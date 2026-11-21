@@ -98,6 +98,131 @@ fn command(store: &Store) -> RunnerCommand {
 }
 
 #[test]
+fn compaction_is_durable_revision_fenced_and_blocks_terminal_command_until_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let c = command(&store);
+    store
+        .observe_agent(
+            c.runner_id,
+            c.id,
+            ObserveAgent {
+                ownership_epoch: 1,
+                progress: AgentProgress {
+                    session_id: agent_session_id(c.id),
+                    message_id: agent_message_id(c.id),
+                    phase: AgentPhase::Running,
+                    summary: "running".into(),
+                },
+            },
+        )
+        .unwrap();
+    let request = RequestCompaction {
+        request_id: RequestId::new(),
+        expected_stream_revision: store.snapshot().unwrap().streams[0].revision,
+        reason: "Context contains obsolete tool output".into(),
+    };
+    let compact = store.request_compaction(c.id, request.clone()).unwrap();
+    assert_eq!(
+        store.request_compaction(c.id, request.clone()).unwrap(),
+        compact
+    );
+    let mut changed = request.clone();
+    changed.reason = "different".into();
+    assert!(matches!(
+        store.request_compaction(c.id, changed),
+        Err(StoreError::RequestConflict)
+    ));
+    let second = RequestCompaction {
+        request_id: RequestId::new(),
+        expected_stream_revision: store.snapshot().unwrap().streams[0].revision,
+        ..request.clone()
+    };
+    assert!(matches!(
+        store.request_compaction(c.id, second),
+        Err(StoreError::WorkConflict)
+    ));
+    let result = CommandResult {
+        request_id: RequestId::new(),
+        ownership_epoch: 1,
+        result: CommandOutput::Agent {
+            agent: AgentProgress {
+                session_id: agent_session_id(c.id),
+                message_id: agent_message_id(c.id),
+                phase: AgentPhase::Succeeded,
+                summary: "done".into(),
+            },
+        },
+    };
+    assert!(matches!(
+        store.complete(c.runner_id, c.id, result.clone()),
+        Err(StoreError::WorkConflict)
+    ));
+    let report = ReportCompaction {
+        request_id: compact.request_id,
+        ownership_epoch: 1,
+        state: CompactionState::Admitted,
+        summary: "admitted".into(),
+    };
+    assert!(store
+        .report_compaction(RunnerId::new(), c.id, report.clone())
+        .is_err());
+    store
+        .report_compaction(c.runner_id, c.id, report.clone())
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let admitted = store
+        .runner_compaction(c.runner_id, c.id, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.state, CompactionState::Admitted);
+    assert_eq!(
+        admitted.message_id,
+        compaction_message_id(compact.request_id)
+    );
+    assert!(store
+        .report_compaction(
+            c.runner_id,
+            c.id,
+            ReportCompaction {
+                state: CompactionState::Rejected,
+                ..report.clone()
+            }
+        )
+        .is_err());
+    let complete = ReportCompaction {
+        state: CompactionState::Succeeded,
+        summary: "completed message observed".into(),
+        ..report
+    };
+    let done = store
+        .report_compaction(c.runner_id, c.id, complete.clone())
+        .unwrap();
+    assert_eq!(
+        store
+            .report_compaction(c.runner_id, c.id, complete)
+            .unwrap(),
+        done
+    );
+    assert_eq!(
+        store.complete(c.runner_id, c.id, result).unwrap().state,
+        CommandState::Succeeded
+    );
+    assert!(store
+        .request_compaction(
+            c.id,
+            RequestCompaction {
+                request_id: RequestId::new(),
+                expected_stream_revision: store.snapshot().unwrap().streams[0].revision,
+                ..request
+            }
+        )
+        .is_err());
+}
+
+#[test]
 fn archive_preserves_untruncated_versions_reverts_and_fenced_final_scan_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");

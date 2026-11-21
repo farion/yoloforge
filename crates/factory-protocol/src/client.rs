@@ -40,6 +40,69 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn request_compaction(
+        &self,
+        id: CommandId,
+        body: &RequestCompaction,
+    ) -> Result<Compaction, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/commands/{id}/compaction", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn compaction(&self, id: CommandId) -> Result<Option<Compaction>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/commands/{id}/compaction", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn runner_compaction(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        epoch: u64,
+    ) -> Result<Option<Compaction>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/compaction",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .query(&[("epoch", epoch)])
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn report_compaction(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        body: &ReportCompaction,
+    ) -> Result<Compaction, ClientError> {
+        Self::decode(
+            self.http
+                .put(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/compaction",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn archive(
         &self,
         id: CommandId,

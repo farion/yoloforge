@@ -9,6 +9,7 @@ use factory_protocol::{
 use std::{path::PathBuf, time::Duration};
 mod agent;
 mod archive;
+mod compaction;
 mod journal;
 mod questions;
 mod workspace;
@@ -53,6 +54,9 @@ async fn report(
     mut record: Record,
     args: &Args,
 ) -> Result<()> {
+    if !compaction::process(client, journal, &mut record, args, registration, false).await? {
+        return Ok(());
+    }
     let archived = archive::step(client, journal, &mut record, args, registration).await;
     if !matches!(archived, Ok(true)) {
         client.observe_agent(record.command.runner_id,registration,record.command.id,&ObserveAgent {
@@ -67,7 +71,7 @@ async fn report(
         .result
         .clone()
         .ok_or_else(|| anyhow::anyhow!("missing journal result"))?;
-    client
+    let delivered = client
         .command_result(
             record.command.runner_id,
             registration,
@@ -78,7 +82,26 @@ async fn report(
                 result,
             },
         )
-        .await?;
+        .await;
+    if matches!(
+        &delivered,
+        Err(ClientError::Http {
+            code: Some(ErrorCode::WorkConflict),
+            ..
+        })
+    ) && client
+        .runner_compaction(
+            record.command.runner_id,
+            registration,
+            record.command.id,
+            record.command.ownership_epoch,
+        )
+        .await?
+        .is_some_and(|r| !r.state.terminal())
+    {
+        return Ok(());
+    }
+    delivered?;
     record.reported = true;
     tokio::task::block_in_place(|| journal.save(&record))?;
     println!("Command {} result confirmed", record.command.id);
@@ -164,6 +187,8 @@ async fn commands(
                 .filter(|c| c.state != PauseState::Released)
             {
                 let (state, summary) = agent::pause(journal, &mut record, args).await?;
+                compaction::process(client, journal, &mut record, args, registration, false)
+                    .await?;
                 if agent::capture(&mut record, args).await.is_ok() {
                     tokio::task::block_in_place(|| journal.save(&record))?;
                 }
@@ -185,6 +210,19 @@ async fn commands(
                 return Ok(true);
             }
             let progress = agent::step(journal, &mut record, args).await?;
+            let allow_compaction = matches!(
+                progress.phase,
+                AgentPhase::Running | AgentPhase::WaitingInput
+            );
+            compaction::process(
+                client,
+                journal,
+                &mut record,
+                args,
+                registration,
+                allow_compaction,
+            )
+            .await?;
             if agent::capture(&mut record, args).await.is_ok() {
                 tokio::task::block_in_place(|| journal.save(&record))?;
             }

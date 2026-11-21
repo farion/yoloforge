@@ -46,6 +46,37 @@ id!(QuestionId);
 id!(DeviceId);
 id!(KnowledgeId);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionState {
+    Requested,
+    Admitted,
+    Running,
+    Succeeded,
+    Failed,
+    Rejected,
+    Unknown,
+}
+impl CompactionState {
+    pub fn terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Rejected)
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Compaction {
+    pub request_id: RequestId,
+    pub command_id: CommandId,
+    pub session_id: String,
+    pub message_id: String,
+    pub reason: String,
+    pub revision: Revision,
+    pub state: CompactionState,
+    pub summary: String,
+}
+pub fn compaction_message_id(id: RequestId) -> String {
+    format!("msg_factory_compact_{}", id.0.simple())
+}
+
 /// Untruncated projected OpenCode messages. Binary objects referenced by messages are not embedded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArchiveBatch {

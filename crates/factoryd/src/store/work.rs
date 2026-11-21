@@ -312,6 +312,9 @@ impl Store {
                 if value.state != CommandState::Accepted {
                     return Err(StoreError::WorkConflict);
                 }
+                if super::compaction::latest(tx, id)?.is_some_and(|v| !v.state.terminal()) {
+                    return Err(StoreError::WorkConflict);
+                }
                 let ok = match (&value.kind, &body.result) {
                     (CommandKind::RunAgent, CommandOutput::Agent { agent }) => {
                         validate_agent(id, agent)?;

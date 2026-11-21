@@ -6,6 +6,18 @@ mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Request native compaction for an active agent session (admission is not completion).
+    Compact {
+        id: CommandId,
+        #[arg(long)]
+        expected_stream_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    /// Read the latest compaction request and execution state.
+    Compaction { id: CommandId },
     /// Export persisted message versions as JSONL; creates a new private file.
     Archive {
         id: CommandId,
@@ -318,6 +330,24 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Compact {
+            id,
+            expected_stream_revision,
+            reason,
+            request_id,
+        } => print(
+            &client
+                .request_compaction(
+                    id,
+                    &RequestCompaction {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_stream_revision: Revision(expected_stream_revision),
+                        reason,
+                    },
+                )
+                .await?,
+        ),
+        Command::Compaction { id } => print(&client.compaction(id).await?),
         Command::Archive { id, output } => {
             use std::io::Write;
             let mut page = client.archive(id, 0, None).await?;

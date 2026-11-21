@@ -8,6 +8,22 @@ pub const RUNNER_HEADER: &str = "x-factory-runner-registration";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RequestCompaction {
+    pub request_id: RequestId,
+    pub expected_stream_revision: Revision,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportCompaction {
+    pub request_id: RequestId,
+    pub ownership_epoch: u64,
+    pub state: CompactionState,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportArchive {
     pub ownership_epoch: u64,
     pub batch: ArchiveBatch,

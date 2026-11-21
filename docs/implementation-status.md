@@ -18,7 +18,7 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | 10 | Checkpoints und Laptop-/Server-Übergabe | Offen; abhängig von 1 |
 | 11 | Review und Integration | Offen; Agent-Erfolg führt bereits zu Review |
 | 12 | Projektgedächtnis und Kontextauswahl | Strukturierte Notizen mit Quellen, Projekt-/Ticketscope, Revision und begrenzter Prompt-Übernahme implementiert; automatische Extraktion und modellspezifischer Tokenizer offen |
-| 13 | Supervisor | Offen; abhängig von 12; einschließlich selbst entschiedener Compaction und Sessionbeendigung |
+| 13 | Supervisor | Automatische Entscheidungen und Sessionbeendigung offen; dauerhafte native Compaction über API/CLI/Runner als Ausführungsmechanismus implementiert |
 | 14 | Android und Push | Offen; reales Gerät/Push-Zugang für Abnahme nötig |
 | 15 | GitHub-Releases und Ansible-Vertrag | v0.1.1 veröffentlicht; Server-/Linux-TUI-Downloads lokal geprüft, Windows nativ in CI geprüft; Android-APK erst mit implementierter App |
 

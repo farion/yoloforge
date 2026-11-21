@@ -20,6 +20,7 @@ pub mod store;
 use store::{Store, StoreError};
 mod access;
 mod archive_routes;
+mod compaction_routes;
 mod knowledge_routes;
 mod live;
 mod work_routes;
@@ -67,6 +68,14 @@ pub fn router_with_shutdown(
         stopping,
     };
     Router::new()
+        .route(
+            "/v1/commands/{id}/compaction",
+            get(compaction_routes::read).post(compaction_routes::create),
+        )
+        .route(
+            "/v1/runners/{runner}/commands/{id}/compaction",
+            get(compaction_routes::runner_read).put(compaction_routes::report),
+        )
         .route("/v1/commands/{id}/archive", get(archive_routes::read))
         .route(
             "/v1/runners/{runner}/commands/{id}/archive",

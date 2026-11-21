@@ -21,6 +21,78 @@ pub struct OpenCodeClient {
 }
 
 impl OpenCodeClient {
+    pub async fn compact(&self, session: &str, id: &str) -> Result<factory_core::CompactionState> {
+        use factory_core::CompactionState;
+        safe_id(session)?;
+        safe_id(id)?;
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/session/{session}/compact",
+                self.registration.url.trim_end_matches('/')
+            ))
+            .basic_auth("opencode", Some(&self.registration.password))
+            .json(&serde_json::json!({"id":id,"delivery":"steer"}))
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("Compaction delivery uncertain"))?;
+        if matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::NOT_FOUND
+        ) {
+            return Ok(CompactionState::Rejected);
+        }
+        ensure!(
+            response.status().is_success(),
+            "Compaction admission uncertain"
+        );
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| anyhow::anyhow!("Compaction admission response invalid"))?;
+        ensure!(
+            value["data"]["id"] == id
+                && value["data"]["sessionID"] == session
+                && value["data"]["type"] == "compaction",
+            "Compaction admission identity differs"
+        );
+        Ok(CompactionState::Admitted)
+    }
+    pub async fn compaction_state(
+        &self,
+        session: &str,
+        id: &str,
+    ) -> Result<factory_core::CompactionState> {
+        use factory_core::CompactionState;
+        if let Some(message) = self.message(session, id).await? {
+            ensure!(
+                message["id"] == id
+                    && message["type"] == "compaction"
+                    && message["reason"] == "manual",
+                "Compaction message identity differs"
+            );
+            return Ok(match message["status"].as_str() {
+                Some("running") => CompactionState::Running,
+                Some("completed") => CompactionState::Succeeded,
+                Some("failed") => CompactionState::Failed,
+                _ => anyhow::bail!("Unknown compaction message state"),
+            });
+        }
+        let inbox = self.session_items(session, "inbox").await?;
+        if let Some(item) = inbox
+            .as_array()
+            .context("Invalid compaction inbox")?
+            .iter()
+            .find(|v| v["id"] == id)
+        {
+            ensure!(
+                item["type"] == "compaction" && item["sessionID"] == session,
+                "Compaction inbox identity differs"
+            );
+            return Ok(CompactionState::Admitted);
+        }
+        Ok(CompactionState::Unknown)
+    }
     /// Lossless projected message page, oldest first. Opaque cursors are not combined with order.
     pub async fn archive_page(
         &self,

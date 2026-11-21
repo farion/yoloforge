@@ -194,11 +194,19 @@ def inside(bin_dir):
         wait(lambda: all((Path(w["path"]) / "started").exists() for w in workspaces), 180)
         check(all(s in oc("GET", "/api/session/active")["data"] for s in sessions), "agents did not overlap")
         print("PASS two real agents execute concurrently in isolated worktrees", flush=True)
+        revision = next(s["revision"] for s in api("GET", "/v1/snapshot")["streams"] if s["id"] == commands[0]["stream_id"])
+        compact_args = ("compact", commands[0]["id"], "--expected-stream-revision", str(revision),
+                        "--reason", "Integration test of durable native session maintenance", "--request-id", str(uuid.uuid4()))
+        compact = cli(*compact_args)
+        check(cli(*compact_args) == compact, "compaction request replay changed")
+        wait(lambda: cli("compaction", commands[0]["id"])["state"] in ("admitted", "running", "succeeded"), 60)
         stop(runners[0][0])
         stop(server)
         server, _ = daemon(address)
         runners[0] = (spawn("factory-runner", *runners[0][1]), runners[0][1])
         results = [wait(lambda c=c: completed(c["id"]), 180) for c in commands]
+        check(cli("compaction", commands[0]["id"])["state"] == "succeeded", "native compaction did not complete")
+        print("PASS native compaction admitted and completed across Factory/runner restart", flush=True)
         for command, result, workspace, marker, session in zip(commands, results, workspaces, markers, sessions):
             check(result["result"]["agent"]["phase"] == "succeeded", "agent did not finish")
             check(tokens[command["id"]] in result["result"]["agent"]["summary"], "agent did not consume the Factory answer")
@@ -220,6 +228,8 @@ def inside(bin_dir):
                 archive = api("GET", "/v1/commands/" + command["id"] + "/archive?after=" + str(archive["next_after"]))
             check(any(m["id"] == "msg_factory_" + command["id"].replace("-", "") for m in archived), "original prompt missing from archive")
             check(any(tokens[command["id"]] in json.dumps(m) for m in archived), "final context missing from archive")
+            if command["id"] == commands[0]["id"]:
+                check(any(m["id"] == compact["message_id"] and m.get("status") == "completed" for m in archived), "completed compaction missing from archive")
         check(not (repo / "proof.py").exists(), "agent wrote into source checkout")
         questions = [q for q in cli("question", "list") if q["command_id"] in ids]
         check(len(questions) == 4 and all(q["state"] == "answered" for q in questions), "question outcomes not durably confirmed")

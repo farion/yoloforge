@@ -57,7 +57,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 8,
+            version <= 9,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -83,6 +83,9 @@ impl Store {
         }
         if version < 8 {
             tx.execute_batch(include_str!("../migrations/008_archive.sql"))?;
+        }
+        if version < 9 {
+            tx.execute_batch(include_str!("../migrations/009_compaction.sql"))?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -385,6 +388,7 @@ impl Store {
 }
 
 mod archive;
+mod compaction;
 mod controls;
 mod devices;
 mod excerpts;
