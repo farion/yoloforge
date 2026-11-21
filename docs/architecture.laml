@@ -1,0 +1,57 @@
+// Architekturuebersicht. Blau: MVP, Gruen: Daten, Orange: spaeter.
+// Verbindungslinien beschreiben Kommunikation, keine Schreibrechtsuebergabe.
+settings {
+    direction: left-to-right
+    relation-label: inline
+}
+semantics {
+    Clients(label="LAPTOP | Ubuntu 26.04\nfactory: Rust + Ratatui\nMehrere TUIs / gleiche Projekte"; style-classes=service)
+    SSH(label="SERVER-HOST | Ubuntu 24.04\nSSH-Tunnel\nWeiterleitung auf Loopback-Port"; style-classes=service)
+    Factory(label="SERVER | Docker\nfactoryd: Rust / Tokio / Axum\nProjekte, Tickets, Streams\nAPI, Scheduler, Event-Replay"; style-classes=service)
+    Local(label="LAPTOP | Hintergrunddienst\nLokaler Rust-Runner + OpenCode\nEigenes Journal / systemd --user\nVerbindung unabhaengig von TUI"; style-classes=service)
+    Remote(label="SERVER | Docker\nServer-Runner + OpenCode\nSessions, Tools, Heartbeats\nArbeitet ohne verbundenen Laptop"; style-classes=service)
+    LocalFiles(label="LAPTOP | Lokaler Workspace\nGit-Branch + Worktree je Stream\nDirekt bauen, testen, starten"; style-classes=data)
+    RemoteFiles(label="SERVER | Persistente Volumes\nGit-Branch + Worktree je Stream\nOpenCode-Zustand / Checkpoints"; style-classes=data)
+    DB(label="SERVER | Persistentes Volume\nSQLite + Factory-Eventlog\nVerbindlicher gemeinsamer Zustand"; style-classes=data)
+    Memory(label="SERVER | Projektgedaechtnis\nKI-Analyse von Sessions / Streams\nWissen verdichten und aktualisieren\nRelevanten Kontext mit Tokenbudget waehlen"; style-classes=later)
+    Knowledge(label="SERVER | Persistentes Projektwissen\nQuellenarchiv + strukturierte Erkenntnisse\nEntscheidungen, Quellen, Gueltigkeit\nProjektkern + gezielt abrufbare Details"; style-classes=data)
+    Future(label="SPAETER | Etappen 2 bis 4\nGit-Checkpoints + kontrollierte Uebergabe\nProjekt-Supervisor: Zuordnung + Rueckfragen\nAndroid: API via SSH, separater Push-Weg"; style-classes=later)
+    @client Clients -> SSH : HTTP / SSE via SSH
+    @forward SSH -> Factory : Container-API
+    @local Local -> SSH : Eigener SSH-Tunnel
+    @files Local -> LocalFiles : Agent / Tools
+    @remote Factory <-> Remote : Auftraege / Status
+    @remoteFiles Remote -> RemoteFiles : Agent / Tools
+    @db Factory -> DB : Zustand / Events
+    @memory Factory <-> Memory : Quellen / Kontextpakete
+    @knowledge Memory <-> Knowledge : Lernen / gezielt abrufen
+}
+layout {
+    Clients < SSH : align=center; gap=120
+    SSH < Factory : align=center; gap=120
+    Clients ^ Local : align=center; gap=140
+    Local ^ LocalFiles : align=center; gap=100
+    Factory ^ Remote : align=center; gap=140
+    Remote ^ RemoteFiles : align=center; gap=100
+    Factory < DB : align=center; gap=120
+    DB ^ Memory : align=center; gap=140
+    Memory ^ Knowledge : align=center; gap=100
+    RemoteFiles ^ Future : align=right; gap=100
+}
+styling {
+    node.service {
+        fill: "#e8f0ff"
+        border-color: "#315ea8"
+        color: "#172c4d"
+    }
+    node.data {
+        fill: "#e5f4eb"
+        border-color: "#33835b"
+        color: "#17432d"
+    }
+    node.later {
+        fill: "#fff1db"
+        border-color: "#b77b23"
+        color: "#68430f"
+    }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "factory-runner"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+factory-core.workspace = true
+factory-protocol = { workspace = true, features = ["client"] }
+factory-opencode.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+fs2 = "0.4"
+tempfile = "3"
+
+[dev-dependencies]
+axum.workspace = true

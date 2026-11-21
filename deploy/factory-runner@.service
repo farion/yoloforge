@@ -1,0 +1,17 @@
+[Unit]
+Description=YOLO Factory runner %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/yolofactory/runner-%i.env
+ExecStart=%h/.local/bin/factory-runner --server ${FACTORY_SERVER} --id ${FACTORY_RUNNER_ID} --name ${FACTORY_RUNNER_NAME} --location ${FACTORY_RUNNER_LOCATION} --journal ${FACTORY_JOURNAL} --repositories ${FACTORY_REPOSITORIES} --workspace-root ${FACTORY_WORKSPACE_ROOT} --opencode-registration ${FACTORY_OPENCODE_REGISTRATION}
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=default.target

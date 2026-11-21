@@ -1,0 +1,16 @@
+Port 2222
+ListenAddress 0.0.0.0
+HostKey /keys/host
+AuthorizedKeysFile /root/.ssh/authorized_keys
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+AllowTcpForwarding local
+PermitOpen 127.0.0.1:7432
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no
+PermitTTY no
+LogLevel ERROR

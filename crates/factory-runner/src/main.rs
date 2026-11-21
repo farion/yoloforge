@@ -1,0 +1,367 @@
+use anyhow::Result;
+use clap::{Parser, ValueEnum};
+use factory_core::*;
+use factory_opencode::OpenCodeClient;
+use factory_protocol::{
+    client::{ClientError, FactoryClient},
+    *,
+};
+use std::{path::PathBuf, time::Duration};
+mod agent;
+mod journal;
+mod questions;
+mod workspace;
+use journal::{Journal, Record};
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Location {
+    Local,
+    Server,
+}
+#[derive(Parser)]
+#[command(
+    version,
+    about = "Factory runner: durable commands, isolated Git worktrees and OpenCode checks"
+)]
+struct Args {
+    #[arg(long, default_value = "http://127.0.0.1:7432")]
+    server: String,
+    #[arg(long)]
+    id: RunnerId,
+    #[arg(long)]
+    name: String,
+    #[arg(long, value_enum, default_value = "local")]
+    location: Location,
+    /// Explicit native OpenCode service registration. Re-read on every heartbeat.
+    #[arg(long)]
+    opencode_registration: Option<PathBuf>,
+    #[arg(long)]
+    journal: Option<PathBuf>,
+    /// JSON object mapping Factory project IDs to existing local Git repositories.
+    #[arg(long)]
+    repositories: Option<PathBuf>,
+    /// Managed worktrees; defaults to a runner-specific directory beside the journal.
+    #[arg(long)]
+    workspace_root: Option<PathBuf>,
+}
+
+async fn report(
+    client: &FactoryClient,
+    journal: &Journal,
+    registration: RegistrationId,
+    mut record: Record,
+) -> Result<()> {
+    sync_excerpt(client, registration, &record).await?;
+    let result = record
+        .result
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("missing journal result"))?;
+    client
+        .command_result(
+            record.command.runner_id,
+            registration,
+            record.command.id,
+            &CommandResult {
+                request_id: record.result_request,
+                ownership_epoch: record.command.ownership_epoch,
+                result,
+            },
+        )
+        .await?;
+    record.reported = true;
+    tokio::task::block_in_place(|| journal.save(&record))?;
+    println!("Command {} result confirmed", record.command.id);
+    Ok(())
+}
+
+async fn sync_excerpt(
+    client: &FactoryClient,
+    registration: RegistrationId,
+    record: &Record,
+) -> Result<()> {
+    if let Some(excerpt) = &record.excerpt {
+        client
+            .report_excerpt(
+                record.command.runner_id,
+                registration,
+                record.command.id,
+                &ReportExcerpt {
+                    ownership_epoch: record.command.ownership_epoch,
+                    excerpt: excerpt.clone(),
+                },
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn commands(
+    client: &FactoryClient,
+    journal: &Journal,
+    args: &Args,
+    registration: RegistrationId,
+    next_command: &mut usize,
+) -> Result<bool> {
+    let outbox = tokio::task::block_in_place(|| journal.unreported())?;
+    for record in outbox {
+        report(client, journal, registration, record).await?;
+    }
+    // Process one command per heartbeat; local Git operations have timeouts.
+    let pending = client.pending_wait(args.id, registration, 10).await?;
+    let selected = if pending.is_empty() {
+        None
+    } else {
+        let index = *next_command % pending.len();
+        *next_command = next_command.wrapping_add(1);
+        Some(pending[index].clone())
+    };
+    let had_command = selected.is_some();
+    if let Some(command) = selected {
+        anyhow::ensure!(
+            command.runner_id == args.id,
+            "server returned a different runner's command"
+        );
+        let mut record = tokio::task::block_in_place(|| journal.receive(command))?;
+        let ack = client
+            .acknowledge(
+                args.id,
+                registration,
+                record.command.id,
+                &AckCommand {
+                    request_id: record.ack_request,
+                    ownership_epoch: record.command.ownership_epoch,
+                },
+            )
+            .await?;
+        if matches!(ack.state, CommandState::Succeeded | CommandState::Failed) {
+            record.result = ack.result;
+            record.reported = true;
+            tokio::task::block_in_place(|| journal.save(&record))?;
+            return Ok(true);
+        }
+        record.command = ack;
+        tokio::task::block_in_place(|| journal.save(&record))?;
+        if record.command.kind == CommandKind::RunAgent && record.result.is_none() {
+            if let Some(control) = client
+                .runner_control(
+                    args.id,
+                    registration,
+                    record.command.id,
+                    record.command.ownership_epoch,
+                )
+                .await?
+                .filter(|c| c.state != PauseState::Released)
+            {
+                let (state, summary) = agent::pause(journal, &mut record, args).await?;
+                if agent::capture(&mut record, args).await.is_ok() {
+                    tokio::task::block_in_place(|| journal.save(&record))?;
+                }
+                sync_excerpt(client, registration, &record).await?;
+                client
+                    .report_control(
+                        args.id,
+                        registration,
+                        record.command.id,
+                        &factory_protocol::ReportControl {
+                            control_request: control.request_id,
+                            ownership_epoch: record.command.ownership_epoch,
+                            state,
+                            summary,
+                        },
+                    )
+                    .await?;
+                return Ok(true);
+            }
+            let progress = agent::step(journal, &mut record, args).await?;
+            if agent::capture(&mut record, args).await.is_ok() {
+                tokio::task::block_in_place(|| journal.save(&record))?;
+            }
+            if client
+                .runner_control(
+                    args.id,
+                    registration,
+                    record.command.id,
+                    record.command.ownership_epoch,
+                )
+                .await?
+                .is_none_or(|c| c.state == PauseState::Released)
+            {
+                questions::process(client, journal, &mut record, args, registration).await?;
+            }
+            if matches!(progress.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
+                record.result = Some(CommandOutput::Agent { agent: progress });
+                tokio::task::block_in_place(|| journal.save(&record))?;
+                report(client, journal, registration, record).await?;
+            } else {
+                sync_excerpt(client, registration, &record).await?;
+                client
+                    .observe_agent(
+                        args.id,
+                        registration,
+                        record.command.id,
+                        &ObserveAgent {
+                            ownership_epoch: record.command.ownership_epoch,
+                            progress,
+                        },
+                    )
+                    .await?;
+            }
+            return Ok(true);
+        }
+        if record.result.is_none() {
+            record.result = Some(match record.command.kind {
+                // Explicitly read-only: safe to repeat after crash before local result commit.
+                // Workspace preparation uses its own persisted plan and reconciliation.
+                CommandKind::CheckOpenCode => {
+                    opencode_status(&args.opencode_registration).await.into()
+                }
+                CommandKind::PrepareWorkspace => tokio::task::block_in_place(|| {
+                    workspace::prepare(
+                        journal,
+                        &record.command,
+                        args.repositories.as_deref(),
+                        args.workspace_root
+                            .as_deref()
+                            .expect("workspace root initialized"),
+                    )
+                }),
+                CommandKind::RunAgent => unreachable!("agent execution handled above"),
+            });
+            tokio::task::block_in_place(|| journal.save(&record))?;
+        }
+        report(client, journal, registration, record).await?;
+    }
+    Ok(had_command)
+}
+async fn opencode_status(path: &Option<PathBuf>) -> OpenCodeStatus {
+    let Some(path) = path else {
+        return OpenCodeStatus::NotConfigured;
+    };
+    match OpenCodeClient::from_registration(path) {
+        Ok(client) => client.status().await,
+        Err(_) => OpenCodeStatus::Unavailable,
+    }
+}
+
+async fn run(mut args: Args) -> Result<()> {
+    let client = FactoryClient::from_env(&args.server)?;
+    let path = args
+        .journal
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!(".factory-data/runner-{}.sqlite3", args.id)));
+    let journal = Journal::open(&path, &args.server, args.id)?;
+    if args.workspace_root.is_none() {
+        args.workspace_root = Some(
+            path.parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join(format!("workspaces-{}", args.id)),
+        );
+    }
+    let instance_id = InstanceId::new();
+    let mut registration: Option<Registration> = None;
+    let mut was_connected = false;
+    let mut next_command = 0;
+    loop {
+        let opencode = opencode_status(&args.opencode_registration).await;
+        let result = if let Some(current) = &registration {
+            client
+                .heartbeat(
+                    args.id,
+                    &Heartbeat {
+                        registration_id: current.registration_id,
+                        opencode,
+                    },
+                )
+                .await
+        } else {
+            client
+                .register(&RegisterRunner {
+                    id: args.id,
+                    instance_id,
+                    name: args.name.clone(),
+                    location: match args.location {
+                        Location::Local => RunnerLocation::Local,
+                        Location::Server => RunnerLocation::Server,
+                    },
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    opencode,
+                })
+                .await
+        };
+        let mut delay = HEARTBEAT_INTERVAL;
+        match result {
+            Ok(current) => {
+                if !was_connected {
+                    println!("Runner {} connected; boot {}", args.id, current.boot_id);
+                }
+                was_connected = true;
+                let command_result = commands(
+                    &client,
+                    &journal,
+                    &args,
+                    current.registration_id,
+                    &mut next_command,
+                )
+                .await;
+                registration = Some(current);
+                if matches!(command_result, Ok(false)) {
+                    delay = Duration::ZERO;
+                }
+                if let Err(error) = command_result {
+                    match error.downcast_ref::<ClientError>() {
+                        Some(ClientError::Transport) => {
+                            was_connected = false;
+                            delay = Duration::from_secs(3);
+                        }
+                        Some(ClientError::Http { status, .. }) if status.is_server_error() => {
+                            was_connected = false;
+                            delay = Duration::from_secs(3);
+                        }
+                        Some(ClientError::Http {
+                            code: Some(ErrorCode::NotFound),
+                            ..
+                        }) => {
+                            registration = None;
+                            was_connected = false;
+                            delay = Duration::from_secs(3);
+                        }
+                        _ => return Err(error),
+                    }
+                }
+            }
+            Err(ClientError::Http {
+                code: Some(ErrorCode::NotFound),
+                ..
+            }) => {
+                registration = None;
+                was_connected = false;
+                delay = Duration::from_millis(100);
+            }
+            Err(ClientError::Http { status, .. }) if status.is_server_error() => {
+                was_connected = false;
+                delay = Duration::from_secs(3);
+            }
+            Err(error @ ClientError::Http { .. }) | Err(error @ ClientError::InvalidResponse) => {
+                return Err(error.into())
+            }
+            Err(ClientError::Transport) => {
+                if was_connected || registration.is_none() {
+                    eprintln!("Factory unavailable; retrying without starting work");
+                }
+                was_connected = false;
+                delay = Duration::from_secs(3);
+            }
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = run(args) => result,
+        _ = tokio::signal::ctrl_c() => Ok(()),
+        _ = terminate.recv() => Ok(()),
+    }
+}

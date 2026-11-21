@@ -1,0 +1,5 @@
+#!/bin/sh
+# OpenCode 2.0.27 calls xdg-open even for a device-code login.
+# Only added to PATH for the interactive login CLI, never for agent tools.
+printf '%s\n' 'Headless login: open the URL shown above in your laptop browser and enter the displayed code.' >&2
+exit 0

@@ -1,0 +1,10 @@
+target
+.git
+.factory-data
+**/.runtime
+**/node_modules
+**/credentials
+**/*.sqlite*
+**/*.lock.db
+**/__pycache__
+deploy/secrets

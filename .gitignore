@@ -1,0 +1,10 @@
+/target/
+/spikes/opencode/workspace/
+/spikes/opencode/.runtime/
+.env
+.factory-dev.env
+.factory-data/
+__pycache__/
+/deploy/secrets/
+*.token
+*.enrollment
