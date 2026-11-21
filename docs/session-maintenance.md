@@ -9,9 +9,9 @@ erfolgreicher Sessions. Das bestätigte Stoppen laufender Prozesse bleibt offen.
 
 ## Fortsetzung und Abschluss einer erfolgreichen Session
 
-### Vorbereitung: Freezer-Protokoll (Schema 13)
+### Dedizierte Container-Pause (Schema 13)
 
-Der Server unterstützt jetzt den persistenten Zustandsvertrag für eine spätere
+Server und Runner unterstützen den persistenten Zustandsvertrag für eine explizit
 dedizierte Container-Laufzeit pro Workstream:
 
 - `requested` → `frozen` benötigt einen Runner-Nachweis mit vollständiger
@@ -31,11 +31,13 @@ dedizierte Container-Laufzeit pro Workstream:
   Capability `container-freeze-v1`. Ältere Runner erhalten keine Container-Control
   mit Nachweis zur Verarbeitung.
 
-**Dies ist bisher nur der getestete serverseitige Vertrag.** Der ausgelieferte
-Runner bewirbt diese Capability noch nicht und führt kein Docker-Pause/Unpause
-aus. Dedizierte Laufzeitbereitstellung, lokales Intent-Journal, Prüfung der
-Containment-Grenzen und echte Tests mit abgekoppelten/signalresistenten Prozessen
-stehen noch aus. Der Server vertraut einem autorisierten Runner-Bericht; ein
+Der Entwicklungs-Runner unterstützt `--containment DATEI`, journalisiert die
+Docker-Schreibabsicht vor `pause`/`unpause` und gleicht nach unklarem Ausgang nur
+lesend ab. Der lokale Docker/cgroup-v2-Test mit abgekoppelten, signalresistenten
+Prozessen und Journalneustart ist bestanden. Einrichtung und Grenzen stehen in
+[container-runtime.md](container-runtime.md). Automatische Provisionierung und
+die vollständige Abnahme mit laufendem OpenCode-Modell auf dem Zielhost fehlen
+noch. Der Server vertraut einem autorisierten Runner-Bericht; ein
 gespeicherter Bericht ist kein aktueller Kernel-Nachweis und keine Erlaubnis für
 Ownership-Transfer. Einfrieren beendet außerdem keine Prozesse und stoppt keine
 bereits ausgelösten externen Dienste. Die bisherige Interrupt-Funktion bleibt
@@ -150,5 +152,6 @@ Strategie behandelt werden, nicht als unbegrenzte Schleife.
 
 Stand: Compaction, erfolgreiche Session-Fortsetzung und -Abschluss sowie ein
 modellbasierter Session-Supervisor mit quellenverknüpfter Wissensübernahme sind
-implementiert. Das Stoppen laufender Sessions, Recovery und vollständige
-Supervisor-Ticketplanung bleiben offen; Pause/Interrupt bleibt konservativ.
+implementiert. Dedizierte Container können eingefroren und in derselben Instanz
+aufgetaut werden. Aktive Sessionbeendigung, Recovery, Übergabe und vollständige
+Supervisor-Ticketplanung bleiben offen; der native Interrupt bleibt unbestätigt.

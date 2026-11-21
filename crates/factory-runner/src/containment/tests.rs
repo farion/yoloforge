@@ -1,0 +1,328 @@
+use super::*;
+use axum::{extract::State, routing::get, Json, Router};
+use clap::Parser;
+use serde_json::json;
+use std::sync::{Arc, Mutex};
+
+async fn fetch_control(
+    State(state): State<Arc<Mutex<StreamControl>>>,
+) -> Json<Option<StreamControl>> {
+    Json(Some(state.lock().unwrap().clone()))
+}
+async fn report_control(
+    State(state): State<Arc<Mutex<StreamControl>>>,
+    Json(body): Json<ReportControl>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut control = state.lock().unwrap();
+    assert_eq!(body.control_request, control.request_id);
+    let lose_response = control.state == PauseState::Requested;
+    assert_eq!(body.ownership_epoch, 1);
+    control.state = body.state;
+    control.summary = body.summary;
+    control.proof = body.proof;
+    if lose_response {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+    } else {
+        Json(control.clone()).into_response()
+    }
+}
+
+struct Cleanup(Config);
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker")
+            .arg("--host")
+            .arg(format!("unix://{}", self.0.docker_socket.display()))
+            .args(["rm", "-f", &self.0.container_id])
+            .output();
+    }
+}
+fn sample(workspace: &Path) -> Vec<u8> {
+    ["parent", "detached"]
+        .iter()
+        .flat_map(|p| std::fs::read(workspace.join(p)).unwrap_or_default())
+        .collect()
+}
+
+/// Explicit opt-in: owns only a fresh labelled test container, never the shared OpenCode lab.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires local Docker cgroup v2 and yoloforge-freezer-test:development image"]
+async fn real_freezer_stops_detached_signal_resistant_tools_and_reconciles_after_restart() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::Builder::new()
+        .prefix("freezer-test-")
+        .tempdir_in("/tmp/opencode")
+        .unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let runner = RunnerId::new();
+    let stream = StreamId::new();
+    let mut c = Config {
+        stream_id: stream,
+        container_id: String::new(),
+        docker_socket: std::fs::canonicalize("/var/run/docker.sock").unwrap(),
+    };
+    // One ordinary child and one double-forked, setsid child ignoring termination signals.
+    // PID 1 stays alive, so daemon observation alone cannot prove the tools are stopped.
+    let code = format!(
+        r#"import os,signal,time
+def pulse(name):
+    signal.signal(signal.SIGTERM,signal.SIG_IGN)
+    signal.signal(signal.SIGHUP,signal.SIG_IGN)
+    signal.signal(signal.SIGINT,signal.SIG_IGN)
+    while True:
+        with open({:?}+'/'+name,'ab',buffering=0) as f: f.write(b'x')
+        time.sleep(.03)
+if os.fork()==0:
+    os.setsid()
+    if os.fork()!=0: os._exit(0)
+    pulse('detached')
+if os.fork()==0: pulse('parent')
+while True: time.sleep(1)
+"#,
+        work.to_str().unwrap()
+    );
+    let mount = format!(
+        "type=bind,source={},target={}",
+        work.display(),
+        work.display()
+    );
+    let label_stream = format!("io.yoloforge.stream={stream}");
+    let label_runner = format!("io.yoloforge.runner={runner}");
+    let id = docker(
+        &c,
+        &[
+            "create",
+            "--read-only",
+            "--user",
+            "10001:10001",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--cgroupns",
+            "private",
+            "--ipc",
+            "private",
+            "--restart",
+            "no",
+            "--label",
+            &label_stream,
+            "--label",
+            &label_runner,
+            "--mount",
+            &mount,
+            "-p",
+            "127.0.0.1::4096",
+            "yoloforge-freezer-test:development",
+            "python3",
+            "-c",
+            &code,
+        ],
+    )
+    .await
+    .unwrap();
+    c.container_id = std::str::from_utf8(&id).unwrap().trim().into();
+    let _cleanup = Cleanup(c.clone());
+    docker(&c, &["start", &c.container_id]).await.unwrap();
+    let raw: Vec<Value> =
+        serde_json::from_slice(&docker(&c, &["inspect", &c.container_id]).await.unwrap()).unwrap();
+    let port = raw[0]["NetworkSettings"]["Ports"]["4096/tcp"][0]["HostPort"]
+        .as_str()
+        .unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let config_path = dir.path().join("containment.json");
+    std::fs::write(&config_path, serde_json::to_vec(&c).unwrap()).unwrap();
+    let registration = dir.path().join("opencode.json");
+    std::fs::write(
+        &registration,
+        json!({"url":endpoint,"password":"test-only"}).to_string(),
+    )
+    .unwrap();
+    let args = Args::try_parse_from([
+        "factory-runner",
+        "--id",
+        &runner.to_string(),
+        "--name",
+        "freezer-test",
+        "--containment",
+        config_path.to_str().unwrap(),
+        "--opencode-registration",
+        registration.to_str().unwrap(),
+    ])
+    .unwrap();
+    let command = RunnerCommand {
+        id: CommandId::new(),
+        stream_id: stream,
+        runner_id: runner,
+        ownership_epoch: 1,
+        kind: CommandKind::RunAgent,
+        state: CommandState::Accepted,
+        result: None,
+        created_unix_ms: 1,
+        workspace_spec: None,
+        agent_spec: None,
+        agent_progress: None,
+    };
+    let runtime = bind(&args, &command, &endpoint, work.to_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let journal_path = dir.path().join("runner.db");
+    let journal = Journal::open(&journal_path, &args.server, runner).unwrap();
+    let mut record = journal.receive(command.clone()).unwrap();
+    record.agent=Some(serde_json::from_value(json!({"runtime":runtime,"workspace":{"path":work,"branch":"test","base_commit":"a".repeat(40)},"endpoint":endpoint,"session_attempted":true,"prompt_attempted":true})).unwrap());
+    journal.save(&record).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(std::fs::metadata(work.join("detached")).unwrap().len() > 0);
+    let mut control = StreamControl {
+        action: ControlAction::Pause,
+        proof: None,
+        stream_id: stream,
+        request_id: RequestId::new(),
+        command_id: Some(command.id),
+        state: PauseState::Requested,
+        summary: "pause".into(),
+        previous_status: StreamState::Running,
+    };
+    let state = Arc::new(Mutex::new(control.clone()));
+    let router = Router::new()
+        .route(
+            "/v1/runners/{runner}/commands/{id}/control",
+            get(fetch_control).post(report_control),
+        )
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let factory = FactoryClient::new(
+        &format!("http://{}", listener.local_addr().unwrap()),
+        "test-only-factory-token-0123456789abcdef",
+    )
+    .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    // There is no OpenCode HTTP listener in this fixture. The control path must
+    // operate entirely via Factory and Docker even while the runtime is frozen.
+    assert!(super::control(
+        &factory,
+        &journal,
+        &mut record,
+        &args,
+        RegistrationId::new()
+    )
+    .await
+    .is_err());
+    assert!(super::control(
+        &factory,
+        &journal,
+        &mut record,
+        &args,
+        RegistrationId::new()
+    )
+    .await
+    .unwrap());
+    assert_eq!(state.lock().unwrap().state, PauseState::Frozen);
+    let frozen = state.lock().unwrap().proof.clone().unwrap();
+    assert!(frozen.frozen);
+    let before = sample(&work);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(sample(&work), before);
+    assert!(ready(&record, &args).await.is_err());
+    drop(journal);
+    let journal = Journal::open(&journal_path, &args.server, runner).unwrap();
+    let mut record = journal.record(command.id).unwrap().unwrap();
+    assert!(
+        transition(&journal, &mut record, &args, &control)
+            .await
+            .unwrap()
+            .frozen
+    );
+    // External drift must not cause a repeated pause, including after journal restart.
+    docker(&c, &["unpause", &c.container_id]).await.unwrap();
+    assert!(transition(&journal, &mut record, &args, &control)
+        .await
+        .is_err());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(sample(&work).len() > before.len());
+    docker(&c, &["pause", &c.container_id]).await.unwrap();
+    control.action = ControlAction::Resume;
+    control.state = PauseState::ResumeRequested;
+    control.request_id = RequestId::new();
+    control.proof = Some(frozen.clone());
+    control.proof.as_mut().unwrap().container_id = "b".repeat(64);
+    assert!(transition(&journal, &mut record, &args, &control)
+        .await
+        .is_err());
+    assert!(
+        current(&record, &args).await.unwrap().unwrap()["State"]["Paused"]
+            .as_bool()
+            .unwrap()
+    );
+    control.proof = Some(frozen);
+    assert!(
+        !transition(&journal, &mut record, &args, &control)
+            .await
+            .unwrap()
+            .frozen
+    );
+    ready(&record, &args).await.unwrap();
+    let before = sample(&work);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(sample(&work).len() > before.len());
+    // Crash after persisting intent, before Docker call: no automatic retry.
+    control.action = ControlAction::Pause;
+    control.state = PauseState::Requested;
+    control.proof = None;
+    control.request_id = RequestId::new();
+    record.container_actions.insert(
+        control.request_id,
+        Attempt {
+            action: ControlAction::Pause,
+        },
+    );
+    journal.save(&record).unwrap();
+    drop(journal);
+    let journal = Journal::open(&journal_path, &args.server, runner).unwrap();
+    let mut record = journal.record(command.id).unwrap().unwrap();
+    assert!(transition(&journal, &mut record, &args, &control)
+        .await
+        .is_err());
+    docker(&c, &["pause", &c.container_id]).await.unwrap();
+    assert!(
+        transition(&journal, &mut record, &args, &control)
+            .await
+            .unwrap()
+            .frozen
+    );
+    docker(&c, &["unpause", &c.container_id]).await.unwrap();
+    docker(&c, &["restart", "--time", "0", &c.container_id])
+        .await
+        .unwrap();
+    assert!(ready(&record, &args).await.is_err());
+    assert!(transition(&journal, &mut record, &args, &control)
+        .await
+        .is_err());
+    // Removing configuration or changing endpoint never adopts/rebinds the execution.
+    let mut removed = args;
+    removed.containment = None;
+    assert!(ready(&record, &removed).await.is_err());
+    // Validate fail-closed checks against the actual engine's inspect shape.
+    for pointer in [
+        "/HostConfig/Privileged",
+        "/HostConfig/ReadonlyRootfs",
+        "/HostConfig/PidMode",
+        "/HostConfig/CgroupnsMode",
+        "/HostConfig/CapDrop",
+        "/Config/User",
+        "/Config/Labels/io.yoloforge.stream",
+    ] {
+        let mut changed = raw[0].clone();
+        *changed.pointer_mut(pointer).unwrap() = Value::Null;
+        assert!(
+            validate(&changed, &c, runner, &endpoint, work.to_str().unwrap()).is_err(),
+            "accepted {pointer}"
+        );
+    }
+    server.abort();
+}

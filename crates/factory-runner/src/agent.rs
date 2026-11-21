@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Execution {
+    #[serde(default)]
+    pub(crate) runtime: Option<crate::containment::Identity>,
     pub(crate) workspace: Workspace,
     pub(crate) endpoint: String,
     session_attempted: bool,
@@ -85,7 +87,25 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
                 ))
             }
         };
+        let runtime = match crate::containment::bind(
+            args,
+            &command,
+            client.endpoint(),
+            &workspace.path,
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                return Ok(progress(
+                    &command,
+                    AgentPhase::Unknown,
+                    "Dedicated runtime not verified; no session or prompt created",
+                ))
+            }
+        };
         record.agent = Some(Execution {
+            runtime,
             workspace,
             endpoint: client.endpoint().into(),
             session_attempted: false,
@@ -108,6 +128,7 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
 
 /// Read-only sampling. A failed read must leave the previous durable sample untouched.
 pub async fn capture(record: &mut Record, args: &Args) -> Result<()> {
+    crate::containment::ready(record, args).await?;
     let execution = record.agent.as_ref().context("No agent session yet")?;
     if !execution.prompt_attempted {
         return Ok(());
@@ -157,6 +178,13 @@ pub async fn pause(
     record: &mut Record,
     args: &Args,
 ) -> Result<(PauseState, String)> {
+    ensure!(
+        record
+            .agent
+            .as_ref()
+            .is_none_or(|a| a.runtime.is_none() || !a.prompt_attempted),
+        "Contained execution requires freezer control, never native interrupt"
+    );
     if record.agent.as_ref().is_none_or(|a| !a.prompt_attempted) {
         return Ok((
             PauseState::HeldBeforeExecution,
@@ -205,6 +233,7 @@ async fn advance(
     args: &Args,
 ) -> Result<AgentProgress> {
     let command = record.command.clone();
+    crate::containment::ready(record, args).await?;
     let spec = command
         .agent_spec
         .as_ref()
@@ -276,7 +305,8 @@ async fn advance(
                     && previous.archive.finished
                     && matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if agent.phase==AgentPhase::Succeeded)
                     && prior.endpoint == execution.endpoint
-                    && prior.workspace == execution.workspace,
+                    && prior.workspace == execution.workspace
+                    && prior.runtime == execution.runtime,
                 "Continuation predecessor identity or completion differs"
             );
             ensure!(
@@ -575,6 +605,7 @@ mod tests {
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command.clone()).unwrap();
         record.agent = Some(Execution {
+            runtime: None,
             previous_assistant: None,
             workspace: Workspace {
                 path: "/prepared".into(),
@@ -591,6 +622,7 @@ mod tests {
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command).unwrap();
         let args = Args {
+            containment: None,
             server: "http://localhost:7432".into(),
             id: runner,
             name: "test".into(),

@@ -10,6 +10,7 @@ use std::{path::PathBuf, time::Duration};
 mod agent;
 mod archive;
 mod compaction;
+mod containment;
 mod journal;
 mod questions;
 mod workspace;
@@ -26,6 +27,9 @@ enum Location {
     about = "Factory runner: durable commands, isolated Git worktrees and OpenCode checks"
 )]
 struct Args {
+    /// JSON binding to one dedicated Linux Docker runtime/stream (cgroup v2).
+    #[arg(long, requires = "opencode_registration")]
+    containment: Option<PathBuf>,
     #[arg(long, default_value = "http://127.0.0.1:7432")]
     server: String,
     #[arg(long)]
@@ -54,6 +58,13 @@ async fn report(
     mut record: Record,
     args: &Args,
 ) -> Result<()> {
+    if containment::control(client, journal, &mut record, args, registration).await? {
+        return Ok(());
+    }
+    if containment::ready(&record, args).await.is_err() {
+        client.observe_agent(record.command.runner_id,registration,record.command.id,&ObserveAgent {ownership_epoch:record.command.ownership_epoch,progress:AgentProgress {session_id:record.command.session_id(),message_id:agent_message_id(record.command.id),phase:AgentPhase::Unknown,summary:"Contained runtime identity/state unavailable; local result retained and stream reserved".into()}}).await?;
+        return Ok(());
+    }
     if !compaction::process(client, journal, &mut record, args, registration, false).await? {
         return Ok(());
     }
@@ -176,6 +187,13 @@ async fn commands(
         record.command = ack;
         tokio::task::block_in_place(|| journal.save(&record))?;
         if record.command.kind == CommandKind::RunAgent && record.result.is_none() {
+            if containment::control(client, journal, &mut record, args, registration).await? {
+                return Ok(true);
+            }
+            if containment::ready(&record, args).await.is_err() {
+                client.observe_agent(args.id,registration,record.command.id,&ObserveAgent {ownership_epoch:record.command.ownership_epoch,progress:AgentProgress {session_id:record.command.session_id(),message_id:agent_message_id(record.command.id),phase:AgentPhase::Unknown,summary:"Contained runtime unavailable, changed or frozen; no external write attempted".into()}}).await?;
+                return Ok(true);
+            }
             if let Some(control) = client
                 .runner_control(
                     args.id,
@@ -186,6 +204,16 @@ async fn commands(
                 .await?
                 .filter(|c| c.state != PauseState::Released)
             {
+                // A control can arrive between the freezer check above and this read.
+                // Contained executions must never fall back to native interrupt.
+                if record
+                    .agent
+                    .as_ref()
+                    .is_some_and(|a| a.prompt_attempted && a.runtime.is_some())
+                {
+                    containment::control(client, journal, &mut record, args, registration).await?;
+                    return Ok(true);
+                }
                 let (state, summary) = agent::pause(journal, &mut record, args).await?;
                 compaction::process(client, journal, &mut record, args, registration, false)
                     .await?;
@@ -328,7 +356,10 @@ async fn run(mut args: Args) -> Result<()> {
         } else {
             client
                 .register(&RegisterRunner {
-                    capabilities: vec![SESSION_LIFECYCLE_CAPABILITY.into()],
+                    capabilities: vec![
+                        SESSION_LIFECYCLE_CAPABILITY.into(),
+                        CONTAINER_FREEZE_CAPABILITY.into(),
+                    ],
                     id: args.id,
                     instance_id,
                     name: args.name.clone(),

@@ -46,6 +46,7 @@ pub async fn process(
     args: &Args,
     registration: RegistrationId,
 ) -> Result<()> {
+    crate::containment::ready(record, args).await?;
     let mut questions = Vec::new();
     if let Some(snapshot) = &record.question_snapshot {
         questions = client
@@ -271,6 +272,7 @@ mod tests {
         )
         .unwrap();
         let args = Args {
+            containment: None,
             server: endpoint.clone(),
             id: runner,
             name: "test".into(),

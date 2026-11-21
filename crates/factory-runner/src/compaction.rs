@@ -38,6 +38,7 @@ pub async fn process(
     registration: RegistrationId,
     allow_new: bool,
 ) -> Result<bool> {
+    crate::containment::ready(record, args).await?;
     if record.command.kind != CommandKind::RunAgent {
         return Ok(true);
     }
@@ -275,6 +276,7 @@ mod tests {
         )
         .unwrap();
         let args = Args {
+            containment: None,
             server: endpoint.clone(),
             id: runner,
             name: "test".into(),
