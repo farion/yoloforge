@@ -20,8 +20,8 @@ pub(super) fn stream_status(
     fallback: StreamState,
 ) -> Result<StreamState> {
     Ok(match load(tx, id)?.map(|c| c.state) {
-        Some(PauseState::Requested) => StreamState::Pausing,
-        Some(PauseState::HeldBeforeExecution) => StreamState::Paused,
+        Some(PauseState::Requested | PauseState::ResumeRequested) => StreamState::Pausing,
+        Some(PauseState::HeldBeforeExecution | PauseState::Frozen) => StreamState::Paused,
         Some(PauseState::InterruptUnverified) => StreamState::Blocked,
         _ => fallback,
     })
@@ -50,14 +50,16 @@ impl Store {
                 ControlAction::Pause=>{
                     if let Some(previous)=previous.filter(|c|c.state!=PauseState::Released) {return Ok(previous);}
                     if active.as_ref().is_some_and(|c|c.kind!=CommandKind::RunAgent) {return Err(StoreError::WorkConflict);}
-                    StreamControl {stream_id:id,request_id:body.request_id,command_id:active.as_ref().map(|c|c.id),
+                    StreamControl {action:ControlAction::Pause,proof:None,stream_id:id,request_id:body.request_id,command_id:active.as_ref().map(|c|c.id),
                         state:if active.is_some() {PauseState::Requested} else {PauseState::HeldBeforeExecution},
                         summary:if active.is_some() {"Stop requested; awaiting runner"} else {"Scheduling held; no active Factory command"}.into(),previous_status:owner.status}
                 },
                 ControlAction::Resume=>{
                     let previous=previous.ok_or(StoreError::WorkConflict)?;
-                    if previous.state!=PauseState::HeldBeforeExecution {return Err(StoreError::WorkConflict);}
-                    StreamControl {request_id:body.request_id,state:PauseState::Released,summary:"Scheduling released explicitly".into(),..previous}
+                    if !matches!(previous.state,PauseState::HeldBeforeExecution|PauseState::Frozen) {return Err(StoreError::WorkConflict);}
+                    let frozen=previous.state==PauseState::Frozen;
+                    if frozen && (previous.proof.as_ref().is_none_or(|p|!p.frozen) || active.as_ref().map(|c|c.id)!=previous.command_id) {return Err(StoreError::WorkConflict);}
+                    StreamControl {action:ControlAction::Resume,request_id:body.request_id,state:if frozen {PauseState::ResumeRequested}else{PauseState::Released},summary:if frozen {"Thaw requested; awaiting owning runner"}else{"Scheduling released explicitly"}.into(),..previous}
                 },
             };
             save(tx,&control)?;
@@ -89,21 +91,79 @@ impl Store {
         let mut control = load(&tx, command.stream_id)?.ok_or(StoreError::WorkConflict)?;
         if control.request_id != body.control_request
             || control.command_id != Some(id)
-            || control.state == PauseState::Released
             || command.state != CommandState::Accepted
-            || !matches!(
-                body.state,
-                PauseState::HeldBeforeExecution | PauseState::InterruptUnverified
-            )
-            || (control.state == PauseState::InterruptUnverified
-                && body.state == PauseState::HeldBeforeExecution)
         {
             return Err(StoreError::WorkConflict);
         }
+        // A lost thaw response is replayable, but cannot reopen a released control.
+        if control.state == PauseState::Released {
+            if body.state == control.state
+                && body.summary == control.summary
+                && body.proof == control.proof
+            {
+                return Ok(control);
+            }
+            return Err(StoreError::WorkConflict);
+        }
+        if let Some(proof) = &body.proof {
+            if proof.container_id.len() != 64
+                || !proof.container_id.bytes().all(|b| b.is_ascii_hexdigit())
+                || proof.observed_unix_ms == 0
+            {
+                return Err(StoreError::Invalid("Invalid containment proof"));
+            }
+            line(&proof.started_at, 100)?;
+            if control.proof.as_ref().is_some_and(|old| {
+                old.container_id != proof.container_id || old.started_at != proof.started_at
+            }) {
+                return Err(StoreError::WorkConflict);
+            }
+            if control
+                .proof
+                .as_ref()
+                .is_some_and(|old| proof.observed_unix_ms < old.observed_unix_ms)
+            {
+                return Err(StoreError::WorkConflict);
+            }
+        }
+        let valid = match body.state {
+            PauseState::InterruptUnverified => body.proof.is_none(),
+            PauseState::HeldBeforeExecution => {
+                control.action == ControlAction::Pause
+                    && body.proof.is_none()
+                    && control.proof.is_none()
+                    && matches!(
+                        control.state,
+                        PauseState::Requested | PauseState::HeldBeforeExecution
+                    )
+            }
+            PauseState::Frozen => {
+                control.action == ControlAction::Pause
+                    && body.proof.as_ref().is_some_and(|p| p.frozen)
+            }
+            PauseState::Released => {
+                control.action == ControlAction::Resume
+                    && control.proof.is_some()
+                    && body.proof.as_ref().is_some_and(|p| !p.frozen)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(StoreError::WorkConflict);
+        }
         line(&body.summary, 240)?;
-        if control.state != body.state || control.summary != body.summary {
+        if control.state != body.state
+            || control.summary != body.summary
+            || body
+                .proof
+                .as_ref()
+                .is_some_and(|p| control.proof.as_ref() != Some(p))
+        {
             control.state = body.state;
             control.summary = body.summary;
+            if body.proof.is_some() {
+                control.proof = body.proof;
+            }
             save(&tx, &control)?;
             let mut owner = super::work::stream(&tx, command.stream_id)?;
             super::work::save_stream(&tx, &mut owner, StreamState::Running)?;

@@ -477,6 +477,12 @@ impl Store {
                 if value.state != CommandState::Accepted {
                     return Err(StoreError::WorkConflict);
                 }
+                if super::controls::load(tx, value.stream_id)?.is_some_and(|c| {
+                    c.state != PauseState::Released
+                        && (c.proof.is_some() || c.state == PauseState::ResumeRequested)
+                }) {
+                    return Err(StoreError::WorkConflict);
+                }
                 if super::compaction::latest(tx, id)?.is_some_and(|v| !v.state.terminal()) {
                     return Err(StoreError::WorkConflict);
                 }

@@ -211,6 +211,7 @@ fn durable_pause_blocks_answers_and_requires_pre_execution_hold_for_resume() {
             runner,
             cmd.id,
             ReportControl {
+                proof: None,
                 control_request: control.request_id,
                 ownership_epoch: 1,
                 state: PauseState::HeldBeforeExecution,
@@ -247,6 +248,7 @@ fn durable_pause_blocks_answers_and_requires_pre_execution_hold_for_resume() {
             runner,
             cmd.id,
             ReportControl {
+                proof: None,
                 control_request: control.request_id,
                 ownership_epoch: 1,
                 state: PauseState::HeldBeforeExecution,
@@ -259,6 +261,7 @@ fn durable_pause_blocks_answers_and_requires_pre_execution_hold_for_resume() {
             runner,
             cmd.id,
             ReportControl {
+                proof: None,
                 control_request: next.request_id,
                 ownership_epoch: 1,
                 state: PauseState::InterruptUnverified,
@@ -281,6 +284,224 @@ fn durable_pause_blocks_answers_and_requires_pre_execution_hold_for_resume() {
         )
         .is_err());
 }
+#[test]
+fn freezer_control_requires_same_incarnation_and_confirmed_thaw_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("freezer.sqlite");
+    let store = Store::open(&path).unwrap();
+    let (runner, cmd) = setup(&store);
+    let pause = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Pause,
+            },
+        )
+        .unwrap();
+    let proof = ContainmentProof {
+        container_id: "a".repeat(64),
+        started_at: "2026-11-21T10:00:00Z".into(),
+        frozen: true,
+        observed_unix_ms: 1000,
+    };
+    let report = ReportControl {
+        proof: Some(proof.clone()),
+        control_request: pause.request_id,
+        ownership_epoch: 1,
+        state: PauseState::Frozen,
+        summary: "Container freezer confirmed".into(),
+    };
+    let mut invalid = report.clone();
+    invalid.proof = None;
+    assert!(store.report_control(runner, cmd.id, invalid).is_err());
+    let mut invalid = report.clone();
+    invalid.ownership_epoch = 2;
+    assert!(store.report_control(runner, cmd.id, invalid).is_err());
+    assert!(store
+        .report_control(RunnerId::new(), cmd.id, report.clone())
+        .is_err());
+    let frozen = store
+        .report_control(runner, cmd.id, report.clone())
+        .unwrap();
+    assert_eq!(
+        store
+            .report_control(runner, cmd.id, report.clone())
+            .unwrap(),
+        frozen
+    );
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].status,
+        StreamState::Paused
+    );
+    let completion = CommandResult {
+        request_id: RequestId::new(),
+        ownership_epoch: 1,
+        result: CommandOutput::Agent {
+            agent: AgentProgress {
+                session_id: cmd.session_id(),
+                message_id: agent_message_id(cmd.id),
+                phase: AgentPhase::Succeeded,
+                summary: "done".into(),
+            },
+        },
+    };
+    assert!(matches!(
+        store.complete(runner, cmd.id, completion.clone()),
+        Err(StoreError::WorkConflict)
+    ));
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.runner_control(runner, cmd.id, 1).unwrap(),
+        Some(frozen)
+    );
+    let resume = SetControl {
+        request_id: RequestId::new(),
+        expected_revision: store.snapshot().unwrap().streams[0].revision,
+        action: ControlAction::Resume,
+    };
+    let requested = store.set_control(cmd.stream_id, resume.clone()).unwrap();
+    assert_eq!(requested.state, PauseState::ResumeRequested);
+    assert_eq!(store.set_control(cmd.stream_id, resume).unwrap(), requested);
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].status,
+        StreamState::Pausing
+    );
+    assert!(store.report_control(runner, cmd.id, report).is_err());
+    assert!(matches!(
+        store.complete(runner, cmd.id, completion),
+        Err(StoreError::WorkConflict)
+    ));
+    let thaw = ReportControl {
+        proof: Some(ContainmentProof {
+            frozen: false,
+            observed_unix_ms: 1001,
+            ..proof
+        }),
+        control_request: requested.request_id,
+        ownership_epoch: 1,
+        state: PauseState::Released,
+        summary: "Same runtime thawed".into(),
+    };
+    let mut wrong = thaw.clone();
+    wrong.proof.as_mut().unwrap().container_id = "b".repeat(64);
+    assert!(store.report_control(runner, cmd.id, wrong).is_err());
+    let mut wrong = thaw.clone();
+    wrong.proof.as_mut().unwrap().started_at = "2026-11-21T11:00:00Z".into();
+    assert!(store.report_control(runner, cmd.id, wrong).is_err());
+    let mut wrong = thaw.clone();
+    wrong.proof.as_mut().unwrap().observed_unix_ms = 999;
+    assert!(store.report_control(runner, cmd.id, wrong).is_err());
+    let mut wrong = thaw.clone();
+    wrong.proof.as_mut().unwrap().frozen = true;
+    assert!(store.report_control(runner, cmd.id, wrong).is_err());
+    let released = store.report_control(runner, cmd.id, thaw.clone()).unwrap();
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].status,
+        StreamState::Running
+    );
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.report_control(runner, cmd.id, thaw).unwrap(),
+        released
+    );
+}
+
+#[test]
+fn uncertain_thaw_preserves_identity_and_cannot_be_reclassified_as_pre_execution_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let (runner, cmd) = setup(&store);
+    let pause = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Pause,
+            },
+        )
+        .unwrap();
+    let proof = ContainmentProof {
+        container_id: "a".repeat(64),
+        started_at: "2026-11-21T10:00:00Z".into(),
+        frozen: true,
+        observed_unix_ms: 1000,
+    };
+    store
+        .report_control(
+            runner,
+            cmd.id,
+            ReportControl {
+                proof: Some(proof.clone()),
+                control_request: pause.request_id,
+                ownership_epoch: 1,
+                state: PauseState::Frozen,
+                summary: "frozen".into(),
+            },
+        )
+        .unwrap();
+    let resume = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Resume,
+            },
+        )
+        .unwrap();
+    let uncertain = ReportControl {
+        proof: None,
+        control_request: resume.request_id,
+        ownership_epoch: 1,
+        state: PauseState::InterruptUnverified,
+        summary: "Thaw outcome unknown".into(),
+    };
+    let saved = store
+        .report_control(runner, cmd.id, uncertain.clone())
+        .unwrap();
+    assert_eq!(saved.proof, Some(proof.clone()));
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].status,
+        StreamState::Blocked
+    );
+    let mut invalid = uncertain;
+    invalid.state = PauseState::HeldBeforeExecution;
+    assert!(store.report_control(runner, cmd.id, invalid).is_err());
+    assert!(store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Resume
+            }
+        )
+        .is_err());
+    // Read-only reconciliation can confirm the original thaw without a new operation.
+    store
+        .report_control(
+            runner,
+            cmd.id,
+            ReportControl {
+                proof: Some(ContainmentProof {
+                    frozen: false,
+                    observed_unix_ms: 1002,
+                    ..proof
+                }),
+                control_request: resume.request_id,
+                ownership_epoch: 1,
+                state: PauseState::Released,
+                summary: "Thaw reconciled".into(),
+            },
+        )
+        .unwrap();
+}
+
 fn sync(
     store: &Store,
     runner: RunnerId,

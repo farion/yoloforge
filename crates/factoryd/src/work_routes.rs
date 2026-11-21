@@ -51,13 +51,22 @@ pub(super) async fn runner_control(
     headers: HeaderMap,
     Query(query): Query<ControlQuery>,
 ) -> Response {
-    let _guard = match runner_access(&app, runner, &headers).await {
+    let guard = match runner_access(&app, runner, &headers).await {
         Ok(g) => g,
         Err(e) => return *e,
     };
+    let freezer = guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == CONTAINER_FREEZE_CAPABILITY);
     let store = app.store.clone();
     db_call(RequestId::new(), move || {
-        store.runner_control(runner, id, query.epoch)
+        let control = store.runner_control(runner, id, query.epoch)?;
+        if !freezer && control.as_ref().is_some_and(|c| c.proof.is_some()) {
+            return Err(store::StoreError::WorkConflict);
+        }
+        Ok(control)
     })
     .await
 }
@@ -74,10 +83,27 @@ pub(super) async fn report_control(
             "Invalid control report",
         );
     };
-    let _guard = match runner_access(&app, runner, &headers).await {
+    let guard = match runner_access(&app, runner, &headers).await {
         Ok(g) => g,
         Err(e) => return *e,
     };
+    if (body.proof.is_some()
+        || matches!(
+            body.state,
+            PauseState::Frozen | PauseState::ResumeRequested | PauseState::Released
+        ))
+        && !guard.entries[&runner]
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == CONTAINER_FREEZE_CAPABILITY)
+    {
+        return error(
+            StatusCode::CONFLICT,
+            ErrorCode::WorkConflict,
+            "Runner lacks container freezer capability",
+        );
+    }
     let store = app.store.clone();
     db_call(RequestId::new(), move || {
         store.report_control(runner, id, body)

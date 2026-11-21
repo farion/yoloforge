@@ -186,6 +186,8 @@ pub struct SetControl {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportControl {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<ContainmentProof>,
     pub control_request: RequestId,
     pub ownership_epoch: u64,
     pub state: PauseState,

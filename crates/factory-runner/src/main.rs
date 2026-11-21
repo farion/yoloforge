@@ -200,6 +200,7 @@ async fn commands(
                         registration,
                         record.command.id,
                         &factory_protocol::ReportControl {
+                            proof: None,
                             control_request: control.request_id,
                             ownership_epoch: record.command.ownership_epoch,
                             state,

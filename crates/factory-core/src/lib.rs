@@ -175,16 +175,33 @@ pub enum ControlAction {
     Pause,
     Resume,
 }
+pub const CONTAINER_FREEZE_CAPABILITY: &str = "container-freeze-v1";
+fn pause_action() -> ControlAction {
+    ControlAction::Pause
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ContainmentProof {
+    pub container_id: String,
+    pub started_at: String,
+    pub frozen: bool,
+    pub observed_unix_ms: u64,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PauseState {
     Requested,
     HeldBeforeExecution,
     InterruptUnverified,
+    Frozen,
+    ResumeRequested,
     Released,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StreamControl {
+    #[serde(default = "pause_action")]
+    pub action: ControlAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<ContainmentProof>,
     pub stream_id: StreamId,
     pub request_id: RequestId,
     pub command_id: Option<CommandId>,

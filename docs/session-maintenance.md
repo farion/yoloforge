@@ -9,6 +9,43 @@ erfolgreicher Sessions. Das bestätigte Stoppen laufender Prozesse bleibt offen.
 
 ## Fortsetzung und Abschluss einer erfolgreichen Session
 
+### Vorbereitung: Freezer-Protokoll (Schema 13)
+
+Der Server unterstützt jetzt den persistenten Zustandsvertrag für eine spätere
+dedizierte Container-Laufzeit pro Workstream:
+
+- `requested` → `frozen` benötigt einen Runner-Nachweis mit vollständiger
+  Container-ID, Startzeit der Container-Instanz und Beobachtungszeitpunkt.
+- Resume erzeugt zunächst `resume_requested`. Erst ein bestätigtes Auftauen
+  derselben Container-Instanz setzt `released`. Ein Klick allein gibt keine
+  laufende Ausführung frei.
+- Unklare Ergebnisse bleiben `interrupt_unverified`; vorhandene Identität bleibt
+  gespeichert. Lesender Abgleich darf anschließend denselben Vorgang bestätigen.
+- Fremde Runner, veraltete Ownership-Epochen/Requests, gewechselte Instanzen und
+  rückläufige Beobachtungszeitpunkte werden abgewiesen. Ein verlorener identischer
+  Auftau-Report kann auch nach Serverneustart wiederholt werden.
+- Solange ein nicht freigegebener Container-Nachweis vorliegt, wird kein
+  terminales Auftragsergebnis angenommen. Vor-Ausführung-Holds können einen
+  Container-Nachweis nicht ersetzen.
+- Die HTTP-Schnittstelle verlangt für neue Freezer-Meldungen die registrierte
+  Capability `container-freeze-v1`. Ältere Runner erhalten keine Container-Control
+  mit Nachweis zur Verarbeitung.
+
+**Dies ist bisher nur der getestete serverseitige Vertrag.** Der ausgelieferte
+Runner bewirbt diese Capability noch nicht und führt kein Docker-Pause/Unpause
+aus. Dedizierte Laufzeitbereitstellung, lokales Intent-Journal, Prüfung der
+Containment-Grenzen und echte Tests mit abgekoppelten/signalresistenten Prozessen
+stehen noch aus. Der Server vertraut einem autorisierten Runner-Bericht; ein
+gespeicherter Bericht ist kein aktueller Kernel-Nachweis und keine Erlaubnis für
+Ownership-Transfer. Einfrieren beendet außerdem keine Prozesse und stoppt keine
+bereits ausgelösten externen Dienste. Die bisherige Interrupt-Funktion bleibt
+unverändert unbestätigt.
+
+Store-Tests prüfen Serverneustart, identischen Replay, Instanzwechsel, verspätete
+Reports, unklare Auftau-Ergebnisse und blockierten Auftragsabschluss. Schema 13
+verhindert ein Öffnen der Datenbank durch ältere Server; Downgrade benötigt die
+passende Sicherung.
+
 ```sh
 yoloforge stream continue STREAM --previous-command LETZTER-AUFTRAG \
   --expected-revision STREAM-REVISION --prompt 'Naechster Arbeitsschritt'

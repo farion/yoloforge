@@ -6,7 +6,7 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
 | Nr. | Arbeitspaket | Stand / Abnahme |
 | --- | --- | --- |
-| 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg in derselben Session über API/CLI/TUI implementiert und mit echtem Agenten geprüft; Prozesscontainment und Fortsetzung nach Interrupt offen |
+| 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg mit echtem Agenten geprüft; persistenter serverseitiger Freeze/Thaw-Vertrag mit Instanzbindung und Replay implementiert. Container-Runner, echte Prozesscontainment-Abnahme und Fortsetzung nach Interrupt offen |
 | 2 | Recovery ungeklärter Aufträge | Offen |
 | 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen, CLI-Export und TUI-Archivbrowser mit eingefrorenem Revisionsstand implementiert; Binäranhänge und historischer Backfill offen |
 | 4 | SSE und Runner-Long-Poll | Implementiert und lokal getestet; TUI nutzt SSE, Runner Long-Poll |

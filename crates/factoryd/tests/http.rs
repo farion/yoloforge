@@ -54,6 +54,63 @@ async fn command_poll_requires_current_runner_registration() {
 }
 
 #[tokio::test]
+async fn container_reports_require_the_registered_freezer_capability() {
+    let server = server().await;
+    let client = Client::new();
+    for capable in [false, true] {
+        let mut input = runner();
+        input.id = RunnerId::new();
+        if capable {
+            input.capabilities.push(CONTAINER_FREEZE_CAPABILITY.into());
+        }
+        let registration = request(
+            &client,
+            &server,
+            reqwest::Method::POST,
+            "/v1/runners/register",
+        )
+        .json(&input)
+        .send()
+        .await
+        .unwrap()
+        .json::<Registration>()
+        .await
+        .unwrap();
+        let path = format!(
+            "/v1/runners/{}/commands/{}/control",
+            input.id,
+            CommandId::new()
+        );
+        let response = request(&client, &server, reqwest::Method::POST, &path)
+            .header(RUNNER_HEADER, registration.registration_id.to_string())
+            .json(&ReportControl {
+                proof: Some(ContainmentProof {
+                    container_id: "a".repeat(64),
+                    started_at: "2026-11-21T10:00:00Z".into(),
+                    frozen: true,
+                    observed_unix_ms: 1,
+                }),
+                control_request: RequestId::new(),
+                ownership_epoch: 1,
+                state: PauseState::Frozen,
+                summary: "Frozen".into(),
+            })
+            .send()
+            .await
+            .unwrap();
+        // Capability rejection precedes lookup; a capable runner reaches the missing command.
+        assert_eq!(
+            response.status(),
+            if capable {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn project_ticket_routes_expose_revision_conflicts_and_durable_event_cursor() {
     let server = server().await;
     let client = Client::new();
