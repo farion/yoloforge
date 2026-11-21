@@ -8,6 +8,13 @@ pub const RUNNER_HEADER: &str = "x-factory-runner-registration";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReportArchive {
+    pub ownership_epoch: u64,
+    pub batch: ArchiveBatch,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateKnowledge {
     pub request_id: RequestId,
     pub project_id: ProjectId,

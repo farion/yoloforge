@@ -10,10 +10,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Execution {
-    workspace: Workspace,
+    pub(crate) workspace: Workspace,
     pub(crate) endpoint: String,
     session_attempted: bool,
-    prompt_attempted: bool,
+    pub(crate) prompt_attempted: bool,
     #[serde(default)]
     interrupt_attempted: bool,
 }

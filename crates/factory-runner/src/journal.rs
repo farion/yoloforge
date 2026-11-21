@@ -32,6 +32,8 @@ pub struct Record {
     #[serde(default)]
     pub excerpt: Option<SessionExcerpt>,
     #[serde(default)]
+    pub archive: crate::archive::Cursor,
+    #[serde(default)]
     pub question_snapshot: Option<Vec<ExternalQuestion>>,
     #[serde(default)]
     pub replies: std::collections::BTreeMap<RequestId, crate::questions::Receipt>,
@@ -111,6 +113,7 @@ impl Journal {
             question_snapshot: None,
             replies: Default::default(),
             excerpt: None,
+            archive: Default::default(),
         };
         self.save(&record)?;
         Ok(record)

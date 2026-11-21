@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 pub mod store;
 use store::{Store, StoreError};
 mod access;
+mod archive_routes;
 mod knowledge_routes;
 mod live;
 mod work_routes;
@@ -66,6 +67,12 @@ pub fn router_with_shutdown(
         stopping,
     };
     Router::new()
+        .route("/v1/commands/{id}/archive", get(archive_routes::read))
+        .route(
+            "/v1/runners/{runner}/commands/{id}/archive",
+            axum::routing::put(archive_routes::write)
+                .layer(axum::extract::DefaultBodyLimit::max(9 * 1024 * 1024)),
+        )
         .route("/v1/knowledge", post(knowledge_routes::create))
         .route("/v1/knowledge/{id}/retire", post(knowledge_routes::retire))
         .route("/v1/projects/{id}/knowledge", get(knowledge_routes::list))

@@ -6,6 +6,12 @@ mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Export persisted message versions as JSONL; creates a new private file.
+    Archive {
+        id: CommandId,
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
     /// Project knowledge with provenance and bounded context selection.
     Knowledge {
         #[command(subcommand)]
@@ -312,6 +318,41 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Archive { id, output } => {
+            use std::io::Write;
+            let mut page = client.archive(id, 0, None).await?;
+            let mut file = private_file(&output)?;
+            let status = page.status.clone();
+            let through = Some(status.as_ref().map_or(0, |v| v.revision));
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({"command_id":id,"status":status,"format":"yoloforge-archive-v1"})
+            )?;
+            let mut after = 0;
+            let mut count = 0;
+            loop {
+                if page.entries.is_empty() {
+                    break;
+                }
+                anyhow::ensure!(page.next_after > after, "Archive cursor did not advance");
+                for entry in page.entries {
+                    writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+                    count += 1;
+                }
+                after = page.next_after;
+                page = client.archive(id, after, through).await?;
+            }
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({"export_complete":true,"versions":count,"through_revision":through})
+            )?;
+            file.sync_all()?;
+            print(
+                &serde_json::json!({"output":output,"versions":count,"final_scan_complete":status.is_some_and(|v|v.final_scan_complete)}),
+            )
+        }
         Command::Knowledge { command } => match command {
             KnowledgeCommand::Add {
                 project,

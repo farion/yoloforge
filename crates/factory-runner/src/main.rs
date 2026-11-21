@@ -8,6 +8,7 @@ use factory_protocol::{
 };
 use std::{path::PathBuf, time::Duration};
 mod agent;
+mod archive;
 mod journal;
 mod questions;
 mod workspace;
@@ -50,7 +51,17 @@ async fn report(
     journal: &Journal,
     registration: RegistrationId,
     mut record: Record,
+    args: &Args,
 ) -> Result<()> {
+    let archived = archive::step(client, journal, &mut record, args, registration).await;
+    if !matches!(archived, Ok(true)) {
+        client.observe_agent(record.command.runner_id,registration,record.command.id,&ObserveAgent {
+            ownership_epoch:record.command.ownership_epoch,
+            progress:AgentProgress {session_id:agent_session_id(record.command.id),message_id:agent_message_id(record.command.id),phase:AgentPhase::Unknown,summary:"Execution result recorded locally; final session archive pending. Stream remains reserved.".into()},
+        }).await?;
+        archived?;
+        return Ok(());
+    }
     sync_excerpt(client, registration, &record).await?;
     let result = record
         .result
@@ -104,7 +115,7 @@ async fn commands(
 ) -> Result<bool> {
     let outbox = tokio::task::block_in_place(|| journal.unreported())?;
     for record in outbox {
-        report(client, journal, registration, record).await?;
+        report(client, journal, registration, record, args).await?;
     }
     // Process one command per heartbeat; local Git operations have timeouts.
     let pending = client.pending_wait(args.id, registration, 10).await?;
@@ -157,6 +168,7 @@ async fn commands(
                     tokio::task::block_in_place(|| journal.save(&record))?;
                 }
                 sync_excerpt(client, registration, &record).await?;
+                archive::step(client, journal, &mut record, args, registration).await?;
                 client
                     .report_control(
                         args.id,
@@ -191,9 +203,10 @@ async fn commands(
             if matches!(progress.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
                 record.result = Some(CommandOutput::Agent { agent: progress });
                 tokio::task::block_in_place(|| journal.save(&record))?;
-                report(client, journal, registration, record).await?;
+                report(client, journal, registration, record, args).await?;
             } else {
                 sync_excerpt(client, registration, &record).await?;
+                archive::step(client, journal, &mut record, args, registration).await?;
                 client
                     .observe_agent(
                         args.id,
@@ -229,7 +242,7 @@ async fn commands(
             });
             tokio::task::block_in_place(|| journal.save(&record))?;
         }
-        report(client, journal, registration, record).await?;
+        report(client, journal, registration, record, args).await?;
     }
     Ok(had_command)
 }

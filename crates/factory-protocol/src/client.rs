@@ -40,6 +40,41 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn archive(
+        &self,
+        id: CommandId,
+        after: u64,
+        through: Option<u64>,
+    ) -> Result<ArchivePage, ClientError> {
+        let mut request = self
+            .http
+            .get(format!("{}/v1/commands/{id}/archive", self.base))
+            .query(&[("after", after)]);
+        if let Some(revision) = through {
+            request = request.query(&[("through_revision", revision)]);
+        }
+        Self::decode(request.send().await).await
+    }
+    pub async fn report_archive(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        body: &ReportArchive,
+    ) -> Result<ArchiveStatus, ClientError> {
+        Self::decode(
+            self.http
+                .put(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/archive",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn create_knowledge(
         &self,
         body: &CreateKnowledge,

@@ -8,10 +8,10 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | --- | --- | --- |
 | 1 | Bestätigte Pause und Session-Fortsetzung | Offen: Prozesscontainment; vorhandener Interrupt bleibt unbestätigt |
 | 2 | Recovery ungeklärter Aufträge | Offen |
-| 3 | Vollständiges Sessionarchiv | Teilweise: persistente begrenzte Auszüge vorhanden |
+| 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen mit Versionen und CLI-Export implementiert; Binäranhänge, historischer Backfill und TUI-Archivbrowser noch offen |
 | 4 | SSE und Runner-Long-Poll | Implementiert und lokal getestet; TUI nutzt SSE, Runner Long-Poll |
 | 5 | Deployment, Backup/Restore, Updates | Container, Vorlagen und Backup/Restore lokal getestet; Zielinstallation durch Betreiber |
-| 6 | Echte Laptop-/Server-Abnahme | Alias rs9tm bekannt; erst nach Ansible-Deployment des Betreibers; kein Deployment durch Agent |
+| 6 | Echte Laptop-/Server-Abnahme | Erstinstallation v0.1.1 auf rs9tm lesend geprüft: Binary-Hash, Health/Auth, Portbindung und Persistenz passen. Runner-/Agentenbetrieb, Update und Rollback noch offen |
 | 7 | Gerätezugang, Rollen, Widerruf | API/CLI implementiert und getestet, einschließlich laufender SSE-/Long-Polls; TUI-Dialog offen |
 | 8 | OpenAI-/GitHub-/Forgejo-Zugangsverwaltung | Offen; lokale OpenCode-Anmeldung im Labor vorhanden |
 | 9 | Clone/Fetch und Repository-Einrichtung | Lokale CLI clone/register/fetch mit atomarer Runner-Zuordnung implementiert; TUI-/Remote-Aufträge offen |

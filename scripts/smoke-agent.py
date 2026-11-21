@@ -212,6 +212,14 @@ def inside(bin_dir):
             check(excerpt and excerpt["session_id"] == session, "session excerpt not stored")
             check(any(m["kind"] == "assistant" and "[Tool:" in m["text"] for m in excerpt["messages"]), "tool output missing from excerpt")
             check(any(tokens[command["id"]] in m["text"] for m in excerpt["messages"]), "final answered context missing from excerpt")
+            archive = api("GET", "/v1/commands/" + command["id"] + "/archive")
+            check(archive["status"]["final_scan_complete"], "terminal result preceded final archive")
+            archived = []
+            while archive["entries"]:
+                archived.extend(entry["message"] for entry in archive["entries"])
+                archive = api("GET", "/v1/commands/" + command["id"] + "/archive?after=" + str(archive["next_after"]))
+            check(any(m["id"] == "msg_factory_" + command["id"].replace("-", "") for m in archived), "original prompt missing from archive")
+            check(any(tokens[command["id"]] in json.dumps(m) for m in archived), "final context missing from archive")
         check(not (repo / "proof.py").exists(), "agent wrote into source checkout")
         questions = [q for q in cli("question", "list") if q["command_id"] in ids]
         check(len(questions) == 4 and all(q["state"] == "answered" for q in questions), "question outcomes not durably confirmed")
@@ -219,7 +227,9 @@ def inside(bin_dir):
         stop(server)
         server, _ = daemon(address)
         check(all(api("GET", "/v1/commands/" + c["id"] + "/excerpt") for c in commands), "session excerpts lost after restart")
+        check(all(api("GET", "/v1/commands/" + c["id"] + "/archive")["status"]["final_scan_complete"] for c in commands), "session archive lost after restart")
         print("PASS real session text/tool excerpts persist through daemon restart", flush=True)
+        print("PASS paginated untruncated session archives and final-scan markers survive restart", flush=True)
         print("PASS both real agents use separately scoped persistent runner credentials", flush=True)
     finally:
         for process in reversed(processes):

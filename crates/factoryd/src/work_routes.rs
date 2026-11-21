@@ -184,7 +184,7 @@ pub(super) async fn observe_agent(
     .await
 }
 
-async fn runner_access<'a>(
+pub(super) async fn runner_access<'a>(
     app: &'a App,
     id: RunnerId,
     headers: &HeaderMap,

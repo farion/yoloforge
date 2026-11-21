@@ -1,5 +1,14 @@
 # Datenmodell und Runner-Protokoll
 
+## Nachrichtenarchiv (Schema v8)
+
+Paginiertes versionsbewahrendes Archiv neben den Auszügen, mit journalisierten
+Runner-Batches, lückenlosen Uploadrevisionen und optionaler Export-Revisionsgrenze.
+Siehe [session-archive.md](session-archive.md) für Endpunkte, Limits und die genaue
+Bedeutung von `final_scan_complete`. Der Abschluss neuer Agentenaufträge wartet
+auf den letzten Archivdurchlauf; bestehende erfolgreiche Aufträge werden nicht
+automatisch rückwirkend aufgenommen.
+
 ## Gerätezugang und Projektgedächtnis
 
 Schema v6 (Release v0.1.1) ergänzt gehashte Geräte-Credentials und einmalige

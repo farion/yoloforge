@@ -46,6 +46,36 @@ id!(QuestionId);
 id!(DeviceId);
 id!(KnowledgeId);
 
+/// Untruncated projected OpenCode messages. Binary objects referenced by messages are not embedded.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveBatch {
+    pub session_id: String,
+    pub revision: u64,
+    pub captured_unix_ms: u64,
+    pub final_scan_complete: bool,
+    pub messages: Vec<serde_json::Value>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArchiveStatus {
+    pub session_id: String,
+    pub revision: u64,
+    pub captured_unix_ms: u64,
+    pub final_scan_complete: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchivedMessage {
+    pub sequence: u64,
+    pub sample_revision: u64,
+    pub captured_unix_ms: u64,
+    pub message: serde_json::Value,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchivePage {
+    pub status: Option<ArchiveStatus>,
+    pub entries: Vec<ArchivedMessage>,
+    pub next_after: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeNote {
     pub id: KnowledgeId,

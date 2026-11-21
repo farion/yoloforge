@@ -1,6 +1,6 @@
 //! Adapter pinned to the verified OpenCode 2.0.27 contract.
 //! Credentials remain separate from Factory authentication and never implement Debug.
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use factory_core::{OpenCodeStatus, QuestionKind, QuestionState};
 use reqwest::{Client, Method, StatusCode, Url};
 use serde::Deserialize;
@@ -21,6 +21,56 @@ pub struct OpenCodeClient {
 }
 
 impl OpenCodeClient {
+    /// Lossless projected message page, oldest first. Opaque cursors are not combined with order.
+    pub async fn archive_page(
+        &self,
+        session: &str,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<serde_json::Value>, Option<String>)> {
+        safe_id(session)?;
+        let mut request = self
+            .client
+            .get(format!(
+                "{}/api/session/{session}/message",
+                self.registration.url.trim_end_matches('/')
+            ))
+            .basic_auth("opencode", Some(&self.registration.password))
+            .query(&[("limit", "16")]);
+        request = if let Some(cursor) = cursor {
+            request.query(&[("cursor", cursor)])
+        } else {
+            request.query(&[("order", "asc")])
+        };
+        let mut response = request.send().await?;
+        ensure!(response.status().is_success(), "Archive page unavailable");
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len() + chunk.len() <= 8 * 1024 * 1024 - 4096,
+                "Archive page exceeds 8 MiB; no truncation applied"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let messages = value["data"]
+            .as_array()
+            .context("Archive messages missing")?
+            .clone();
+        ensure!(messages.len() <= 16, "Archive page limit exceeded");
+        let cursors = value["cursor"]
+            .as_object()
+            .context("Archive cursor missing")?;
+        let next = match cursors.get("next") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) if s.len() <= 4096 => Some(s.clone()),
+            _ => anyhow::bail!("Invalid archive cursor"),
+        };
+        ensure!(
+            next.as_deref() != cursor || next.is_none(),
+            "Archive cursor did not advance"
+        );
+        Ok((messages, next))
+    }
     /// Newest page only; return oldest-to-newest for display. Never interpret a failed read as empty.
     pub async fn excerpt(
         &self,
