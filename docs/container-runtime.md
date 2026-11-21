@@ -16,7 +16,7 @@ Downgrade benötigt die passende Sicherung. Der neue Runner bewirbt
 Interrupt-Semantik bestehen.
 
 1. Projekt/Workstream und dedizierten Runner anlegen, Worktree wie bisher mit
-   `prepare-workspace` vorbereiten. Noch keinen Agentenauftrag starten.
+   `yoloforge stream prepare` vorbereiten. Noch keinen Agentenauftrag starten.
 2. Eine eigene OpenCode-Instanz im Container starten. Die vorhandene gemeinsame
    Laborinstanz ist dafür ungeeignet. Keine weiteren API-Schreiber oder Sessions
    in diesem Container betreiben.
@@ -102,5 +102,46 @@ Schreibvorgänge nach Thaw, Journalneustart, verlorener Abschlussabgleich,
 persistierter Intent ohne Docker-Aufruf, externe Zustandsänderung, fremder
 Instanznachweis, Containerneustart und entfernte Konfiguration. Er braucht keinen
 Providerzugang und ruft kein Modell auf. Server-Store-/HTTP-Tests prüfen separat
-Control-Transitions, Fencing und Capability-Schutz. Ein vollständiger Modelllauf
-mit Freeze/Thaw und die Zielhost-Abnahme stehen noch aus.
+Control-Transitions, Fencing und Capability-Schutz. Wiederholte Bestätigungen
+derselben Freezer-Lage aktualisieren den Beobachtungszeitpunkt dauerhaft, ohne
+die Streamrevision zu verändern: Ein Heartbeat macht eine bereits vorbereitete
+Resume-Entscheidung nicht allein durch eine neuere Beobachtungszeit ungültig.
+
+## Vollständiger Modelltest — lokal bestanden am 21.11.2026
+
+```sh
+cargo build --workspace --locked
+docker build -f scripts/fixtures/contained-opencode.Dockerfile \
+  -t yoloforge-contained-opencode:2.0.27 scripts/fixtures
+python3 -u scripts/smoke-contained-agent.py
+```
+
+Der Fixture-Build benötigt das lokale Laborimage `yolofactory-opencode-spike:2.0.27`.
+Der Test liest standardmäßig die private Laborregistrierung unter
+`spikes/opencode/.runtime/registration.json`; mit `--credential-source DATEI`
+kann eine andere explizite Registrierung gewählt werden. Er verlangt einen
+mindestens 30 Minuten gültigen OpenAI-OAuth-Access-Token. **Der Refresh-Token wird
+nicht übernommen**; der temporäre Dienst kann die Anmeldung der Quellinstanz
+damit nicht erneuern/rotieren. Das vorhandene Labor und dessen Datenvolume werden
+weder neu gestartet noch verändert. Es wird kein Datenbank-/Sessionklon angelegt.
+
+Getestet mit OpenCode 2.0.27 und `openai/gpt-6-astra`:
+
+- Eigener non-root/read-only Container mit dediziertem Volume und exaktem
+  Worktree-Mount; Host-Runner mit eigenem Journal und gescoptem Gerätecredential.
+- Ein echter Modellauftrag führt ein wartendes Vordergrundtool aus, das einen
+  doppelt abgekoppelten Childprozess startet; beide schreiben Fortschrittsmarker.
+- Pause über Factory-CLI friert beide Prozesse ein. Während Factory und Runner
+  neu starten, bleiben beide Marker unverändert; der neue Runner bestätigt
+  dieselbe Container-Instanz erneut.
+- Resume über CLI taut dieselbe Instanz auf. Beide Prozesse arbeiten weiter;
+  das Tool wird genau einmal ausgeführt, erstellt/kompiliert seine Ergebnisdatei
+  und die ursprüngliche Session schließt erfolgreich ab.
+- Der Runner beendet den finalen Archivscan; der revisionsgebundene JSONL-Export
+  enthält die projektierten Nachrichten und den eindeutigen Testmarker.
+
+Testcontainer und dessen Volume werden anschließend entfernt. Bei Fehlern bleibt
+ein privates Diagnoseverzeichnis unter `/tmp/opencode/contained-agent-*` erhalten;
+bei Erfolg wird es ebenfalls entfernt. Der Test ist opt-in und verwendet echte
+Modellkapazität. Die Abnahme auf dem Zielhost, automatische Provisionierung,
+Recovery nach Containerverlust und Ownership-Transfer bleiben offen.

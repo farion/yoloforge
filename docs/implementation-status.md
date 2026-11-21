@@ -6,7 +6,7 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
 | Nr. | Arbeitspaket | Stand / Abnahme |
 | --- | --- | --- |
-| 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg mit echtem Agenten geprüft; dedizierter Container-Runner mit journalisiertem Freeze/Thaw und Instanzbindung implementiert, lokale Docker-Abnahme mit abgekoppelten/signalresistenten Prozessen bestanden. Vollständiger Modelllauf/Zielhost-Abnahme, automatische Provisionierung und Fortsetzung nach nativem Interrupt offen |
+| 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg sowie dediziertes Container-Freeze/Thaw mit echtem Modell lokal geprüft: abgekoppelte Tools, Factory-/Runner-Neustart, gleiche Ausführung, genau ein Toolaufruf und finales Archiv. Zielhost-Abnahme, automatische Provisionierung und Fortsetzung nach nativem Interrupt offen |
 | 2 | Recovery ungeklärter Aufträge | Offen |
 | 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen, CLI-Export und TUI-Archivbrowser mit eingefrorenem Revisionsstand implementiert; Binäranhänge und historischer Backfill offen |
 | 4 | SSE und Runner-Long-Poll | Implementiert und lokal getestet; TUI nutzt SSE, Runner Long-Poll |

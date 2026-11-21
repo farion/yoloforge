@@ -159,14 +159,19 @@ impl Store {
                 .as_ref()
                 .is_some_and(|p| control.proof.as_ref() != Some(p))
         {
+            let state_changed = control.state != body.state;
             control.state = body.state;
             control.summary = body.summary;
             if body.proof.is_some() {
                 control.proof = body.proof;
             }
             save(&tx, &control)?;
-            let mut owner = super::work::stream(&tx, command.stream_id)?;
-            super::work::save_stream(&tx, &mut owner, StreamState::Running)?;
+            // A fresh observation of the same freezer state must not invalidate
+            // an operator's pending resume solely because a heartbeat arrived.
+            if state_changed {
+                let mut owner = super::work::stream(&tx, command.stream_id)?;
+                super::work::save_stream(&tx, &mut owner, StreamState::Running)?;
+            }
         }
         tx.commit()?;
         Ok(control)

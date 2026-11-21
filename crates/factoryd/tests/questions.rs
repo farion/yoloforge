@@ -502,6 +502,66 @@ fn uncertain_thaw_preserves_identity_and_cannot_be_reclassified_as_pre_execution
         .unwrap();
 }
 
+#[test]
+fn fresh_freezer_observations_do_not_invalidate_a_pending_operator_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let (runner, cmd) = setup(&store);
+    let pause = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Pause,
+            },
+        )
+        .unwrap();
+    let mut body = ReportControl {
+        proof: Some(ContainmentProof {
+            container_id: "a".repeat(64),
+            started_at: "2026-11-21T10:00:00Z".into(),
+            frozen: true,
+            observed_unix_ms: 1000,
+        }),
+        control_request: pause.request_id,
+        ownership_epoch: 1,
+        state: PauseState::Frozen,
+        summary: "frozen".into(),
+    };
+    store.report_control(runner, cmd.id, body.clone()).unwrap();
+    let operator_revision = store.snapshot().unwrap().streams[0].revision;
+    body.proof.as_mut().unwrap().observed_unix_ms = 1001;
+    store.report_control(runner, cmd.id, body.clone()).unwrap();
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].revision,
+        operator_revision
+    );
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .runner_control(runner, cmd.id, 1)
+            .unwrap()
+            .unwrap()
+            .proof,
+        body.proof
+    );
+    let resumed = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: operator_revision,
+                action: ControlAction::Resume,
+            },
+        )
+        .unwrap();
+    assert_eq!(resumed.state, PauseState::ResumeRequested);
+    assert!(store.snapshot().unwrap().streams[0].revision.0 > operator_revision.0);
+}
+
 fn sync(
     store: &Store,
     runner: RunnerId,

@@ -33,11 +33,12 @@ dedizierte Container-Laufzeit pro Workstream:
 
 Der Entwicklungs-Runner unterstützt `--containment DATEI`, journalisiert die
 Docker-Schreibabsicht vor `pause`/`unpause` und gleicht nach unklarem Ausgang nur
-lesend ab. Der lokale Docker/cgroup-v2-Test mit abgekoppelten, signalresistenten
-Prozessen und Journalneustart ist bestanden. Einrichtung und Grenzen stehen in
-[container-runtime.md](container-runtime.md). Automatische Provisionierung und
-die vollständige Abnahme mit laufendem OpenCode-Modell auf dem Zielhost fehlen
-noch. Der Server vertraut einem autorisierten Runner-Bericht; ein
+lesend ab. Lokale Docker/cgroup-v2-Tests sowie ein vollständiger echter
+OpenCode-Modelllauf mit abgekoppeltem Toolprozess, Factory-/Runner-Neustart,
+Fortsetzung derselben Ausführung und finalem Archivexport sind bestanden.
+Einrichtung und Grenzen stehen in [container-runtime.md](container-runtime.md).
+Automatische Provisionierung und Zielhost-Abnahme fehlen noch.
+Der Server vertraut einem autorisierten Runner-Bericht; ein
 gespeicherter Bericht ist kein aktueller Kernel-Nachweis und keine Erlaubnis für
 Ownership-Transfer. Einfrieren beendet außerdem keine Prozesse und stoppt keine
 bereits ausgelösten externen Dienste. Die bisherige Interrupt-Funktion bleibt
