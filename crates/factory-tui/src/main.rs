@@ -18,6 +18,7 @@ mod commands;
 mod detail;
 mod devices;
 mod manage;
+mod recovery;
 mod stream;
 
 fn project_questions(snapshot: &Snapshot, index: usize) -> Vec<&Question> {
@@ -151,6 +152,9 @@ async fn main() -> Result<()> {
     let mut open_stream: Option<StreamId> = None;
     let mut management: BTreeMap<manage::Target, manage::Dialog> = BTreeMap::new();
     let mut open_management: Option<manage::Target> = None;
+    let mut recoveries: BTreeMap<StreamId, recovery::Dialog> = BTreeMap::new();
+    let mut open_recovery: Option<StreamId> = None;
+    let (recovery_tx, mut recovery_rx) = tokio::sync::mpsc::unbounded_channel();
     let (management_tx, mut management_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel();
     let (answer_tx, mut answer_rx) = tokio::sync::mpsc::unbounded_channel::<(
@@ -170,6 +174,9 @@ async fn main() -> Result<()> {
                         );
                         last = Some(snapshot);
                         if let Some(snapshot) = &last {
+                            for dialog in recoveries.values_mut() {
+                                dialog.observe(snapshot);
+                            }
                             for (id, dialog) in &mut dialogs {
                                 dialog.observe(snapshot.questions.iter().find(|q| q.id == *id));
                             }
@@ -188,6 +195,7 @@ async fn main() -> Result<()> {
             }
         }
         terminal.draw(|frame| {
+            if let Some(dialog)=open_recovery.and_then(|id|recoveries.get_mut(&id)){dialog.draw(frame,online);return;}
             if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
             if let Some(dialog)=&mut command_detail {dialog.draw(frame,last.as_ref(),online);return;}
             if let Some(dialog)=open_management.and_then(|id|management.get(&id)) {dialog.draw(frame,online);return;}
@@ -220,7 +228,7 @@ async fn main() -> Result<()> {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
                 1 => (["Projekt", "Branch", "Tickets", "ID"], " Projekte | n: neu | e: Metadaten | Enter: Profil ".to_string()),
                 2 => (["Ticket", "Status", "Prioritaet / Revision", "ID"], format!(" Tickets: {project_name} | n: neu | Enter: bearbeiten ")),
-                3 => (["Stream", "Status", "Revision / Tickets", "ID"], format!(" Streams: {project_name} | n: neu | Enter: steuern ")),
+                3 => (["Stream", "Status", "Revision / Tickets", "ID"], format!(" Streams: {project_name} | n: neu | Enter: steuern | r: Recovery ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
             };
@@ -241,9 +249,18 @@ async fn main() -> Result<()> {
                 dialog.response(id, result);
             }
         }
+        while let Ok((target, id, result)) = recovery_rx.try_recv() {
+            if let Some(dialog) = recoveries.get_mut(&target) {
+                dialog.response(id, result);
+            }
+        }
         if event::poll(Duration::from_millis(50))? {
             let event = event::read()?;
             if let Event::Paste(text) = &event {
+                if let Some(dialog) = open_recovery.and_then(|id| recoveries.get_mut(&id)) {
+                    dialog.insert(text);
+                    continue;
+                }
                 if open_devices {
                     if let Some(dialog) = &mut device_dialog {
                         dialog.insert(text);
@@ -265,6 +282,27 @@ async fn main() -> Result<()> {
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     break;
+                }
+                if let Some(id) = open_recovery {
+                    if key.kind == KeyEventKind::Press {
+                        match recoveries
+                            .get_mut(&id)
+                            .unwrap()
+                            .key(key, online, last.as_ref())
+                        {
+                            recovery::Action::Close => open_recovery = None,
+                            recovery::Action::Send(body) => {
+                                let client = client.clone();
+                                let tx = recovery_tx.clone();
+                                tokio::spawn(async move {
+                                    let result = client.retry_control(id, &body).await;
+                                    let _ = tx.send((id, body.request_id, result));
+                                });
+                            }
+                            recovery::Action::None => {}
+                        }
+                    }
+                    continue;
                 }
                 if open_devices {
                     if key.kind == KeyEventKind::Press
@@ -379,6 +417,26 @@ async fn main() -> Result<()> {
                     }
                     let previous = (view, selected_project);
                     match key.code {
+                        KeyCode::Char('r') if view == 3 => {
+                            if let Some(snapshot) = &last {
+                                if let Some(current) = snapshot
+                                    .streams
+                                    .iter()
+                                    .filter(|s| {
+                                        snapshot
+                                            .projects
+                                            .get(selected_project)
+                                            .is_some_and(|p| p.id == s.project_id)
+                                    })
+                                    .nth(row_offset)
+                                {
+                                    recoveries.entry(current.id).or_insert_with(|| {
+                                        recovery::Dialog::new(current.id, snapshot)
+                                    });
+                                    open_recovery = Some(current.id);
+                                }
+                            }
+                        }
                         KeyCode::Char('7') => {
                             if device_dialog.is_none() {
                                 device_dialog = Some(devices::Dialog::new(client.clone()));

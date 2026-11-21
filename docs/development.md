@@ -47,7 +47,7 @@ importiert. Server und Runner gemeinsam aktualisieren.
 | --- | --- | --- |
 | `2` Projekte | `n`: Name, Repository und Basisbranch | `e`: Metadaten; `Enter`: Provider, Modell, Toolchain, Start-/Testbefehle |
 | `3` Tickets | `n`: Titel, Beschreibung, Abnahmekriterien und Priorität | `Enter`: Felder und Status bearbeiten |
-| `4` Streams | `n`: Ziel, Runner und optionale Tickets | `Enter`: Stream-Steuerung |
+| `4` Streams | `n`: Ziel, Runner und optionale Tickets | `Enter`: Stream-Steuerung; `r`: Container-Recovery |
 
 Links/rechts wählt weiterhin das aktive Projekt für Tickets und Streams;
 hoch/runter markiert den obersten sichtbaren Listeneintrag. Im Verwaltungsdialog

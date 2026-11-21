@@ -70,6 +70,10 @@ def main():
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
             def api(method, path, body=None, registration=None):
+                if registration:
+                    # The synthetic runner has no heartbeat loop; keep its lease
+                    # alive explicitly as this PTY acceptance grows beyond 60s.
+                    api("POST", "/v1/runners/" + runner + "/heartbeat", {"registration_id": registration, "opencode": {"status": "not_configured"}})
                 headers = {"Authorization": "Bearer " + env["FACTORY_TOKEN"], "x-factory-protocol": "1", "Content-Type": "application/json"}
                 if registration:
                     headers["x-factory-runner-registration"] = registration
@@ -84,7 +88,7 @@ def main():
             api("PATCH", "/v1/projects/" + project["id"] + "/profile", {"request_id": rid(), "expected_revision": 1,
                 "profile": {"toolchain": "", "start_command": "", "test_command": "", "provider_id": "test", "model_id": "test"}})
             runner = rid()
-            registration = api("POST", "/v1/runners/register", {"id": runner, "instance_id": rid(), "name": "dialog-fixture", "location": "local", "version": "test", "opencode": {"status": "not_configured"}})["registration_id"]
+            registration = api("POST", "/v1/runners/register", {"id": runner, "instance_id": rid(), "name": "dialog-fixture", "location": "local", "version": "test", "capabilities": ["container-freeze-v1"], "opencode": {"status": "not_configured"}})["registration_id"]
             stream = api("POST", "/v1/streams", {"request_id": rid(), "project_id": project["id"], "goal": "dialog test", "runner_id": runner, "ticket_ids": []})
             prefix = "/v1/runners/" + runner + "/commands/"
             prep = api("POST", "/v1/streams/" + stream["id"] + "/commands", {"request_id": rid(), "expected_revision": 1, "kind": "prepare_workspace"})
@@ -299,6 +303,48 @@ def main():
             check(api("GET", "/v1/snapshot")["controls"][0]["state"] == "released", "TUI scheduling resume failed")
             print("PASS TUI durable pause and explicit pre-execution resume")
             send(b"\x1b")
+            def stream_revision():
+                return next(s["revision"] for s in api("GET", "/v1/snapshot")["streams"] if s["id"] == stream["id"])
+            def stream_control():
+                return next(c for c in api("GET", "/v1/snapshot")["controls"] if c["stream_id"] == stream["id"])
+            route = "/v1/streams/" + stream["id"] + "/control"
+            pause = api("POST", route, {"request_id": rid(), "expected_revision": stream_revision(), "action": "pause"})
+            proof = {"container_id": "a" * 64, "started_at": "2026-11-21T10:00:00Z", "frozen": True, "observed_unix_ms": 1000}
+            api("POST", prefix + command["id"] + "/control", {"control_request": pause["request_id"], "ownership_epoch": 1, "state": "frozen", "summary": "Fixture frozen", "proof": proof}, registration)
+            resume = api("POST", route, {"request_id": rid(), "expected_revision": stream_revision(), "action": "resume"})
+            def unknown(request):
+                return api("POST", prefix + command["id"] + "/control", {"control_request": request, "ownership_epoch": 1, "state": "interrupt_unverified", "summary": "Fixture thaw uncertain"}, registration)
+            unknown(resume["request_id"])
+            pump(1.3)
+            send(b"r")
+            visible("Container-Recovery")
+            visible(resume["request_id"])
+            send(b"\x13")
+            visible("Begruendung erforderlich")
+            reason = "Laufzeit geprüft – neuer Versuch"
+            send(("\x1b[200~" + reason + "\x1b[201~").encode())
+            competing = api("POST", route + "/retry", {"request_id": rid(), "expected_revision": stream_revision(), "previous_request": resume["request_id"], "expected_proof": proof, "reason": "Other operator"})
+            unknown(competing["request_id"])
+            pump(1.3)
+            visible("Stand geaendert")
+            visible(resume["request_id"])
+            send(b"\x13")
+            check(stream_control()["request_id"] == competing["request_id"], "TUI silently retargeted recovery")
+            send(b"\x12")
+            visible(competing["request_id"])
+            visible(reason)
+            send(b"\x13")
+            pump(1.3)
+            visible("Neuer Versuch gespeichert")
+            recovered = stream_control()
+            check(recovered["state"] == "resume_requested" and recovered["retry"] == {"previous_request": competing["request_id"], "reason": reason}, "TUI recovery provenance differs")
+            send(b"\x13")
+            check(stream_control()["request_id"] == recovered["request_id"], "TUI duplicated confirmed recovery")
+            unknown(recovered["request_id"])
+            pump(1.3)
+            send(b"\x12")
+            send(b"\x1b")
+            print("PASS TUI recovery pins evidence, preserves Unicode reason and requires explicit rebase after competing request")
             send(b"7")
             pump(1.3)
             visible("Geraete / Admin")
@@ -353,7 +399,7 @@ def main():
             print("PASS TUI device roles, one-use enrollment, runner scope, hidden codes and live revocation")
             send(b"5\x1b[B\r\t\t\t")
             pump(1.3)
-            visible("question.updated")
+            visible("stream.control")
             send(b"\t\t")
             pump(0.7)
             send(b"n")
@@ -363,7 +409,7 @@ def main():
             server.wait(timeout=8)
             pump(1.3)
             visible("GETRENNT")
-            visible("question.updated")
+            visible("stream.control")
             send(b"\t")
             visible("Grüße from archived tool output")
             send(b"\t")
@@ -382,6 +428,14 @@ def main():
             visible("retained draft")
             print("PASS concurrent answer preserves TUI draft; dialog remains responsive offline")
             send(b"\x1b")
+            send(b"4r")
+            visible("Container-Recovery")
+            visible("GETRENNT")
+            visible(reason)
+            send(b"\x13")
+            visible("Request: noch nicht erzeugt")
+            send(b"\x1b")
+            print("PASS TUI recovery retains its draft while offline and blocks new submission")
             send(b"q")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:

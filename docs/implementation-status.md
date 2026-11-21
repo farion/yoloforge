@@ -7,7 +7,7 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | Nr. | Arbeitspaket | Stand / Abnahme |
 | --- | --- | --- |
 | 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg sowie dediziertes Container-Freeze/Thaw mit echtem Modell lokal geprüft: abgekoppelte Tools, Factory-/Runner-Neustart, gleiche Ausführung, genau ein Toolaufruf und finales Archiv. Zielhost-Abnahme, automatische Provisionierung und Fortsetzung nach nativem Interrupt offen |
-| 2 | Recovery ungeklärter Aufträge | Expliziter API/CLI-Neuversuch unklarer Container-Freeze/Thaw-Steuerungen mit unveränderter Instanzbindung, Revisionsschutz und Retry-Provenienz implementiert; Recovery ohne Nachweis, bei Container-/Journalverlust und für native Interrupts/Prompts offen |
+| 2 | Recovery ungeklärter Aufträge | Expliziter API/CLI/TUI-Neuversuch unklarer Container-Freeze/Thaw-Steuerungen mit Instanzbindung, Revisionsschutz und Retry-Provenienz implementiert; TUI mit gebundenem Nachweis, unveränderlichem Replay und Offline-Entwurf lokal per PTY geprüft. Recovery ohne Nachweis, bei Container-/Journalverlust und für native Interrupts/Prompts offen |
 | 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen, CLI-Export und TUI-Archivbrowser mit eingefrorenem Revisionsstand implementiert; Binäranhänge und historischer Backfill offen |
 | 4 | SSE und Runner-Long-Poll | Implementiert und lokal getestet; TUI nutzt SSE, Runner Long-Poll |
 | 5 | Deployment, Backup/Restore, Updates | Container, Vorlagen und Backup/Restore lokal getestet; Zielinstallation durch Betreiber |

@@ -33,7 +33,35 @@ werden; der gespeicherte Nachweis ist eine vergangene Beobachtung. Es werden kei
 Prompts erneut gesendet, Sessions neu angelegt, Journalreceipts gelöscht oder
 Ownership-Epochen verändert.
 
-## CLI
+## TUI
+
+In der Streamliste (`4`) den Stream auswählen und **`r`** drücken. Der Dialog
+zeigt die gebundene Streamrevision, Runner/Ownership-Epoche, alte Control- und
+Command-ID, Aktion, Zustand, Container-ID, Startzeit, Beobachtungszeitpunkt und
+die Runner-Meldung. `PgUp`/`PgDn` scrollen den Nachweis bei kleinen Terminals.
+
+- Eine einzeilige Begründung ist erforderlich (maximal 240 UTF-8-Bytes).
+  Unicode, Paste, Links/Rechts, Home/End und Delete/Backspace sind unterstützt.
+- **Ctrl-S** fordert den neuen Versuch an. Fehlender Nachweis, nicht mehr aktiver
+  Auftrag, geänderte Ownership oder ein anderer Zustand sperren das Absenden.
+- Ein Snapshot-Refresh tauscht den gebundenen Vorgang nicht aus. Bei geändertem
+  Stand bleibt der Entwurf erhalten; **Ctrl-R** lädt ausdrücklich den aktuellen
+  Vorgang. Danach muss erneut mit Ctrl-S abgesendet werden.
+- Während der Anfrage und nach unklarem Ausgang sind Payload und Request-ID
+  unveränderlich. Ctrl-S wiederholt bei unklarem Ausgang exakt denselben Request;
+  Ctrl-R kann dann keine zweite Recovery erzeugen. Ein bestätigtes Ergebnis wird
+  nicht erneut gesendet.
+- **Esc** kehrt zur Liste zurück. Entwurf und ausstehender Request bleiben im
+  laufenden TUI-Prozess erhalten. Auch verspätete Antworten werden anhand der
+  Request-ID zugeordnet. Offline bleiben Nachweis und Entwurf sichtbar, neue
+  Requests und Neubindungen sind gesperrt.
+
+Die TUI bestätigt nur die Annahme des Recovery-Requests, nicht das erfolgreiche
+Auftauen. Dafür ist der anschließende Runner-Bericht maßgeblich. Der Cliententwurf
+ist nicht über einen TUI-Prozessneustart hinweg persistiert; danach den Serverstand
+prüfen. Der Server hält bereits angenommene Requests und deren Historie dauerhaft.
+
+## CLI-Aufruf
 
 ```sh
 umask 077
@@ -71,6 +99,11 @@ nicht wegen dieses erwartbaren Revisionsrennens.
 - Store-Tests: zwei konkurrierende DB-Verbindungen, Neustart/Replays, veraltete
   Reports, geänderte Evidenz und atomarer Rollback bei fehlgeschriebenem Event.
 - HTTP-Test: Authentifizierung, API-Roundtrip und Deduplizierung.
+- TUI-Unit-Tests: unveränderlicher Replay nach Transportfehler/HTTP 408,
+  explizites Rebase, verspätete Antworten, fehlende Evidenz, Unicode und Offline.
+- Echter PTY-/HTTP-Test (`scripts/smoke-tui-answers.py`): konkurrierender
+  Operator-Request, festgehaltener Nachweis, erhaltene Unicode-Begründung,
+  explizite Neubindung, gespeicherte Provenienz und Offline-Ansicht.
 - Runner-Test: Request wird während des Reports ersetzt, kein fataler Abbruch.
 - Reales Docker-Labor: persistierter, noch nicht ausgeführter Thaw-Intent bleibt
   zunächst unklar; ein expliziter neuer Request taut dieselbe Instanz auf und
@@ -79,4 +112,4 @@ nicht wegen dieses erwartbaren Revisionsrennens.
 Weiterhin offen: Recovery ohne bisherigen Container-Nachweis, verschwundene oder
 neu gestartete Container, verlorene Journale, unklare native Interrupts/Prompts,
 abschließendes Stilllegen solcher Aufträge und Übertragung an einen anderen
-Runner. Die interaktive TUI besitzt noch keinen eigenen Recovery-Dialog.
+Runner.
