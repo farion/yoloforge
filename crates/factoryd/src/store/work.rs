@@ -52,7 +52,7 @@ pub(super) fn command(
     }
     Ok(value)
 }
-fn save_command(tx: &Transaction<'_>, value: &RunnerCommand, state: &str) -> Result<()> {
+pub(super) fn save_command(tx: &Transaction<'_>, value: &RunnerCommand, state: &str) -> Result<()> {
     tx.execute(
         "UPDATE commands SET state=?1,data=?2 WHERE id=?3",
         params![state, serde_json::to_string(value)?, value.id.to_string()],
@@ -475,6 +475,9 @@ impl Store {
                     return Ok(value);
                 }
                 if value.state != CommandState::Accepted {
+                    return Err(StoreError::WorkConflict);
+                }
+                if super::termination::active(tx, value.stream_id)? {
                     return Err(StoreError::WorkConflict);
                 }
                 if super::controls::load(tx, value.stream_id)?.is_some_and(|c| {

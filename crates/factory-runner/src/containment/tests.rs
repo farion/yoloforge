@@ -114,6 +114,14 @@ fn sample(workspace: &Path) -> Vec<u8> {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires local Docker cgroup v2 and yoloforge-freezer-test:development image"]
 async fn real_freezer_stops_detached_signal_resistant_tools_and_reconciles_after_restart() {
+    exercise_runtime(false).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires local Docker cgroup v2 and yoloforge-freezer-test:development image"]
+async fn real_freezer_removal_stops_detached_writers_and_replays_evidence() {
+    exercise_runtime(true).await;
+}
+async fn exercise_runtime(terminate: bool) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::Builder::new()
         .prefix("freezer-test-")
@@ -398,6 +406,106 @@ while True: time.sleep(1)
     );
     assert!(record.container_actions.contains_key(&old_request));
     assert!(record.container_actions.contains_key(&control.request_id));
+    if terminate {
+        let saved = record
+            .agent
+            .as_ref()
+            .unwrap()
+            .runtime
+            .as_ref()
+            .unwrap()
+            .clone();
+        let mut request = RuntimeTermination {
+            request_id: RequestId::new(),
+            command_id: command.id,
+            stream_id: stream,
+            runner_id: runner,
+            ownership_epoch: 1,
+            runtime: RuntimeRef {
+                container_id: c.container_id.clone(),
+                started_at: saved.started_at.clone(),
+            },
+            previous_request: None,
+            reason: "Test removal".into(),
+            state: TerminationState::Requested,
+            summary: String::new(),
+            proof: None,
+            result: None,
+            archive_may_be_incomplete: true,
+        };
+        // A foreign engine or incarnation never authorizes a destructive write.
+        record
+            .agent
+            .as_mut()
+            .unwrap()
+            .runtime
+            .as_mut()
+            .unwrap()
+            .daemon_id = Some("foreign-engine".into());
+        assert!(remove(&journal, &mut record, &args, &request)
+            .await
+            .is_err());
+        record.agent.as_mut().unwrap().runtime = Some(saved);
+        request.runtime.started_at = "foreign-incarnation".into();
+        assert!(remove(&journal, &mut record, &args, &request)
+            .await
+            .is_err());
+        request.runtime.started_at = record
+            .agent
+            .as_ref()
+            .unwrap()
+            .runtime
+            .as_ref()
+            .unwrap()
+            .started_at
+            .clone();
+        // Intent persisted but never executed: reconciliation may not repeat rm.
+        record.removals.insert(
+            request.request_id,
+            RemovalAttempt {
+                runtime: request.runtime.clone(),
+                proof: None,
+            },
+        );
+        journal.save(&record).unwrap();
+        assert!(remove(&journal, &mut record, &args, &request)
+            .await
+            .is_err());
+        assert!(!absent(&c).await.unwrap());
+        request.previous_request = Some(request.request_id);
+        request.request_id = RequestId::new();
+        docker(&c, &["pause", &c.container_id]).await.unwrap();
+        let proof = remove(&journal, &mut record, &args, &request)
+            .await
+            .unwrap();
+        assert!(absent(&c).await.unwrap());
+        let before = sample(&work);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(before, sample(&work));
+        assert!(!before.is_empty());
+        drop(journal);
+        let journal = Journal::open(&journal_path, &args.server, runner).unwrap();
+        let mut record = journal.record(command.id).unwrap().unwrap();
+        assert_eq!(
+            remove(&journal, &mut record, &args, &request)
+                .await
+                .unwrap(),
+            proof
+        );
+        // Simulate loss between removal and proof persistence: absence on the
+        // pinned daemon is enough, with no second destructive operation.
+        record.removals.get_mut(&request.request_id).unwrap().proof = None;
+        journal.save(&record).unwrap();
+        assert_eq!(
+            remove(&journal, &mut record, &args, &request)
+                .await
+                .unwrap()
+                .runtime,
+            proof.runtime
+        );
+        server.abort();
+        return;
+    }
     docker(&c, &["restart", "--time", "0", &c.container_id])
         .await
         .unwrap();

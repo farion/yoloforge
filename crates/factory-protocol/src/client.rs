@@ -40,6 +40,72 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn termination(
+        &self,
+        id: CommandId,
+    ) -> Result<Option<RuntimeTermination>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/commands/{id}/termination", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn request_termination(
+        &self,
+        id: CommandId,
+        body: &RequestTermination,
+    ) -> Result<RuntimeTermination, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/commands/{id}/termination", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn runner_termination(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        epoch: u64,
+    ) -> Result<Option<RuntimeTermination>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/termination",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .query(&[("epoch", epoch)])
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn report_termination(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        body: &ReportTermination,
+    ) -> Result<RuntimeTermination, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/termination",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn knowledge_note(&self, id: KnowledgeId) -> Result<KnowledgeNote, ClientError> {
         Self::decode(
             self.http

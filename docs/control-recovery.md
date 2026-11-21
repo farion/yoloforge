@@ -113,3 +113,7 @@ Weiterhin offen: Recovery ohne bisherigen Container-Nachweis, verschwundene oder
 neu gestartete Container, verlorene Journale, unklare native Interrupts/Prompts,
 abschließendes Stilllegen solcher Aufträge und Übertragung an einen anderen
 Runner.
+# Bestätigte Runtime-Beendigung
+
+Für einen endgültigen Abschluss mit erhaltener Runtime-/Daemon-Bindung steht
+zusätzlich die API/CLI aus [runtime-termination.md](runtime-termination.md) bereit.

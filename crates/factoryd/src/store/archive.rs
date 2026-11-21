@@ -9,6 +9,10 @@ impl Store {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let command = super::work::command(&tx, id, runner, body.ownership_epoch)?;
+        if super::termination::load(&tx, id)?.is_some_and(|t| t.state == TerminationState::Stopped)
+        {
+            return Err(StoreError::WorkConflict);
+        }
         let batch = body.batch;
         if command.kind != CommandKind::RunAgent
             || command.state == CommandState::Pending
@@ -114,6 +118,7 @@ impl Store {
             ))
         })?;
         let mut page = ArchivePage {
+            termination: super::termination::load(&tx, id)?,
             status,
             entries: Vec::new(),
             next_after: after,

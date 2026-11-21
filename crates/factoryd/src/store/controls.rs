@@ -14,6 +14,26 @@ fn save(tx: &Transaction<'_>, control: &StreamControl) -> Result<()> {
     tx.execute("INSERT INTO controls(stream_id,data) VALUES(?1,?2) ON CONFLICT(stream_id) DO UPDATE SET data=excluded.data",params![control.stream_id.to_string(),serde_json::to_string(control)?])?;
     event(tx, "stream.control", control.stream_id.to_string(), control)
 }
+pub(super) fn termination(tx: &Transaction<'_>, id: StreamId, stopped: bool) -> Result<()> {
+    if let Some(mut c) = load(tx, id)? {
+        c.state = if stopped {
+            PauseState::Released
+        } else {
+            PauseState::InterruptUnverified
+        };
+        c.summary = if stopped {
+            "Runtime removed; see termination evidence. Scheduling reservation released."
+        } else {
+            "Runtime termination requested; scheduling remains reserved."
+        }
+        .into();
+        if stopped {
+            c.proof = None;
+        }
+        save(tx, &c)?;
+    }
+    Ok(())
+}
 pub(super) fn stream_status(
     tx: &Transaction<'_>,
     id: StreamId,
@@ -43,6 +63,7 @@ impl Store {
     /// adopts a new runtime or releases the command's reservation by itself.
     pub fn retry_control(&self, id: StreamId, body: RetryControl) -> Result<StreamControl> {
         self.mutate(body.request_id,&format!("stream.control.retry/{id}"),&body,|tx| {
+            if super::termination::active(tx,id)? {return Err(StoreError::WorkConflict);}
             line(&body.reason,240)?;
             let mut owner=super::work::stream(tx,id)?;
             if owner.revision!=body.expected_revision {return Err(StoreError::RevisionConflict(owner.revision));}
@@ -64,6 +85,7 @@ impl Store {
     }
     pub fn set_control(&self, id: StreamId, body: SetControl) -> Result<StreamControl> {
         self.mutate(body.request_id,&format!("stream.control/{id}"),&body,|tx| {
+            if super::termination::active(tx,id)? {return Err(StoreError::WorkConflict);}
             let mut owner=super::work::stream(tx,id)?;
             if owner.revision!=body.expected_revision {return Err(StoreError::RevisionConflict(owner.revision));}
             let previous=load(tx,id)?;
@@ -111,6 +133,9 @@ impl Store {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let command = super::work::command(&tx, id, runner, body.ownership_epoch)?;
+        if super::termination::active(&tx, command.stream_id)? {
+            return Err(StoreError::WorkConflict);
+        }
         let mut control = load(&tx, command.stream_id)?.ok_or(StoreError::WorkConflict)?;
         if control.request_id != body.control_request
             || control.command_id != Some(id)

@@ -13,6 +13,7 @@ mod compaction;
 mod containment;
 mod journal;
 mod questions;
+mod termination;
 mod workspace;
 use journal::{Journal, Record};
 
@@ -58,6 +59,9 @@ async fn report(
     mut record: Record,
     args: &Args,
 ) -> Result<()> {
+    if termination::process(client, journal, &mut record, args, registration).await? {
+        return Ok(());
+    }
     if containment::control(client, journal, &mut record, args, registration).await? {
         return Ok(());
     }
@@ -94,6 +98,16 @@ async fn report(
             },
         )
         .await;
+    if matches!(
+        &delivered,
+        Err(ClientError::Http {
+            code: Some(ErrorCode::WorkConflict),
+            ..
+        })
+    ) && termination::process(client, journal, &mut record, args, registration).await?
+    {
+        return Ok(());
+    }
     if matches!(
         &delivered,
         Err(ClientError::Http {
@@ -186,6 +200,9 @@ async fn commands(
         }
         record.command = ack;
         tokio::task::block_in_place(|| journal.save(&record))?;
+        if termination::process(client, journal, &mut record, args, registration).await? {
+            return Ok(true);
+        }
         if record.command.kind == CommandKind::RunAgent && record.result.is_none() {
             if containment::control(client, journal, &mut record, args, registration).await? {
                 return Ok(true);
@@ -359,6 +376,7 @@ async fn run(mut args: Args) -> Result<()> {
                     capabilities: vec![
                         SESSION_LIFECYCLE_CAPABILITY.into(),
                         CONTAINER_FREEZE_CAPABILITY.into(),
+                        RUNTIME_TERMINATION_CAPABILITY.into(),
                     ],
                     id: args.id,
                     instance_id,

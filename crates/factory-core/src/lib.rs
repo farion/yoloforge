@@ -56,10 +56,14 @@ pub enum CompactionState {
     Failed,
     Rejected,
     Unknown,
+    Aborted,
 }
 impl CompactionState {
     pub fn terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Rejected)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Rejected | Self::Aborted
+        )
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -102,6 +106,8 @@ pub struct ArchivedMessage {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArchivePage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination: Option<RuntimeTermination>,
     pub status: Option<ArchiveStatus>,
     pub entries: Vec<ArchivedMessage>,
     pub next_after: u64,
@@ -176,6 +182,42 @@ pub enum ControlAction {
     Resume,
 }
 pub const CONTAINER_FREEZE_CAPABILITY: &str = "container-freeze-v1";
+pub const RUNTIME_TERMINATION_CAPABILITY: &str = "runtime-termination-v1";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeRef {
+    pub container_id: String,
+    pub started_at: String,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationState {
+    Requested,
+    Unknown,
+    Stopped,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemovalProof {
+    pub runtime: RuntimeRef,
+    pub daemon_id: String,
+    pub observed_unix_ms: u64,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeTermination {
+    pub request_id: RequestId,
+    pub command_id: CommandId,
+    pub stream_id: StreamId,
+    pub runner_id: RunnerId,
+    pub ownership_epoch: u64,
+    pub runtime: RuntimeRef,
+    pub previous_request: Option<RequestId>,
+    pub reason: String,
+    pub state: TerminationState,
+    pub summary: String,
+    pub proof: Option<RemovalProof>,
+    pub result: Option<CommandOutput>,
+    pub archive_may_be_incomplete: bool,
+}
 fn pause_action() -> ControlAction {
     ControlAction::Pause
 }

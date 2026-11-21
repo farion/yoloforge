@@ -23,6 +23,8 @@ impl Drop for Journal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default)]
+    pub removals: std::collections::BTreeMap<RequestId, crate::containment::RemovalAttempt>,
+    #[serde(default)]
     pub container_actions: std::collections::BTreeMap<RequestId, crate::containment::Attempt>,
     pub command: RunnerCommand,
     pub ack_request: RequestId,
@@ -59,7 +61,7 @@ impl Journal {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         let tx = db.transaction()?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 3, "runner journal schema is too new");
+        ensure!(version <= 4, "runner journal schema is too new");
         if version == 0 {
             tx.execute_batch("CREATE TABLE identity(id INTEGER PRIMARY KEY CHECK(id=1),server TEXT NOT NULL,runner TEXT NOT NULL);
                 CREATE TABLE commands(id TEXT PRIMARY KEY NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)));
@@ -74,6 +76,9 @@ impl Journal {
         }
         if version < 3 {
             tx.execute_batch("PRAGMA user_version=3;")?;
+        }
+        if version < 4 {
+            tx.execute_batch("PRAGMA user_version=4;")?;
         }
         let (saved_server, saved_runner): (String, String) =
             tx.query_row("SELECT server,runner FROM identity WHERE id=1", [], |r| {
@@ -111,6 +116,7 @@ impl Journal {
             return Ok(record);
         }
         let record = Record {
+            removals: Default::default(),
             container_actions: Default::default(),
             command,
             ack_request: RequestId::new(),

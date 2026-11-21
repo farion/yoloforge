@@ -24,6 +24,7 @@ mod compaction_routes;
 mod knowledge_routes;
 mod live;
 mod supervisor_routes;
+mod termination_routes;
 mod work_routes;
 use access::*;
 use live::*;
@@ -134,6 +135,14 @@ pub fn router_with_shutdown(
         .route("/v1/tickets/{id}", patch(update_ticket))
         .route("/v1/streams", post(create_stream))
         .route("/v1/streams/{id}/control", post(set_control))
+        .route(
+            "/v1/commands/{id}/termination",
+            get(termination_routes::read).post(termination_routes::create),
+        )
+        .route(
+            "/v1/runners/{runner}/commands/{command}/termination",
+            get(termination_routes::runner_read).post(termination_routes::report),
+        )
         .route("/v1/streams/{id}/control/retry", post(retry_control))
         .route(
             "/v1/runners/{runner}/commands/{command}/control",

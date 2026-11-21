@@ -20,6 +20,7 @@ struct Request {
 }
 #[derive(Default)]
 struct State {
+    terminated: bool,
     status: Option<ArchiveStatus>,
     through: Option<u64>,
     entry: Option<ArchivedMessage>,
@@ -83,6 +84,9 @@ impl State {
             return Err(());
         }
         if !request.reset && page.entries.is_empty() {
+            self.terminated |= page
+                .termination
+                .is_some_and(|t| t.state == TerminationState::Stopped);
             self.end = true;
             self.message = "Archivende dieses Revisionsstands. r: neueren Stand laden".into();
             return Ok(());
@@ -107,6 +111,10 @@ impl State {
                 self.first_position += 1;
             }
         }
+        self.terminated |= page
+            .termination
+            .as_ref()
+            .is_some_and(|t| t.state == TerminationState::Stopped);
         self.next = page.next_after;
         self.entry = page.entries.into_iter().next();
         self.end = self.entry.is_none();
@@ -267,14 +275,22 @@ impl Browser {
                     "Session {} | bis Revision {} | letzter Archivdurchlauf {}",
                     status.session_id,
                     s.through.unwrap_or(0),
-                    if status.final_scan_complete {
+                    if s.terminated {
+                        "Runtime beendet; Archiv eventuell unvollstaendig"
+                    } else if status.final_scan_complete {
                         "abgeschlossen"
                     } else {
                         "noch offen"
                     }
                 )
             })
-            .unwrap_or_else(|| "Kein Archivstatus vorhanden".into());
+            .unwrap_or_else(|| {
+                if s.terminated {
+                    "Runtime beendet; kein vollstaendiges Archiv vorhanden".into()
+                } else {
+                    "Kein Archivstatus vorhanden".into()
+                }
+            });
         frame.render_widget(
             Paragraph::new(format!(
                 "Auftrag {}\n{}\n{}",
@@ -322,6 +338,7 @@ mod tests {
     use serde_json::json;
     fn page(sequence: u64, revision: u64) -> ArchivePage {
         ArchivePage {
+            termination: None,
             status: Some(ArchiveStatus {
                 session_id: "ses_test".into(),
                 revision,
@@ -361,6 +378,7 @@ mod tests {
             .apply(
                 request,
                 ArchivePage {
+                    termination: None,
                     status: state.status.clone(),
                     next_after: 10,
                     entries: vec![],

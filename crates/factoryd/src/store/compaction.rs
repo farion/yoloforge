@@ -1,4 +1,17 @@
 use super::*;
+pub(super) fn terminate(tx: &Transaction<'_>, id: CommandId) -> Result<()> {
+    if let Some(mut v) = latest(tx, id)?.filter(|v| !v.state.terminal()) {
+        v.state = CompactionState::Aborted;
+        v.revision.0 += 1;
+        v.summary = "Runtime removed; native compaction outcome not established".into();
+        tx.execute(
+            "UPDATE compactions SET data=?1 WHERE request_id=?2",
+            params![serde_json::to_string(&v)?, v.request_id.to_string()],
+        )?;
+        event(tx, "session.compaction", id.to_string(), &v)?;
+    }
+    Ok(())
+}
 pub(super) fn latest(tx: &Transaction<'_>, id: CommandId) -> Result<Option<Compaction>> {
     let data: Option<String> = tx
         .query_row(
@@ -109,7 +122,10 @@ impl Store {
         let mut value = latest(&tx, id)?.ok_or(StoreError::NotFound)?;
         if value.request_id != body.request_id
             || command.state != CommandState::Accepted
-            || body.state == CompactionState::Requested
+            || matches!(
+                body.state,
+                CompactionState::Requested | CompactionState::Aborted
+            )
         {
             return Err(StoreError::WorkConflict);
         }

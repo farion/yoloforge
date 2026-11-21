@@ -3,6 +3,8 @@ use factory_protocol::*;
 use factoryd::store::{Store, StoreError};
 use serde_json::json;
 use std::sync::{Arc, Barrier};
+#[path = "cases/termination.rs"]
+mod termination_cases;
 
 fn setup(store: &Store) -> (RunnerId, RunnerCommand) {
     let p = store

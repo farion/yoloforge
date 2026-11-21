@@ -123,7 +123,7 @@ fn migration_retires_unscoped_legacy_supervisor_observations_without_deleting_pr
         [note.id.to_string()],
     )
     .unwrap();
-    db.execute_batch("DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
+    db.execute_batch("DROP TABLE runtime_terminations; DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
         .unwrap();
     drop(db);
     let store = Store::open(&path).unwrap();

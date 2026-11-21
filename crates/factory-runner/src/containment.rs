@@ -30,6 +30,8 @@ pub struct Config {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Identity {
+    #[serde(default)]
+    daemon_id: Option<String>,
     config: Config,
     started_at: String,
     endpoint: String,
@@ -175,18 +177,20 @@ fn validate(
         .strip_prefix("http://127.0.0.1:")
         .context("Loopback HTTP endpoint with explicit port required")?
         .parse::<u16>()?;
-    let ports = v["NetworkSettings"]["Ports"]["4096/tcp"]
-        .as_array()
-        .context("Runtime port missing")?;
-    ensure!(
-        ports.len() == 1
-            && ports[0]["HostIp"] == "127.0.0.1"
-            && ports[0]["HostPort"]
-                .as_str()
-                .and_then(|v| v.parse::<u16>().ok())
-                == Some(port),
-        "Endpoint is not the dedicated runtime port"
-    );
+    if v["State"]["Running"] == true {
+        let ports = v["NetworkSettings"]["Ports"]["4096/tcp"]
+            .as_array()
+            .context("Runtime port missing")?;
+        ensure!(
+            ports.len() == 1
+                && ports[0]["HostIp"] == "127.0.0.1"
+                && ports[0]["HostPort"]
+                    .as_str()
+                    .and_then(|v| v.parse::<u16>().ok())
+                    == Some(port),
+            "Endpoint is not the dedicated runtime port"
+        );
+    }
     if let Some(tmpfs) = h["Tmpfs"].as_object() {
         ensure!(
             tmpfs.keys().all(|p| p == "/tmp" || p == "/run"),
@@ -225,18 +229,30 @@ fn validate(
     Ok(())
 }
 async fn inspect(c: &Config, runner: RunnerId, endpoint: &str, workspace: &str) -> Result<Value> {
-    let info: Value =
-        serde_json::from_slice(&docker(c, &["info", "--format", "{{json .}} "]).await?)?;
-    ensure!(
-        info["OSType"] == "linux" && info["CgroupVersion"] == "2",
-        "Linux cgroup v2 required"
-    );
+    daemon(c).await?;
     let values: Vec<Value> = serde_json::from_slice(
         &docker(c, &["inspect", "--type", "container", &c.container_id]).await?,
     )?;
     ensure!(values.len() == 1, "Ambiguous inspection");
     let v = values.into_iter().next().unwrap();
     validate(&v, c, runner, endpoint, workspace)?;
+    validate_volumes(c, runner, &v).await?;
+    Ok(v)
+}
+async fn daemon(c: &Config) -> Result<String> {
+    let info: Value =
+        serde_json::from_slice(&docker(c, &["info", "--format", "{{json .}} "]).await?)?;
+    ensure!(
+        info["OSType"] == "linux" && info["CgroupVersion"] == "2",
+        "Linux cgroup v2 required"
+    );
+    let id = info["ID"]
+        .as_str()
+        .context("Docker daemon identity missing")?;
+    ensure!(!id.is_empty(), "Docker daemon identity missing");
+    Ok(id.into())
+}
+async fn validate_volumes(c: &Config, runner: RunnerId, v: &Value) -> Result<()> {
     for m in v["Mounts"].as_array().unwrap() {
         if m["Type"] == "volume" {
             let name = m["Name"].as_str().context("Volume name missing")?;
@@ -261,11 +277,7 @@ async fn inspect(c: &Config, runner: RunnerId, endpoint: &str, workspace: &str) 
             );
         }
     }
-    ensure!(
-        v["State"]["Running"] == true && v["State"]["Restarting"] == false,
-        "Runtime not running; recovery required"
-    );
-    Ok(v)
+    Ok(())
 }
 pub async fn bind(
     args: &Args,
@@ -277,7 +289,12 @@ pub async fn bind(
         return Ok(None);
     }
     let config = config(args, command.stream_id)?;
+    let daemon_id = Some(daemon(&config).await?);
     let v = inspect(&config, command.runner_id, endpoint, workspace).await?;
+    ensure!(
+        v["State"]["Running"] == true && v["State"]["Restarting"] == false,
+        "Runtime not running"
+    );
     ensure!(
         v["State"]["Paused"] == false,
         "Runtime frozen before binding"
@@ -288,6 +305,7 @@ pub async fn bind(
         .to_string();
     ensure!(!started_at.is_empty(), "Runtime incarnation missing");
     Ok(Some(Identity {
+        daemon_id,
         config,
         started_at,
         endpoint: endpoint.into(),
@@ -302,6 +320,9 @@ async fn current(record: &Record, args: &Args) -> Result<Option<Value>> {
     let config = config(args, record.command.stream_id)?;
     let saved = saved.context("Cannot adopt an existing unmanaged execution")?;
     ensure!(saved.config == config, "Runtime configuration changed");
+    if let Some(id) = &saved.daemon_id {
+        ensure!(&daemon(&config).await? == id, "Docker daemon changed");
+    }
     let api = OpenCodeClient::from_registration(
         args.opencode_registration
             .as_ref()
@@ -319,7 +340,127 @@ async fn current(record: &Record, args: &Args) -> Result<Option<Value>> {
         v["State"]["StartedAt"] == saved.started_at,
         "Runtime incarnation changed"
     );
+    ensure!(
+        v["State"]["Running"] == true && v["State"]["Restarting"] == false,
+        "Runtime not running; recovery required"
+    );
     Ok(Some(v))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemovalAttempt {
+    runtime: RuntimeRef,
+    proof: Option<RemovalProof>,
+}
+async fn absent(c: &Config) -> Result<bool> {
+    let filter = format!("id={}", c.container_id);
+    let result = docker(c, &["ps", "-aq", "--no-trunc", "--filter", &filter]).await?;
+    let result = std::str::from_utf8(&result)?.trim();
+    ensure!(
+        result.is_empty() || result == c.container_id,
+        "Ambiguous runtime lookup"
+    );
+    Ok(result.is_empty())
+}
+pub async fn remove(
+    journal: &Journal,
+    record: &mut Record,
+    args: &Args,
+    request: &RuntimeTermination,
+) -> Result<RemovalProof> {
+    ensure!(
+        request.command_id == record.command.id
+            && request.stream_id == record.command.stream_id
+            && request.runner_id == record.command.runner_id
+            && request.ownership_epoch == record.command.ownership_epoch,
+        "Foreign termination request"
+    );
+    let saved = record
+        .agent
+        .as_ref()
+        .and_then(|a| a.runtime.as_ref())
+        .context("Runtime journal missing")?
+        .clone();
+    ensure!(
+        saved.config == config(args, record.command.stream_id)?,
+        "Runtime configuration changed"
+    );
+    ensure!(
+        request.runtime.container_id == saved.config.container_id
+            && request.runtime.started_at == saved.started_at,
+        "Runtime binding differs"
+    );
+    let daemon_id = saved
+        .daemon_id
+        .as_ref()
+        .context("Legacy runtime lacks daemon pin; no automatic adoption")?;
+    ensure!(
+        &daemon(&saved.config).await? == daemon_id,
+        "Docker daemon changed"
+    );
+    if let Some(attempt) = record.removals.get(&request.request_id) {
+        ensure!(
+            attempt.runtime == request.runtime,
+            "Removal request changed"
+        );
+    }
+    if !absent(&saved.config).await? {
+        let v = inspect(
+            &saved.config,
+            record.command.runner_id,
+            &saved.endpoint,
+            &saved.workspace,
+        )
+        .await?;
+        ensure!(
+            v["State"]["StartedAt"] == saved.started_at && v["State"]["Restarting"] == false,
+            "Runtime incarnation changed"
+        );
+        ensure!(
+            !record.removals.contains_key(&request.request_id),
+            "Removal outcome uncertain; read-only reconciliation only"
+        );
+        record.removals.insert(
+            request.request_id,
+            RemovalAttempt {
+                runtime: request.runtime.clone(),
+                proof: None,
+            },
+        );
+        tokio::task::block_in_place(|| journal.save(record))?;
+        // No --volumes: retain native OpenCode data and all bind-mounted work.
+        let _ = docker(
+            &saved.config,
+            &["rm", "--force", &saved.config.container_id],
+        )
+        .await;
+    }
+    ensure!(
+        &daemon(&saved.config).await? == daemon_id,
+        "Docker daemon changed during removal"
+    );
+    ensure!(
+        absent(&saved.config).await?,
+        "Runtime removal not confirmed"
+    );
+    let proof = record
+        .removals
+        .get(&request.request_id)
+        .and_then(|a| a.proof.clone())
+        .unwrap_or(RemovalProof {
+            runtime: request.runtime.clone(),
+            daemon_id: daemon_id.clone(),
+            observed_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64,
+        });
+    record.removals.insert(
+        request.request_id,
+        RemovalAttempt {
+            runtime: request.runtime.clone(),
+            proof: Some(proof.clone()),
+        },
+    );
+    tokio::task::block_in_place(|| journal.save(record))?;
+    Ok(proof)
 }
 pub async fn ready(record: &Record, args: &Args) -> Result<()> {
     if record.command.kind != CommandKind::RunAgent {
@@ -490,6 +631,18 @@ pub async fn control(
         }) {
             // Recovery superseded the observed request while Docker was being
             // inspected. Keep its receipt; process the new request next tick.
+            return Ok(true);
+        }
+        if factory
+            .runner_termination(
+                record.command.runner_id,
+                registration,
+                record.command.id,
+                record.command.ownership_epoch,
+            )
+            .await?
+            .is_some()
+        {
             return Ok(true);
         }
     }

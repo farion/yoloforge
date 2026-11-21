@@ -193,6 +193,24 @@ pub struct RetryControl {
     pub expected_proof: ContainmentProof,
     pub reason: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestTermination {
+    pub request_id: RequestId,
+    pub expected_stream_revision: Revision,
+    pub runtime: RuntimeRef,
+    pub previous_request: Option<RequestId>,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportTermination {
+    pub request_id: RequestId,
+    pub ownership_epoch: u64,
+    pub state: TerminationState,
+    pub proof: Option<RemovalProof>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportControl {

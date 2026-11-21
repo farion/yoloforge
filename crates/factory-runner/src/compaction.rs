@@ -21,6 +21,7 @@ fn summary(state: CompactionState) -> &'static str {
         CompactionState::Running => "Native compaction is running",
         CompactionState::Succeeded => "Native compaction completed; original session retained",
         CompactionState::Failed => "Native compaction failed; inspect archived session",
+        CompactionState::Aborted => "Runtime removed; native compaction outcome not established",
         CompactionState::Rejected => {
             "Compaction not submitted or definitively rejected; no automatic retry"
         }

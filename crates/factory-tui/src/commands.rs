@@ -6,6 +6,24 @@ mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Remove a pinned dedicated runtime and fail its active command; volumes/worktree remain.
+    Terminate {
+        id: CommandId,
+        #[arg(long)]
+        expected_stream_revision: u64,
+        #[arg(long)]
+        container_id: String,
+        #[arg(long)]
+        started_at: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        previous_request: Option<RequestId>,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    /// Inspect a runtime termination, its removal evidence and archive limitation.
+    Termination { id: CommandId },
     /// Read autonomous session supervisor policy and remaining evaluation budget.
     Supervisor { project: ProjectId },
     /// Configure a dedicated supervisor stream (revision 0 creates the policy).
@@ -401,6 +419,32 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Terminate {
+            id,
+            expected_stream_revision,
+            container_id,
+            started_at,
+            reason,
+            previous_request,
+            request_id,
+        } => print(
+            &client
+                .request_termination(
+                    id,
+                    &RequestTermination {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_stream_revision: Revision(expected_stream_revision),
+                        runtime: RuntimeRef {
+                            container_id,
+                            started_at,
+                        },
+                        previous_request,
+                        reason,
+                    },
+                )
+                .await?,
+        ),
+        Command::Termination { id } => print(&client.termination(id).await?),
         Command::Supervisor { project } => print(&client.supervisor_policy(project).await?),
         Command::SupervisorHistory { project } => {
             print(&client.supervisor_evaluations(project).await?)
@@ -491,11 +535,12 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             let mut page = client.archive(id, 0, None).await?;
             let mut file = private_file(&output)?;
             let status = page.status.clone();
+            let termination = page.termination.clone();
             let through = Some(status.as_ref().map_or(0, |v| v.revision));
             writeln!(
                 file,
                 "{}",
-                serde_json::json!({"command_id":id,"status":status,"format":"yoloforge-archive-v1"})
+                serde_json::json!({"command_id":id,"status":status,"termination":termination,"format":"yoloforge-archive-v1"})
             )?;
             let mut after = 0;
             let mut count = 0;
@@ -518,7 +563,7 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             )?;
             file.sync_all()?;
             print(
-                &serde_json::json!({"output":output,"versions":count,"final_scan_complete":status.is_some_and(|v|v.final_scan_complete)}),
+                &serde_json::json!({"output":output,"versions":count,"final_scan_complete":status.is_some_and(|v|v.final_scan_complete) && termination.as_ref().is_none_or(|t|t.state!=TerminationState::Stopped),"termination":termination}),
             )
         }
         Command::Knowledge { command } => match command {
