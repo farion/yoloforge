@@ -121,6 +121,18 @@ impl Journal {
         self.save(&record)?;
         Ok(record)
     }
+    pub fn record(&self, id: CommandId) -> Result<Option<Record>> {
+        let data: Option<String> = self
+            .db
+            .query_row(
+                "SELECT data FROM commands WHERE id=?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        data.map(|v| serde_json::from_str(&v).map_err(Into::into))
+            .transpose()
+    }
     pub fn save(&self, record: &Record) -> Result<()> {
         self.db.execute("INSERT INTO commands(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
             params![record.command.id.to_string(),serde_json::to_string(record)?])?;

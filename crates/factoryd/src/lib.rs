@@ -23,6 +23,7 @@ mod archive_routes;
 mod compaction_routes;
 mod knowledge_routes;
 mod live;
+mod supervisor_routes;
 mod work_routes;
 use access::*;
 use live::*;
@@ -68,6 +69,22 @@ pub fn router_with_shutdown(
         stopping,
     };
     Router::new()
+        .route(
+            "/v1/projects/{id}/supervisor",
+            get(supervisor_routes::read).put(supervisor_routes::configure),
+        )
+        .route(
+            "/v1/projects/{id}/supervisor/evaluations",
+            get(supervisor_routes::evaluations),
+        )
+        .route(
+            "/v1/commands/{id}/closure",
+            get(compaction_routes::closure).post(compaction_routes::close_session),
+        )
+        .route(
+            "/v1/streams/{id}/continue",
+            post(compaction_routes::continue_agent),
+        )
         .route(
             "/v1/commands/{id}/compaction",
             get(compaction_routes::read).post(compaction_routes::create),
@@ -286,7 +303,11 @@ async fn register(
             "Runner identity does not match device",
         );
     }
-    if !valid_text(&body.name, 80) || !valid_text(&body.version, 80) {
+    if !valid_text(&body.name, 80)
+        || !valid_text(&body.version, 80)
+        || body.capabilities.len() > 16
+        || body.capabilities.iter().any(|c| !valid_text(c, 80))
+    {
         return error(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,

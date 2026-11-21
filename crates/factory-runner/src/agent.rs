@@ -16,6 +16,8 @@ pub struct Execution {
     pub(crate) prompt_attempted: bool,
     #[serde(default)]
     interrupt_attempted: bool,
+    #[serde(default)]
+    previous_assistant: Option<String>,
 }
 
 fn progress(
@@ -24,7 +26,7 @@ fn progress(
     summary: impl Into<String>,
 ) -> AgentProgress {
     AgentProgress {
-        session_id: agent_session_id(command.id),
+        session_id: command.session_id(),
         message_id: agent_message_id(command.id),
         phase,
         summary: summary.into(),
@@ -89,6 +91,7 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
             session_attempted: false,
             prompt_attempted: false,
             interrupt_attempted: false,
+            previous_assistant: None,
         });
         tokio::task::block_in_place(|| journal.save(record))?;
     }
@@ -118,11 +121,11 @@ pub async fn capture(record: &mut Record, args: &Args) -> Result<()> {
         execution.endpoint == client.endpoint(),
         "OpenCode endpoint changed"
     );
-    let id = agent_session_id(record.command.id);
+    let id = record.command.session_id();
     let session = client.session(&id).await?.context("Session missing")?;
     ensure!(
         session["id"] == id
-            && session["metadata"]["factory_command"] == record.command.id.to_string()
+            && session["metadata"]["factory_command"] == record.command.session_root().to_string()
             && session["location"]["directory"] == execution.workspace.path,
         "Session identity changed"
     );
@@ -180,19 +183,18 @@ pub async fn pause(
         execution.endpoint == client.endpoint(),
         "OpenCode endpoint changed"
     );
-    let session = client.session(&agent_session_id(record.command.id)).await?;
+    let session = client.session(&record.command.session_id()).await?;
     ensure!(
         session
             .as_ref()
-            .is_some_and(
-                |s| s["metadata"]["factory_command"] == record.command.id.to_string()
-                    && s["location"]["directory"] == execution.workspace.path
-            ),
+            .is_some_and(|s| s["metadata"]["factory_command"]
+                == record.command.session_root().to_string()
+                && s["location"]["directory"] == execution.workspace.path),
         "Session identity changed"
     );
     record.agent.as_mut().unwrap().interrupt_attempted = true;
     tokio::task::block_in_place(|| journal.save(record))?;
-    let _ = client.interrupt(&agent_session_id(record.command.id)).await;
+    let _ = client.interrupt(&record.command.session_id()).await;
     Ok((PauseState::InterruptUnverified, summary.into()))
 }
 
@@ -216,10 +218,14 @@ async fn advance(
         execution.endpoint == client.endpoint(),
         "OpenCode endpoint changed"
     );
-    let session_id = agent_session_id(command.id);
+    let session_id = command.session_id();
     let message_id = agent_message_id(command.id);
     let session = client.session(&session_id).await?;
     let Some(session) = session else {
+        ensure!(
+            spec.continuation.is_none(),
+            "Continuation session missing; never recreate it"
+        );
         if execution.session_attempted {
             record.question_snapshot = Some(Vec::new());
         }
@@ -236,6 +242,7 @@ async fn advance(
                 &command.id.to_string(),
                 &spec.profile.provider_id,
                 &spec.profile.model_id,
+                spec.read_only,
             )
             .await?;
         return Ok(progress(
@@ -246,13 +253,66 @@ async fn advance(
     };
     ensure!(
         session["id"] == session_id
-            && session["metadata"]["factory_command"] == command.id.to_string()
+            && session["metadata"]["factory_command"] == command.session_root().to_string()
             && session["location"]["directory"] == execution.workspace.path
             && session["model"]["providerID"] == spec.profile.provider_id
             && session["model"]["id"] == spec.profile.model_id,
         "Session identity changed"
     );
     if !execution.prompt_attempted {
+        if let Some(continuation) = &spec.continuation {
+            let previous = journal
+                .record(continuation.previous_command_id)?
+                .context("Continuation predecessor journal missing")?;
+            let prior = previous
+                .agent
+                .as_ref()
+                .context("Predecessor execution missing")?;
+            ensure!(
+                previous.command.stream_id == command.stream_id
+                    && previous.command.runner_id == command.runner_id
+                    && previous.command.ownership_epoch == command.ownership_epoch
+                    && previous.command.session_root() == command.session_root()
+                    && previous.archive.finished
+                    && matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if agent.phase==AgentPhase::Succeeded)
+                    && prior.endpoint == execution.endpoint
+                    && prior.workspace == execution.workspace,
+                "Continuation predecessor identity or completion differs"
+            );
+            ensure!(
+                !client.active(&session_id).await?,
+                "Session already active before continuation"
+            );
+            for kind in ["inbox", "form", "permission"] {
+                ensure!(
+                    client
+                        .session_items(&session_id, kind)
+                        .await?
+                        .as_array()
+                        .context("Invalid session items")?
+                        .is_empty(),
+                    "Session has pending work before continuation"
+                );
+            }
+            let messages = client
+                .session_items(&session_id, "message?type=assistant&order=desc&limit=1")
+                .await?;
+            record.agent.as_mut().unwrap().previous_assistant = Some(
+                messages
+                    .as_array()
+                    .and_then(|m| m.first())
+                    .and_then(|m| m["id"].as_str())
+                    .context("Previous assistant missing")?
+                    .into(),
+            );
+        }
+        if spec.read_only {
+            ensure!(
+                session["permissions"]
+                    == serde_json::json!([{"action":"*","resource":"*","effect":"deny"}]),
+                "Supervisor tool permissions changed"
+            );
+        }
         let current = tokio::task::block_in_place(|| {
             workspace::existing(
                 journal,
@@ -279,7 +339,11 @@ async fn advance(
         ));
     }
     let message = client.message(&session_id, &message_id).await?;
-    let admitted = if let Some(message) = message {
+    let prompt_created = message
+        .as_ref()
+        .and_then(|m| m.pointer("/time/created"))
+        .and_then(|v| v.as_f64());
+    let admitted = if let Some(message) = &message {
         ensure!(
             message["text"] == spec.prompt && message["type"] == "user",
             "Projected prompt differs"
@@ -342,6 +406,18 @@ async fn advance(
         .session_items(&session_id, "message?type=assistant&order=desc&limit=1")
         .await?;
     let last = messages.as_array().unwrap().first();
+    if spec.continuation.is_some() {
+        ensure!(
+            last.is_some_and(
+                |m| m["id"].as_str() != execution.previous_assistant.as_deref()
+                    && m.pointer("/time/created")
+                        .and_then(|v| v.as_f64())
+                        .zip(prompt_created)
+                        .is_some_and(|(reply, prompt)| reply >= prompt)
+            ),
+            "No response belonging to continuation observed"
+        );
+    }
     if session["outcome"] == "interrupted" {
         return Ok(progress(
             &command,
@@ -467,6 +543,8 @@ mod tests {
                 base_branch: "main".into(),
             }),
             agent_spec: Some(AgentSpec {
+                read_only: false,
+                continuation: None,
                 prompt: "Implement it".into(),
                 profile: ExecutionProfile {
                     provider_id: "openai".into(),
@@ -497,6 +575,7 @@ mod tests {
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command.clone()).unwrap();
         record.agent = Some(Execution {
+            previous_assistant: None,
             workspace: Workspace {
                 path: "/prepared".into(),
                 branch: format!("factory/{stream}"),

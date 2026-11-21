@@ -54,7 +54,7 @@ pub async fn process(
     };
     ensure!(
         request.command_id == record.command.id
-            && request.session_id == agent_session_id(record.command.id)
+            && request.session_id == record.command.session_id()
             && request.message_id == compaction_message_id(request.request_id),
         "Compaction request identity differs"
     );
@@ -138,7 +138,7 @@ async fn advance(
         .context("Compaction session missing")?;
     ensure!(
         session["id"] == receipt.request.session_id
-            && session["metadata"]["factory_command"] == record.command.id.to_string()
+            && session["metadata"]["factory_command"] == record.command.session_root().to_string()
             && session["location"]["directory"] == execution.workspace.path,
         "Compaction session identity changed"
     );

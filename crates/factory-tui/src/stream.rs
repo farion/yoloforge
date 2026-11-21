@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use factory_core::*;
 use factory_protocol::{
     client::{ClientError, FactoryClient},
-    EnqueueCommand, SetControl,
+    ContinueAgent, EnqueueCommand, SetControl,
 };
 use ratatui::{
     widgets::{Block, Paragraph, Wrap},
@@ -13,10 +13,14 @@ use ratatui::{
 pub enum Request {
     Command(EnqueueCommand),
     Control(SetControl),
+    Continue(ContinueAgent),
 }
 impl Request {
     pub async fn send(&self, client: &FactoryClient, id: StreamId) -> Result<(), ClientError> {
         match self {
+            Self::Continue(body) => {
+                client.continue_agent(id, body).await?;
+            }
             Self::Command(body) => {
                 client.enqueue(id, body).await?;
             }
@@ -35,6 +39,7 @@ pub struct Dialog {
     sending: bool,
     finished: bool,
     message: String,
+    previous: Option<CommandId>,
 }
 pub enum Action {
     None,
@@ -42,7 +47,7 @@ pub enum Action {
     Send(Request),
 }
 impl Dialog {
-    pub fn new(stream: Workstream) -> Self {
+    pub fn new(stream: Workstream, previous: Option<CommandId>) -> Self {
         Self {
             stream,
             prompt: String::new(),
@@ -51,6 +56,7 @@ impl Dialog {
             sending: false,
             finished: false,
             message: String::new(),
+            previous,
         }
     }
     pub fn insert(&mut self, text: &str) {
@@ -89,6 +95,20 @@ impl Dialog {
                     let request_id = RequestId::new();
                     let expected_revision = self.stream.revision;
                     self.request = Some(match self.choice {
+                        4 => {
+                            let Some(previous_command_id) = self.previous else {
+                                self.message =
+                                    "Kein erfolgreicher vorheriger Agentenauftrag vorhanden."
+                                        .into();
+                                return Action::None;
+                            };
+                            Request::Continue(ContinueAgent {
+                                request_id,
+                                expected_revision,
+                                previous_command_id,
+                                prompt: self.prompt.clone(),
+                            })
+                        }
                         0 | 1 => Request::Command(EnqueueCommand {
                             request_id,
                             expected_revision,
@@ -124,8 +144,8 @@ impl Dialog {
             return Action::None;
         }
         match key.code {
-            KeyCode::Tab => self.choice = (self.choice + 1) % 4,
-            KeyCode::BackTab => self.choice = (self.choice + 3) % 4,
+            KeyCode::Tab => self.choice = (self.choice + 1) % 5,
+            KeyCode::BackTab => self.choice = (self.choice + 4) % 5,
             KeyCode::Char(c) => self.insert(&c.to_string()),
             KeyCode::Enter => self.insert("\n"),
             KeyCode::Backspace => {
@@ -135,10 +155,10 @@ impl Dialog {
         }
         Action::None
     }
-    pub fn reopen(&mut self, current: Workstream) {
+    pub fn reopen(&mut self, current: Workstream, previous: Option<CommandId>) {
         if self.finished || self.request.is_none() {
             let prompt = self.prompt.clone();
-            *self = Self::new(current);
+            *self = Self::new(current, previous);
             self.prompt = prompt;
         }
     }
@@ -146,6 +166,7 @@ impl Dialog {
         let request = self.request.as_ref().map(|r| match r {
             Request::Command(b) => b.request_id,
             Request::Control(b) => b.request_id,
+            Request::Continue(b) => b.request_id,
         });
         let prompt = self
             .prompt
@@ -156,6 +177,6 @@ impl Dialog {
             .into_iter()
             .rev()
             .collect::<String>();
-        frame.render_widget(Paragraph::new(format!("{} | {:?} | Revision {} | {}\n{}\n\nTab / Shift-Tab: Aktion waehlen\nAktion: {}\n\nPrompt (Text / Paste, Enter: neue Zeile):\n{}\n\nPause: laufende Prozesse bleiben unbestaetigt; Resume nur vor Ausfuehrung.\nCtrl-S: senden / identisch wiederholen | Esc: Liste\n{}\nRequest: {:?}",self.stream.id,self.stream.status,self.stream.revision.0,if online {"verbunden"} else {"GETRENNT"},control.map(|c|format!("{:?}: {}",c.state,c.summary)).unwrap_or_default(),["Worktree vorbereiten","Agent starten","Pause anfordern","Scheduling fortsetzen"][self.choice as usize],prompt,self.message,request)).wrap(Wrap {trim:false}).block(Block::bordered().title(" Stream steuern ")),frame.area());
+        frame.render_widget(Paragraph::new(format!("{} | {:?} | Revision {} | {}\n{}\n\nTab / Shift-Tab: Aktion waehlen\nAktion: {}\n\nPrompt (Text / Paste, Enter: neue Zeile):\n{}\n\nPause: laufende Prozesse bleiben unbestaetigt; Resume nur vor Ausfuehrung.\nCtrl-S: senden / identisch wiederholen | Esc: Liste\n{}\nRequest: {:?}",self.stream.id,self.stream.status,self.stream.revision.0,if online {"verbunden"} else {"GETRENNT"},control.map(|c|format!("{:?}: {}",c.state,c.summary)).unwrap_or_default(),["Worktree vorbereiten","Agent starten","Pause anfordern","Scheduling fortsetzen","Session nach Erfolg fortsetzen"][self.choice as usize],prompt,self.message,request)).wrap(Wrap {trim:false}).block(Block::bordered().title(" Stream steuern ")),frame.area());
     }
 }

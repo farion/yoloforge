@@ -12,7 +12,7 @@ impl Store {
         let batch = body.batch;
         if command.kind != CommandKind::RunAgent
             || command.state == CommandState::Pending
-            || batch.session_id != agent_session_id(id)
+            || batch.session_id != command.session_id()
         {
             return Err(StoreError::WorkConflict);
         }

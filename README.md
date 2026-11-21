@@ -47,6 +47,7 @@ bleiben aber getrennte Prozesse. Pro Stream schreibt nur ein Runner.
 - [Repository klonen, registrieren und aktualisieren](docs/repositories.md)
 - [Projektgedächtnis und begrenzte Kontextauswahl](docs/knowledge.md)
 - [Nachrichtenarchiv und Export](docs/session-archive.md)
+- [Autonomer Session-Supervisor](docs/supervisor.md)
 - [Server-Erstabnahme rs9tm](docs/server-acceptance.md)
 
 Status: Rust-Verbindungsdurchstich (F-101), persistente Projekt-/Ticketverwaltung

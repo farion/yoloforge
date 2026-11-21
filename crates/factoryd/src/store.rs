@@ -57,7 +57,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 9,
+            version <= 11,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -86,6 +86,12 @@ impl Store {
         }
         if version < 9 {
             tx.execute_batch(include_str!("../migrations/009_compaction.sql"))?;
+        }
+        if version < 10 {
+            tx.execute_batch(include_str!("../migrations/010_session_closures.sql"))?;
+        }
+        if version < 11 {
+            tx.execute_batch(include_str!("../migrations/011_supervisor.sql"))?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -394,6 +400,8 @@ mod devices;
 mod excerpts;
 mod knowledge;
 mod questions;
+mod sessions;
+mod supervisor;
 mod work;
 
 fn records<T: DeserializeOwned>(tx: &Transaction<'_>, sql: &str) -> Result<Vec<T>> {

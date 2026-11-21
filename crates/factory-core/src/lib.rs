@@ -259,8 +259,86 @@ pub struct ExecutionProfile {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentSpec {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<SessionContinuation>,
     pub prompt: String,
     pub profile: ExecutionProfile,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionContinuation {
+    pub root_command_id: CommandId,
+    pub previous_command_id: CommandId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionClosure {
+    pub request_id: RequestId,
+    pub root_command_id: CommandId,
+    pub last_command_id: CommandId,
+    pub session_id: String,
+    pub reason: String,
+    pub closed_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SupervisorPolicy {
+    pub project_id: ProjectId,
+    pub stream_id: StreamId,
+    pub revision: Revision,
+    pub enabled: bool,
+    pub remaining_evaluations: u32,
+    pub interval_seconds: u32,
+    pub next_unix_ms: u64,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorAction {
+    Wait,
+    Compact,
+    Close,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorDecision {
+    pub action: SupervisorAction,
+    pub reason: String,
+    pub memory: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SupervisorEvaluation {
+    pub command_id: CommandId,
+    pub project_id: ProjectId,
+    pub target_command_id: CommandId,
+    pub target_stream_revision: Revision,
+    pub policy_revision: Revision,
+    pub created_unix_ms: u64,
+    pub resolved: bool,
+    pub outcome: String,
+    pub decision: Option<SupervisorDecision>,
+    pub action_request_id: Option<RequestId>,
+    pub knowledge_id: Option<KnowledgeId>,
+}
+impl RunnerCommand {
+    pub fn requires_session_lifecycle(&self) -> bool {
+        self.agent_spec
+            .as_ref()
+            .is_some_and(|s| s.read_only || s.continuation.is_some())
+    }
+    pub fn session_root(&self) -> CommandId {
+        self.agent_spec
+            .as_ref()
+            .and_then(|s| s.continuation.as_ref())
+            .map_or(self.id, |c| c.root_command_id)
+    }
+    pub fn session_id(&self) -> String {
+        agent_session_id(self.session_root())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

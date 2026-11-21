@@ -123,6 +123,7 @@ async fn device_roles_one_use_enrollment_and_live_revocation() {
         StatusCode::FORBIDDEN
     );
     let body = RegisterRunner {
+        capabilities: vec![],
         id: RunnerId::new(),
         instance_id: InstanceId::new(),
         name: "runner".into(),

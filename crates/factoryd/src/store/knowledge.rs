@@ -26,21 +26,60 @@ fn scope(tx: &Transaction<'_>, project: ProjectId, ticket: Option<TicketId>) -> 
 
 impl Store {
     pub fn create_knowledge(&self, body: CreateKnowledge) -> Result<KnowledgeNote> {
-        self.mutate(body.request_id,"knowledge.create",&body,|tx| {
-            scope(tx,body.project_id,body.ticket_id)?;
-            line(&body.title,160)?;line(&body.source,512)?;
-            if body.content.trim().is_empty() || body.content.len()>4096 || body.content.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\r'|'\t')) || body.priority>9 {
-                return Err(StoreError::Invalid("Invalid knowledge content or priority"));
-            }
-            if let Some(command) = body.source_command {
-                let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1 AND s.project_id=?2)",params![command.to_string(),body.project_id.to_string()],|r|r.get(0))?;
-                if !valid {return Err(StoreError::Invalid("Knowledge source command belongs to another project or is missing"));}
-            }
-            let note=KnowledgeNote {id:KnowledgeId::new(),project_id:body.project_id,ticket_id:body.ticket_id,revision:Revision(1),title:body.title.clone(),content:body.content.clone(),source:body.source.clone(),source_command:body.source_command,priority:body.priority,retired:false,created_unix_ms:super::super::unix_ms()};
-            tx.execute("INSERT INTO knowledge(id,project_id,ticket_id,priority,data) VALUES(?1,?2,?3,?4,?5)",params![note.id.to_string(),note.project_id.to_string(),note.ticket_id.map(|id|id.to_string()),note.priority,serde_json::to_string(&note)?])?;
-            event(tx,"knowledge.created",note.id.to_string(),&note)?;
-            Ok(note)
+        self.mutate(body.request_id, "knowledge.create", &body, |tx| {
+            Self::create_knowledge_in(tx, &body)
         })
+    }
+    pub(super) fn create_knowledge_in(
+        tx: &Transaction<'_>,
+        body: &CreateKnowledge,
+    ) -> Result<KnowledgeNote> {
+        scope(tx, body.project_id, body.ticket_id)?;
+        line(&body.title, 160)?;
+        line(&body.source, 512)?;
+        if body.content.trim().is_empty()
+            || body.content.len() > 4096
+            || body
+                .content
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+            || body.priority > 9
+        {
+            return Err(StoreError::Invalid("Invalid knowledge content or priority"));
+        }
+        if let Some(command) = body.source_command {
+            let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1 AND s.project_id=?2)",params![command.to_string(),body.project_id.to_string()],|r|r.get(0))?;
+            if !valid {
+                return Err(StoreError::Invalid(
+                    "Knowledge source command belongs to another project or is missing",
+                ));
+            }
+        }
+        let note = KnowledgeNote {
+            id: KnowledgeId::new(),
+            project_id: body.project_id,
+            ticket_id: body.ticket_id,
+            revision: Revision(1),
+            title: body.title.clone(),
+            content: body.content.clone(),
+            source: body.source.clone(),
+            source_command: body.source_command,
+            priority: body.priority,
+            retired: false,
+            created_unix_ms: super::super::unix_ms(),
+        };
+        tx.execute(
+            "INSERT INTO knowledge(id,project_id,ticket_id,priority,data) VALUES(?1,?2,?3,?4,?5)",
+            params![
+                note.id.to_string(),
+                note.project_id.to_string(),
+                note.ticket_id.map(|id| id.to_string()),
+                note.priority,
+                serde_json::to_string(&note)?
+            ],
+        )?;
+        event(tx, "knowledge.created", note.id.to_string(), &note)?;
+        Ok(note)
     }
     pub fn retire_knowledge(
         &self,

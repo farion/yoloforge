@@ -290,6 +290,7 @@ impl OpenCodeClient {
         command: &str,
         provider: &str,
         model: &str,
+        read_only: bool,
     ) -> Result<()> {
         safe_id(id)?;
         let result = self
@@ -299,7 +300,8 @@ impl OpenCodeClient {
                 Some(serde_json::json!({
                     "id":id,"title":format!("Factory {command}"),"agent":"build",
                     "location":{"directory":directory},"model":{"providerID":provider,"id":model},
-                    "metadata":{"factory_command":command}
+                    "metadata":{"factory_command":command},
+                    "permissions": if read_only {Some(serde_json::json!([{"action":"*","resource":"*","effect":"deny"}]))} else {None}
                 })),
             )
             .await?;

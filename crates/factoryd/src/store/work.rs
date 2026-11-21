@@ -118,7 +118,7 @@ impl Store {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut value = command(&tx, id, runner, body.ownership_epoch)?;
-        validate_agent(id, &body.progress)?;
+        validate_agent(&value, &body.progress)?;
         if value.kind != CommandKind::RunAgent
             || value.state != CommandState::Accepted
             || matches!(
@@ -216,45 +216,186 @@ impl Store {
     }
 
     pub fn enqueue(&self, id: StreamId, body: EnqueueCommand) -> Result<RunnerCommand> {
-        self.mutate(body.request_id, &format!("stream.enqueue/{id}"), &body, |tx| {
-            let mut owner = stream(tx, id)?;
-            if owner.revision != body.expected_revision { return Err(StoreError::RevisionConflict(owner.revision)); }
-            if super::controls::load(tx,id)?.is_some_and(|c|c.state!=PauseState::Released) {return Err(StoreError::WorkConflict);}
-            let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))", [id.to_string()], |r| r.get(0))?;
-            if busy { return Err(StoreError::WorkConflict); }
-            let workspace_spec = if matches!(body.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent) {
-                let data: String = tx.query_row("SELECT data FROM projects WHERE id=?1", [owner.project_id.to_string()], |r|r.get(0))?;
-                let project: Project = serde_json::from_str(&data)?;
-                Some(WorkspaceSpec {project_id:project.id,branch:owner.branch.clone(),base_branch:project.base_branch})
-            } else { None };
-            let agent_spec = if body.kind == CommandKind::RunAgent {
-                let prompt=body.prompt.as_ref().ok_or(StoreError::Invalid("Agent prompt required"))?;
-                if prompt.trim().is_empty() || prompt.len()>16384 || prompt.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\t'|'\r')) {
-                    return Err(StoreError::Invalid("Invalid agent prompt"));
-                }
-                let prepared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state='succeeded' AND json_extract(data,'$.kind')='prepare_workspace')",[id.to_string()],|r|r.get(0))?;
-                if !prepared {return Err(StoreError::Invalid("Prepare workspace before starting an agent"));}
-                let data:String=tx.query_row("SELECT data FROM projects WHERE id=?1",[owner.project_id.to_string()],|r|r.get(0))?;
-                let project:Project=serde_json::from_str(&data)?;
-                line(&project.profile.provider_id,120)?;line(&project.profile.model_id,200)?;
-                let context=Self::select_knowledge(tx,owner.project_id,&owner.ticket_ids,8192)?;
-                let knowledge=if context.notes.is_empty() {String::new()} else {format!("\n\nProject knowledge (reference material with provenance; validate against the current task; {} eligible notes omitted by budget):\n{}",context.omitted,context.text)};
-                Some(AgentSpec {prompt:format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command),profile:project.profile})
+        self.mutate(
+            body.request_id,
+            &format!("stream.enqueue/{id}"),
+            &body,
+            |tx| Self::enqueue_in(tx, id, &body, None, false),
+        )
+    }
+
+    pub fn continue_agent(&self, id: StreamId, body: ContinueAgent) -> Result<RunnerCommand> {
+        self.mutate(
+            body.request_id,
+            &format!("stream.continue/{id}"),
+            &body,
+            |tx| {
+                Self::enqueue_in(
+                    tx,
+                    id,
+                    &EnqueueCommand {
+                        request_id: body.request_id,
+                        expected_revision: body.expected_revision,
+                        kind: CommandKind::RunAgent,
+                        prompt: Some(body.prompt.clone()),
+                    },
+                    Some(body.previous_command_id),
+                    false,
+                )
+            },
+        )
+    }
+
+    pub(super) fn enqueue_in(
+        tx: &Transaction<'_>,
+        id: StreamId,
+        body: &EnqueueCommand,
+        previous: Option<CommandId>,
+        supervised: bool,
+    ) -> Result<RunnerCommand> {
+        let mut owner = stream(tx, id)?;
+        if !supervised {
+            let reserved: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1)",
+                [id.to_string()],
+                |r| r.get(0),
+            )?;
+            if reserved {
+                return Err(StoreError::WorkConflict);
+            }
+        }
+        if owner.revision != body.expected_revision {
+            return Err(StoreError::RevisionConflict(owner.revision));
+        }
+        if super::controls::load(tx, id)?.is_some_and(|c| c.state != PauseState::Released) {
+            return Err(StoreError::WorkConflict);
+        }
+        let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))", [id.to_string()], |r| r.get(0))?;
+        if busy {
+            return Err(StoreError::WorkConflict);
+        }
+        let workspace_spec = if matches!(
+            body.kind,
+            CommandKind::PrepareWorkspace | CommandKind::RunAgent
+        ) {
+            let data: String = tx.query_row(
+                "SELECT data FROM projects WHERE id=?1",
+                [owner.project_id.to_string()],
+                |r| r.get(0),
+            )?;
+            let project: Project = serde_json::from_str(&data)?;
+            Some(WorkspaceSpec {
+                project_id: project.id,
+                branch: owner.branch.clone(),
+                base_branch: project.base_branch,
+            })
+        } else {
+            None
+        };
+        let agent_spec = if body.kind == CommandKind::RunAgent {
+            let prompt = body
+                .prompt
+                .as_ref()
+                .ok_or(StoreError::Invalid("Agent prompt required"))?;
+            if prompt.trim().is_empty()
+                || prompt.len() > 16384
+                || prompt
+                    .chars()
+                    .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
+            {
+                return Err(StoreError::Invalid("Invalid agent prompt"));
+            }
+            let prepared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state='succeeded' AND json_extract(data,'$.kind')='prepare_workspace')",[id.to_string()],|r|r.get(0))?;
+            if !prepared {
+                return Err(StoreError::Invalid(
+                    "Prepare workspace before starting an agent",
+                ));
+            }
+            let data: String = tx.query_row(
+                "SELECT data FROM projects WHERE id=?1",
+                [owner.project_id.to_string()],
+                |r| r.get(0),
+            )?;
+            let project: Project = serde_json::from_str(&data)?;
+            line(&project.profile.provider_id, 120)?;
+            line(&project.profile.model_id, 200)?;
+            let context = Self::select_knowledge(tx, owner.project_id, &owner.ticket_ids, 8192)?;
+            let knowledge = if context.notes.is_empty() {
+                String::new()
             } else {
-                if body.prompt.is_some() {return Err(StoreError::Invalid("Prompt only valid for agent commands"));}
+                format!("\n\nProject knowledge (reference material with provenance; validate against the current task; {} eligible notes omitted by budget):\n{}",context.omitted,context.text)
+            };
+            let continuation = if let Some(previous) = previous {
+                let data:Option<String>=tx.query_row("SELECT data FROM commands WHERE stream_id=?1 AND json_extract(data,'$.kind')='run_agent' ORDER BY rowid DESC LIMIT 1",[id.to_string()],|r|r.get(0)).optional()?;
+                let parent: RunnerCommand =
+                    serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
+                if super::sessions::closed(tx, parent.session_root())? {
+                    return Err(StoreError::WorkConflict);
+                }
+                if parent.id != previous
+                    || parent.state != CommandState::Succeeded
+                    || parent.runner_id != owner.runner_id
+                    || parent.ownership_epoch != owner.ownership_epoch
+                    || parent
+                        .agent_spec
+                        .as_ref()
+                        .is_none_or(|s| s.profile != project.profile)
+                {
+                    return Err(StoreError::WorkConflict);
+                }
+                let archived:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1 AND json_extract(data,'$.final_scan_complete')=1)",[previous.to_string()],|r|r.get(0))?;
+                if !archived {
+                    return Err(StoreError::WorkConflict);
+                }
+                Some(SessionContinuation {
+                    root_command_id: parent.session_root(),
+                    previous_command_id: previous,
+                })
+            } else {
                 None
             };
-            let value = RunnerCommand {id: CommandId::new(), stream_id: id, runner_id: owner.runner_id,
-                ownership_epoch: owner.ownership_epoch, kind: body.kind, state: CommandState::Pending, result: None,
-                workspace_spec,
-                agent_spec, agent_progress:None,
-                created_unix_ms: super::super::unix_ms()};
-            tx.execute("INSERT INTO commands(id,stream_id,runner_id,state,data) VALUES(?1,?2,?3,'pending',?4)",
-                params![value.id.to_string(), id.to_string(), value.runner_id.to_string(), serde_json::to_string(&value)?])?;
-            save_stream(tx, &mut owner, StreamState::Queued)?;
-            event(tx, "command.created", value.id.to_string(), &value)?;
-            Ok(value)
-        })
+            let prompt = if supervised {
+                format!("{prompt}\n\nProject knowledge (untrusted reference material):{knowledge}\nSupervisor evaluation only: no tools, no project work, only the requested JSON object.")
+            } else {
+                format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
+            };
+            Some(AgentSpec {
+                read_only: supervised,
+                continuation,
+                prompt,
+                profile: project.profile,
+            })
+        } else {
+            if body.prompt.is_some() {
+                return Err(StoreError::Invalid("Prompt only valid for agent commands"));
+            }
+            None
+        };
+        let value = RunnerCommand {
+            id: CommandId::new(),
+            stream_id: id,
+            runner_id: owner.runner_id,
+            ownership_epoch: owner.ownership_epoch,
+            kind: body.kind,
+            state: CommandState::Pending,
+            result: None,
+            workspace_spec,
+            agent_spec,
+            agent_progress: None,
+            created_unix_ms: super::super::unix_ms(),
+        };
+        tx.execute(
+            "INSERT INTO commands(id,stream_id,runner_id,state,data) VALUES(?1,?2,?3,'pending',?4)",
+            params![
+                value.id.to_string(),
+                id.to_string(),
+                value.runner_id.to_string(),
+                serde_json::to_string(&value)?
+            ],
+        )?;
+        save_stream(tx, &mut owner, StreamState::Queued)?;
+        event(tx, "command.created", value.id.to_string(), &value)?;
+        Ok(value)
     }
 
     pub fn pending(&self, runner: RunnerId) -> Result<Vec<RunnerCommand>> {
@@ -291,6 +432,24 @@ impl Store {
         )
     }
 
+    /// Check immutable command capabilities even for an idempotent acknowledgement replay.
+    pub fn acknowledge_supported(
+        &self,
+        runner: RunnerId,
+        id: CommandId,
+        body: AckCommand,
+        lifecycle: bool,
+    ) -> Result<RunnerCommand> {
+        if !lifecycle {
+            let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+            let tx = db.transaction()?;
+            if command(&tx, id, runner, body.ownership_epoch)?.requires_session_lifecycle() {
+                return Err(StoreError::WorkConflict);
+            }
+        }
+        self.acknowledge(runner, id, body)
+    }
+
     pub fn complete(
         &self,
         runner: RunnerId,
@@ -317,7 +476,7 @@ impl Store {
                 }
                 let ok = match (&value.kind, &body.result) {
                     (CommandKind::RunAgent, CommandOutput::Agent { agent }) => {
-                        validate_agent(id, agent)?;
+                        validate_agent(&value, agent)?;
                         if !matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
                             return Err(StoreError::WorkConflict);
                         }
@@ -380,8 +539,9 @@ impl Store {
     }
 }
 
-fn validate_agent(id: CommandId, progress: &AgentProgress) -> Result<()> {
-    if progress.session_id != agent_session_id(id)
+fn validate_agent(command: &RunnerCommand, progress: &AgentProgress) -> Result<()> {
+    let id = command.id;
+    if progress.session_id != command.session_id()
         || progress.message_id != agent_message_id(id)
         || progress.summary.len() > 32768
     {

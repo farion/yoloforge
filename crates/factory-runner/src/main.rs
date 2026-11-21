@@ -61,7 +61,7 @@ async fn report(
     if !matches!(archived, Ok(true)) {
         client.observe_agent(record.command.runner_id,registration,record.command.id,&ObserveAgent {
             ownership_epoch:record.command.ownership_epoch,
-            progress:AgentProgress {session_id:agent_session_id(record.command.id),message_id:agent_message_id(record.command.id),phase:AgentPhase::Unknown,summary:"Execution result recorded locally; final session archive pending. Stream remains reserved.".into()},
+            progress:AgentProgress {session_id:record.command.session_id(),message_id:agent_message_id(record.command.id),phase:AgentPhase::Unknown,summary:"Execution result recorded locally; final session archive pending. Stream remains reserved.".into()},
         }).await?;
         archived?;
         return Ok(());
@@ -327,6 +327,7 @@ async fn run(mut args: Args) -> Result<()> {
         } else {
             client
                 .register(&RegisterRunner {
+                    capabilities: vec![SESSION_LIFECYCLE_CAPABILITY.into()],
                     id: args.id,
                     instance_id,
                     name: args.name.clone(),

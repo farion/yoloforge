@@ -272,11 +272,19 @@ pub(super) async fn pending_commands(
         };
         let store = app.store.clone();
         let identity = principal.clone();
+        let lifecycle = guard.entries[&id]
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == SESSION_LIFECYCLE_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
             }
-            store.pending(id)
+            store.pending(id).map(|mut commands| {
+                commands.retain(|c| lifecycle || !c.requires_session_lifecycle());
+                commands
+            })
         })
         .await;
         drop(guard);
@@ -309,12 +317,20 @@ pub(super) async fn ack_command(
             "Invalid command acknowledgement",
         );
     };
-    let _guard = match runner_access(&app, runner, &headers).await {
+    let guard = match runner_access(&app, runner, &headers).await {
         Ok(g) => g,
         Err(e) => return *e,
     };
     let store = app.store.clone();
-    db_call(body.request_id, move || store.acknowledge(runner, id, body)).await
+    let lifecycle = guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == SESSION_LIFECYCLE_CAPABILITY);
+    db_call(body.request_id, move || {
+        store.acknowledge_supported(runner, id, body, lifecycle)
+    })
+    .await
 }
 pub(super) async fn command_result(
     State(app): State<App>,

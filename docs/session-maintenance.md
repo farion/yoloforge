@@ -3,8 +3,36 @@
 ## Implementierter Mechanismus (Entwicklungsstand nach v0.1.1)
 
 Native Compaction ist über API/CLI und den owning Runner ausführbar, mit
-persistenten Aufträgen in Schema 9. Die automatische Entscheidung des Supervisors
-und Sessionbeendigung sind weiterhin offen.
+persistenten Aufträgen seit Schema 9. Der [Session-Supervisor](supervisor.md)
+entscheidet inzwischen selbst zwischen Warten, Compaction und Abschluss bereits
+erfolgreicher Sessions. Das bestätigte Stoppen laufender Prozesse bleibt offen.
+
+## Fortsetzung und Abschluss einer erfolgreichen Session
+
+```sh
+yoloforge stream continue STREAM --previous-command LETZTER-AUFTRAG \
+  --expected-revision STREAM-REVISION --prompt 'Naechster Arbeitsschritt'
+yoloforge close-session LETZTER-AUFTRAG --expected-stream-revision REVISION \
+  --reason 'Ziel erreicht'
+yoloforge session-closure AUFTRAG
+```
+
+In der TUI: Stream öffnen, mit Tab „Session nach Erfolg fortsetzen“ wählen,
+Prompt eingeben und Ctrl-S. Die ursprüngliche Session-ID bleibt erhalten, jede
+Fortsetzung erhält eine neue Command-/Message-ID und den direkten Vorgänger als
+Provenienz. Ein eigener abschließender Archivdurchlauf sichert den neuen Stand.
+
+Fortsetzung setzt den letzten erfolgreichen, archivierten Agentenauftrag desselben
+Streams, Runners, Ownership-Epoche und Ausführungsprofils voraus. Der Runner prüft
+sein Vorgängerjournal, Endpoint, Worktree und dass keine aktive Ausführung, Inbox
+oder offene Rückfrage vorliegt. Eine verschwundene Session wird niemals neu
+erstellt. Eine alte Assistant-Antwort darf nicht als Ergebnis des Folgeprompts
+gelten. Unklare Promptzustellung wird wie beim ersten Auftrag nur lesend abgeglichen.
+
+Ein Abschluss sperrt die gesamte Sessionlinie für weitere Fortsetzungen; Grund,
+Root- und letzter Auftrag bleiben dauerhaft erhalten. Ein neuer normaler Agentstart
+verwendet eine neue Session und das Projektgedächtnis. Dies ist ein Scheduling-
+Abschluss nach Erfolg, kein Nachweis einer Prozessbaum-Stilllegung nach Interrupt.
 
 ```sh
 yoloforge compact AUFTRAG-UUID --expected-stream-revision REVISION \
@@ -83,6 +111,7 @@ Entscheidungen. Selbstständigkeit ersetzt aber nicht den Nachweis der tatsächl
 Ausführung. Wiederholte Compactions ohne Fortschritt müssen als fehlgeschlagene
 Strategie behandelt werden, nicht als unbegrenzte Schleife.
 
-Stand: Compaction-Auftrag und Abschlussabgleich sind implementiert. Der automatische
-Entscheider, die vorgeschaltete Wissensextraktion und Sessionbeendigung sind noch
-offen; die vorhandene Pause-/Interrupt-Implementierung bleibt konservativ.
+Stand: Compaction, erfolgreiche Session-Fortsetzung und -Abschluss sowie ein
+modellbasierter Session-Supervisor mit quellenverknüpfter Wissensübernahme sind
+implementiert. Das Stoppen laufender Sessions, Recovery und vollständige
+Supervisor-Ticketplanung bleiben offen; Pause/Interrupt bleibt konservativ.

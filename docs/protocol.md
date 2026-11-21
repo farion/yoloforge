@@ -1,5 +1,17 @@
 # Datenmodell und Runner-Protokoll
 
+## Session-Lifecycle und Supervisor (Schema v10/v11)
+
+Fortsetzungsaufträge enthalten im unveränderlichen `agent_spec.continuation` den
+Root- und Vorgängerauftrag; die Session-ID folgt dem Root, die Prompt-ID weiterhin
+dem jeweiligen Auftrag. Sessionabschlüsse bleiben separat dauerhaft gespeichert.
+Supervisor-Policies und Bewertungen werden atomar mit Notizen/Aktionsaufträgen
+gespeichert. Runner mit diesen Fähigkeiten registrieren
+`capabilities: ["session-lifecycle-v1"]`. Nicht unterstützte Aufträge werden
+älteren Runnern nicht ausgeliefert; Ack-Prüfungen gelten auch bei Request-Replay.
+Protokollversion bleibt 1. Upgrade-Reihenfolge: Server vor Runnern.
+Details: [Sessionpflege](session-maintenance.md), [Supervisor](supervisor.md).
+
 ## Nachrichtenarchiv (Schema v8)
 
 Paginiertes versionsbewahrendes Archiv neben den Auszügen, mit journalisierten

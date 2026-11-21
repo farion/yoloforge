@@ -13,6 +13,34 @@ pub struct RequestCompaction {
     pub expected_stream_revision: Revision,
     pub reason: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueAgent {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub previous_command_id: CommandId,
+    pub prompt: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseSession {
+    pub request_id: RequestId,
+    pub expected_stream_revision: Revision,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSupervisor {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub stream_id: StreamId,
+    pub enabled: bool,
+    pub evaluation_budget: u32,
+    pub interval_seconds: u32,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportCompaction {
@@ -76,6 +104,8 @@ pub struct DeviceCredential {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterRunner {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub id: RunnerId,
     pub instance_id: InstanceId,
     pub name: String,
@@ -83,6 +113,7 @@ pub struct RegisterRunner {
     pub version: String,
     pub opencode: OpenCodeStatus,
 }
+pub const SESSION_LIFECYCLE_CAPABILITY: &str = "session-lifecycle-v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

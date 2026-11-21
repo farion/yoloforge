@@ -73,7 +73,7 @@ impl Store {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 || external.payload["id"] != external.external_id
-                || external.payload["sessionID"] != agent_session_id(id)
+                || external.payload["sessionID"] != command.session_id()
                 || !seen.insert((kind, external.external_id.clone()))
             {
                 return Err(StoreError::Invalid(
@@ -103,7 +103,7 @@ impl Store {
                 let value = Question {
                     id: QuestionId::new(),
                     command_id: id,
-                    session_id: agent_session_id(id),
+                    session_id: command.session_id(),
                     revision: Revision(1),
                     external: external.clone(),
                     state: QuestionState::Pending,

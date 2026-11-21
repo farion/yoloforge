@@ -33,7 +33,7 @@ impl Store {
         if command.kind != CommandKind::RunAgent || command.state == CommandState::Pending {
             return Err(StoreError::WorkConflict);
         }
-        if value.session_id != agent_session_id(id)
+        if value.session_id != command.session_id()
             || value.revision.0 == 0
             || value.messages.len() > 32
         {

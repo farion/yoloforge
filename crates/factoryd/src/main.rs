@@ -56,6 +56,28 @@ async fn main() -> Result<()> {
         listener.local_addr()?
     );
     let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let supervisor_store = store.clone();
+    let supervisor_stopping = stopping.clone();
+    let supervisor = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if supervisor_stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            let store = supervisor_store.clone();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if !matches!(
+                tokio::task::spawn_blocking(move || store.supervisor_tick(now)).await,
+                Ok(Ok(()))
+            ) {
+                eprintln!("Supervisor tick failed; durable state retained for retry");
+            }
+        }
+    });
     axum::serve(
         listener,
         factoryd::router_with_shutdown(&token, store, stopping.clone()),
@@ -68,5 +90,6 @@ async fn main() -> Result<()> {
         stopping.store(true, std::sync::atomic::Ordering::Relaxed);
     })
     .await?;
+    supervisor.abort();
     Ok(())
 }

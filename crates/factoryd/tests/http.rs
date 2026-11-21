@@ -156,6 +156,7 @@ async fn server() -> Server {
 }
 fn runner() -> RegisterRunner {
     RegisterRunner {
+        capabilities: vec![],
         id: RunnerId::new(),
         instance_id: InstanceId::new(),
         name: "laptop".into(),

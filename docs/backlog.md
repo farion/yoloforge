@@ -118,8 +118,8 @@ angenommene Aufträge nach Server-Neustart und echte Prozess-Wiederanläufe.
 Schreibende Agentenaufträge journalisieren Session-/Prompt-Absichten vor HTTP-
 Writes und gleichen unklare Ergebnisse über OpenCode ab. `unknown` reserviert
 den Stream weiter. Der echte Zwei-Agenten-Test bestätigt Wiederanlauf während
-Shelltools ohne doppelte Prompts oder Toolausführung. Offen: Long-Poll und
-Bedienabläufe für dauerhaft unauflösbare `unknown`-Zustände.
+Shelltools ohne doppelte Prompts oder Toolausführung. Long-Poll ist inzwischen
+implementiert. Offen: Bedienabläufe für dauerhaft unauflösbare `unknown`-Zustände.
 
 - Voraussetzungen: F-101, F-102.
 - Registrierung, Heartbeats, Long-Poll, Command-Journal und Event-Outbox.
@@ -146,8 +146,9 @@ Automatisches Clone/Fetch über verwaltete Hosting-Verbindungen bleibt eine Erwe
 
 ### F-106: OpenCode-Ausführung über beide Runner
 
-Status: **schreibender Durchstich umgesetzt**. `run_agent`, eigene Session pro
-Auftrag, deterministische IDs, Prompt-Zustellung, Verlauf-/Aktivitätsabgleich,
+Status: **schreibender Durchstich umgesetzt**. `run_agent`, neue Session beim
+normalen Start und explizite Fortsetzung nach Erfolg in derselben Session,
+deterministische IDs, Prompt-Zustellung, Verlauf-/Aktivitätsabgleich,
 persistente Fortschritte und Abschlusszusammenfassung. Zwei echte Agenten haben
 im Ubuntu-Labor gleichzeitig getrennte Worktrees geändert und Python-Prüfungen
 ausgeführt. Factory-/Runner-Neustart während laufender Shelltools erzeugte weder
@@ -159,7 +160,8 @@ Zustelljournal weitergegeben. Der echte Test prüft Agentenfragen mit vorher
 unbekannten Tokens, gespeicherte Antworten nach Factory-Neustart und Shell-Freigaben.
 Tests für konkurrierende Antworten, verschwundene Fragen und unbestätigte
 HTTP-Antworten ohne erneuten POST bestehen.
-Offen: SSE, verifizierte Pause/Resume sowie Session-Kontextfortsetzung über mehrere Aufträge.
+SSE und Session-Kontextfortsetzung nach Erfolg sind implementiert. Offen:
+verifizierte Pause/Resume laufender Prozesse und Fortsetzung nach Interrupt.
 
 - Voraussetzungen: F-104, F-105.
 - Adapter implementieren: Start, Prompt, Verlauf, Events, Pause, Rückfragen,
@@ -195,8 +197,9 @@ dauerhaften Sessionauszug mit bis zu 32 Nachrichten / 128 KiB Text und sichtbare
 Kürzungen. Toolinput/-ausgaben und abschließender Kontext wurden mit zwei echten
 Agenten einschließlich Factory-/Runner-Neustart geprüft. Alte/konkurrierende
 Quellrevisionen werden abgewiesen; gescheiterte Reads erhalten den letzten Stand.
-Offen: vollständiger OpenCode-Sessionverlauf, bestätigte Pause laufender Prozesse
-und Session-Fortsetzung nach einem Interrupt.
+Das paginierte projizierte Nachrichtenarchiv ist inzwischen implementiert.
+Offen: binäre Anhänge, bestätigte Pause laufender Prozesse und Session-Fortsetzung
+nach einem Interrupt.
 
 - Voraussetzungen: F-103, F-106.
 - Projektwahl, Ticketliste, Streams samt Runner, Sessionverlauf und Eingabe.
@@ -284,6 +287,13 @@ und Session-Fortsetzung nach einem Interrupt.
 - Review, Konfliktbehandlung und Test gegen aktuellen Zielbranch vor Integration.
 
 ### Etappe 3 – Supervisor
+
+Teilstand: [modellbasierter Session-Supervisor](supervisor.md) mit dauerhaftem
+Entscheidungsjournal, Bewertungsbudget, automatischer Compaction-Anforderung und
+Abschluss bereits erfolgreicher Sessions implementiert. Echte Modellbewertung,
+automatischer Abschluss mit Wissensnotiz und Wiederanlauf sind lokal geprüft.
+Ticket-Scheduling, automatische Antworten, Kostenmessung und bestätigtes Beenden
+laufender Sessions bleiben offen.
 
 - Projektregeln, Entscheidungsjournal und deterministisches Scheduling.
 - Ticket-Zuordnung mit Abhängigkeiten und Parallelitätslimits.

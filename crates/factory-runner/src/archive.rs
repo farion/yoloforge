@@ -13,7 +13,7 @@ pub struct Cursor {
     revision: u64,
     next: Option<String>,
     final_scan: bool,
-    finished: bool,
+    pub(crate) finished: bool,
     pending: Option<ArchiveBatch>,
 }
 /// One bounded page per step. A terminal result is held until the final traversal has been uploaded.
@@ -52,14 +52,14 @@ pub async fn step(
         execution.endpoint == client.endpoint(),
         "Archive endpoint changed"
     );
-    let session_id = agent_session_id(record.command.id);
+    let session_id = record.command.session_id();
     let session = client
         .session(&session_id)
         .await?
         .context("Archive session missing")?;
     ensure!(
         session["id"] == session_id
-            && session["metadata"]["factory_command"] == record.command.id.to_string()
+            && session["metadata"]["factory_command"] == record.command.session_root().to_string()
             && session["location"]["directory"] == execution.workspace.path,
         "Archive session identity changed"
     );

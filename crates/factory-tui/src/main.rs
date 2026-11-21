@@ -398,10 +398,20 @@ async fn main() -> Result<()> {
                                 .cloned()
                             {
                                 open_stream = Some(current.id);
+                                let previous = last
+                                    .as_ref()
+                                    .and_then(|s| {
+                                        s.commands.iter().rev().find(|c| {
+                                            c.stream_id == current.id
+                                                && c.kind == CommandKind::RunAgent
+                                        })
+                                    })
+                                    .filter(|c| c.state == CommandState::Succeeded)
+                                    .map(|c| c.id);
                                 stream_dialogs
                                     .entry(current.id)
-                                    .and_modify(|d| d.reopen(current.clone()))
-                                    .or_insert_with(|| stream::Dialog::new(current));
+                                    .and_modify(|d| d.reopen(current.clone(), previous))
+                                    .or_insert_with(|| stream::Dialog::new(current, previous));
                             }
                         }
                         KeyCode::Enter if view == 5 => {

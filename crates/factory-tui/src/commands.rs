@@ -6,6 +6,38 @@ mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Read autonomous session supervisor policy and remaining evaluation budget.
+    Supervisor { project: ProjectId },
+    /// Configure a dedicated supervisor stream (revision 0 creates the policy).
+    SupervisorSet {
+        project: ProjectId,
+        #[arg(long)]
+        stream: StreamId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long,action=clap::ArgAction::Set)]
+        enabled: bool,
+        #[arg(long, default_value_t = 10)]
+        evaluation_budget: u32,
+        #[arg(long, default_value_t = 60)]
+        interval_seconds: u32,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    /// Read the latest autonomous evaluations, reasons, source links and action outcomes.
+    SupervisorHistory { project: ProjectId },
+    /// Retire future continuation of a successful archived session, preserving its history.
+    CloseSession {
+        id: CommandId,
+        #[arg(long)]
+        expected_stream_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    /// Read the session closure record for any command in its lineage.
+    SessionClosure { id: CommandId },
     /// Request native compaction for an active agent session (admission is not completion).
     Compact {
         id: CommandId,
@@ -172,6 +204,18 @@ pub enum QuestionCommand {
 }
 #[derive(Subcommand)]
 pub enum StreamCommand {
+    /// Continue the most recent successful, archived session on its owning runner.
+    Continue {
+        id: StreamId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        previous_command: CommandId,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
     /// Request a durable scheduling hold and best-effort interrupt.
     Pause {
         id: StreamId,
@@ -330,6 +374,73 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Supervisor { project } => print(&client.supervisor_policy(project).await?),
+        Command::SupervisorHistory { project } => {
+            print(&client.supervisor_evaluations(project).await?)
+        }
+        Command::SupervisorSet {
+            project,
+            stream,
+            expected_revision,
+            enabled,
+            evaluation_budget,
+            interval_seconds,
+            request_id,
+        } => print(
+            &client
+                .set_supervisor(
+                    project,
+                    &SetSupervisor {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        stream_id: stream,
+                        enabled,
+                        evaluation_budget,
+                        interval_seconds,
+                    },
+                )
+                .await?,
+        ),
+        Command::CloseSession {
+            id,
+            expected_stream_revision,
+            reason,
+            request_id,
+        } => print(
+            &client
+                .close_session(
+                    id,
+                    &CloseSession {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_stream_revision: Revision(expected_stream_revision),
+                        reason,
+                    },
+                )
+                .await?,
+        ),
+        Command::SessionClosure { id } => print(&client.session_closure(id).await?),
+        Command::Stream {
+            command:
+                StreamCommand::Continue {
+                    id,
+                    expected_revision,
+                    previous_command,
+                    prompt,
+                    request_id,
+                },
+        } => print(
+            &client
+                .continue_agent(
+                    id,
+                    &ContinueAgent {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        previous_command_id: previous_command,
+                        prompt,
+                    },
+                )
+                .await?,
+        ),
         Command::Compact {
             id,
             expected_stream_revision,

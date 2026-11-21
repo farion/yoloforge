@@ -40,6 +40,87 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn supervisor_policy(
+        &self,
+        id: ProjectId,
+    ) -> Result<Option<SupervisorPolicy>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/projects/{id}/supervisor", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn set_supervisor(
+        &self,
+        id: ProjectId,
+        body: &SetSupervisor,
+    ) -> Result<SupervisorPolicy, ClientError> {
+        Self::decode(
+            self.http
+                .put(format!("{}/v1/projects/{id}/supervisor", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn supervisor_evaluations(
+        &self,
+        id: ProjectId,
+    ) -> Result<Vec<SupervisorEvaluation>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/projects/{id}/supervisor/evaluations",
+                    self.base
+                ))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn close_session(
+        &self,
+        id: CommandId,
+        body: &CloseSession,
+    ) -> Result<SessionClosure, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/commands/{id}/closure", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn session_closure(
+        &self,
+        id: CommandId,
+    ) -> Result<Option<SessionClosure>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/commands/{id}/closure", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn continue_agent(
+        &self,
+        id: StreamId,
+        body: &ContinueAgent,
+    ) -> Result<RunnerCommand, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/streams/{id}/continue", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn request_compaction(
         &self,
         id: CommandId,
