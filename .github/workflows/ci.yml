@@ -27,3 +27,4 @@ jobs:
           toolchain: 1.98.0
       - run: cargo test --locked -p factory-tui --bin yoloforge
       - run: cargo build --locked -p factory-tui --bin yoloforge
+      - run: python scripts/smoke-client.py target/debug/yoloforge.exe

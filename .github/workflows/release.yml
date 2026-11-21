@@ -64,6 +64,7 @@ jobs:
           python-version: '3.13'
       - run: cargo test --locked -p factory-tui --bin yoloforge
       - run: cargo build --release --locked -p factory-tui --bin yoloforge
+      - run: python scripts/smoke-client.py target/release/yoloforge.exe
       - run: python scripts/package-release.py --kind tui --os windows --arch x86_64 --version "$env:RELEASE_TAG"
       - uses: actions/upload-artifact@v4
         with:
