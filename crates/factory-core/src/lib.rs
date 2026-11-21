@@ -109,6 +109,12 @@ pub struct ArchivePage {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeNote {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<KnowledgeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<KnowledgeId>,
     pub id: KnowledgeId,
     pub project_id: ProjectId,
     pub ticket_id: Option<TicketId>,

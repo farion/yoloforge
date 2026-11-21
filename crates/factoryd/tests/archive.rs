@@ -3,6 +3,153 @@ use factory_protocol::*;
 use factoryd::store::{Store, StoreError};
 use serde_json::json;
 
+#[test]
+fn supervisor_context_and_extracted_memory_use_the_target_branch_not_its_own_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let target = command(&store);
+    finish_agent(&store, &target, "done".into());
+    let target_stream = store
+        .snapshot()
+        .unwrap()
+        .streams
+        .into_iter()
+        .find(|s| s.id == target.stream_id)
+        .unwrap();
+    for (branch, title) in [
+        (target_stream.branch.as_str(), "ONLY_TARGET_RULE"),
+        ("other/branch", "FOREIGN_BRANCH_RULE"),
+    ] {
+        store
+            .create_knowledge(CreateKnowledge {
+                request_id: RequestId::new(),
+                project_id: target_stream.project_id,
+                ticket_id: None,
+                branch: Some(branch.into()),
+                supersedes: None,
+                title: title.into(),
+                content: "Branch-local reference".into(),
+                source: "operator".into(),
+                source_command: None,
+                priority: 5,
+            })
+            .unwrap();
+    }
+    let p = supervisor(&store, &target);
+    let e = store
+        .supervisor_evaluations(p.project_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let worker = store
+        .acknowledge(
+            target.runner_id,
+            e.command_id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            },
+        )
+        .unwrap();
+    let prompt = &worker.agent_spec.as_ref().unwrap().prompt;
+    assert!(prompt.contains("ONLY_TARGET_RULE"));
+    assert!(!prompt.contains("FOREIGN_BRANCH_RULE"));
+    finish_agent(
+        &store,
+        &worker,
+        json!({"action":"close","reason":"goal met","memory":"Scoped observation"}).to_string(),
+    );
+    store.supervisor_tick(p.next_unix_ms).unwrap();
+    let observation = store
+        .knowledge(p.project_id)
+        .unwrap()
+        .into_iter()
+        .find(|n| n.source_command == Some(target.id))
+        .unwrap();
+    assert_eq!(observation.branch, Some(target_stream.branch.clone()));
+    assert!(store
+        .knowledge_context(p.project_id, None, 8192)
+        .unwrap()
+        .notes
+        .is_empty());
+    assert!(!store
+        .knowledge_context_for_branch(p.project_id, None, Some("other/branch"), 8192)
+        .unwrap()
+        .text
+        .contains("Scoped observation"));
+}
+
+#[test]
+fn migration_retires_unscoped_legacy_supervisor_observations_without_deleting_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let target = command(&store);
+    finish_agent(&store, &target, "done".into());
+    let p = supervisor(&store, &target);
+    let e = store
+        .supervisor_evaluations(p.project_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let worker = store
+        .acknowledge(
+            target.runner_id,
+            e.command_id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            },
+        )
+        .unwrap();
+    finish_agent(
+        &store,
+        &worker,
+        json!({"action":"close","reason":"goal met","memory":"A branch-local observation"})
+            .to_string(),
+    );
+    store.supervisor_tick(p.next_unix_ms).unwrap();
+    let note = store.knowledge(p.project_id).unwrap().pop().unwrap();
+    assert!(note.branch.is_some());
+    assert!(store
+        .knowledge_context(p.project_id, None, 8192)
+        .unwrap()
+        .notes
+        .is_empty());
+    drop(store);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "UPDATE knowledge SET data=json_remove(data,'$.branch') WHERE id=?1",
+        [note.id.to_string()],
+    )
+    .unwrap();
+    db.execute_batch("DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
+        .unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let retired = store.knowledge(p.project_id).unwrap().pop().unwrap();
+    assert!(retired.retired);
+    assert_eq!(retired.revision, Revision(2));
+    assert_eq!(retired.id, note.id);
+    assert_eq!(retired.content, note.content);
+    assert_eq!(
+        store.supervisor_evaluations(p.project_id).unwrap()[0].knowledge_id,
+        Some(note.id)
+    );
+    assert!(store
+        .knowledge_context(p.project_id, None, 8192)
+        .unwrap()
+        .notes
+        .is_empty());
+    assert!(store
+        .events(0, 200)
+        .unwrap()
+        .events
+        .iter()
+        .any(|e| e.kind == "knowledge.retired_for_scope_migration"
+            && e.aggregate_id == note.id.to_string()));
+}
+
 #[tokio::test]
 async fn legacy_runner_cannot_poll_or_ack_new_lifecycle_payloads() {
     let dir = tempfile::tempdir().unwrap();

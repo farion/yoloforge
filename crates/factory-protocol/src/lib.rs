@@ -60,6 +60,10 @@ pub struct ReportArchive {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateKnowledge {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<SupersedeKnowledge>,
     pub request_id: RequestId,
     pub project_id: ProjectId,
     pub ticket_id: Option<TicketId>,
@@ -68,6 +72,13 @@ pub struct CreateKnowledge {
     pub source: String,
     pub source_command: Option<CommandId>,
     pub priority: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupersedeKnowledge {
+    pub id: KnowledgeId,
+    pub expected_revision: Revision,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

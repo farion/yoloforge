@@ -17,7 +17,7 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | 9 | Clone/Fetch und Repository-Einrichtung | Lokale CLI clone/register/fetch mit atomarer Runner-Zuordnung implementiert; TUI-/Remote-Aufträge offen |
 | 10 | Checkpoints und Laptop-/Server-Übergabe | Offen; abhängig von 1 |
 | 11 | Review und Integration | Offen; Agent-Erfolg führt bereits zu Review |
-| 12 | Projektgedächtnis und Kontextauswahl | Strukturierte Notizen und begrenzte Prompt-Übernahme; Supervisor sichert quellenverknüpfte Modellbeobachtungen vor Aktionen. Widerspruchs-/Branch-Gültigkeit und modellspezifischer Tokenizer offen |
+| 12 | Projektgedächtnis und Kontextauswahl | Branch-/Ticketscope, budgetierte Prompt-Übernahme und atomare revisionsgeschützte Ablösung mit Provenienz implementiert; Supervisor-Beobachtungen bleiben branchlokal. Automatische semantische Widerspruchsauflösung und modellspezifischer Tokenizer offen |
 | 13 | Supervisor | Modellbasierter Session-Supervisor mit Entscheidungsjournal, Bewertungsbudget, autonomer Compaction und Abschluss erfolgreicher Sessions implementiert; Ticketplanung, automatische Antworten und bestätigtes Beenden laufender Sessions offen |
 | 14 | Android und Push | Offen; reales Gerät/Push-Zugang für Abnahme nötig |
 | 15 | GitHub-Releases und Ansible-Vertrag | v0.1.1 veröffentlicht; Server-/Linux-TUI-Downloads lokal geprüft, Windows nativ in CI geprüft; Android-APK erst mit implementierter App |

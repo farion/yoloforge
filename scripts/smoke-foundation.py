@@ -174,6 +174,23 @@ def main():
         check(cli("knowledge", "context", "--project", project["id"], "--ticket", ticket["id"])["notes"] == [], "retired knowledge still selected")
         check(cli("knowledge", "list", "--project", project["id"])[0]["content"] == note["content"], "retirement lost provenance")
         print("PASS knowledge CLI/API deduplication, ticket scope, context selection and retirement")
+        branch = "feature/grüße"
+        scoped_args = ("knowledge", "add", "--project", project["id"], "--branch", branch,
+                       "--title", "Branch decision", "--content", "Old local rule", "--source", "smoke operator")
+        scoped = cli(*scoped_args)
+        check(cli("knowledge", "context", "--project", project["id"])["notes"] == [], "branch knowledge leaked into project-wide context")
+        check(cli("knowledge", "context", "--project", project["id"], "--branch", "other")["notes"] == [], "branch knowledge leaked into another branch")
+        replacement_args = ("knowledge", "add", "--project", project["id"], "--branch", branch,
+                            "--title", "Corrected branch decision", "--content", "New local rule", "--source", "corrected operator decision",
+                            "--supersedes", scoped["id"], "--supersedes-revision", "1", "--request-id", str(uuid.uuid4()))
+        replacement = cli(*replacement_args)
+        check(cli(*replacement_args) == replacement, "replacement replay duplicated a note")
+        branch_context = cli("knowledge", "context", "--project", project["id"], "--branch", branch)
+        check([n["id"] for n in branch_context["notes"]] == [replacement["id"]], "superseded note still active")
+        old = next(n for n in cli("knowledge", "list", "--project", project["id"]) if n["id"] == scoped["id"])
+        check(cli("knowledge", "show", old["id"]) == old, "historic note lookup differs")
+        check(old["retired"] and old["superseded_by"] == replacement["id"] and replacement["supersedes"] == old["id"], "replacement provenance broken")
+        print("PASS branch-scoped knowledge CLI/API and atomic revision-protected supersession")
         stream = cli("stream", "create", "--project", project["id"], "--goal", "smoke-stream", "--runner", local_id, "--ticket", ticket["id"])
         command = cli("stream", "check", stream["id"], "--expected-revision", "1")
         wait_for(lambda: snapshot()["commands"][0]["state"] in ("succeeded", "failed"))

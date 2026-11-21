@@ -1,4 +1,7 @@
 use super::*;
+pub(super) async fn read(State(app): State<App>, Path(id): Path<KnowledgeId>) -> Response {
+    db_call(RequestId::new(), move || app.store.knowledge_note(id)).await
+}
 pub(super) async fn create(
     State(app): State<App>,
     body: Result<Json<CreateKnowledge>, JsonRejection>,
@@ -34,6 +37,7 @@ pub(super) async fn list(State(app): State<App>, Path(id): Path<ProjectId>) -> R
 }
 #[derive(serde::Deserialize)]
 pub(super) struct ContextQuery {
+    branch: Option<String>,
     ticket: Option<TicketId>,
     #[serde(default = "default_budget")]
     budget_bytes: usize,
@@ -47,8 +51,12 @@ pub(super) async fn context(
     Query(query): Query<ContextQuery>,
 ) -> Response {
     db_call(RequestId::new(), move || {
-        app.store
-            .knowledge_context(id, query.ticket, query.budget_bytes)
+        app.store.knowledge_context_for_branch(
+            id,
+            query.ticket,
+            query.branch.as_deref(),
+            query.budget_bytes,
+        )
     })
     .await
 }

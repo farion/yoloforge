@@ -100,7 +100,17 @@ pub enum Command {
 }
 #[derive(Subcommand)]
 pub enum KnowledgeCommand {
+    /// Read a specific note, including retired content and supersession references.
+    Show { id: KnowledgeId },
     Add {
+        /// Restrict this note to an exact workstream branch (no inheritance).
+        #[arg(long)]
+        branch: Option<String>,
+        /// Atomically retire and replace a note in the same project/ticket/branch scope.
+        #[arg(long, requires = "supersedes_revision")]
+        supersedes: Option<KnowledgeId>,
+        #[arg(long, requires = "supersedes")]
+        supersedes_revision: Option<u64>,
         #[arg(long)]
         project: ProjectId,
         #[arg(long)]
@@ -123,6 +133,8 @@ pub enum KnowledgeCommand {
         project: ProjectId,
     },
     Context {
+        #[arg(long)]
+        branch: Option<String>,
         #[arg(long)]
         project: ProjectId,
         #[arg(long)]
@@ -495,7 +507,11 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             )
         }
         Command::Knowledge { command } => match command {
+            KnowledgeCommand::Show { id } => print(&client.knowledge_note(id).await?),
             KnowledgeCommand::Add {
+                branch,
+                supersedes,
+                supersedes_revision,
                 project,
                 ticket,
                 title,
@@ -507,6 +523,13 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             } => print(
                 &client
                     .create_knowledge(&CreateKnowledge {
+                        branch,
+                        supersedes: supersedes.zip(supersedes_revision).map(|(id, revision)| {
+                            SupersedeKnowledge {
+                                id,
+                                expected_revision: Revision(revision),
+                            }
+                        }),
                         request_id: request_id.unwrap_or_default(),
                         project_id: project,
                         ticket_id: ticket,
@@ -520,12 +543,13 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             ),
             KnowledgeCommand::List { project } => print(&client.knowledge(project).await?),
             KnowledgeCommand::Context {
+                branch,
                 project,
                 ticket,
                 budget_bytes,
             } => print(
                 &client
-                    .knowledge_context(project, ticket, budget_bytes)
+                    .knowledge_context_for_branch(project, ticket, branch.as_deref(), budget_bytes)
                     .await?,
             ),
             KnowledgeCommand::Retire {

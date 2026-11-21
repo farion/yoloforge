@@ -57,7 +57,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 11,
+            version <= 12,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -92,6 +92,9 @@ impl Store {
         }
         if version < 11 {
             tx.execute_batch(include_str!("../migrations/011_supervisor.sql"))?;
+        }
+        if version < 12 {
+            tx.execute_batch(include_str!("../migrations/012_knowledge_scope.sql"))?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))

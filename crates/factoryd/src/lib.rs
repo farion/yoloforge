@@ -100,6 +100,7 @@ pub fn router_with_shutdown(
                 .layer(axum::extract::DefaultBodyLimit::max(9 * 1024 * 1024)),
         )
         .route("/v1/knowledge", post(knowledge_routes::create))
+        .route("/v1/knowledge/{id}", get(knowledge_routes::read))
         .route("/v1/knowledge/{id}/retire", post(knowledge_routes::retire))
         .route("/v1/projects/{id}/knowledge", get(knowledge_routes::list))
         .route("/v1/projects/{id}/context", get(knowledge_routes::context))

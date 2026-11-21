@@ -1,5 +1,15 @@
 # Datenmodell und Runner-Protokoll
 
+## Wissensgültigkeit (Schema v12)
+
+Notizen können einen exakten `branch`-Scope tragen. Ohne Branchvorgabe liefert die
+Kontextvorschau ausschließlich projektweit gültige Notizen; Agentenaufträge wählen
+für ihren tatsächlichen Workstream-Branch. `CreateKnowledge.supersedes` benennt
+Vorgängernotiz und erwartete Revision. Neue Notiz, Stilllegung und beidseitige
+Provenienz werden atomar gespeichert. Frühere ungescopte Supervisor-Beobachtungen
+werden bei der Migration mit eigenem Ereignis stillgelegt, nicht gelöscht.
+Siehe [knowledge.md](knowledge.md).
+
 ## Session-Lifecycle und Supervisor (Schema v10/v11)
 
 Fortsetzungsaufträge enthalten im unveränderlichen `agent_spec.continuation` den

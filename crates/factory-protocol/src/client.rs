@@ -40,6 +40,15 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn knowledge_note(&self, id: KnowledgeId) -> Result<KnowledgeNote, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/knowledge/{id}", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn supervisor_policy(
         &self,
         id: ProjectId,
@@ -261,12 +270,25 @@ impl FactoryClient {
         ticket: Option<TicketId>,
         budget: usize,
     ) -> Result<KnowledgeContext, ClientError> {
+        self.knowledge_context_for_branch(id, ticket, None, budget)
+            .await
+    }
+    pub async fn knowledge_context_for_branch(
+        &self,
+        id: ProjectId,
+        ticket: Option<TicketId>,
+        branch: Option<&str>,
+        budget: usize,
+    ) -> Result<KnowledgeContext, ClientError> {
         let mut request = self
             .http
             .get(format!("{}/v1/projects/{id}/context", self.base))
             .query(&[("budget_bytes", budget)]);
         if let Some(ticket) = ticket {
             request = request.query(&[("ticket", ticket)]);
+        }
+        if let Some(branch) = branch {
+            request = request.query(&[("branch", branch)]);
         }
         Self::decode(request.send().await).await
     }

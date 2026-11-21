@@ -1,6 +1,6 @@
 # Autonomer Session-Supervisor
 
-Entwicklungsstand nach v0.1.1, Schema 11. Der Factory-Daemon führt einen
+Entwicklungsstand nach v0.1.1, Schema 12. Der Factory-Daemon führt einen
 dauerhaften Bewertungszyklus aus. Ein echter OpenCode-Agent bewertet Sessions
 mit dem Provider/Modell des Projekts. Er entscheidet selbst zwischen `wait`,
 `compact` und `close`; einzelne Entscheidungen benötigen keine menschliche
@@ -46,14 +46,16 @@ Ausführungen werden damit nicht rückwirkend unterbrochen.
   Pausen, ungeklärte Zustände, offene Eingabewartezustände und Supervisoraufträge
   werden nicht automatisch überholt.
 - Der Agent erhält Streamziel, Status, einen begrenzten Fortschritts-/Ergebnistext,
-  einen begrenzten Archivauszug und budgetiertes Projektwissen. Dies ist noch
+  einen begrenzten Archivauszug und bis zu 4096 Bytes Projekt-/Ticketwissen mit
+  exakter Gültigkeit für den Zielbranch. Dies ist noch
   keine modellspezifische Messung der Kontextbelegung.
 - Antwortformat ist strikt JSON mit `action`, `reason` und `memory`.
   Unbekannte Aktionen, fehlende Felder, Markdown und übergroße Ausgaben werden
   als `invalid_decision` protokolliert, ohne Aktion.
 - Vor `compact` oder `close` speichert die Factory die Modellzusammenfassung als
   niedrig priorisierte, ausdrücklich unbestätigte Wissensnotiz mit Quellauftrag
-  und Bewertungsreferenz. Sie ist keine unabhängig geprüfte Tatsache.
+  und Bewertungsreferenz. Diese Beobachtung gilt ausschließlich auf dem Zielbranch;
+  sie ist keine unabhängig geprüfte Tatsache.
 - Policyänderungen und eine veränderte Zielstreamrevision verwerfen veraltete
   Entscheidungen. Notiz, Entscheidungsjournal und Aktionsauftrag werden in einer
   SQLite-Transaktion gespeichert. Wiederanlauf erzeugt keine zweite Aktion.
@@ -78,7 +80,8 @@ Ticketplanung mit Abhängigkeiten und Parallelitätslimits, belegte automatische
 Antworten, echte Token-/Kostenbudgets, automatische Neuaufteilung und das Beenden
 obsoleter **laufender** Sessions mit bestätigter Prozessruhe sind weitere Schritte.
 Die automatische Wissensübernahme ist zunächst eine quellenverknüpfte
-Modellbeobachtung; Widerspruchsauflösung und branchbezogene Gültigkeit sind offen.
+Modellbeobachtung. Branch-Gültigkeit und explizite revisionsgeschützte Ablösung sind
+implementiert; automatische semantische Widerspruchsauflösung bleibt offen.
 Der Supervisor wird im Moment per API/CLI eingerichtet, nicht über einen eigenen
 Ratatui-Dialog oder die noch ausstehende Android-App.
 

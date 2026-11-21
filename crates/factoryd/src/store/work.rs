@@ -319,7 +319,13 @@ impl Store {
             let project: Project = serde_json::from_str(&data)?;
             line(&project.profile.provider_id, 120)?;
             line(&project.profile.model_id, 200)?;
-            let context = Self::select_knowledge(tx, owner.project_id, &owner.ticket_ids, 8192)?;
+            let context = Self::select_knowledge(
+                tx,
+                owner.project_id,
+                &owner.ticket_ids,
+                Some(&owner.branch),
+                if supervised { 0 } else { 8192 },
+            )?;
             let knowledge = if context.notes.is_empty() {
                 String::new()
             } else {

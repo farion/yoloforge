@@ -1,5 +1,25 @@
 use super::*;
 
+fn branch(value: &str) -> Result<()> {
+    line(value, 240)?;
+    if value == "HEAD"
+        || value == "@"
+        || value.starts_with('-')
+        || value.ends_with('.')
+        || value.contains("..")
+        || value.contains("@{")
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+        || value
+            .split('/')
+            .any(|p| p.is_empty() || p.starts_with('.') || p.ends_with(".lock"))
+    {
+        return Err(StoreError::Invalid("Invalid knowledge branch name"));
+    }
+    Ok(())
+}
+
 fn scope(tx: &Transaction<'_>, project: ProjectId, ticket: Option<TicketId>) -> Result<()> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
@@ -25,6 +45,17 @@ fn scope(tx: &Transaction<'_>, project: ProjectId, ticket: Option<TicketId>) -> 
 }
 
 impl Store {
+    pub fn knowledge_note(&self, id: KnowledgeId) -> Result<KnowledgeNote> {
+        let db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let data: Option<String> = db
+            .query_row(
+                "SELECT data FROM knowledge WHERE id=?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?)
+    }
     pub fn create_knowledge(&self, body: CreateKnowledge) -> Result<KnowledgeNote> {
         self.mutate(body.request_id, "knowledge.create", &body, |tx| {
             Self::create_knowledge_in(tx, &body)
@@ -35,6 +66,9 @@ impl Store {
         body: &CreateKnowledge,
     ) -> Result<KnowledgeNote> {
         scope(tx, body.project_id, body.ticket_id)?;
+        if let Some(value) = &body.branch {
+            branch(value)?;
+        }
         line(&body.title, 160)?;
         line(&body.source, 512)?;
         if body.content.trim().is_empty()
@@ -54,8 +88,46 @@ impl Store {
                     "Knowledge source command belongs to another project or is missing",
                 ));
             }
+            if let Some(branch) = &body.branch {
+                let source_branch:String=tx.query_row("SELECT json_extract(s.data,'$.branch') FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1",[command.to_string()],|r|r.get(0))?;
+                if *branch != source_branch {
+                    return Err(StoreError::Invalid(
+                        "Knowledge branch differs from source command workstream",
+                    ));
+                }
+            }
         }
+        let mut previous = if let Some(replacement) = &body.supersedes {
+            let data: Option<String> = tx
+                .query_row(
+                    "SELECT data FROM knowledge WHERE id=?1",
+                    [replacement.id.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let old: KnowledgeNote = serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
+            if old.project_id != body.project_id
+                || old.ticket_id != body.ticket_id
+                || old.branch != body.branch
+            {
+                return Err(StoreError::Invalid(
+                    "Replacement must preserve project, ticket and branch scope",
+                ));
+            }
+            if old.revision != replacement.expected_revision {
+                return Err(StoreError::RevisionConflict(old.revision));
+            }
+            if old.retired || old.superseded_by.is_some() {
+                return Err(StoreError::WorkConflict);
+            }
+            Some(old)
+        } else {
+            None
+        };
         let note = KnowledgeNote {
+            branch: body.branch.clone(),
+            supersedes: body.supersedes.as_ref().map(|r| r.id),
+            superseded_by: None,
             id: KnowledgeId::new(),
             project_id: body.project_id,
             ticket_id: body.ticket_id,
@@ -78,6 +150,16 @@ impl Store {
                 serde_json::to_string(&note)?
             ],
         )?;
+        if let Some(old) = &mut previous {
+            old.retired = true;
+            old.superseded_by = Some(note.id);
+            old.revision.0 += 1;
+            tx.execute(
+                "UPDATE knowledge SET retired=1,data=?1 WHERE id=?2",
+                params![serde_json::to_string(old)?, old.id.to_string()],
+            )?;
+            event(tx, "knowledge.superseded", old.id.to_string(), old)?;
+        }
         event(tx, "knowledge.created", note.id.to_string(), &note)?;
         Ok(note)
     }
@@ -133,6 +215,15 @@ impl Store {
         ticket: Option<TicketId>,
         budget: usize,
     ) -> Result<KnowledgeContext> {
+        self.knowledge_context_for_branch(project, ticket, None, budget)
+    }
+    pub fn knowledge_context_for_branch(
+        &self,
+        project: ProjectId,
+        ticket: Option<TicketId>,
+        selected_branch: Option<&str>,
+        budget: usize,
+    ) -> Result<KnowledgeContext> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction()?;
         scope(&tx, project, ticket)?;
@@ -140,6 +231,7 @@ impl Store {
             &tx,
             project,
             &ticket.into_iter().collect::<Vec<_>>(),
+            selected_branch,
             budget,
         )
     }
@@ -147,25 +239,30 @@ impl Store {
         tx: &Transaction<'_>,
         project: ProjectId,
         tickets: &[TicketId],
+        selected_branch: Option<&str>,
         budget: usize,
     ) -> Result<KnowledgeContext> {
         if budget > 16384 {
             return Err(StoreError::Invalid("Knowledge budget exceeds 16384 bytes"));
         }
+        if let Some(value) = selected_branch {
+            branch(value)?;
+        }
         // Filter scope in SQL before limiting; unrelated ticket notes cannot crowd out project notes.
         let ticket_json = serde_json::to_string(tickets)?;
-        let filter="project_id=?1 AND retired=0 AND (ticket_id IS NULL OR ticket_id IN (SELECT value FROM json_each(?2)))";
+        let filter="project_id=?1 AND retired=0 AND (ticket_id IS NULL OR ticket_id IN (SELECT value FROM json_each(?2))) AND (json_extract(data,'$.branch') IS NULL OR json_extract(data,'$.branch')=?3)";
         let total: usize = tx.query_row(
             &format!("SELECT count(*) FROM knowledge WHERE {filter}"),
-            params![project.to_string(), ticket_json],
+            params![project.to_string(), ticket_json, selected_branch],
             |r| r.get(0),
         )?;
         let mut stmt = tx.prepare(&format!(
             "SELECT data FROM knowledge WHERE {filter} ORDER BY priority DESC,rowid DESC LIMIT 256"
         ))?;
-        let rows = stmt.query_map(params![project.to_string(), ticket_json], |r| {
-            r.get::<_, String>(0)
-        })?;
+        let rows = stmt.query_map(
+            params![project.to_string(), ticket_json, selected_branch],
+            |r| r.get::<_, String>(0),
+        )?;
         let mut context = KnowledgeContext {
             notes: Vec::new(),
             text: String::new(),
@@ -175,8 +272,13 @@ impl Store {
         for row in rows {
             let note: KnowledgeNote = serde_json::from_str(&row?)?;
             let item = format!(
-                "\n[Knowledge {} revision {}]\n{}\nSource: {}\n{}\n",
-                note.id, note.revision.0, note.title, note.source, note.content
+                "\n[Knowledge {} revision {} | branch: {}]\n{}\nSource: {}\n{}\n",
+                note.id,
+                note.revision.0,
+                note.branch.as_deref().unwrap_or("project-wide"),
+                note.title,
+                note.source,
+                note.content
             );
             if context.text.len() + item.len() <= budget {
                 context.text.push_str(&item);
