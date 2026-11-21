@@ -40,6 +40,26 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn report_runtime_binding(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        body: &RuntimeBinding,
+    ) -> Result<RuntimeBinding, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/runtime-binding",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn termination(
         &self,
         id: CommandId,

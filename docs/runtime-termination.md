@@ -1,7 +1,8 @@
 # Bestätigte Runtime-Beendigung
 
 API und CLI können einen aktiven Container-Auftrag beenden. Voraussetzung ist
-ein bereits vom Runner gespeicherter Containment-Nachweis. Die Anfrage bindet
+eine bereits vom Runner gespeicherte Runtime-Bindung (bei älteren Ausführungen
+ein Containment-Nachweis). Die Anfrage bindet
 Auftrag, Streamrevision, vollständige Container-ID und Startzeit:
 
 ```sh
@@ -16,6 +17,11 @@ Bei unklarer HTTP-Zustellung dieselbe Anfrage mit derselben Request-ID wiederhol
 Ein neuer Versuch nach `unknown` braucht eine neue Request-ID, aktuelle Revision
 und `--previous-request OLD_REQUEST_UUID`. Ereignisse und Runner-Receipts erhalten
 die Historie; die Statusabfrage zeigt den neuesten Versuch.
+
+Vor dem ersten Session-/Prompt-Schreibzugriff veröffentlicht der Runner seine
+Runtime-Bindung unveränderlich in Factory. Nach Verlust des lokalen Journals
+kann ausschließlich die Beendigung diese zentrale Bindung verwenden; Prompt-
+Zustellung und Session-Fortsetzung werden daraus nicht rekonstruiert.
 
 Der Runner prüft seine persistierte Bindung einschließlich Docker-Daemon-ID,
 Container-ID, Startzeit, Workspace und Runtime-Konfiguration. Vor `docker rm
@@ -34,11 +40,12 @@ Anfordern dieser Beendigung.
 
 ## Grenzen und Versionierung
 
-- Server zuerst aktualisieren: DB-Schema 15, Runner-Journal 4,
+- Server zuerst aktualisieren: DB-Schema 16, Runner-Journal 4,
   Capability `runtime-termination-v1`.
 - Legacy-Bindungen ohne gespeicherte Daemon-ID werden nicht automatisch adoptiert.
-- Fehlendes Journal, fehlender Servernachweis, geänderter Daemon oder neu gestarteter
-  Container erlauben keine Freigabe. Native Interrupt-/Prompt-Recovery bleibt offen.
+- Fehlen sowohl Journal als auch zentrale Bindung, bleibt der Auftrag reserviert.
+  Geänderter Daemon oder neu gestarteter Container erlauben keine Freigabe.
+  Native Interrupt-/Prompt-Recovery bleibt offen.
 - Beendet werden Prozesse der dedizierten Runtime; bereits ausgelöste externe
   Dienste werden dadurch nicht abgebrochen. Checkpoint/Ownership-Handoff bleibt offen.
 
@@ -55,3 +62,14 @@ cargo test -p factory-runner --locked real_freezer -- --ignored --nocapture
 ```
 
 Zielhost- und Realmodell-Abnahme der Beendigung stehen noch aus.
+
+## Autonomer Supervisor
+
+Der Session-Supervisor kann nun `terminate` entscheiden. Voraussetzung ist eine
+bereits bei der Modellbewertung vorhandene zentrale Runtime-Bindung; die Antwort
+darf keine Container-ID wählen. Streamrevision und Policyrevision bleiben geprüft.
+Unverifizierte Wissensnotiz, Entscheidung und Beendigungsanfrage werden atomar
+gespeichert. Ohne passenden Runner-Nachweis bleibt der Auftrag reserviert.
+Unklare Beendigungen werden nicht automatisch erneut ausgelöst.
+Store-Tests prüfen modellförmige Entscheidungen und Neustart/Deduplizierung;
+eine echte Modellabnahme dieser neuen Entscheidung steht noch aus.

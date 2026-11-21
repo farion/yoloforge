@@ -116,6 +116,13 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
         tokio::task::block_in_place(|| journal.save(record))?;
     }
     // Network/protocol uncertainty never releases this stream for another writer.
+    if record.agent.as_ref().is_some_and(|a| a.runtime.is_some()) && !record.runtime_published {
+        return Ok(progress(
+            &command,
+            AgentPhase::Starting,
+            "Awaiting durable Factory runtime binding before agent writes",
+        ));
+    }
     match advance(&client, journal, record, args).await {
         Ok(value) => Ok(value),
         Err(_) => Ok(progress(

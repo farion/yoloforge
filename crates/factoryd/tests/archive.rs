@@ -123,7 +123,7 @@ fn migration_retires_unscoped_legacy_supervisor_observations_without_deleting_pr
         [note.id.to_string()],
     )
     .unwrap();
-    db.execute_batch("DROP TABLE runtime_terminations; DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
+    db.execute_batch("DROP TABLE runtime_bindings; DROP TABLE runtime_terminations; DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
         .unwrap();
     drop(db);
     let store = Store::open(&path).unwrap();
@@ -359,11 +359,32 @@ fn supervisor(store: &Store, target: &RunnerCommand) -> SupervisorPolicy {
 }
 #[test]
 fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
-    for action in ["compact", "close"] {
+    for action in ["compact", "close", "terminate"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         let store = Store::open(&path).unwrap();
         let target = command(&store);
+        if action == "terminate" {
+            store
+                .report_runtime_binding(
+                    target.runner_id,
+                    target.id,
+                    RuntimeBinding {
+                        command_id: target.id,
+                        stream_id: target.stream_id,
+                        runner_id: target.runner_id,
+                        ownership_epoch: 1,
+                        runtime: RuntimeRef {
+                            container_id: "a".repeat(64),
+                            started_at: "2026-11-21T00:00:00Z".into(),
+                        },
+                        daemon_id: "original-engine".into(),
+                        endpoint: "http://127.0.0.1:4096".into(),
+                        workspace: "/work/target".into(),
+                    },
+                )
+                .unwrap();
+        }
         if action == "close" {
             finish_agent(&store, &target, "Goal reached and tests passed".into());
         } else {
@@ -420,7 +441,24 @@ fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
                 .remaining_evaluations,
             1
         );
-        if action == "compact" {
+        if action == "terminate" {
+            let t = store.termination(target.id).unwrap().unwrap();
+            assert_eq!(t.request_id, applied.action_request_id.unwrap());
+            assert_eq!(t.state, TerminationState::Requested);
+            assert_eq!(t.binding.unwrap().runtime, applied.runtime.clone().unwrap());
+            // Autonomous request is not evidence of process termination.
+            assert_eq!(
+                store
+                    .snapshot()
+                    .unwrap()
+                    .commands
+                    .iter()
+                    .find(|c| c.id == target.id)
+                    .unwrap()
+                    .state,
+                CommandState::Accepted
+            );
+        } else if action == "compact" {
             assert_eq!(
                 store.compaction(target.id).unwrap().unwrap().request_id,
                 applied.action_request_id.unwrap()

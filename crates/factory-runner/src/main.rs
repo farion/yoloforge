@@ -204,6 +204,7 @@ async fn commands(
             return Ok(true);
         }
         if record.command.kind == CommandKind::RunAgent && record.result.is_none() {
+            containment::publish_binding(client, journal, &mut record, registration).await?;
             if containment::control(client, journal, &mut record, args, registration).await? {
                 return Ok(true);
             }

@@ -416,6 +416,7 @@ while True: time.sleep(1)
             .unwrap()
             .clone();
         let mut request = RuntimeTermination {
+            binding: None,
             request_id: RequestId::new(),
             command_id: command.id,
             stream_id: stream,
@@ -474,6 +475,20 @@ while True: time.sleep(1)
         assert!(!absent(&c).await.unwrap());
         request.previous_request = Some(request.request_id);
         request.request_id = RequestId::new();
+        let saved = record.agent.as_ref().unwrap().runtime.as_ref().unwrap();
+        request.binding = Some(RuntimeBinding {
+            command_id: command.id,
+            stream_id: stream,
+            runner_id: runner,
+            ownership_epoch: 1,
+            runtime: request.runtime.clone(),
+            daemon_id: saved.daemon_id.clone().unwrap(),
+            endpoint: saved.endpoint.clone(),
+            workspace: saved.workspace.clone(),
+        });
+        // Recover removal from central evidence after losing the entire local
+        // execution identity. Never recover a prompt or continuation this way.
+        record.agent = None;
         docker(&c, &["pause", &c.container_id]).await.unwrap();
         let proof = remove(&journal, &mut record, &args, &request)
             .await

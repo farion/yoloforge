@@ -136,6 +136,10 @@ pub fn router_with_shutdown(
         .route("/v1/streams", post(create_stream))
         .route("/v1/streams/{id}/control", post(set_control))
         .route(
+            "/v1/runners/{runner}/commands/{command}/runtime-binding",
+            post(termination_routes::bind),
+        )
+        .route(
             "/v1/commands/{id}/termination",
             get(termination_routes::read).post(termination_routes::create),
         )

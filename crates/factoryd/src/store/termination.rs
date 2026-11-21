@@ -1,4 +1,15 @@
 use super::*;
+pub(super) fn binding(tx: &Transaction<'_>, id: CommandId) -> Result<Option<RuntimeBinding>> {
+    let data: Option<String> = tx
+        .query_row(
+            "SELECT data FROM runtime_bindings WHERE command_id=?1",
+            [id.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    data.map(|s| serde_json::from_str(&s).map_err(Into::into))
+        .transpose()
+}
 pub(super) fn load(tx: &Transaction<'_>, id: CommandId) -> Result<Option<RuntimeTermination>> {
     let data: Option<String> = tx
         .query_row(
@@ -32,6 +43,66 @@ fn save(tx: &Transaction<'_>, value: &RuntimeTermination) -> Result<()> {
     )
 }
 impl Store {
+    pub fn report_runtime_binding(
+        &self,
+        runner: RunnerId,
+        id: CommandId,
+        body: RuntimeBinding,
+    ) -> Result<RuntimeBinding> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let cmd = super::work::command(&tx, id, runner, body.ownership_epoch)?;
+        if body.command_id != id
+            || body.stream_id != cmd.stream_id
+            || body.runner_id != runner
+            || cmd.kind != CommandKind::RunAgent
+        {
+            return Err(StoreError::WorkConflict);
+        }
+        if let Some(old) = binding(&tx, id)? {
+            return if old == body {
+                Ok(old)
+            } else {
+                Err(StoreError::WorkConflict)
+            };
+        }
+        if cmd.state != CommandState::Accepted || load(&tx, id)?.is_some() {
+            return Err(StoreError::WorkConflict);
+        }
+        line(&body.runtime.started_at, 128)?;
+        line(&body.daemon_id, 200)?;
+        line(&body.workspace, 4096)?;
+        if body.runtime.container_id.len() != 64
+            || !body
+                .runtime
+                .container_id
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+            || !body.workspace.starts_with('/')
+        {
+            return Err(StoreError::Invalid("Invalid runtime identity"));
+        }
+        let url = url::Url::parse(&body.endpoint)
+            .map_err(|_| StoreError::Invalid("Invalid runtime endpoint"))?;
+        if url.scheme() != "http"
+            || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(StoreError::Invalid(
+                "Local credential-free endpoint required",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO runtime_bindings(command_id,data) VALUES(?1,?2)",
+            params![id.to_string(), serde_json::to_string(&body)?],
+        )?;
+        event(&tx, "runtime.bound", id.to_string(), &body)?;
+        tx.commit()?;
+        Ok(body)
+    }
     pub fn termination(&self, id: CommandId) -> Result<Option<RuntimeTermination>> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction()?;
@@ -57,65 +128,77 @@ impl Store {
             body.request_id,
             &format!("runtime.terminate/{id}"),
             &body,
-            |tx| {
-                line(&body.reason, 512)?;
-                let data: Option<String> = tx
-                    .query_row(
-                        "SELECT data FROM commands WHERE id=?1",
-                        [id.to_string()],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                let cmd: RunnerCommand = serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
-                let mut owner = super::work::stream(tx, cmd.stream_id)?;
-                if owner.revision != body.expected_stream_revision {
-                    return Err(StoreError::RevisionConflict(owner.revision));
-                }
-                if cmd.kind != CommandKind::RunAgent
-                    || cmd.state != CommandState::Accepted
-                    || cmd.runner_id != owner.runner_id
-                    || cmd.ownership_epoch != owner.ownership_epoch
-                {
-                    return Err(StoreError::WorkConflict);
-                }
-                let c =
-                    super::controls::load(tx, cmd.stream_id)?.ok_or(StoreError::WorkConflict)?;
-                let p = c.proof.ok_or(StoreError::WorkConflict)?;
-                if c.command_id != Some(id)
-                    || body.runtime.container_id != p.container_id
-                    || body.runtime.started_at != p.started_at
-                {
-                    return Err(StoreError::WorkConflict);
-                }
-                match (load(tx, id)?, body.previous_request) {
-                    (None, None) => {}
-                    (Some(old), Some(previous))
-                        if old.request_id == previous
-                            && old.state == TerminationState::Unknown
-                            && old.runtime == body.runtime => {}
-                    _ => return Err(StoreError::WorkConflict),
-                }
-                let v = RuntimeTermination {
-                    request_id: body.request_id,
-                    command_id: id,
-                    stream_id: cmd.stream_id,
-                    runner_id: cmd.runner_id,
-                    ownership_epoch: cmd.ownership_epoch,
-                    runtime: body.runtime.clone(),
-                    previous_request: body.previous_request,
-                    reason: body.reason.clone(),
-                    state: TerminationState::Requested,
-                    summary: "Removal requested; process quiescence not yet confirmed".into(),
-                    proof: None,
-                    result: None,
-                    archive_may_be_incomplete: true,
-                };
-                save(tx, &v)?;
-                super::controls::termination(tx, cmd.stream_id, false)?;
-                super::work::save_stream(tx, &mut owner, StreamState::Blocked)?;
-                Ok(v)
-            },
+            |tx| Self::request_termination_in(tx, id, &body),
         )
+    }
+    pub(super) fn request_termination_in(
+        tx: &Transaction<'_>,
+        id: CommandId,
+        body: &RequestTermination,
+    ) -> Result<RuntimeTermination> {
+        line(&body.reason, 512)?;
+        let data: Option<String> = tx
+            .query_row(
+                "SELECT data FROM commands WHERE id=?1",
+                [id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let cmd: RunnerCommand = serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
+        let mut owner = super::work::stream(tx, cmd.stream_id)?;
+        if owner.revision != body.expected_stream_revision {
+            return Err(StoreError::RevisionConflict(owner.revision));
+        }
+        if cmd.kind != CommandKind::RunAgent
+            || cmd.state != CommandState::Accepted
+            || cmd.runner_id != owner.runner_id
+            || cmd.ownership_epoch != owner.ownership_epoch
+        {
+            return Err(StoreError::WorkConflict);
+        }
+        let bound = binding(tx, id)?;
+        if let Some(bound) = &bound {
+            if bound.runtime != body.runtime {
+                return Err(StoreError::WorkConflict);
+            }
+        } else {
+            let c = super::controls::load(tx, cmd.stream_id)?.ok_or(StoreError::WorkConflict)?;
+            let p = c.proof.ok_or(StoreError::WorkConflict)?;
+            if c.command_id != Some(id)
+                || body.runtime.container_id != p.container_id
+                || body.runtime.started_at != p.started_at
+            {
+                return Err(StoreError::WorkConflict);
+            }
+        }
+        match (load(tx, id)?, body.previous_request) {
+            (None, None) => {}
+            (Some(old), Some(previous))
+                if old.request_id == previous
+                    && old.state == TerminationState::Unknown
+                    && old.runtime == body.runtime => {}
+            _ => return Err(StoreError::WorkConflict),
+        }
+        let v = RuntimeTermination {
+            binding: bound,
+            request_id: body.request_id,
+            command_id: id,
+            stream_id: cmd.stream_id,
+            runner_id: cmd.runner_id,
+            ownership_epoch: cmd.ownership_epoch,
+            runtime: body.runtime.clone(),
+            previous_request: body.previous_request,
+            reason: body.reason.clone(),
+            state: TerminationState::Requested,
+            summary: "Removal requested; process quiescence not yet confirmed".into(),
+            proof: None,
+            result: None,
+            archive_may_be_incomplete: true,
+        };
+        save(tx, &v)?;
+        super::controls::termination(tx, cmd.stream_id, false)?;
+        super::work::save_stream(tx, &mut owner, StreamState::Blocked)?;
+        Ok(v)
     }
     pub fn report_termination(
         &self,
@@ -149,7 +232,12 @@ impl Store {
                     .proof
                     .ok_or(StoreError::Invalid("Removal evidence required"))?;
                 line(&p.daemon_id, 200)?;
-                if p.runtime != v.runtime || p.observed_unix_ms == 0 {
+                if p.runtime != v.runtime
+                    || p.observed_unix_ms == 0
+                    || v.binding
+                        .as_ref()
+                        .is_some_and(|b| b.daemon_id != p.daemon_id)
+                {
                     return Err(StoreError::WorkConflict);
                 }
                 v.proof = Some(p);

@@ -189,6 +189,18 @@ pub struct RuntimeRef {
     pub container_id: String,
     pub started_at: String,
 }
+/// Durable runner-observed identity, saved centrally before the first agent write.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeBinding {
+    pub command_id: CommandId,
+    pub stream_id: StreamId,
+    pub runner_id: RunnerId,
+    pub ownership_epoch: u64,
+    pub runtime: RuntimeRef,
+    pub daemon_id: String,
+    pub endpoint: String,
+    pub workspace: String,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminationState {
@@ -204,6 +216,8 @@ pub struct RemovalProof {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeTermination {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<RuntimeBinding>,
     pub request_id: RequestId,
     pub command_id: CommandId,
     pub stream_id: StreamId,
@@ -375,6 +389,7 @@ pub enum SupervisorAction {
     Wait,
     Compact,
     Close,
+    Terminate,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -385,6 +400,8 @@ pub struct SupervisorDecision {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SupervisorEvaluation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeRef>,
     pub command_id: CommandId,
     pub project_id: ProjectId,
     pub target_command_id: CommandId,

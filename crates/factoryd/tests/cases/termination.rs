@@ -1,4 +1,70 @@
 use super::*;
+#[test]
+fn central_binding_is_immutable_and_authorizes_removal_without_freezer_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let (runner, cmd) = setup(&store);
+    let bound = RuntimeBinding {
+        command_id: cmd.id,
+        stream_id: cmd.stream_id,
+        runner_id: runner,
+        ownership_epoch: 1,
+        runtime: RuntimeRef {
+            container_id: "a".repeat(64),
+            started_at: "2026-11-21T00:00:00Z".into(),
+        },
+        daemon_id: "engine-original".into(),
+        endpoint: "http://127.0.0.1:4096".into(),
+        workspace: "/work/stream".into(),
+    };
+    assert!(store
+        .report_runtime_binding(RunnerId::new(), cmd.id, bound.clone())
+        .is_err());
+    assert_eq!(
+        store
+            .report_runtime_binding(runner, cmd.id, bound.clone())
+            .unwrap(),
+        bound
+    );
+    let mut changed = bound.clone();
+    changed.daemon_id = "foreign".into();
+    assert!(store
+        .report_runtime_binding(runner, cmd.id, changed)
+        .is_err());
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .report_runtime_binding(runner, cmd.id, bound.clone())
+            .unwrap(),
+        bound
+    );
+    assert!(store.snapshot().unwrap().controls.is_empty());
+    let t = store
+        .request_termination(
+            cmd.id,
+            RequestTermination {
+                request_id: RequestId::new(),
+                expected_stream_revision: store.snapshot().unwrap().streams[0].revision,
+                runtime: bound.runtime.clone(),
+                previous_request: None,
+                reason: "Recover lost runner journal".into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(t.binding, Some(bound));
+    let mut wrong = stopped(&t);
+    wrong.proof.as_mut().unwrap().daemon_id = "foreign".into();
+    assert!(store.report_termination(runner, cmd.id, wrong).is_err());
+    assert_eq!(
+        store
+            .report_termination(runner, cmd.id, stopped(&t))
+            .unwrap()
+            .state,
+        TerminationState::Stopped
+    );
+}
 #[tokio::test]
 async fn termination_http_client_roundtrip_requires_current_runner_registration() {
     use factory_protocol::client::FactoryClient;

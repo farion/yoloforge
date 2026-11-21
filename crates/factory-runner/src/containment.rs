@@ -375,11 +375,31 @@ pub async fn remove(
             && request.ownership_epoch == record.command.ownership_epoch,
         "Foreign termination request"
     );
-    let saved = record
-        .agent
+    let local = record.agent.as_ref().and_then(|a| a.runtime.as_ref());
+    let recovered = request
+        .binding
         .as_ref()
-        .and_then(|a| a.runtime.as_ref())
-        .context("Runtime journal missing")?
+        .map(|b| -> Result<Identity> {
+            ensure!(
+                b.command_id == record.command.id
+                    && b.stream_id == record.command.stream_id
+                    && b.runner_id == record.command.runner_id
+                    && b.ownership_epoch == record.command.ownership_epoch
+                    && b.runtime == request.runtime,
+                "Foreign durable runtime binding"
+            );
+            Ok(Identity {
+                config: config(args, b.stream_id)?,
+                daemon_id: Some(b.daemon_id.clone()),
+                started_at: b.runtime.started_at.clone(),
+                endpoint: b.endpoint.clone(),
+                workspace: b.workspace.clone(),
+            })
+        })
+        .transpose()?;
+    let saved = local
+        .or(recovered.as_ref())
+        .context("Runtime journal and central binding missing")?
         .clone();
     ensure!(
         saved.config == config(args, record.command.stream_id)?,
@@ -461,6 +481,50 @@ pub async fn remove(
     );
     tokio::task::block_in_place(|| journal.save(record))?;
     Ok(proof)
+}
+pub async fn publish_binding(
+    factory: &FactoryClient,
+    journal: &Journal,
+    record: &mut Record,
+    registration: RegistrationId,
+) -> Result<()> {
+    if record.runtime_published {
+        return Ok(());
+    }
+    let Some(saved) = record.agent.as_ref().and_then(|a| a.runtime.as_ref()) else {
+        return Ok(());
+    };
+    // Legacy executions can still be observed, but cannot acquire an invented daemon pin.
+    let Some(daemon_id) = saved.daemon_id.clone() else {
+        return Ok(());
+    };
+    let binding = RuntimeBinding {
+        command_id: record.command.id,
+        stream_id: record.command.stream_id,
+        runner_id: record.command.runner_id,
+        ownership_epoch: record.command.ownership_epoch,
+        runtime: RuntimeRef {
+            container_id: saved.config.container_id.clone(),
+            started_at: saved.started_at.clone(),
+        },
+        daemon_id,
+        endpoint: saved.endpoint.clone(),
+        workspace: saved.workspace.clone(),
+    };
+    ensure!(
+        factory
+            .report_runtime_binding(
+                record.command.runner_id,
+                registration,
+                record.command.id,
+                &binding
+            )
+            .await?
+            == binding,
+        "Factory runtime binding differs"
+    );
+    record.runtime_published = true;
+    tokio::task::block_in_place(|| journal.save(record))
 }
 pub async fn ready(record: &Record, args: &Args) -> Result<()> {
     if record.command.kind != CommandKind::RunAgent {

@@ -23,6 +23,8 @@ impl Drop for Journal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default)]
+    pub runtime_published: bool,
+    #[serde(default)]
     pub removals: std::collections::BTreeMap<RequestId, crate::containment::RemovalAttempt>,
     #[serde(default)]
     pub container_actions: std::collections::BTreeMap<RequestId, crate::containment::Attempt>,
@@ -116,6 +118,7 @@ impl Journal {
             return Ok(record);
         }
         let record = Record {
+            runtime_published: false,
             removals: Default::default(),
             container_actions: Default::default(),
             command,

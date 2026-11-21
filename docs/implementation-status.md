@@ -29,5 +29,9 @@ Ergänzung zu 2/13: Bestätigte Entfernung einer gebundenen dedizierten Runtime
 über API/CLI und Runner implementiert; reale Docker-Abnahme mit abgekoppelten
 Writern und Journal-Recovery bestanden. Auch extern entfernte Container sind mit
 erhaltener Daemon-Bindung abschließbar. Fehlende Nachweise/Journale, ersetzte
-Instanzen, native Recovery und autonome Supervisor-Anforderung bleiben offen.
-Details: `runtime-termination.md` (DB 15, Runner-Journal 4).
+Instanzen und native Recovery bleiben offen. Neue Ausführungen veröffentlichen
+ihre Runtime-/Daemon-Bindung vor Agent-Schreibzugriffen zentral; damit ist
+Beendigung nach lokalem Journalverlust implementiert und mit Docker geprüft.
+Autonome Supervisor-Beendigungsanfragen mit atomarer Wissenssicherung sind
+implementiert und mit synthetischen Modellentscheidungen geprüft; Realmodell-
+Abnahme bleibt offen. Details: `runtime-termination.md` (DB 16, Runner-Journal 4).
