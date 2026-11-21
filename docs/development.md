@@ -1,5 +1,36 @@
 # Factory-Entwicklungsstand starten
 
+## Schnellstart: lokal die Oberfläche ausprobieren
+
+Im Repository drei Terminals öffnen:
+
+```sh
+# Terminal 1: Server laufen lassen
+bash scripts/dev-local.sh server
+
+# Terminal 2: Oberfläche; q beendet nur die Oberfläche
+bash scripts/dev-local.sh tui
+
+# Terminal 3 (optional): lokalen Runner anzeigen
+bash scripts/dev-local.sh runner
+```
+
+Das Skript baut die benötigten Programme, erzeugt einmalig einen gemeinsamen
+Zugangstoken und verwendet `127.0.0.1:17432`. Testdaten und Token liegen unter
+`.factory-data/local-test/` und bleiben nach einem Neustart erhalten. Bereits
+gesetzte `FACTORY_TOKEN`-/`FACTORY_TOKEN_FILE`-Werte werden für diesen isolierten
+Test überschrieben. Der bestehende Server auf Port 7432 wird nicht verwendet.
+
+`2` → `n` legt ein Projekt an, `3` → `n` ein Ticket, `Ctrl-S` speichert.
+Ein JSON-Verbindungstest ist `bash scripts/dev-local.sh snapshot`.
+Ohne OpenCode-Konfiguration meldet der Runner `not_configured`; Projekte,
+Tickets und Oberfläche funktionieren bereits. Echte Agentenläufe benötigen
+zusätzlich eine OpenCode-Registrierung, Repository-Zuordnung und ein Projektprofil;
+siehe die weiteren Abschnitte unten.
+
+Bei direktem `cargo run --bin factory` werden Server und Token nicht automatisch
+angelegt. Dafür den manuellen Startablauf weiter unten verwenden.
+
 ## Auftragsdetails und Factory-Verlauf
 
 `5` → Auftrag auswählen → `Enter` öffnet die schreibgeschützte Detailansicht.
