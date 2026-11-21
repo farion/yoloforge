@@ -29,6 +29,71 @@ async fn report_control(
 }
 
 struct Cleanup(Config);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replaced_control_during_report_is_reconciled_without_exiting_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = RunnerId::new();
+    let command = RunnerCommand {
+        id: CommandId::new(),
+        stream_id: StreamId::new(),
+        runner_id: runner,
+        ownership_epoch: 1,
+        kind: CommandKind::RunAgent,
+        state: CommandState::Accepted,
+        result: None,
+        created_unix_ms: 1,
+        workspace_spec: None,
+        agent_spec: None,
+        agent_progress: None,
+    };
+    let original = StreamControl {
+        retry: None,
+        action: ControlAction::Resume,
+        proof: None,
+        stream_id: command.stream_id,
+        request_id: RequestId::new(),
+        command_id: Some(command.id),
+        state: PauseState::ResumeRequested,
+        summary: "retry race".into(),
+        previous_status: StreamState::Running,
+    };
+    let state = Arc::new(Mutex::new(original.clone()));
+    let router=Router::new().route("/v1/runners/{runner}/commands/{id}/control",get(fetch_control).post(|State(state):State<Arc<Mutex<StreamControl>>>|async move {
+        state.lock().unwrap().request_id=RequestId::new();
+        (axum::http::StatusCode::CONFLICT,Json(json!({"code":"work_conflict","message":"Superseded request","request_id":RequestId::new(),"current_revision":null})))
+    })).with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let factory =
+        FactoryClient::new(&endpoint, "test-only-factory-token-0123456789abcdef").unwrap();
+    let journal = Journal::open(&dir.path().join("journal"), &endpoint, runner).unwrap();
+    let mut record = journal.receive(command.clone()).unwrap();
+    record.agent=Some(serde_json::from_value(json!({"runtime":{"config":{"stream_id":command.stream_id,"container_id":"a".repeat(64),"docker_socket":"/missing"},"started_at":"old","endpoint":"http://127.0.0.1:1","workspace":"/workspace"},"workspace":{"path":"/workspace","branch":"test","base_commit":"a".repeat(40)},"endpoint":"http://127.0.0.1:1","session_attempted":true,"prompt_attempted":true})).unwrap());
+    // Missing configuration yields an unknown report, whose request is replaced
+    // while in flight. It must not trigger writes or a fatal runner conflict.
+    let args = Args::try_parse_from([
+        "factory-runner",
+        "--id",
+        &runner.to_string(),
+        "--name",
+        "race",
+    ])
+    .unwrap();
+    assert!(super::control(
+        &factory,
+        &journal,
+        &mut record,
+        &args,
+        RegistrationId::new()
+    )
+    .await
+    .unwrap());
+    assert_ne!(state.lock().unwrap().request_id, original.request_id);
+    assert!(record.container_actions.is_empty());
+    server.abort();
+}
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let _ = std::process::Command::new("docker")
@@ -179,6 +244,7 @@ while True: time.sleep(1)
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(std::fs::metadata(work.join("detached")).unwrap().len() > 0);
     let mut control = StreamControl {
+        retry: None,
         action: ControlAction::Pause,
         proof: None,
         stream_id: stream,
@@ -295,7 +361,43 @@ while True: time.sleep(1)
             .unwrap()
             .frozen
     );
-    docker(&c, &["unpause", &c.container_id]).await.unwrap();
+    // An operator-authorized *new* thaw request may recover an intent that was
+    // persisted before a crash, without erasing or replaying the old receipt.
+    control.proof = Some(
+        transition(&journal, &mut record, &args, &control)
+            .await
+            .unwrap(),
+    );
+    control.action = ControlAction::Resume;
+    control.state = PauseState::ResumeRequested;
+    control.request_id = RequestId::new();
+    let old_request = control.request_id;
+    record.container_actions.insert(
+        old_request,
+        Attempt {
+            action: ControlAction::Resume,
+        },
+    );
+    journal.save(&record).unwrap();
+    drop(journal);
+    let journal = Journal::open(&journal_path, &args.server, runner).unwrap();
+    let mut record = journal.record(command.id).unwrap().unwrap();
+    assert!(transition(&journal, &mut record, &args, &control)
+        .await
+        .is_err());
+    control.request_id = RequestId::new();
+    control.retry = Some(ControlRetry {
+        previous_request: old_request,
+        reason: "Explicit operator recovery".into(),
+    });
+    assert!(
+        !transition(&journal, &mut record, &args, &control)
+            .await
+            .unwrap()
+            .frozen
+    );
+    assert!(record.container_actions.contains_key(&old_request));
+    assert!(record.container_actions.contains_key(&control.request_id));
     docker(&c, &["restart", "--time", "0", &c.container_id])
         .await
         .unwrap();

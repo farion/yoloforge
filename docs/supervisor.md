@@ -1,6 +1,6 @@
 # Autonomer Session-Supervisor
 
-Entwicklungsstand nach v0.1.1, Schema 13. Der Factory-Daemon führt einen
+Entwicklungsstand nach v0.1.1, Schema 14. Der Factory-Daemon führt einen
 dauerhaften Bewertungszyklus aus. Ein echter OpenCode-Agent bewertet Sessions
 mit dem Provider/Modell des Projekts. Er entscheidet selbst zwischen `wait`,
 `compact` und `close`; einzelne Entscheidungen benötigen keine menschliche

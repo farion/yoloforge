@@ -183,6 +183,16 @@ pub struct SetControl {
     pub expected_revision: Revision,
     pub action: ControlAction,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryControl {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub previous_request: RequestId,
+    pub expected_proof: ContainmentProof,
+    pub reason: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportControl {

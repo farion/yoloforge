@@ -39,6 +39,29 @@ pub(super) fn completed(tx: &Transaction<'_>, stream: StreamId, command: Command
     Ok(())
 }
 impl Store {
+    /// Explicit operator retry of the same uncertain freezer transition. Never
+    /// adopts a new runtime or releases the command's reservation by itself.
+    pub fn retry_control(&self, id: StreamId, body: RetryControl) -> Result<StreamControl> {
+        self.mutate(body.request_id,&format!("stream.control.retry/{id}"),&body,|tx| {
+            line(&body.reason,240)?;
+            let mut owner=super::work::stream(tx,id)?;
+            if owner.revision!=body.expected_revision {return Err(StoreError::RevisionConflict(owner.revision));}
+            let mut control=load(tx,id)?.ok_or(StoreError::WorkConflict)?;
+            if control.state!=PauseState::InterruptUnverified || control.request_id!=body.previous_request || control.proof.as_ref()!=Some(&body.expected_proof) {
+                return Err(StoreError::WorkConflict);
+            }
+            let command=super::work::command(tx,control.command_id.ok_or(StoreError::WorkConflict)?,owner.runner_id,owner.ownership_epoch)?;
+            if command.state!=CommandState::Accepted || command.kind!=CommandKind::RunAgent || command.stream_id!=id {return Err(StoreError::WorkConflict);}
+            control.retry=Some(ControlRetry {previous_request:control.request_id,reason:body.reason.clone()});
+            control.request_id=body.request_id;
+            control.state=match control.action {ControlAction::Pause=>PauseState::Requested,ControlAction::Resume=>PauseState::ResumeRequested};
+            control.summary="Operator requested a new attempt of the same container transition; awaiting runner verification".into();
+            save(tx,&control)?;
+            event(tx,"stream.control.retry",id.to_string(),&control)?;
+            super::work::save_stream(tx,&mut owner,StreamState::Running)?;
+            Ok(control)
+        })
+    }
     pub fn set_control(&self, id: StreamId, body: SetControl) -> Result<StreamControl> {
         self.mutate(body.request_id,&format!("stream.control/{id}"),&body,|tx| {
             let mut owner=super::work::stream(tx,id)?;
@@ -50,7 +73,7 @@ impl Store {
                 ControlAction::Pause=>{
                     if let Some(previous)=previous.filter(|c|c.state!=PauseState::Released) {return Ok(previous);}
                     if active.as_ref().is_some_and(|c|c.kind!=CommandKind::RunAgent) {return Err(StoreError::WorkConflict);}
-                    StreamControl {action:ControlAction::Pause,proof:None,stream_id:id,request_id:body.request_id,command_id:active.as_ref().map(|c|c.id),
+                    StreamControl {retry:None,action:ControlAction::Pause,proof:None,stream_id:id,request_id:body.request_id,command_id:active.as_ref().map(|c|c.id),
                         state:if active.is_some() {PauseState::Requested} else {PauseState::HeldBeforeExecution},
                         summary:if active.is_some() {"Stop requested; awaiting runner"} else {"Scheduling held; no active Factory command"}.into(),previous_status:owner.status}
                 },
@@ -59,7 +82,7 @@ impl Store {
                     if !matches!(previous.state,PauseState::HeldBeforeExecution|PauseState::Frozen) {return Err(StoreError::WorkConflict);}
                     let frozen=previous.state==PauseState::Frozen;
                     if frozen && (previous.proof.as_ref().is_none_or(|p|!p.frozen) || active.as_ref().map(|c|c.id)!=previous.command_id) {return Err(StoreError::WorkConflict);}
-                    StreamControl {action:ControlAction::Resume,request_id:body.request_id,state:if frozen {PauseState::ResumeRequested}else{PauseState::Released},summary:if frozen {"Thaw requested; awaiting owning runner"}else{"Scheduling released explicitly"}.into(),..previous}
+                    StreamControl {retry:None,action:ControlAction::Resume,request_id:body.request_id,state:if frozen {PauseState::ResumeRequested}else{PauseState::Released},summary:if frozen {"Thaw requested; awaiting owning runner"}else{"Scheduling released explicitly"}.into(),..previous}
                 },
             };
             save(tx,&control)?;

@@ -6,7 +6,10 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use factory_core::*;
 use factory_opencode::OpenCodeClient;
-use factory_protocol::{client::FactoryClient, ReportControl};
+use factory_protocol::{
+    client::{ClientError, FactoryClient},
+    ErrorCode, ReportControl,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -453,7 +456,7 @@ pub async fn control(
             None,
         ),
     };
-    factory
+    let reported = factory
         .report_control(
             record.command.runner_id,
             registration,
@@ -466,6 +469,30 @@ pub async fn control(
                 summary: summary.into(),
             },
         )
-        .await?;
+        .await;
+    if matches!(
+        &reported,
+        Err(ClientError::Http {
+            code: Some(ErrorCode::WorkConflict),
+            ..
+        })
+    ) {
+        let latest = factory
+            .runner_control(
+                record.command.runner_id,
+                registration,
+                record.command.id,
+                record.command.ownership_epoch,
+            )
+            .await?;
+        if latest.is_some_and(|c| {
+            c.command_id == Some(record.command.id) && c.request_id != control.request_id
+        }) {
+            // Recovery superseded the observed request while Docker was being
+            // inspected. Keep its receipt; process the new request next tick.
+            return Ok(true);
+        }
+    }
+    reported?;
     Ok(true)
 }

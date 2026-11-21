@@ -198,6 +198,8 @@ pub enum PauseState {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StreamControl {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ControlRetry>,
     #[serde(default = "pause_action")]
     pub action: ControlAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,6 +210,12 @@ pub struct StreamControl {
     pub state: PauseState,
     pub summary: String,
     pub previous_status: StreamState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ControlRetry {
+    pub previous_request: RequestId,
+    pub reason: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

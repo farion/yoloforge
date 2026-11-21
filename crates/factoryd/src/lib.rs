@@ -134,6 +134,7 @@ pub fn router_with_shutdown(
         .route("/v1/tickets/{id}", patch(update_ticket))
         .route("/v1/streams", post(create_stream))
         .route("/v1/streams/{id}/control", post(set_control))
+        .route("/v1/streams/{id}/control/retry", post(retry_control))
         .route(
             "/v1/runners/{runner}/commands/{command}/control",
             get(runner_control).post(report_control),

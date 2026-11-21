@@ -387,6 +387,20 @@ impl FactoryClient {
         )
         .await
     }
+    pub async fn retry_control(
+        &self,
+        id: StreamId,
+        body: &RetryControl,
+    ) -> Result<StreamControl, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/streams/{id}/control/retry", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn runner_control(
         &self,
         runner: RunnerId,

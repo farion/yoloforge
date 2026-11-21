@@ -9,7 +9,7 @@ gestartet. Bestehende unverwaltete Ausführungen werden nicht nachträglich adop
 
 ## Einrichtung
 
-Zuerst Server mit Schema 13 aktualisieren, dann Runner. Das Runner-Journal wird
+Zuerst Server mit Schema 14 aktualisieren, dann Runner. Das Runner-Journal wird
 auf Schema 3 angehoben, damit ältere Runner die Laufzeitbindung nicht ignorieren.
 Downgrade benötigt die passende Sicherung. Der neue Runner bewirbt
 `container-freeze-v1`; ohne Konfiguration bleibt die bisherige native
@@ -76,6 +76,9 @@ journalisiert. Absturz nach Intent vor dem Aufruf und verlorene Antworten führe
 zum lesenden Abgleich, niemals zum automatischen Wiederholen. Bereits erfüllte
 Requests werden ebenfalls gespeichert: Ein extern aufgetauter Container wird
 nicht kommentarlos erneut eingefroren. Unklare Zustände reservieren den Stream.
+Ein expliziter, revisionsgeschützter neuer Versuch derselben Container-Aktion ist
+über [Control-Recovery](control-recovery.md) möglich, sofern bereits ein
+Container-Nachweis vorhanden ist. Der alte Request wird nicht erneut ausgeführt.
 Nach einem bestätigten Thaw läuft die ursprüngliche Ausführung weiter; es wird
 kein neuer Prompt versendet.
 

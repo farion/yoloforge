@@ -41,6 +41,20 @@ pub(super) async fn set_control(
     };
     db_call(body.request_id, move || app.store.set_control(id, body)).await
 }
+pub(super) async fn retry_control(
+    State(app): State<App>,
+    Path(id): Path<StreamId>,
+    body: Result<Json<RetryControl>, JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid control recovery request",
+        );
+    };
+    db_call(body.request_id, move || app.store.retry_control(id, body)).await
+}
 #[derive(serde::Deserialize)]
 pub(super) struct ControlQuery {
     epoch: u64,

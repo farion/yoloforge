@@ -9,7 +9,7 @@ erfolgreicher Sessions. Das bestätigte Stoppen laufender Prozesse bleibt offen.
 
 ## Fortsetzung und Abschluss einer erfolgreichen Session
 
-### Dedizierte Container-Pause (Schema 13)
+### Dedizierte Container-Pause (seit Schema 13; Recovery ab Schema 14)
 
 Server und Runner unterstützen den persistenten Zustandsvertrag für eine explizit
 dedizierte Container-Laufzeit pro Workstream:
@@ -43,6 +43,11 @@ gespeicherter Bericht ist kein aktueller Kernel-Nachweis und keine Erlaubnis fü
 Ownership-Transfer. Einfrieren beendet außerdem keine Prozesse und stoppt keine
 bereits ausgelösten externen Dienste. Die bisherige Interrupt-Funktion bleibt
 unverändert unbestätigt.
+
+Für unklare Freeze-/Thaw-Steuerungen mit vorhandenem Instanznachweis gibt es
+einen expliziten neuen Versuch mit Provenienz über API/CLI:
+[Control-Recovery](control-recovery.md). Eine allgemeine Wiederherstellung nach
+Containerverlust ist damit noch nicht implementiert.
 
 Store-Tests prüfen Serverneustart, identischen Replay, Instanzwechsel, verspätete
 Reports, unklare Auftau-Ergebnisse und blockierten Auftragsabschluss. Schema 13

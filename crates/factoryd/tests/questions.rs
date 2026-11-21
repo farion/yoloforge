@@ -562,6 +562,318 @@ fn fresh_freezer_observations_do_not_invalidate_a_pending_operator_resume() {
     assert!(store.snapshot().unwrap().streams[0].revision.0 > operator_revision.0);
 }
 
+fn uncertain_thaw(store: &Store) -> (RunnerId, RunnerCommand, StreamControl) {
+    let (runner, cmd) = setup(store);
+    let pause = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Pause,
+            },
+        )
+        .unwrap();
+    store
+        .report_control(
+            runner,
+            cmd.id,
+            ReportControl {
+                control_request: pause.request_id,
+                ownership_epoch: 1,
+                state: PauseState::Frozen,
+                summary: "frozen".into(),
+                proof: Some(ContainmentProof {
+                    container_id: "a".repeat(64),
+                    started_at: "2026-11-21T10:00:00Z".into(),
+                    frozen: true,
+                    observed_unix_ms: 1000,
+                }),
+            },
+        )
+        .unwrap();
+    let resume = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Resume,
+            },
+        )
+        .unwrap();
+    let unknown = store
+        .report_control(
+            runner,
+            cmd.id,
+            ReportControl {
+                control_request: resume.request_id,
+                ownership_epoch: 1,
+                state: PauseState::InterruptUnverified,
+                summary: "thaw uncertain".into(),
+                proof: None,
+            },
+        )
+        .unwrap();
+    (runner, cmd, unknown)
+}
+fn retry_body(store: &Store, unknown: &StreamControl) -> RetryControl {
+    RetryControl {
+        request_id: RequestId::new(),
+        expected_revision: store.snapshot().unwrap().streams[0].revision,
+        previous_request: unknown.request_id,
+        expected_proof: unknown.proof.clone().unwrap(),
+        reason: "Operator checked the dedicated runtime; retry the original thaw".into(),
+    }
+}
+
+#[test]
+fn concurrent_control_recovery_has_one_winner_and_replays_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let (runner, cmd, unknown) = uncertain_thaw(&store);
+    let body = retry_body(&store, &unknown);
+    let barrier = Arc::new(Barrier::new(2));
+    let workers = (0..2)
+        .map(|_| {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            let mut body = body.clone();
+            body.request_id = RequestId::new();
+            std::thread::spawn(move || {
+                let store = Store::open(&path).unwrap();
+                barrier.wait();
+                let result = store.retry_control(cmd.stream_id, body.clone());
+                (body, result)
+            })
+        })
+        .collect::<Vec<_>>();
+    let outcomes = workers
+        .into_iter()
+        .map(|w| w.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|(_, r)| r.is_ok()).count(), 1);
+    assert!(outcomes
+        .iter()
+        .any(|(_, r)| matches!(r, Err(StoreError::RevisionConflict(_)))));
+    let (body, result) = outcomes.into_iter().find(|(_, r)| r.is_ok()).unwrap();
+    let requested = result.unwrap();
+    assert_eq!(requested.state, PauseState::ResumeRequested);
+    assert_eq!(requested.action, unknown.action);
+    assert_eq!(requested.proof, unknown.proof);
+    assert_eq!(
+        requested.retry.as_ref().unwrap().previous_request,
+        unknown.request_id
+    );
+    assert_eq!(
+        store
+            .snapshot()
+            .unwrap()
+            .commands
+            .iter()
+            .find(|c| c.id == cmd.id)
+            .unwrap()
+            .state,
+        CommandState::Accepted
+    );
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].status,
+        StreamState::Pausing
+    );
+    assert!(store
+        .report_control(
+            runner,
+            cmd.id,
+            ReportControl {
+                control_request: unknown.request_id,
+                ownership_epoch: 1,
+                state: PauseState::Released,
+                summary: "late thaw".into(),
+                proof: Some(ContainmentProof {
+                    frozen: false,
+                    observed_unix_ms: 1001,
+                    ..body.expected_proof.clone()
+                })
+            }
+        )
+        .is_err());
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.retry_control(cmd.stream_id, body.clone()).unwrap(),
+        requested
+    );
+    store
+        .report_control(
+            runner,
+            cmd.id,
+            ReportControl {
+                control_request: requested.request_id,
+                ownership_epoch: 1,
+                state: PauseState::Released,
+                summary: "new thaw confirmed".into(),
+                proof: Some(ContainmentProof {
+                    frozen: false,
+                    observed_unix_ms: 1002,
+                    ..body.expected_proof.clone()
+                }),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.retry_control(cmd.stream_id, body.clone()).unwrap(),
+        requested
+    );
+    let mut changed = body;
+    changed.reason = "Changed justification".into();
+    assert!(store.retry_control(cmd.stream_id, changed).is_err());
+    assert_eq!(
+        store
+            .events(0, 200)
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e.kind == "stream.control.retry")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn control_recovery_rejects_changed_evidence_and_rolls_back_on_event_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let (runner, cmd, unknown) = uncertain_thaw(&store);
+    let body = retry_body(&store, &unknown);
+    let mut wrong = body.clone();
+    wrong.expected_proof.container_id = "b".repeat(64);
+    assert!(store.retry_control(cmd.stream_id, wrong).is_err());
+    let mut wrong = body.clone();
+    wrong.previous_request = RequestId::new();
+    assert!(store.retry_control(cmd.stream_id, wrong).is_err());
+    let mut wrong = body.clone();
+    wrong.reason = "\n".into();
+    assert!(store.retry_control(cmd.stream_id, wrong).is_err());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_retry BEFORE INSERT ON events WHEN NEW.kind='stream.control.retry' BEGIN SELECT RAISE(ABORT,'test rollback'); END;").unwrap();
+    assert!(store.retry_control(cmd.stream_id, body.clone()).is_err());
+    assert_eq!(
+        store.runner_control(runner, cmd.id, 1).unwrap(),
+        Some(unknown)
+    );
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].revision,
+        body.expected_revision
+    );
+    db.execute_batch("DROP TRIGGER fail_retry").unwrap();
+    store.retry_control(cmd.stream_id, body).unwrap();
+}
+
+#[test]
+fn native_interrupt_without_container_evidence_cannot_be_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let (runner, cmd) = setup(&store);
+    let pause = store
+        .set_control(
+            cmd.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Pause,
+            },
+        )
+        .unwrap();
+    store
+        .report_control(
+            runner,
+            cmd.id,
+            ReportControl {
+                control_request: pause.request_id,
+                ownership_epoch: 1,
+                state: PauseState::InterruptUnverified,
+                summary: "native interrupt uncertain".into(),
+                proof: None,
+            },
+        )
+        .unwrap();
+    assert!(store
+        .retry_control(
+            cmd.stream_id,
+            RetryControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                previous_request: pause.request_id,
+                expected_proof: ContainmentProof {
+                    container_id: "a".repeat(64),
+                    started_at: "fake".into(),
+                    frozen: true,
+                    observed_unix_ms: 1
+                },
+                reason: "operator supplied evidence cannot replace runner proof".into()
+            }
+        )
+        .is_err());
+}
+
+#[tokio::test]
+async fn control_recovery_http_round_trip_is_authenticated_and_deduplicated() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let (_, cmd, unknown) = uncertain_thaw(&store);
+    let body = retry_body(&store, &unknown);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://{}/v1/streams/{}/control/retry",
+        listener.local_addr().unwrap(),
+        cmd.stream_id
+    );
+    let token = "test-only-control-token-0123456789abcdef";
+    let task = tokio::spawn(async move {
+        axum::serve(listener, factoryd::router(token, store))
+            .await
+            .unwrap()
+    });
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .post(&url)
+            .header(VERSION_HEADER, "1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let response = client
+        .post(&url)
+        .bearer_auth(token)
+        .header(VERSION_HEADER, "1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let saved = response.json::<StreamControl>().await.unwrap();
+    let replay = client
+        .post(&url)
+        .bearer_auth(token)
+        .header(VERSION_HEADER, "1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json::<StreamControl>()
+        .await
+        .unwrap();
+    assert_eq!(replay, saved);
+    assert_eq!(saved.retry.unwrap().reason, body.reason);
+    task.abort();
+}
+
 fn sync(
     store: &Store,
     runner: RunnerId,

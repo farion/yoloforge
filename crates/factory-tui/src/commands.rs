@@ -236,11 +236,26 @@ pub enum StreamCommand {
         #[arg(long)]
         request_id: Option<RequestId>,
     },
-    /// Release only a hold confirmed before prompt execution.
+    /// Release a pre-execution hold or request thaw of a verified dedicated runtime.
     Resume {
         id: StreamId,
         #[arg(long)]
         expected_revision: u64,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    /// Explicitly retry an uncertain container transition with its pinned evidence.
+    RetryControl {
+        id: StreamId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        previous_request: RequestId,
+        /// JSON file containing the exact persisted proof from snapshot.controls.
+        #[arg(long)]
+        proof_file: std::path::PathBuf,
+        #[arg(long)]
+        reason: String,
         #[arg(long)]
         request_id: Option<RequestId>,
     },
@@ -651,6 +666,30 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                         request_id: request(request_id),
                         expected_revision: Revision(expected_revision),
                         action: ControlAction::Pause,
+                    },
+                )
+                .await?,
+        ),
+        Command::Stream {
+            command:
+                StreamCommand::RetryControl {
+                    id,
+                    expected_revision,
+                    previous_request,
+                    proof_file,
+                    reason,
+                    request_id,
+                },
+        } => print(
+            &client
+                .retry_control(
+                    id,
+                    &RetryControl {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        previous_request,
+                        expected_proof: serde_json::from_slice(&std::fs::read(proof_file)?)?,
+                        reason,
                     },
                 )
                 .await?,
