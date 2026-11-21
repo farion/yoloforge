@@ -57,7 +57,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 16,
+            version <= 18,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -107,6 +107,12 @@ impl Store {
         }
         if version < 16 {
             tx.execute_batch(include_str!("../migrations/016_runtime_bindings.sql"))?;
+        }
+        if version < 17 {
+            tx.execute_batch(include_str!("../migrations/017_checkpoints.sql"))?;
+        }
+        if version < 18 {
+            tx.execute_batch(include_str!("../migrations/018_checkpoint_handoff.sql"))?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -409,6 +415,7 @@ impl Store {
 }
 
 mod archive;
+mod checkpoints;
 mod compaction;
 mod controls;
 mod devices;

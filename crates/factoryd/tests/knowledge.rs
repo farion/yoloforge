@@ -390,7 +390,7 @@ fn legacy_curated_notes_keep_global_scope_and_request_replay_after_migration() {
     let saved = store.create_knowledge(body.clone()).unwrap();
     drop(store);
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("DROP TABLE runtime_bindings; DROP TABLE runtime_terminations; DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
+    db.execute_batch("DROP TABLE checkpoint_bundles; DROP TABLE checkpoints; DROP TABLE runtime_bindings; DROP TABLE runtime_terminations; DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
         .unwrap();
     drop(db);
     let store = Store::open(&path).unwrap();

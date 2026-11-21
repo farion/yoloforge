@@ -205,6 +205,15 @@ pub struct RequestTermination {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HandoffStream {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub checkpoint_command: CommandId,
+    pub target_runner: RunnerId,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportTermination {
     pub request_id: RequestId,
     pub ownership_epoch: u64,

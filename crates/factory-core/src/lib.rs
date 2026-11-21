@@ -312,12 +312,14 @@ pub struct Question {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Workstream {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointImport>,
     pub id: StreamId,
     pub project_id: ProjectId,
     pub revision: Revision,
     pub goal: String,
     pub runner_id: RunnerId,
-    /// Immutable in this first queue implementation; no automatic handoff.
+    /// Incremented atomically by checkpoint-based handoff; fences former owners.
     pub ownership_epoch: u64,
     /// Stream branch; created by PrepareWorkspace on the owning runner.
     pub branch: String,
@@ -332,6 +334,38 @@ pub enum CommandKind {
     CheckOpenCode,
     PrepareWorkspace,
     RunAgent,
+    Checkpoint,
+}
+pub const CHECKPOINT_CAPABILITY: &str = "git-checkpoint-v1";
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointSpec {
+    pub command_id: CommandId,
+    pub source_commands: Vec<CommandId>,
+    pub stopped_runtimes: Vec<RemovalProof>,
+    pub context: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GitCheckpoint {
+    pub commit: String,
+    pub parent: String,
+    pub tree: String,
+    pub bundle_path: String,
+    pub bundle_sha256: String,
+    pub bundle_bytes: u64,
+    pub manifest_path: String,
+}
+pub const CHECKPOINT_BUNDLE_LIMIT: usize = 64 * 1024 * 1024;
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointImport {
+    pub command_id: CommandId,
+    pub commit: String,
+    pub bundle_sha256: String,
+    pub bundle_bytes: u64,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BundleReceipt {
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -415,6 +449,13 @@ pub struct SupervisorEvaluation {
     pub knowledge_id: Option<KnowledgeId>,
 }
 impl RunnerCommand {
+    pub fn requires_checkpoint(&self) -> bool {
+        self.kind == CommandKind::Checkpoint
+            || self
+                .workspace_spec
+                .as_ref()
+                .is_some_and(|s| s.checkpoint.is_some())
+    }
     pub fn requires_session_lifecycle(&self) -> bool {
         self.agent_spec
             .as_ref()
@@ -459,6 +500,8 @@ pub fn agent_message_id(id: CommandId) -> String {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CheckpointImport>,
     pub project_id: ProjectId,
     pub branch: String,
     pub base_branch: String,
@@ -475,6 +518,8 @@ pub struct Workspace {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CommandOutput {
+    Checkpoint { checkpoint: GitCheckpoint },
+    CheckpointError { checkpoint_error: String },
     OpenCode(OpenCodeStatus),
     Workspace { workspace: Workspace },
     WorkspaceError { workspace_error: String },

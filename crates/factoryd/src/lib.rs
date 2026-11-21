@@ -20,6 +20,7 @@ pub mod store;
 use store::{Store, StoreError};
 mod access;
 mod archive_routes;
+mod checkpoint_routes;
 mod compaction_routes;
 mod knowledge_routes;
 mod live;
@@ -135,6 +136,20 @@ pub fn router_with_shutdown(
         .route("/v1/tickets/{id}", patch(update_ticket))
         .route("/v1/streams", post(create_stream))
         .route("/v1/streams/{id}/control", post(set_control))
+        .route("/v1/streams/{id}/handoff", post(checkpoint_routes::handoff))
+        .route(
+            "/v1/runners/{runner}/commands/{command}/checkpoint-bundle",
+            get(checkpoint_routes::download)
+                .post(checkpoint_routes::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    CHECKPOINT_BUNDLE_LIMIT,
+                )),
+        )
+        .route("/v1/commands/{id}/checkpoint", get(checkpoint_routes::read))
+        .route(
+            "/v1/runners/{runner}/commands/{command}/checkpoint",
+            get(checkpoint_routes::runner_read),
+        )
         .route(
             "/v1/runners/{runner}/commands/{command}/runtime-binding",
             post(termination_routes::bind),

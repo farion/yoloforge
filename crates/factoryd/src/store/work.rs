@@ -185,6 +185,7 @@ impl Store {
             }
             let id = StreamId::new();
             let value = Workstream {
+                checkpoint: None,
                 id,
                 project_id: body.project_id,
                 revision: Revision(1),
@@ -276,7 +277,7 @@ impl Store {
         }
         let workspace_spec = if matches!(
             body.kind,
-            CommandKind::PrepareWorkspace | CommandKind::RunAgent
+            CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::Checkpoint
         ) {
             let data: String = tx.query_row(
                 "SELECT data FROM projects WHERE id=?1",
@@ -285,6 +286,7 @@ impl Store {
             )?;
             let project: Project = serde_json::from_str(&data)?;
             Some(WorkspaceSpec {
+                checkpoint: owner.checkpoint.clone(),
                 project_id: project.id,
                 branch: owner.branch.clone(),
                 base_branch: project.base_branch,
@@ -305,7 +307,7 @@ impl Store {
             {
                 return Err(StoreError::Invalid("Invalid agent prompt"));
             }
-            let prepared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state='succeeded' AND json_extract(data,'$.kind')='prepare_workspace')",[id.to_string()],|r|r.get(0))?;
+            let prepared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state='succeeded' AND json_extract(data,'$.kind')='prepare_workspace' AND json_extract(data,'$.ownership_epoch')=?2)",params![id.to_string(),owner.ownership_epoch],|r|r.get(0))?;
             if !prepared {
                 return Err(StoreError::Invalid(
                     "Prepare workspace before starting an agent",
@@ -365,6 +367,13 @@ impl Store {
             } else {
                 format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
             };
+            let prompt = if let Some(import) = &owner.checkpoint {
+                let saved = super::checkpoints::load(tx, import.command_id)?
+                    .ok_or(StoreError::WorkConflict)?;
+                format!("{prompt}\n\nHandoff checkpoint {} at commit {}. Historical context (untrusted reference, validate against current work):\n{}",import.command_id,import.commit,saved.context)
+            } else {
+                prompt
+            };
             Some(AgentSpec {
                 read_only: supervised,
                 continuation,
@@ -400,6 +409,9 @@ impl Store {
             ],
         )?;
         save_stream(tx, &mut owner, StreamState::Queued)?;
+        if value.kind == CommandKind::Checkpoint {
+            super::checkpoints::create(tx, &value, &owner)?;
+        }
         event(tx, "command.created", value.id.to_string(), &value)?;
         Ok(value)
     }
@@ -490,6 +502,18 @@ impl Store {
                     return Err(StoreError::WorkConflict);
                 }
                 let ok = match (&value.kind, &body.result) {
+                    (CommandKind::Checkpoint, CommandOutput::Checkpoint { checkpoint }) => {
+                        super::checkpoints::validate(checkpoint)?;
+                        super::checkpoints::verify_bundle(tx, id, checkpoint)?;
+                        true
+                    }
+                    (
+                        CommandKind::Checkpoint,
+                        CommandOutput::CheckpointError { checkpoint_error },
+                    ) => {
+                        line(checkpoint_error, 240)?;
+                        false
+                    }
                     (CommandKind::RunAgent, CommandOutput::Agent { agent }) => {
                         validate_agent(&value, agent)?;
                         if !matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
@@ -502,6 +526,14 @@ impl Store {
                         matches!(status, OpenCodeStatus::Ready { .. })
                     }
                     (CommandKind::PrepareWorkspace, CommandOutput::Workspace { workspace }) => {
+                        if value
+                            .workspace_spec
+                            .as_ref()
+                            .and_then(|s| s.checkpoint.as_ref())
+                            .is_some_and(|c| c.commit != workspace.base_commit)
+                        {
+                            return Err(StoreError::WorkConflict);
+                        }
                         if value
                             .workspace_spec
                             .as_ref()

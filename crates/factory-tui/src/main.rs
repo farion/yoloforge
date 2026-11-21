@@ -46,6 +46,11 @@ fn command_output(output: &CommandOutput) -> String {
         CommandOutput::Workspace { workspace } => workspace.path.clone(),
         CommandOutput::WorkspaceError { workspace_error } => workspace_error.clone(),
         CommandOutput::Agent { agent } => format!("{:?}: {}", agent.phase, agent.summary),
+        CommandOutput::Checkpoint { checkpoint } => format!(
+            "Checkpoint {}: {}",
+            checkpoint.commit, checkpoint.bundle_path
+        ),
+        CommandOutput::CheckpointError { checkpoint_error } => checkpoint_error.clone(),
     }
 }
 

@@ -24,7 +24,10 @@ struct Plan {
 
 // Arguments are passed directly, never through a shell. Output goes to local
 // temp files to avoid pipe deadlocks while enforcing a command timeout.
-fn git(repository: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(repository: &Path, args: &[&str]) -> Result<String> {
+    git_env(repository, args, &[])
+}
+pub(crate) fn git_env(repository: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
     let out = tempfile::tempfile()?;
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
@@ -38,6 +41,7 @@ fn git(repository: &Path, args: &[&str]) -> Result<String> {
         .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(Stdio::null())
@@ -62,7 +66,11 @@ fn git(repository: &Path, args: &[&str]) -> Result<String> {
     let mut out = out;
     out.seek(SeekFrom::Start(0))?;
     let mut text = String::new();
-    out.take(1_048_576).read_to_string(&mut text)?;
+    out.take(1_048_577).read_to_string(&mut text)?;
+    ensure!(
+        text.len() <= 1_048_576,
+        "Git output exceeds inspection limit"
+    );
     Ok(text.trim().to_string())
 }
 
@@ -72,10 +80,17 @@ fn common_dir(repository: &Path) -> Result<PathBuf> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?)?)
 }
-fn save(journal: &Journal, stream: StreamId, plan: &Plan) -> Result<()> {
+fn save(journal: &Journal, stream: impl ToString, plan: &Plan) -> Result<()> {
     journal.db.execute("INSERT INTO workspaces(stream_id,data) VALUES(?1,?2) ON CONFLICT(stream_id) DO UPDATE SET data=excluded.data",
         params![stream.to_string(),serde_json::to_string(plan)?])?;
     Ok(())
+}
+fn key(command: &RunnerCommand) -> String {
+    if command.ownership_epoch == 1 {
+        command.stream_id.to_string()
+    } else {
+        format!("{}-epoch-{}", command.stream_id, command.ownership_epoch)
+    }
 }
 
 pub fn prepare(
@@ -104,7 +119,15 @@ fn prepare_inner(
         .as_ref()
         .context("Workspace specification missing")?;
     ensure!(
-        spec.branch == format!("factory/{}", command.stream_id),
+        spec.branch
+            == if command.ownership_epoch == 1 {
+                format!("factory/{}", command.stream_id)
+            } else {
+                format!(
+                    "factory/{}-epoch-{}",
+                    command.stream_id, command.ownership_epoch
+                )
+            },
         "Unexpected stream branch"
     );
     let mapping =
@@ -121,12 +144,12 @@ fn prepare_inner(
     let common = common_dir(&repository).context("Mapped path is not a Git repository")?;
     fs::create_dir_all(root).context("Cannot create workspace root")?;
     let root = fs::canonicalize(root)?;
-    let path = root.join(command.stream_id.to_string());
+    let path = root.join(key(command));
     let previous: Option<String> = journal
         .db
         .query_row(
             "SELECT data FROM workspaces WHERE stream_id=?1",
-            [command.stream_id.to_string()],
+            [key(command)],
             |r| r.get(0),
         )
         .optional()?;
@@ -154,15 +177,19 @@ fn prepare_inner(
             ],
         )
         .context("Invalid base branch")?;
-        let commit = git(
-            &repository,
-            &[
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{}^{{commit}}", spec.base_branch),
-            ],
-        )
-        .context("Base branch does not exist locally")?;
+        let commit = if let Some(import) = &spec.checkpoint {
+            crate::checkpoint::import_objects(&repository, &root, import)?
+        } else {
+            git(
+                &repository,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/heads/{}^{{commit}}", spec.base_branch),
+                ],
+            )
+            .context("Base branch does not exist locally")?
+        };
         let refs = git(
             &repository,
             &["for-each-ref", "--format=%(refname)", &reference],
@@ -179,7 +206,7 @@ fn prepare_inner(
             commit,
             ready: false,
         };
-        save(journal, command.stream_id, &plan)?;
+        save(journal, key(command), &plan)?;
         plan
     };
     if fs::symlink_metadata(&path).is_ok() {
@@ -241,7 +268,7 @@ fn prepare_inner(
         )?;
     }
     plan.ready = true;
-    save(journal, command.stream_id, &plan)?;
+    save(journal, key(command), &plan)?;
     Ok(Workspace {
         path: path.to_str().context("Non-UTF8 workspace path")?.into(),
         branch: spec.branch.clone(),
@@ -259,7 +286,7 @@ pub fn existing(
         .db
         .query_row(
             "SELECT data FROM workspaces WHERE stream_id=?1",
-            [command.stream_id.to_string()],
+            [key(command)],
             |r| r.get(0),
         )
         .optional()?;
@@ -333,6 +360,7 @@ mod tests {
                 result: None,
                 created_unix_ms: 1,
                 workspace_spec: Some(WorkspaceSpec {
+                    checkpoint: None,
                     project_id: self.project,
                     branch: format!("factory/{stream_id}"),
                     base_branch: "main".into(),

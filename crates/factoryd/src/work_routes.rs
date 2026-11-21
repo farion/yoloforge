@@ -312,6 +312,11 @@ pub(super) async fn pending_commands(
         };
         let store = app.store.clone();
         let identity = principal.clone();
+        let checkpoints = guard.entries[&id]
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == CHECKPOINT_CAPABILITY);
         let lifecycle = guard.entries[&id]
             .input
             .capabilities
@@ -323,6 +328,7 @@ pub(super) async fn pending_commands(
             }
             store.pending(id).map(|mut commands| {
                 commands.retain(|c| lifecycle || !c.requires_session_lifecycle());
+                commands.retain(|c| checkpoints || !c.requires_checkpoint());
                 commands
             })
         })
@@ -367,7 +373,13 @@ pub(super) async fn ack_command(
         .capabilities
         .iter()
         .any(|c| c == SESSION_LIFECYCLE_CAPABILITY);
+    let checkpoints = guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == CHECKPOINT_CAPABILITY);
     db_call(body.request_id, move || {
+        store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;
         store.acknowledge_supported(runner, id, body, lifecycle)
     })
     .await

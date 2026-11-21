@@ -362,6 +362,16 @@ async fn absent(c: &Config) -> Result<bool> {
     );
     Ok(result.is_empty())
 }
+pub async fn verify_removed(args: &Args, stream: StreamId, proof: &RemovalProof) -> Result<()> {
+    let mut c = config(args, stream)?;
+    c.container_id = proof.runtime.container_id.clone();
+    ensure!(
+        daemon(&c).await? == proof.daemon_id,
+        "Checkpoint daemon differs from removal proof"
+    );
+    ensure!(absent(&c).await?, "Checkpoint runtime is still present");
+    Ok(())
+}
 pub async fn remove(
     journal: &Journal,
     record: &mut Record,

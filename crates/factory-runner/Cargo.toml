@@ -16,6 +16,7 @@ serde_json.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }
 fs2 = "0.4"
 tempfile = "3"
+sha2 = "0.10"
 
 [dev-dependencies]
 axum.workspace = true

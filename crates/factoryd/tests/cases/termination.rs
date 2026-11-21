@@ -1,5 +1,173 @@
 use super::*;
 #[test]
+fn checkpoint_requires_stopped_writer_and_atomically_pins_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let (runner, cmd, c) = uncertain_thaw(&store);
+    let enqueue = |store: &Store| EnqueueCommand {
+        request_id: RequestId::new(),
+        expected_revision: store.snapshot().unwrap().streams[0].revision,
+        kind: CommandKind::Checkpoint,
+        prompt: None,
+    };
+    assert!(store.enqueue(cmd.stream_id, enqueue(&store)).is_err());
+    let t = store
+        .request_termination(cmd.id, request(&store, &c))
+        .unwrap();
+    assert!(store.enqueue(cmd.stream_id, enqueue(&store)).is_err());
+    store
+        .report_termination(runner, cmd.id, stopped(&t))
+        .unwrap();
+    let body = enqueue(&store);
+    let checkpoint = store.enqueue(cmd.stream_id, body.clone()).unwrap();
+    assert_eq!(store.enqueue(cmd.stream_id, body).unwrap(), checkpoint);
+    let spec = store.checkpoint(checkpoint.id).unwrap().unwrap();
+    assert_eq!(spec.source_commands, vec![cmd.id]);
+    assert_eq!(spec.stopped_runtimes, vec![stopped(&t).proof.unwrap()]);
+    assert!(store.enqueue(cmd.stream_id, enqueue(&store)).is_err());
+    store
+        .acknowledge(
+            runner,
+            checkpoint.id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.runner_checkpoint(runner, checkpoint.id, 1).unwrap(),
+        spec
+    );
+    assert!(store
+        .runner_checkpoint(RunnerId::new(), checkpoint.id, 1)
+        .is_err());
+    let receipt = store
+        .upload_checkpoint_bundle(runner, checkpoint.id, 1, b"bundle fixture".to_vec())
+        .unwrap();
+    assert_eq!(
+        store
+            .upload_checkpoint_bundle(runner, checkpoint.id, 1, b"bundle fixture".to_vec())
+            .unwrap(),
+        receipt
+    );
+    assert!(store
+        .upload_checkpoint_bundle(runner, checkpoint.id, 1, b"changed".to_vec())
+        .is_err());
+    let result = GitCheckpoint {
+        commit: "a".repeat(40),
+        parent: "b".repeat(40),
+        tree: "c".repeat(40),
+        bundle_path: "/checkpoints/a.bundle".into(),
+        bundle_sha256: receipt.sha256,
+        bundle_bytes: receipt.bytes,
+        manifest_path: "/checkpoints/manifest.json".into(),
+    };
+    store
+        .complete(
+            runner,
+            checkpoint.id,
+            CommandResult {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+                result: CommandOutput::Checkpoint { checkpoint: result },
+            },
+        )
+        .unwrap();
+    assert_eq!(store.checkpoint(checkpoint.id).unwrap().unwrap(), spec);
+    let next = RunnerId::new();
+    let body = HandoffStream {
+        request_id: RequestId::new(),
+        expected_revision: store.snapshot().unwrap().streams[0].revision,
+        checkpoint_command: checkpoint.id,
+        target_runner: next,
+        reason: "Continue on laptop".into(),
+    };
+    let db = rusqlite::Connection::open(dir.path().join("db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_handoff BEFORE INSERT ON events WHEN NEW.kind='stream.handoff' BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
+    assert!(store.handoff(cmd.stream_id, body.clone()).is_err());
+    assert_eq!(store.snapshot().unwrap().streams[0].runner_id, runner);
+    db.execute_batch("DROP TRIGGER fail_handoff").unwrap();
+    let moved = store.handoff(cmd.stream_id, body.clone()).unwrap();
+    assert_eq!(moved.ownership_epoch, 2);
+    assert_eq!(moved.runner_id, next);
+    assert!(moved.branch.ends_with("epoch-2"));
+    assert_eq!(store.handoff(cmd.stream_id, body.clone()).unwrap(), moved);
+    assert!(store
+        .upload_checkpoint_bundle(runner, checkpoint.id, 1, b"bundle fixture".to_vec())
+        .is_ok());
+    assert!(store
+        .upload_checkpoint_bundle(runner, checkpoint.id, 1, b"changed".to_vec())
+        .is_err());
+    let mut competing = body;
+    competing.request_id = RequestId::new();
+    competing.target_runner = RunnerId::new();
+    assert!(store.handoff(cmd.stream_id, competing).is_err());
+    assert!(store.runner_checkpoint(runner, checkpoint.id, 1).is_err());
+    assert!(store
+        .enqueue(
+            cmd.stream_id,
+            EnqueueCommand {
+                request_id: RequestId::new(),
+                expected_revision: moved.revision,
+                kind: CommandKind::RunAgent,
+                prompt: Some("Premature".into())
+            }
+        )
+        .is_err());
+    let prepare = store
+        .enqueue(
+            cmd.stream_id,
+            EnqueueCommand {
+                request_id: RequestId::new(),
+                expected_revision: moved.revision,
+                kind: CommandKind::PrepareWorkspace,
+                prompt: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(prepare.ownership_epoch, 2);
+    assert!(store
+        .require_checkpoint_support(next, prepare.id, 2, false)
+        .is_err());
+    assert!(store
+        .require_checkpoint_support(next, prepare.id, 2, true)
+        .is_ok());
+    assert_eq!(
+        prepare.workspace_spec.as_ref().unwrap().checkpoint,
+        moved.checkpoint
+    );
+    assert!(store
+        .acknowledge(
+            runner,
+            prepare.id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1
+            }
+        )
+        .is_err());
+    store
+        .acknowledge(
+            next,
+            prepare.id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 2,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .download_checkpoint_bundle(next, prepare.id, 2)
+            .unwrap(),
+        b"bundle fixture"
+    );
+    assert!(store
+        .download_checkpoint_bundle(runner, prepare.id, 1)
+        .is_err());
+}
+#[test]
 fn central_binding_is_immutable_and_authorizes_removal_without_freezer_history() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");

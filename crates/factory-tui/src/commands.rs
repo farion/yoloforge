@@ -6,6 +6,8 @@ mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Inspect the pinned context and stopped-runtime evidence for a checkpoint command.
+    Checkpoint { id: CommandId },
     /// Remove a pinned dedicated runtime and fail its active command; volumes/worktree remain.
     Terminate {
         id: CommandId,
@@ -234,6 +236,28 @@ pub enum QuestionCommand {
 }
 #[derive(Subcommand)]
 pub enum StreamCommand {
+    /// Transfer a checkpointed stream to a different runner with a new ownership epoch.
+    Handoff {
+        id: StreamId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        checkpoint: CommandId,
+        #[arg(long)]
+        runner: RunnerId,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    /// Capture Git files and context after confirmed runtime removal (ignored files excluded).
+    Checkpoint {
+        id: StreamId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
     /// Continue the most recent successful, archived session on its owning runner.
     Continue {
         id: StreamId,
@@ -419,6 +443,51 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Stream {
+            command:
+                StreamCommand::Handoff {
+                    id,
+                    expected_revision,
+                    checkpoint,
+                    runner,
+                    reason,
+                    request_id,
+                },
+        } => print(
+            &client
+                .handoff(
+                    id,
+                    &HandoffStream {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        checkpoint_command: checkpoint,
+                        target_runner: runner,
+                        reason,
+                    },
+                )
+                .await?,
+        ),
+        Command::Stream {
+            command:
+                StreamCommand::Checkpoint {
+                    id,
+                    expected_revision,
+                    request_id,
+                },
+        } => print(
+            &client
+                .enqueue(
+                    id,
+                    &EnqueueCommand {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        kind: CommandKind::Checkpoint,
+                        prompt: None,
+                    },
+                )
+                .await?,
+        ),
+        Command::Checkpoint { id } => print(&client.checkpoint(id).await?),
         Command::Terminate {
             id,
             expected_stream_revision,

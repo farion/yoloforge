@@ -9,6 +9,7 @@ use factory_protocol::{
 use std::{path::PathBuf, time::Duration};
 mod agent;
 mod archive;
+mod checkpoint;
 mod compaction;
 mod containment;
 mod journal;
@@ -59,6 +60,22 @@ async fn report(
     mut record: Record,
     args: &Args,
 ) -> Result<()> {
+    if let Some(CommandOutput::Checkpoint { checkpoint }) = &record.result {
+        let bytes = tokio::task::block_in_place(|| checkpoint::bundle_bytes(checkpoint))?;
+        let receipt = client
+            .upload_checkpoint_bundle(
+                record.command.runner_id,
+                registration,
+                record.command.id,
+                record.command.ownership_epoch,
+                bytes,
+            )
+            .await?;
+        anyhow::ensure!(
+            receipt.sha256 == checkpoint.bundle_sha256 && receipt.bytes == checkpoint.bundle_bytes,
+            "Factory bundle receipt differs"
+        );
+    }
     if termination::process(client, journal, &mut record, args, registration).await? {
         return Ok(());
     }
@@ -307,6 +324,46 @@ async fn commands(
             return Ok(true);
         }
         if record.result.is_none() {
+            if record.command.kind == CommandKind::PrepareWorkspace {
+                if let Some(import) = record
+                    .command
+                    .workspace_spec
+                    .as_ref()
+                    .and_then(|s| s.checkpoint.as_ref())
+                {
+                    let bytes = client
+                        .download_checkpoint_bundle(
+                            args.id,
+                            registration,
+                            record.command.id,
+                            record.command.ownership_epoch,
+                        )
+                        .await?;
+                    tokio::task::block_in_place(|| {
+                        checkpoint::install_bundle(
+                            args.workspace_root
+                                .as_deref()
+                                .expect("workspace root initialized"),
+                            import,
+                            &bytes,
+                        )
+                    })?;
+                }
+            }
+            if record.command.kind == CommandKind::Checkpoint {
+                let spec = client
+                    .runner_checkpoint(
+                        args.id,
+                        registration,
+                        record.command.id,
+                        record.command.ownership_epoch,
+                    )
+                    .await?;
+                record.result = Some(checkpoint::execute(journal, &mut record, args, &spec).await);
+                tokio::task::block_in_place(|| journal.save(&record))?;
+                report(client, journal, registration, record, args).await?;
+                return Ok(true);
+            }
             record.result = Some(match record.command.kind {
                 // Explicitly read-only: safe to repeat after crash before local result commit.
                 // Workspace preparation uses its own persisted plan and reconciliation.
@@ -324,6 +381,7 @@ async fn commands(
                     )
                 }),
                 CommandKind::RunAgent => unreachable!("agent execution handled above"),
+                CommandKind::Checkpoint => unreachable!("checkpoint execution handled above"),
             });
             tokio::task::block_in_place(|| journal.save(&record))?;
         }
@@ -378,6 +436,7 @@ async fn run(mut args: Args) -> Result<()> {
                         SESSION_LIFECYCLE_CAPABILITY.into(),
                         CONTAINER_FREEZE_CAPABILITY.into(),
                         RUNTIME_TERMINATION_CAPABILITY.into(),
+                        CHECKPOINT_CAPABILITY.into(),
                     ],
                     id: args.id,
                     instance_id,

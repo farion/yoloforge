@@ -40,6 +40,102 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn handoff(
+        &self,
+        id: StreamId,
+        body: &HandoffStream,
+    ) -> Result<Workstream, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/streams/{id}/handoff", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn upload_checkpoint_bundle(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        epoch: u64,
+        bytes: Vec<u8>,
+    ) -> Result<BundleReceipt, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/checkpoint-bundle",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .query(&[("epoch", epoch)])
+                .body(bytes)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn download_checkpoint_bundle(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        epoch: u64,
+    ) -> anyhow::Result<Vec<u8>> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/v1/runners/{runner}/commands/{id}/checkpoint-bundle",
+                self.base
+            ))
+            .header(RUNNER_HEADER, registration.to_string())
+            .query(&[("epoch", epoch)])
+            .send()
+            .await?
+            .error_for_status()?;
+        anyhow::ensure!(
+            response
+                .content_length()
+                .is_some_and(|n| n <= CHECKPOINT_BUNDLE_LIMIT as u64),
+            "Invalid checkpoint bundle length"
+        );
+        let bytes = response.bytes().await?;
+        anyhow::ensure!(
+            bytes.len() <= CHECKPOINT_BUNDLE_LIMIT,
+            "Checkpoint bundle too large"
+        );
+        Ok(bytes.to_vec())
+    }
+    pub async fn checkpoint(&self, id: CommandId) -> Result<Option<CheckpointSpec>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/commands/{id}/checkpoint", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn runner_checkpoint(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        epoch: u64,
+    ) -> Result<CheckpointSpec, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/checkpoint",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .query(&[("epoch", epoch)])
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn report_runtime_binding(
         &self,
         runner: RunnerId,

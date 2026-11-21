@@ -23,6 +23,8 @@ impl Drop for Journal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default)]
+    pub checkpoint: Option<crate::checkpoint::Plan>,
+    #[serde(default)]
     pub runtime_published: bool,
     #[serde(default)]
     pub removals: std::collections::BTreeMap<RequestId, crate::containment::RemovalAttempt>,
@@ -63,7 +65,7 @@ impl Journal {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         let tx = db.transaction()?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 4, "runner journal schema is too new");
+        ensure!(version <= 5, "runner journal schema is too new");
         if version == 0 {
             tx.execute_batch("CREATE TABLE identity(id INTEGER PRIMARY KEY CHECK(id=1),server TEXT NOT NULL,runner TEXT NOT NULL);
                 CREATE TABLE commands(id TEXT PRIMARY KEY NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)));
@@ -81,6 +83,9 @@ impl Journal {
         }
         if version < 4 {
             tx.execute_batch("PRAGMA user_version=4;")?;
+        }
+        if version < 5 {
+            tx.execute_batch("PRAGMA user_version=5;")?;
         }
         let (saved_server, saved_runner): (String, String) =
             tx.query_row("SELECT server,runner FROM identity WHERE id=1", [], |r| {
@@ -118,6 +123,7 @@ impl Journal {
             return Ok(record);
         }
         let record = Record {
+            checkpoint: None,
             runtime_published: false,
             removals: Default::default(),
             container_actions: Default::default(),
