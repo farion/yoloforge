@@ -123,7 +123,7 @@ fn migration_retires_unscoped_legacy_supervisor_observations_without_deleting_pr
         [note.id.to_string()],
     )
     .unwrap();
-    db.execute_batch("DROP TABLE checkpoint_bundles; DROP TABLE checkpoints; DROP TABLE runtime_bindings; DROP TABLE runtime_terminations; DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
+    db.execute_batch("DROP TABLE scheduler_runs; DROP TABLE scheduler_policies; DROP TABLE reviews; DROP TABLE checkpoint_bundles; DROP TABLE checkpoints; DROP TABLE runtime_bindings; DROP TABLE runtime_terminations; DROP INDEX knowledge_branch_scope; PRAGMA user_version=11;")
         .unwrap();
     drop(db);
     let store = Store::open(&path).unwrap();
@@ -289,6 +289,134 @@ fn finish_agent(store: &Store, c: &RunnerCommand, summary: String) {
         )
         .unwrap();
 }
+#[test]
+fn cleanup_after_success_preserves_result_archive_and_unlocks_checkpoint_only_after_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let target = command(&store);
+    let binding = RuntimeBinding {
+        command_id: target.id,
+        stream_id: target.stream_id,
+        runner_id: target.runner_id,
+        ownership_epoch: 1,
+        runtime: RuntimeRef {
+            container_id: "a".repeat(64),
+            started_at: "2026-11-21T00:00:00Z".into(),
+        },
+        daemon_id: "test-engine".into(),
+        endpoint: "http://127.0.0.1:4096".into(),
+        workspace: "/work".into(),
+    };
+    store
+        .report_runtime_binding(target.runner_id, target.id, binding.clone())
+        .unwrap();
+    finish_agent(&store, &target, "Done, tests passed".into());
+    let original = store
+        .snapshot()
+        .unwrap()
+        .commands
+        .iter()
+        .find(|c| c.id == target.id)
+        .unwrap()
+        .result
+        .clone();
+    let revision = || {
+        store
+            .snapshot()
+            .unwrap()
+            .streams
+            .iter()
+            .find(|s| s.id == target.stream_id)
+            .unwrap()
+            .revision
+    };
+    let t = store
+        .request_termination(
+            target.id,
+            RequestTermination {
+                request_id: RequestId::new(),
+                expected_stream_revision: revision(),
+                runtime: binding.runtime.clone(),
+                previous_request: None,
+                reason: "Release completed runtime for checkpoint".into(),
+            },
+        )
+        .unwrap();
+    assert!(!t.archive_may_be_incomplete);
+    assert_eq!(
+        store
+            .terminal_cleanup_commands(target.runner_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(store
+        .enqueue(
+            target.stream_id,
+            EnqueueCommand {
+                request_id: RequestId::new(),
+                expected_revision: revision(),
+                kind: CommandKind::Checkpoint,
+                prompt: None
+            }
+        )
+        .is_err());
+    let report = ReportTermination {
+        request_id: t.request_id,
+        ownership_epoch: 1,
+        state: TerminationState::Stopped,
+        proof: Some(RemovalProof {
+            runtime: binding.runtime,
+            daemon_id: binding.daemon_id,
+            observed_unix_ms: 2000,
+        }),
+    };
+    let stopped = store
+        .report_termination(target.runner_id, target.id, report.clone())
+        .unwrap();
+    assert_eq!(
+        store
+            .report_termination(target.runner_id, target.id, report)
+            .unwrap(),
+        stopped
+    );
+    assert_eq!(stopped.result, original);
+    assert!(!stopped.archive_may_be_incomplete);
+    assert!(store
+        .terminal_cleanup_commands(target.runner_id)
+        .unwrap()
+        .is_empty());
+    assert!(
+        store
+            .archive(target.id, 0, None)
+            .unwrap()
+            .status
+            .unwrap()
+            .final_scan_complete
+    );
+    assert!(store
+        .continue_agent(
+            target.stream_id,
+            ContinueAgent {
+                request_id: RequestId::new(),
+                expected_revision: revision(),
+                previous_command_id: target.id,
+                prompt: "Must not reuse removed runtime".into()
+            }
+        )
+        .is_err());
+    assert!(store
+        .enqueue(
+            target.stream_id,
+            EnqueueCommand {
+                request_id: RequestId::new(),
+                expected_revision: revision(),
+                kind: CommandKind::Checkpoint,
+                prompt: None
+            }
+        )
+        .is_ok());
+}
 fn supervisor(store: &Store, target: &RunnerCommand) -> SupervisorPolicy {
     let snapshot = store.snapshot().unwrap();
     let project = snapshot
@@ -364,7 +492,7 @@ fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
         let path = dir.path().join("db");
         let store = Store::open(&path).unwrap();
         let target = command(&store);
-        if action == "terminate" {
+        if matches!(action, "terminate" | "close") {
             store
                 .report_runtime_binding(
                     target.runner_id,
@@ -472,6 +600,9 @@ fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
                     .request_id,
                 applied.action_request_id.unwrap()
             );
+            let cleanup = store.termination(target.id).unwrap().unwrap();
+            assert_eq!(cleanup.request_id, applied.action_request_id.unwrap());
+            assert!(!cleanup.archive_may_be_incomplete);
         }
         let revision = store
             .snapshot()

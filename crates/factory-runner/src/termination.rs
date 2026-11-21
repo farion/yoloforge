@@ -21,7 +21,7 @@ fn finished(journal: &Journal, record: &mut Record, t: &RuntimeTermination) -> R
     );
     let result = t.result.clone().context("Termination result missing")?;
     ensure!(
-        matches!(&result,CommandOutput::Agent {agent} if agent.phase==AgentPhase::Failed && agent.session_id==record.command.session_id()),
+        matches!(&result,CommandOutput::Agent {agent} if matches!(agent.phase,AgentPhase::Failed|AgentPhase::Succeeded) && agent.session_id==record.command.session_id()),
         "Invalid termination result"
     );
     record.result = Some(result);

@@ -214,6 +214,38 @@ pub struct HandoffStream {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RequestReview {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub checkpoint_command: CommandId,
+    pub expected_target_commit: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RequestIntegration {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub review_command: CommandId,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetScheduler {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub enabled: bool,
+    pub runner_ids: Vec<RunnerId>,
+    pub max_parallel: u8,
+    pub start_budget: u32,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetDependencies {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub depends_on: Vec<TicketId>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportTermination {
     pub request_id: RequestId,
     pub ownership_epoch: u64,

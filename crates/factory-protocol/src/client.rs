@@ -40,6 +40,120 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn scheduler_policy(
+        &self,
+        id: ProjectId,
+    ) -> Result<Option<SchedulerPolicy>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/projects/{id}/scheduler", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn set_scheduler(
+        &self,
+        id: ProjectId,
+        body: &SetScheduler,
+    ) -> Result<SchedulerPolicy, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/projects/{id}/scheduler", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn set_dependencies(
+        &self,
+        id: TicketId,
+        body: &SetDependencies,
+    ) -> Result<Ticket, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/tickets/{id}/dependencies", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn request_review(
+        &self,
+        id: StreamId,
+        body: &RequestReview,
+    ) -> Result<RunnerCommand, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/streams/{id}/review", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn request_integration(
+        &self,
+        id: StreamId,
+        body: &RequestIntegration,
+    ) -> Result<RunnerCommand, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/streams/{id}/integrate", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn review_job(&self, id: CommandId) -> Result<ReviewJob, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/commands/{id}/review", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn runner_review_job(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        epoch: u64,
+    ) -> Result<ReviewJob, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/review",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .query(&[("epoch", epoch)])
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn terminal_cleanup_commands(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+    ) -> Result<Vec<RunnerCommand>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/runners/{runner}/runtime-cleanups",
+                    self.base
+                ))
+                .header(RUNNER_HEADER, registration.to_string())
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn handoff(
         &self,
         id: StreamId,

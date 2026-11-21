@@ -57,7 +57,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 18,
+            version <= 20,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -113,6 +113,12 @@ impl Store {
         }
         if version < 18 {
             tx.execute_batch(include_str!("../migrations/018_checkpoint_handoff.sql"))?;
+        }
+        if version < 19 {
+            tx.execute_batch(include_str!("../migrations/019_reviews.sql"))?;
+        }
+        if version < 20 {
+            tx.execute_batch(include_str!("../migrations/020_scheduler.sql"))?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -197,6 +203,7 @@ impl Store {
             }
             let now = super::unix_ms();
             let ticket = Ticket {
+                depends_on: vec![],
                 id: TicketId::new(),
                 project_id: body.project_id,
                 revision: Revision(1),
@@ -422,6 +429,8 @@ mod devices;
 mod excerpts;
 mod knowledge;
 mod questions;
+mod reviews;
+mod scheduler;
 mod sessions;
 mod supervisor;
 mod termination;

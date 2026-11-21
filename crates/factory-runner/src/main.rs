@@ -14,6 +14,7 @@ mod compaction;
 mod containment;
 mod journal;
 mod questions;
+mod review;
 mod termination;
 mod workspace;
 use journal::{Journal, Record};
@@ -29,6 +30,11 @@ enum Location {
     about = "Factory runner: durable commands, isolated Git worktrees and OpenCode checks"
 )]
 struct Args {
+    /// Locally installed Docker image used for isolated project review tests (never auto-pulled).
+    #[arg(long)]
+    review_image: Option<String>,
+    #[arg(long, default_value = "/var/run/docker.sock")]
+    review_docker_socket: PathBuf,
     /// JSON binding to one dedicated Linux Docker runtime/stream (cgroup v2).
     #[arg(long, requires = "opencode_registration")]
     containment: Option<PathBuf>,
@@ -177,7 +183,17 @@ async fn commands(
     args: &Args,
     registration: RegistrationId,
     next_command: &mut usize,
+    next_cleanup: &mut usize,
 ) -> Result<bool> {
+    let cleanups = client
+        .terminal_cleanup_commands(args.id, registration)
+        .await?;
+    if !cleanups.is_empty() {
+        let c = cleanups[*next_cleanup % cleanups.len()].clone();
+        *next_cleanup = next_cleanup.wrapping_add(1);
+        let mut record = tokio::task::block_in_place(|| journal.receive(c))?;
+        termination::process(client, journal, &mut record, args, registration).await?;
+    }
     let outbox = tokio::task::block_in_place(|| journal.unreported())?;
     for record in outbox {
         report(client, journal, registration, record, args).await?;
@@ -324,6 +340,44 @@ async fn commands(
             return Ok(true);
         }
         if record.result.is_none() {
+            if matches!(
+                record.command.kind,
+                CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview
+            ) {
+                let job = client
+                    .runner_review_job(
+                        args.id,
+                        registration,
+                        record.command.id,
+                        record.command.ownership_epoch,
+                    )
+                    .await?;
+                if let ReviewJob::Review { checkpoint, .. } = &job {
+                    let bytes = client
+                        .download_checkpoint_bundle(
+                            args.id,
+                            registration,
+                            record.command.id,
+                            record.command.ownership_epoch,
+                        )
+                        .await?;
+                    tokio::task::block_in_place(|| {
+                        checkpoint::install_bundle(
+                            args.workspace_root
+                                .as_deref()
+                                .expect("workspace root initialized"),
+                            checkpoint,
+                            &bytes,
+                        )
+                    })?;
+                }
+                if let Some(output) = review::step(journal, &mut record, args, &job).await? {
+                    record.result = Some(output);
+                    tokio::task::block_in_place(|| journal.save(&record))?;
+                    report(client, journal, registration, record, args).await?;
+                }
+                return Ok(true);
+            }
             if record.command.kind == CommandKind::PrepareWorkspace {
                 if let Some(import) = record
                     .command
@@ -382,6 +436,9 @@ async fn commands(
                 }),
                 CommandKind::RunAgent => unreachable!("agent execution handled above"),
                 CommandKind::Checkpoint => unreachable!("checkpoint execution handled above"),
+                CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview => {
+                    unreachable!("review handled above")
+                }
             });
             tokio::task::block_in_place(|| journal.save(&record))?;
         }
@@ -417,6 +474,7 @@ async fn run(mut args: Args) -> Result<()> {
     let mut registration: Option<Registration> = None;
     let mut was_connected = false;
     let mut next_command = 0;
+    let mut next_cleanup = 0;
     loop {
         let opencode = opencode_status(&args.opencode_registration).await;
         let result = if let Some(current) = &registration {
@@ -437,6 +495,7 @@ async fn run(mut args: Args) -> Result<()> {
                         CONTAINER_FREEZE_CAPABILITY.into(),
                         RUNTIME_TERMINATION_CAPABILITY.into(),
                         CHECKPOINT_CAPABILITY.into(),
+                        REVIEW_CAPABILITY.into(),
                     ],
                     id: args.id,
                     instance_id,
@@ -463,6 +522,7 @@ async fn run(mut args: Args) -> Result<()> {
                     &args,
                     current.registration_id,
                     &mut next_command,
+                    &mut next_cleanup,
                 )
                 .await;
                 registration = Some(current);

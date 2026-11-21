@@ -40,7 +40,7 @@ Anfordern dieser Beendigung.
 
 ## Grenzen und Versionierung
 
-- Server zuerst aktualisieren: DB-Schema 16, Runner-Journal 4,
+- Server zuerst aktualisieren: DB-Schema 20, Runner-Journal 6,
   Capability `runtime-termination-v1`.
 - Legacy-Bindungen ohne gespeicherte Daemon-ID werden nicht automatisch adoptiert.
 - Fehlen sowohl Journal als auch zentrale Bindung, bleibt der Auftrag reserviert.
@@ -61,7 +61,17 @@ verlorene Ergebnis-Persistierung und Intent ohne ausgeführten Docker-Aufruf:
 cargo test -p factory-runner --locked real_freezer -- --ignored --nocapture
 ```
 
-Zielhost- und Realmodell-Abnahme der Beendigung stehen noch aus.
+Die Zielhost-Abnahme der Beendigung steht noch aus.
+Die Entfernung nach erfolgreichem Realmodell-Lauf und anschließende
+Checkpoint-Erstellung sind inzwischen mit `scripts/smoke-contained-agent.py`
+lokal geprüft; die autonome Beendigungsentscheidung selbst ist weiterhin nur
+mit synthetischen Modellentscheidungen geprüft.
+
+Bereits abgeschlossene letzte Agentenaufträge können ebenfalls bereinigt werden.
+Der Runner verarbeitet diese über eine separate Cleanup-Queue; neues Scheduling
+bleibt währenddessen gesperrt. Ergebnis und abgeschlossenes Archiv bleiben
+unverändert. Eine Fortsetzung der entfernten Runtime wird abgewiesen. Für eine
+neue Ausführung muss eine neue Runtime eingerichtet werden.
 
 ## Autonomer Supervisor
 
@@ -71,5 +81,8 @@ darf keine Container-ID wählen. Streamrevision und Policyrevision bleiben gepr�
 Unverifizierte Wissensnotiz, Entscheidung und Beendigungsanfrage werden atomar
 gespeichert. Ohne passenden Runner-Nachweis bleibt der Auftrag reserviert.
 Unklare Beendigungen werden nicht automatisch erneut ausgelöst.
+Beim autonomen `close` einer erfolgreichen Session wird eine vorhandene zentral
+gebundene Runtime ebenfalls zur Entfernung vorgemerkt. Schließung, Wissensnotiz
+und Cleanup-Anforderung sind atomar; der ursprüngliche Erfolg bleibt erhalten.
 Store-Tests prüfen modellförmige Entscheidungen und Neustart/Deduplizierung;
 eine echte Modellabnahme dieser neuen Entscheidung steht noch aus.

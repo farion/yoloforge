@@ -71,10 +71,14 @@ async fn main() -> Result<()> {
                 .unwrap_or_default()
                 .as_millis() as u64;
             if !matches!(
-                tokio::task::spawn_blocking(move || store.supervisor_tick(now)).await,
+                tokio::task::spawn_blocking(move || {
+                    store.supervisor_tick(now)?;
+                    store.scheduler_tick()
+                })
+                .await,
                 Ok(Ok(()))
             ) {
-                eprintln!("Supervisor tick failed; durable state retained for retry");
+                eprintln!("Orchestration tick failed; durable state retained for retry");
             }
         }
     });

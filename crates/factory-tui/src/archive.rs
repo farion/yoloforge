@@ -84,9 +84,9 @@ impl State {
             return Err(());
         }
         if !request.reset && page.entries.is_empty() {
-            self.terminated |= page
-                .termination
-                .is_some_and(|t| t.state == TerminationState::Stopped);
+            self.terminated |= page.termination.is_some_and(|t| {
+                t.state == TerminationState::Stopped && t.archive_may_be_incomplete
+            });
             self.end = true;
             self.message = "Archivende dieses Revisionsstands. r: neueren Stand laden".into();
             return Ok(());
@@ -114,7 +114,7 @@ impl State {
         self.terminated |= page
             .termination
             .as_ref()
-            .is_some_and(|t| t.state == TerminationState::Stopped);
+            .is_some_and(|t| t.state == TerminationState::Stopped && t.archive_may_be_incomplete);
         self.next = page.next_after;
         self.entry = page.entries.into_iter().next();
         self.end = self.entry.is_none();

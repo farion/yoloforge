@@ -24,6 +24,8 @@ mod checkpoint_routes;
 mod compaction_routes;
 mod knowledge_routes;
 mod live;
+mod review_routes;
+mod scheduler_routes;
 mod supervisor_routes;
 mod termination_routes;
 mod work_routes;
@@ -136,6 +138,25 @@ pub fn router_with_shutdown(
         .route("/v1/tickets/{id}", patch(update_ticket))
         .route("/v1/streams", post(create_stream))
         .route("/v1/streams/{id}/control", post(set_control))
+        .route(
+            "/v1/projects/{id}/scheduler",
+            get(scheduler_routes::read).post(scheduler_routes::configure),
+        )
+        .route(
+            "/v1/tickets/{id}/dependencies",
+            post(scheduler_routes::dependencies),
+        )
+        .route("/v1/streams/{id}/review", post(review_routes::review))
+        .route("/v1/streams/{id}/integrate", post(review_routes::integrate))
+        .route("/v1/commands/{id}/review", get(review_routes::read))
+        .route(
+            "/v1/runners/{runner}/commands/{command}/review",
+            get(review_routes::runner_read),
+        )
+        .route(
+            "/v1/runners/{runner}/runtime-cleanups",
+            get(termination_routes::pending),
+        )
         .route("/v1/streams/{id}/handoff", post(checkpoint_routes::handoff))
         .route(
             "/v1/runners/{runner}/commands/{command}/checkpoint-bundle",

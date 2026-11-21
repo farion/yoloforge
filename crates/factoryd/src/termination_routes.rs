@@ -1,4 +1,31 @@
 use super::*;
+pub(super) async fn pending(
+    State(app): State<App>,
+    Path(runner): Path<RunnerId>,
+    headers: HeaderMap,
+) -> Response {
+    let guard = match work_routes::runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    if !guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == RUNTIME_TERMINATION_CAPABILITY)
+    {
+        return error(
+            StatusCode::CONFLICT,
+            ErrorCode::WorkConflict,
+            "Runner lacks runtime termination capability",
+        );
+    }
+    let store = app.store.clone();
+    db_call(RequestId::new(), move || {
+        store.terminal_cleanup_commands(runner)
+    })
+    .await
+}
 pub(super) async fn bind(
     State(app): State<App>,
     Path((runner, id)): Path<(RunnerId, CommandId)>,

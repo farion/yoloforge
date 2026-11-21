@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real Factory/CLI/two-runner checkpoint transport; no OpenCode or deployment."""
 import json
+import argparse
 import os
 from pathlib import Path
 import secrets
@@ -15,11 +16,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--review",action="store_true",help="Also test Docker-contained review and CAS integration")
+    parser.add_argument("--review-image",default="yoloforge-freezer-test:development")
+    options=parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="handoff-", dir="/tmp/opencode") as tmp:
         base = Path(tmp)
         env = {k: v for k, v in os.environ.items() if k != "FACTORY_TOKEN_FILE"}
         env["FACTORY_TOKEN"] = secrets.token_hex(32)
         processes, logs = [], []
+        reviews=[]
         def spawn(binary, *args):
             log = open(base / f"process-{len(logs)}.log", "w+")
             logs.append(log)
@@ -65,7 +71,7 @@ def main():
         def runner(which):
             return spawn("factory-runner", "--server", url, "--id", ids[which], "--name", "handoff-" + which,
                          "--journal", base / f"{which}.sqlite3", "--repositories", base / f"{which}.json",
-                         "--workspace-root", base / f"work-{which}")
+                         "--workspace-root", base / f"work-{which}", *(["--review-image",options.review_image] if options.review else []))
         def stream():
             return next(s for s in snapshot()["streams"] if s["id"] == stream_id)
         def command(action):
@@ -75,6 +81,8 @@ def main():
             result = wait(completed)
             assert result["state"] == "succeeded", result
             return result
+        def finished(command_id):
+            return next((x for x in snapshot()["commands"] if x["id"]==command_id and x["state"] in ("succeeded","failed")),None)
         try:
             server = spawn("factoryd", "--listen", address, "--database", base / "factory.sqlite3")
             wait(snapshot)
@@ -134,6 +142,49 @@ def main():
             assert (original / "file").read_text() == "dirty source A"
             assert git(original, "status", "--porcelain") == before
             print("PASS reverse handoff creates epoch-3 worktree; original source files/index remain intact")
+            if options.review:
+                repo=base/"repo-a"
+                git(repo,"checkout","--detach")
+                def configure(test):
+                    p=next(p for p in snapshot()["projects"] if p["id"]==project["id"])
+                    cli("project","configure",p["id"],"--expected-revision",p["revision"],"--provider","openai","--model","test","--test-command",test)
+                def review():
+                    cp=command("checkpoint")
+                    c=cli("stream","review",stream_id,"--expected-revision",stream()["revision"],"--checkpoint",cp["id"],"--expected-target-commit",git(repo,"rev-parse","main"))
+                    reviews.append(c["id"])
+                    return c
+                configure("python3 -c \"from pathlib import Path; import time; assert Path('file').read_text()=='change on B'; print('review-once', flush=True); time.sleep(12)\"")
+                reviewed=review()
+                def running_test():
+                    ids=subprocess.check_output(["docker","ps","-q","--filter",f"label=io.yoloforge.review={reviewed['id']}"],text=True).strip()
+                    return ids
+                wait(running_test)
+                time.sleep(.5)  # allow the runner to persist observed start identity
+                stop(a);stop(server)
+                server=spawn("factoryd","--listen",address,"--database",base/"factory.sqlite3")
+                wait(snapshot);a=runner("a")
+                tested=wait(lambda:finished(reviewed["id"]))
+                assert tested["state"]=="succeeded",tested
+                evidence=tested["result"]["review"]
+                assert Path(evidence["log_path"]).read_text().count("review-once")==1
+                integrated=cli("stream","integrate",stream_id,"--expected-revision",stream()["revision"],"--review",reviewed["id"])
+                applied=wait(lambda:finished(integrated["id"]))
+                assert applied["state"]=="succeeded",applied
+                assert git(repo,"rev-parse","main")==evidence["candidate_commit"]
+                print("PASS isolated review tests survive restart exactly once; tested candidate integrated by CAS")
+                configure("exit 9")
+                target_before=git(repo,"rev-parse","main")
+                rejected=review();failed=wait(lambda:finished(rejected["id"]))
+                assert failed["state"]=="failed",failed
+                assert git(repo,"rev-parse","main")==target_before
+                configure("python3 -c \"print('ok')\"")
+                valid=review();assert wait(lambda:finished(valid["id"]))["state"]=="succeeded"
+                changed=git(repo,"commit-tree",git(repo,"rev-parse","main^{tree}"),"-p",target_before,"-m","concurrent target change")
+                git(repo,"update-ref","refs/heads/main",changed,target_before)
+                attempted=cli("stream","integrate",stream_id,"--expected-revision",stream()["revision"],"--review",valid["id"])
+                assert wait(lambda:finished(attempted["id"]))["state"]=="failed"
+                assert git(repo,"rev-parse","main")==changed
+                print("PASS failed tests and concurrent target changes prevent integration without overwriting work")
         except Exception:
             for log in logs:
                 log.flush()
@@ -145,6 +196,10 @@ def main():
                 stop(p)
             for log in logs:
                 log.close()
+            for review_id in reviews:
+                ids=subprocess.run(["docker","ps","-aq","--no-trunc","--filter",f"label=io.yoloforge.review={review_id}"],capture_output=True,text=True).stdout.split()
+                for runtime in ids:
+                    subprocess.run(["docker","rm","-f",runtime],capture_output=True)
 
 
 if __name__ == "__main__":

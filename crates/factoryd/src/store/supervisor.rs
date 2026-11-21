@@ -359,6 +359,20 @@ fn resolve(
                         reason: decision.reason.clone(),
                     },
                 )?;
+                if let Some(bound) = super::termination::binding(tx, target.id)? {
+                    let current = super::work::stream(tx, stream.id)?;
+                    Store::request_termination_in(
+                        tx,
+                        target.id,
+                        &RequestTermination {
+                            request_id,
+                            expected_stream_revision: current.revision,
+                            runtime: bound.runtime,
+                            previous_request: None,
+                            reason: decision.reason.clone(),
+                        },
+                    )?;
+                }
             }
             SupervisorAction::Wait => unreachable!(),
         }

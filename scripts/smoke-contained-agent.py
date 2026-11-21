@@ -265,6 +265,18 @@ print(MARKER)
         check(exported["final_scan_complete"] and exported["versions"] > 0, "Final archive incomplete")
         check(marker in (directory / "archive.jsonl").read_text(), "Final archive does not contain proof")
         print("PASS same real session thawed, single tool invocation completed and full final archive exported", flush=True)
+        cli("terminate", command["id"], "--expected-stream-revision", str(revision(stream)),
+            "--container-id", container, "--started-at", frozen["proof"]["started_at"],
+            "--reason", "Preserve successful result and release runtime for checkpoint")
+        removed = wait(lambda: (t if (t := cli("termination", command["id"]))["state"] == "stopped" else None), 45)
+        check(not removed["archive_may_be_incomplete"], "Cleanup changed final archive completeness")
+        check(removed["result"] == result["result"], "Cleanup overwrote successful result")
+        container = None  # confirmed absent; finally must not remove it a second time
+        checkpoint = cli("stream", "checkpoint", stream, "--expected-revision", str(revision(stream)))
+        captured = wait(lambda: completed(checkpoint["id"]), 60)
+        check(captured["state"] == "succeeded", "Checkpoint after real model failed")
+        check(captured["result"]["checkpoint"]["bundle_bytes"] > 0, "Checkpoint bundle missing")
+        print("PASS completed real runtime removed without result loss; checkpoint bundle uploaded", flush=True)
         succeeded = True
     finally:
         for process in reversed(processes):

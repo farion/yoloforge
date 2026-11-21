@@ -630,6 +630,8 @@ mod tests {
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command).unwrap();
         let args = Args {
+            review_image: None,
+            review_docker_socket: "/var/run/docker.sock".into(),
             containment: None,
             server: "http://localhost:7432".into(),
             id: runner,

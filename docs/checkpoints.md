@@ -7,8 +7,8 @@ nicht erforderlich.
 
 ## Voraussetzungen
 
-- Server, Clients und beide Runner aktualisieren: DB-Schema **18**, Runner-Journal
-  **5**, Capability `git-checkpoint-v1`. Erst Server aktualisieren, dann Runner und
+- Server, Clients und beide Runner aktualisieren: DB-Schema **20**, Runner-Journal
+  **6**, Capability `git-checkpoint-v1`. Erst Server aktualisieren, dann Runner und
   Clients; anschließend neue Funktionen verwenden.
 - Beide Runner benötigen eine lokale Repository-Zuordnung für dasselbe Projekt.
 - Der Quell-Worktree muss vorbereitet sein. Alle Agenten-Runtimes der aktuellen
@@ -98,6 +98,8 @@ und vollständigen Rollback bei Eventfehlern. Git-Tests prüfen Originalindex,
 dirty Worktree, ignorierte Dateien, Symlinks und Journal-Replay.
 
 Getrennte Zielhosts und Übergabe nach echtem Modelllauf sind noch nicht abgenommen.
-Für Checkpoints und Handoff gibt es noch keinen eigenen TUI-Dialog. Die Beendigung
-einer bereits erfolgreich abgeschlossenen, aber weiterhin vorhandenen Runtime,
-native Prozessruhe und sehr große/submodulbasierte Projekte bleiben Erweiterungen.
+Checkpoint und Handoff sind auch in der TUI-Streamsteuerung verfügbar (siehe
+`review-integration.md`). Erfolgreich abgeschlossene Runtimes können inzwischen
+unter Erhalt ihres Ergebnisses entfernt werden; der Realmodell-Test prüft danach
+die Checkpoint-Erstellung. Native Prozessruhe und sehr große/submodulbasierte
+Projekte bleiben Erweiterungen.

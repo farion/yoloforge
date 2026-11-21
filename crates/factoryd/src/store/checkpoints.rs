@@ -152,13 +152,23 @@ impl Store {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction()?;
         let c = super::work::command(&tx, id, runner, epoch)?;
-        if c.kind != CommandKind::PrepareWorkspace || c.state != CommandState::Accepted {
+        if !matches!(
+            c.kind,
+            CommandKind::PrepareWorkspace | CommandKind::ReviewCheckpoint
+        ) || c.state != CommandState::Accepted
+        {
             return Err(StoreError::WorkConflict);
         }
-        let import = c
-            .workspace_spec
-            .and_then(|s| s.checkpoint)
-            .ok_or(StoreError::WorkConflict)?;
+        let import = if c.kind == CommandKind::ReviewCheckpoint {
+            let ReviewJob::Review { checkpoint, .. } = super::reviews::load(&tx, id)? else {
+                return Err(StoreError::WorkConflict);
+            };
+            checkpoint
+        } else {
+            c.workspace_spec
+                .and_then(|s| s.checkpoint)
+                .ok_or(StoreError::WorkConflict)?
+        };
         let bytes: Vec<u8> = tx.query_row(
             "SELECT content FROM checkpoint_bundles WHERE command_id=?1 AND sha256=?2 AND size=?3",
             params![

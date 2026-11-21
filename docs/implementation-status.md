@@ -15,10 +15,10 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | 7 | Gerätezugang, Rollen, Widerruf | API/CLI und TUI-Geräteverwaltung implementiert und lokal getestet: Rollen, einmalige Enrollment-Codes, Runner-Scope, Widerruf einschließlich laufender SSE-/Long-Polls |
 | 8 | OpenAI-/GitHub-/Forgejo-Zugangsverwaltung | Offen; lokale OpenCode-Anmeldung im Labor vorhanden |
 | 9 | Clone/Fetch und Repository-Einrichtung | Lokale CLI clone/register/fetch mit atomarer Runner-Zuordnung implementiert; TUI-/Remote-Aufträge offen |
-| 10 | Checkpoints und Laptop-/Server-Übergabe | API/CLI/Runner: journalisierte Git-Checkpoints, Kontextpaket, Bundle-Transport über Factory, revisionsgeschützter Ownership-Wechsel und neue Epochen-Worktrees implementiert. Zwei unabhängige lokale Runner mit Neustart und Rückübergabe geprüft; TUI-Dialog, getrennte Zielhosts und Realmodell-Übergabe offen. Siehe `checkpoints.md` |
-| 11 | Review und Integration | Offen; Agent-Erfolg führt bereits zu Review |
+| 10 | Checkpoints und Laptop-/Server-Übergabe | API/CLI/TUI/Runner: journalisierte Git-Checkpoints, Kontextpaket, Bundle-Transport über Factory, revisionsgeschützter Ownership-Wechsel und neue Epochen-Worktrees implementiert. Zwei unabhängige lokale Runner mit Neustart und Rückübergabe geprüft; Checkpoint nach Realmodell-Erfolg und Runtime-Cleanup geprüft. Getrennte Zielhosts und Realmodell-Übergabe offen. Siehe `checkpoints.md` |
+| 11 | Review und Integration | API/CLI/TUI/Runner: Merge-Kandidat gegen gepinnten Zielbranch, Docker-isolierte Tests, bestätigte Test-Runtime-Entfernung und lokale Git-CAS-Integration implementiert. Neustart ohne zweiten Testlauf, Testfehler und konkurrierende Zielbranchänderung lokal per Prozess-/Docker-Test geprüft. Hosting-Push/PR und Zielhost-Abnahme offen; siehe `review-integration.md` |
 | 12 | Projektgedächtnis und Kontextauswahl | Branch-/Ticketscope, budgetierte Prompt-Übernahme und atomare revisionsgeschützte Ablösung mit Provenienz implementiert; Supervisor-Beobachtungen bleiben branchlokal. Automatische semantische Widerspruchsauflösung und modellspezifischer Tokenizer offen |
-| 13 | Supervisor | Modellbasierter Session-Supervisor mit Entscheidungsjournal, Bewertungsbudget, autonomer Compaction und Abschluss erfolgreicher Sessions implementiert; Ticketplanung, automatische Antworten und bestätigtes Beenden laufender Sessions offen |
+| 13 | Supervisor | Modellbasierter Session-Supervisor mit Entscheidungsjournal, Bewertungsbudget, Compaction, Sessionabschluss und gebundener Runtime-Beendigung implementiert. Abhängigkeitengesteuerte Ticketplanung mit Parallelitäts-/Startbudget per API/CLI implementiert und auf Konkurrenz/Neustart geprüft (`scheduler.md`). Automatische Antworten, Scheduler-TUI und Zielhost-Abnahme offen |
 | 14 | Android und Push | Offen; reales Gerät/Push-Zugang für Abnahme nötig |
 | 15 | GitHub-Releases und Ansible-Vertrag | v0.1.1 veröffentlicht; Server-/Linux-TUI-Downloads lokal geprüft, Windows nativ in CI geprüft; Android-APK erst mit implementierter App |
 
@@ -34,4 +34,6 @@ ihre Runtime-/Daemon-Bindung vor Agent-Schreibzugriffen zentral; damit ist
 Beendigung nach lokalem Journalverlust implementiert und mit Docker geprüft.
 Autonome Supervisor-Beendigungsanfragen mit atomarer Wissenssicherung sind
 implementiert und mit synthetischen Modellentscheidungen geprüft; Realmodell-
-Abnahme bleibt offen. Details: `runtime-termination.md` (DB 16, Runner-Journal 4).
+Abnahme bleibt offen. Cleanup nach abgeschlossenem Erfolg bewahrt Ergebnis und
+Archiv und ist mit echtem Modell geprüft; Supervisor-Close fordert Cleanup atomar
+mit an. Details: `runtime-termination.md` (DB 20, Runner-Journal 6).

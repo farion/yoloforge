@@ -277,6 +277,8 @@ mod tests {
         )
         .unwrap();
         let args = Args {
+            review_image: None,
+            review_docker_socket: "/var/run/docker.sock".into(),
             containment: None,
             server: endpoint.clone(),
             id: runner,

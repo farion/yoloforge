@@ -145,78 +145,90 @@ impl Store {
 
     pub fn create_stream(&self, body: CreateStream) -> Result<Workstream> {
         self.mutate(body.request_id, "stream.create", &body, |tx| {
-            line(&body.goal, 240)?;
-            if body.ticket_ids.len() > 100 {
-                return Err(StoreError::Invalid("Too many tickets"));
+            Self::create_stream_in(tx, &body)
+        })
+    }
+    pub(super) fn create_stream_in(
+        tx: &Transaction<'_>,
+        body: &CreateStream,
+    ) -> Result<Workstream> {
+        line(&body.goal, 240)?;
+        if body.ticket_ids.len() > 100 {
+            return Err(StoreError::Invalid("Too many tickets"));
+        }
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [body.project_id.to_string()],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::NotFound);
+        }
+        let mut unique = std::collections::HashSet::new();
+        for id in &body.ticket_ids {
+            if !unique.insert(*id) {
+                return Err(StoreError::Invalid("Duplicate ticket"));
             }
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
-                [body.project_id.to_string()],
-                |r| r.get(0),
-            )?;
-            if !exists {
-                return Err(StoreError::NotFound);
-            }
-            let mut unique = std::collections::HashSet::new();
-            for id in &body.ticket_ids {
-                if !unique.insert(*id) {
-                    return Err(StoreError::Invalid("Duplicate ticket"));
-                }
-            }
-            for id in &body.ticket_ids {
-                let project: Option<String> = tx
-                    .query_row(
-                        "SELECT project_id FROM tickets WHERE id=?1",
-                        [id.to_string()],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if project.as_deref() != Some(&body.project_id.to_string()) {
-                    return Err(StoreError::Invalid("Ticket does not belong to project"));
-                }
-                let assigned: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM stream_tickets WHERE ticket_id=?1)",
+        }
+        for id in &body.ticket_ids {
+            let project: Option<String> = tx
+                .query_row(
+                    "SELECT project_id FROM tickets WHERE id=?1",
                     [id.to_string()],
                     |r| r.get(0),
-                )?;
-                if assigned {
-                    return Err(StoreError::WorkConflict);
-                }
+                )
+                .optional()?;
+            if project.as_deref() != Some(&body.project_id.to_string()) {
+                return Err(StoreError::Invalid("Ticket does not belong to project"));
             }
-            let id = StreamId::new();
-            let value = Workstream {
-                checkpoint: None,
-                id,
-                project_id: body.project_id,
-                revision: Revision(1),
-                goal: body.goal.clone(),
-                runner_id: body.runner_id,
-                ownership_epoch: 1,
-                branch: format!("factory/{id}"),
-                ticket_ids: body.ticket_ids.clone(),
-                status: StreamState::Idle,
-                created_unix_ms: super::super::unix_ms(),
-            };
-            tx.execute(
-                "INSERT INTO streams(id,project_id,data) VALUES(?1,?2,?3)",
-                params![
-                    id.to_string(),
-                    value.project_id.to_string(),
-                    serde_json::to_string(&value)?
-                ],
+            let assigned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM stream_tickets WHERE ticket_id=?1)",
+                [id.to_string()],
+                |r| r.get(0),
             )?;
-            for ticket in &value.ticket_ids {
-                tx.execute(
-                    "INSERT INTO stream_tickets(ticket_id,stream_id) VALUES(?1,?2)",
-                    params![ticket.to_string(), id.to_string()],
-                )?;
+            if assigned {
+                return Err(StoreError::WorkConflict);
             }
-            event(tx, "stream.created", id.to_string(), &value)?;
-            Ok(value)
-        })
+        }
+        let id = StreamId::new();
+        let value = Workstream {
+            checkpoint: None,
+            id,
+            project_id: body.project_id,
+            revision: Revision(1),
+            goal: body.goal.clone(),
+            runner_id: body.runner_id,
+            ownership_epoch: 1,
+            branch: format!("factory/{id}"),
+            ticket_ids: body.ticket_ids.clone(),
+            status: StreamState::Idle,
+            created_unix_ms: super::super::unix_ms(),
+        };
+        tx.execute(
+            "INSERT INTO streams(id,project_id,data) VALUES(?1,?2,?3)",
+            params![
+                id.to_string(),
+                value.project_id.to_string(),
+                serde_json::to_string(&value)?
+            ],
+        )?;
+        for ticket in &value.ticket_ids {
+            tx.execute(
+                "INSERT INTO stream_tickets(ticket_id,stream_id) VALUES(?1,?2)",
+                params![ticket.to_string(), id.to_string()],
+            )?;
+        }
+        event(tx, "stream.created", id.to_string(), &value)?;
+        Ok(value)
     }
 
     pub fn enqueue(&self, id: StreamId, body: EnqueueCommand) -> Result<RunnerCommand> {
+        if matches!(
+            body.kind,
+            CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview
+        ) {
+            return Err(StoreError::Invalid("Use review/integration endpoints"));
+        }
         self.mutate(
             body.request_id,
             &format!("stream.enqueue/{id}"),
@@ -255,6 +267,9 @@ impl Store {
         supervised: bool,
     ) -> Result<RunnerCommand> {
         let mut owner = stream(tx, id)?;
+        if super::termination::active(tx, id)? {
+            return Err(StoreError::WorkConflict);
+        }
         if !supervised {
             let reserved: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1)",
@@ -277,7 +292,11 @@ impl Store {
         }
         let workspace_spec = if matches!(
             body.kind,
-            CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::Checkpoint
+            CommandKind::PrepareWorkspace
+                | CommandKind::RunAgent
+                | CommandKind::Checkpoint
+                | CommandKind::ReviewCheckpoint
+                | CommandKind::IntegrateReview
         ) {
             let data: String = tx.query_row(
                 "SELECT data FROM projects WHERE id=?1",
@@ -338,6 +357,9 @@ impl Store {
                 let parent: RunnerCommand =
                     serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
                 if super::sessions::closed(tx, parent.session_root())? {
+                    return Err(StoreError::WorkConflict);
+                }
+                if super::termination::load(tx, parent.id)?.is_some() {
                     return Err(StoreError::WorkConflict);
                 }
                 if parent.id != previous
@@ -502,6 +524,9 @@ impl Store {
                     return Err(StoreError::WorkConflict);
                 }
                 let ok = match (&value.kind, &body.result) {
+                    (CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview, output) => {
+                        super::reviews::validate(tx, &value, output)?
+                    }
                     (CommandKind::Checkpoint, CommandOutput::Checkpoint { checkpoint }) => {
                         super::checkpoints::validate(checkpoint)?;
                         super::checkpoints::verify_bundle(tx, id, checkpoint)?;
@@ -571,7 +596,10 @@ impl Store {
                     tx,
                     &mut owner,
                     if ok {
-                        if value.kind == CommandKind::RunAgent {
+                        if matches!(
+                            value.kind,
+                            CommandKind::RunAgent | CommandKind::ReviewCheckpoint
+                        ) {
                             StreamState::Review
                         } else {
                             StreamState::Idle

@@ -46,6 +46,12 @@ fn command_output(output: &CommandOutput) -> String {
         CommandOutput::Workspace { workspace } => workspace.path.clone(),
         CommandOutput::WorkspaceError { workspace_error } => workspace_error.clone(),
         CommandOutput::Agent { agent } => format!("{:?}: {}", agent.phase, agent.summary),
+        CommandOutput::Review { review } => format!("Tested candidate {}", review.candidate_commit),
+        CommandOutput::Integration { integration } => format!(
+            "Integrated {} -> {}",
+            integration.commit, integration.target_branch
+        ),
+        CommandOutput::ReviewError { review_error } => review_error.clone(),
         CommandOutput::Checkpoint { checkpoint } => format!(
             "Checkpoint {}: {}",
             checkpoint.commit, checkpoint.bundle_path
@@ -498,7 +504,8 @@ async fn main() -> Result<()> {
                                 stream_dialogs
                                     .entry(current.id)
                                     .and_modify(|d| d.reopen(current.clone(), previous))
-                                    .or_insert_with(|| stream::Dialog::new(current, previous));
+                                    .or_insert_with(|| stream::Dialog::new(current, previous))
+                                    .context(last.as_ref().unwrap());
                             }
                         }
                         KeyCode::Enter if view == 5 => {

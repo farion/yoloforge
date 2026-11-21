@@ -335,6 +335,43 @@ pub enum CommandKind {
     PrepareWorkspace,
     RunAgent,
     Checkpoint,
+    ReviewCheckpoint,
+    IntegrateReview,
+}
+pub const REVIEW_CAPABILITY: &str = "git-review-v1";
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReviewJob {
+    Review {
+        checkpoint: CheckpointImport,
+        target_branch: String,
+        target_commit: String,
+        test_command: String,
+    },
+    Integrate {
+        review_command: CommandId,
+        target_branch: String,
+        target_commit: String,
+        candidate_commit: String,
+    },
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReviewResult {
+    pub checkpoint: CommandId,
+    pub target_commit: String,
+    pub candidate_commit: String,
+    pub tree: String,
+    pub image: String,
+    pub test_exit_code: i32,
+    pub removal: RemovalProof,
+    pub log_path: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IntegrationResult {
+    pub review_command: CommandId,
+    pub target_branch: String,
+    pub previous_commit: String,
+    pub commit: String,
 }
 pub const CHECKPOINT_CAPABILITY: &str = "git-checkpoint-v1";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -518,6 +555,9 @@ pub struct Workspace {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CommandOutput {
+    Review { review: ReviewResult },
+    Integration { integration: IntegrationResult },
+    ReviewError { review_error: String },
     Checkpoint { checkpoint: GitCheckpoint },
     CheckpointError { checkpoint_error: String },
     OpenCode(OpenCodeStatus),
@@ -576,6 +616,8 @@ pub struct Project {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<TicketId>,
     pub id: TicketId,
     pub project_id: ProjectId,
     pub revision: Revision,
@@ -587,6 +629,15 @@ pub struct Ticket {
     pub status: TicketState,
     pub created_unix_ms: u64,
     pub updated_unix_ms: u64,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SchedulerPolicy {
+    pub project_id: ProjectId,
+    pub revision: Revision,
+    pub enabled: bool,
+    pub runner_ids: Vec<RunnerId>,
+    pub max_parallel: u8,
+    pub remaining_starts: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

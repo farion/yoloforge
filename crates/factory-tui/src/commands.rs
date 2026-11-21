@@ -6,8 +6,31 @@ mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    Scheduler {
+        project: ProjectId,
+    },
+    SchedulerSet {
+        project: ProjectId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        enabled: bool,
+        #[arg(long, required = true)]
+        runner: Vec<RunnerId>,
+        #[arg(long, default_value = "1")]
+        max_parallel: u8,
+        #[arg(long, default_value = "10")]
+        start_budget: u32,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    Review {
+        id: CommandId,
+    },
     /// Inspect the pinned context and stopped-runtime evidence for a checkpoint command.
-    Checkpoint { id: CommandId },
+    Checkpoint {
+        id: CommandId,
+    },
     /// Remove a pinned dedicated runtime and fail its active command; volumes/worktree remain.
     Terminate {
         id: CommandId,
@@ -25,9 +48,13 @@ pub enum Command {
         request_id: Option<RequestId>,
     },
     /// Inspect a runtime termination, its removal evidence and archive limitation.
-    Termination { id: CommandId },
+    Termination {
+        id: CommandId,
+    },
     /// Read autonomous session supervisor policy and remaining evaluation budget.
-    Supervisor { project: ProjectId },
+    Supervisor {
+        project: ProjectId,
+    },
     /// Configure a dedicated supervisor stream (revision 0 creates the policy).
     SupervisorSet {
         project: ProjectId,
@@ -45,7 +72,9 @@ pub enum Command {
         request_id: Option<RequestId>,
     },
     /// Read the latest autonomous evaluations, reasons, source links and action outcomes.
-    SupervisorHistory { project: ProjectId },
+    SupervisorHistory {
+        project: ProjectId,
+    },
     /// Retire future continuation of a successful archived session, preserving its history.
     CloseSession {
         id: CommandId,
@@ -57,7 +86,9 @@ pub enum Command {
         request_id: Option<RequestId>,
     },
     /// Read the session closure record for any command in its lineage.
-    SessionClosure { id: CommandId },
+    SessionClosure {
+        id: CommandId,
+    },
     /// Request native compaction for an active agent session (admission is not completion).
     Compact {
         id: CommandId,
@@ -69,7 +100,9 @@ pub enum Command {
         request_id: Option<RequestId>,
     },
     /// Read the latest compaction request and execution state.
-    Compaction { id: CommandId },
+    Compaction {
+        id: CommandId,
+    },
     /// Export persisted message versions as JSONL; creates a new private file.
     Archive {
         id: CommandId,
@@ -236,6 +269,26 @@ pub enum QuestionCommand {
 }
 #[derive(Subcommand)]
 pub enum StreamCommand {
+    Review {
+        id: StreamId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        checkpoint: CommandId,
+        #[arg(long)]
+        expected_target_commit: String,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    Integrate {
+        id: StreamId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        review: CommandId,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
     /// Transfer a checkpointed stream to a different runner with a new ownership epoch.
     Handoff {
         id: StreamId,
@@ -392,6 +445,15 @@ pub enum ProjectCommand {
 }
 #[derive(Subcommand)]
 pub enum TicketCommand {
+    Dependencies {
+        id: TicketId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        depends_on: Vec<TicketId>,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
     List {
         #[arg(long)]
         project: Option<ProjectId>,
@@ -443,6 +505,93 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Scheduler { project } => print(&client.scheduler_policy(project).await?),
+        Command::SchedulerSet {
+            project,
+            expected_revision,
+            enabled,
+            runner,
+            max_parallel,
+            start_budget,
+            request_id,
+        } => print(
+            &client
+                .set_scheduler(
+                    project,
+                    &SetScheduler {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        enabled,
+                        runner_ids: runner,
+                        max_parallel,
+                        start_budget,
+                    },
+                )
+                .await?,
+        ),
+        Command::Ticket {
+            command:
+                TicketCommand::Dependencies {
+                    id,
+                    expected_revision,
+                    depends_on,
+                    request_id,
+                },
+        } => print(
+            &client
+                .set_dependencies(
+                    id,
+                    &SetDependencies {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        depends_on,
+                    },
+                )
+                .await?,
+        ),
+        Command::Review { id } => print(&client.review_job(id).await?),
+        Command::Stream {
+            command:
+                StreamCommand::Review {
+                    id,
+                    expected_revision,
+                    checkpoint,
+                    expected_target_commit,
+                    request_id,
+                },
+        } => print(
+            &client
+                .request_review(
+                    id,
+                    &RequestReview {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        checkpoint_command: checkpoint,
+                        expected_target_commit,
+                    },
+                )
+                .await?,
+        ),
+        Command::Stream {
+            command:
+                StreamCommand::Integrate {
+                    id,
+                    expected_revision,
+                    review,
+                    request_id,
+                },
+        } => print(
+            &client
+                .request_integration(
+                    id,
+                    &RequestIntegration {
+                        request_id: request_id.unwrap_or_default(),
+                        expected_revision: Revision(expected_revision),
+                        review_command: review,
+                    },
+                )
+                .await?,
+        ),
         Command::Stream {
             command:
                 StreamCommand::Handoff {
@@ -632,7 +781,7 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             )?;
             file.sync_all()?;
             print(
-                &serde_json::json!({"output":output,"versions":count,"final_scan_complete":status.is_some_and(|v|v.final_scan_complete) && termination.as_ref().is_none_or(|t|t.state!=TerminationState::Stopped),"termination":termination}),
+                &serde_json::json!({"output":output,"versions":count,"final_scan_complete":status.is_some_and(|v|v.final_scan_complete) && termination.as_ref().is_none_or(|t|!t.archive_may_be_incomplete),"termination":termination}),
             )
         }
         Command::Knowledge { command } => match command {

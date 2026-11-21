@@ -43,6 +43,13 @@ fn save(tx: &Transaction<'_>, value: &RuntimeTermination) -> Result<()> {
     )
 }
 impl Store {
+    pub fn terminal_cleanup_commands(&self, runner: RunnerId) -> Result<Vec<RunnerCommand>> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN runtime_terminations t ON t.command_id=c.id JOIN streams s ON s.id=c.stream_id WHERE c.runner_id=?1 AND c.state IN ('succeeded','failed') AND t.state!='stopped' AND json_extract(s.data,'$.runner_id')=c.runner_id AND json_extract(s.data,'$.ownership_epoch')=json_extract(c.data,'$.ownership_epoch') ORDER BY t.rowid LIMIT 100")?;
+        let rows = stmt.query_map([runner.to_string()], |r| r.get::<_, String>(0))?;
+        rows.map(|v| Ok(serde_json::from_str(&v?)?)).collect()
+    }
     pub fn report_runtime_binding(
         &self,
         runner: RunnerId,
@@ -150,10 +157,18 @@ impl Store {
             return Err(StoreError::RevisionConflict(owner.revision));
         }
         if cmd.kind != CommandKind::RunAgent
-            || cmd.state != CommandState::Accepted
+            || cmd.state == CommandState::Pending
             || cmd.runner_id != owner.runner_id
             || cmd.ownership_epoch != owner.ownership_epoch
         {
+            return Err(StoreError::WorkConflict);
+        }
+        let latest: String = tx.query_row(
+            "SELECT id FROM commands WHERE stream_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [cmd.stream_id.to_string()],
+            |r| r.get(0),
+        )?;
+        if latest != id.to_string() {
             return Err(StoreError::WorkConflict);
         }
         let bound = binding(tx, id)?;
@@ -193,7 +208,7 @@ impl Store {
             summary: "Removal requested; process quiescence not yet confirmed".into(),
             proof: None,
             result: None,
-            archive_may_be_incomplete: true,
+            archive_may_be_incomplete: cmd.state==CommandState::Accepted || !tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1 AND json_extract(data,'$.final_scan_complete')=1)",[id.to_string()],|r|r.get::<_,bool>(0))?,
         };
         save(tx, &v)?;
         super::controls::termination(tx, cmd.stream_id, false)?;
@@ -219,7 +234,7 @@ impl Store {
             }
             return Err(StoreError::WorkConflict);
         }
-        if cmd.state != CommandState::Accepted {
+        if cmd.state == CommandState::Pending {
             return Err(StoreError::WorkConflict);
         }
         match body.state {
@@ -243,22 +258,34 @@ impl Store {
                 v.proof = Some(p);
                 v.state = TerminationState::Stopped;
                 v.summary="Pinned runtime removed; processes stopped. Archive may be incomplete; volumes and worktree retained.".into();
-                let progress = AgentProgress {
-                    session_id: cmd.session_id(),
-                    message_id: agent_message_id(id),
-                    phase: AgentPhase::Failed,
-                    summary: v.summary.clone(),
-                };
-                cmd.state = CommandState::Failed;
-                cmd.agent_progress = Some(progress.clone());
-                cmd.result = Some(CommandOutput::Agent { agent: progress });
+                if cmd.state == CommandState::Accepted {
+                    let progress = AgentProgress {
+                        session_id: cmd.session_id(),
+                        message_id: agent_message_id(id),
+                        phase: AgentPhase::Failed,
+                        summary: v.summary.clone(),
+                    };
+                    cmd.state = CommandState::Failed;
+                    cmd.agent_progress = Some(progress.clone());
+                    cmd.result = Some(CommandOutput::Agent { agent: progress });
+                    super::work::save_command(&tx, &cmd, "failed")?;
+                } else {
+                    v.summary="Pinned runtime removed after completed execution; original result and archive retained.".into();
+                }
                 v.result = cmd.result.clone();
                 super::questions::close(&tx, id)?;
                 super::compaction::terminate(&tx, id)?;
                 super::controls::termination(&tx, cmd.stream_id, true)?;
-                super::work::save_command(&tx, &cmd, "failed")?;
                 let mut owner = super::work::stream(&tx, cmd.stream_id)?;
-                super::work::save_stream(&tx, &mut owner, StreamState::Blocked)?;
+                super::work::save_stream(
+                    &tx,
+                    &mut owner,
+                    if cmd.state == CommandState::Succeeded {
+                        StreamState::Review
+                    } else {
+                        StreamState::Blocked
+                    },
+                )?;
             }
             _ => return Err(StoreError::WorkConflict),
         }

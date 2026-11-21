@@ -70,7 +70,7 @@ fn config(args: &Args, stream: StreamId) -> Result<Config> {
     }
     Ok(config)
 }
-async fn docker(config: &Config, args: &[&str]) -> Result<Vec<u8>> {
+pub(crate) async fn docker(config: &Config, args: &[&str]) -> Result<Vec<u8>> {
     let mut command = Command::new("docker");
     command
         .arg("--host")
@@ -239,7 +239,7 @@ async fn inspect(c: &Config, runner: RunnerId, endpoint: &str, workspace: &str) 
     validate_volumes(c, runner, &v).await?;
     Ok(v)
 }
-async fn daemon(c: &Config) -> Result<String> {
+pub(crate) async fn daemon(c: &Config) -> Result<String> {
     let info: Value =
         serde_json::from_slice(&docker(c, &["info", "--format", "{{json .}} "]).await?)?;
     ensure!(
