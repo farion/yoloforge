@@ -40,6 +40,57 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn create_knowledge(
+        &self,
+        body: &CreateKnowledge,
+    ) -> Result<KnowledgeNote, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/knowledge", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn retire_knowledge(
+        &self,
+        id: KnowledgeId,
+        body: &RetireKnowledge,
+    ) -> Result<KnowledgeNote, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/knowledge/{id}/retire", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn knowledge(&self, id: ProjectId) -> Result<Vec<KnowledgeNote>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/projects/{id}/knowledge", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn knowledge_context(
+        &self,
+        id: ProjectId,
+        ticket: Option<TicketId>,
+        budget: usize,
+    ) -> Result<KnowledgeContext, ClientError> {
+        let mut request = self
+            .http
+            .get(format!("{}/v1/projects/{id}/context", self.base))
+            .query(&[("budget_bytes", budget)]);
+        if let Some(ticket) = ticket {
+            request = request.query(&[("ticket", ticket)]);
+        }
+        Self::decode(request.send().await).await
+    }
     pub async fn enrollment(&self, body: &CreateEnrollment) -> Result<Enrollment, ClientError> {
         Self::decode(
             self.http

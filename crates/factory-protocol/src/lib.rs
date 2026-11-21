@@ -8,6 +8,25 @@ pub const RUNNER_HEADER: &str = "x-factory-runner-registration";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CreateKnowledge {
+    pub request_id: RequestId,
+    pub project_id: ProjectId,
+    pub ticket_id: Option<TicketId>,
+    pub title: String,
+    pub content: String,
+    pub source: String,
+    pub source_command: Option<CommandId>,
+    pub priority: u8,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetireKnowledge {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateEnrollment {
     pub role: DeviceRole,
     pub runner_id: Option<RunnerId>,

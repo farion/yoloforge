@@ -17,10 +17,10 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | 9 | Clone/Fetch und Repository-Einrichtung | Lokale CLI clone/register/fetch mit atomarer Runner-Zuordnung implementiert; TUI-/Remote-Aufträge offen |
 | 10 | Checkpoints und Laptop-/Server-Übergabe | Offen; abhängig von 1 |
 | 11 | Review und Integration | Offen; Agent-Erfolg führt bereits zu Review |
-| 12 | Projektgedächtnis und Kontextauswahl | Offen |
+| 12 | Projektgedächtnis und Kontextauswahl | Strukturierte Notizen mit Quellen, Projekt-/Ticketscope, Revision und begrenzter Prompt-Übernahme implementiert; automatische Extraktion und modellspezifischer Tokenizer offen |
 | 13 | Supervisor | Offen; abhängig von 12; einschließlich selbst entschiedener Compaction und Sessionbeendigung |
 | 14 | Android und Push | Offen; reales Gerät/Push-Zugang für Abnahme nötig |
-| 15 | GitHub-Releases und Ansible-Vertrag | Ziel farion/yoloforge; getrennte Server-/Linux-TUI-/Windows-TUI-/Runner-Pakete; Release-Abnahme läuft; Android-APK erst mit implementierter App |
+| 15 | GitHub-Releases und Ansible-Vertrag | v0.1.1 veröffentlicht; Server-/Linux-TUI-Downloads lokal geprüft, Windows nativ in CI geprüft; Android-APK erst mit implementierter App |
 
 Siehe `backlog.md` für Akzeptanzkriterien und `development.md` für bereits
 implementierte Bedienabläufe. Zugangsdaten nicht in dieses Dokument eintragen.

@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 pub mod store;
 use store::{Store, StoreError};
 mod access;
+mod knowledge_routes;
 mod live;
 mod work_routes;
 use access::*;
@@ -65,6 +66,10 @@ pub fn router_with_shutdown(
         stopping,
     };
     Router::new()
+        .route("/v1/knowledge", post(knowledge_routes::create))
+        .route("/v1/knowledge/{id}/retire", post(knowledge_routes::retire))
+        .route("/v1/projects/{id}/knowledge", get(knowledge_routes::list))
+        .route("/v1/projects/{id}/context", get(knowledge_routes::context))
         .route("/healthz", get(health))
         .route(
             "/v1/enroll",

@@ -76,7 +76,7 @@ def main():
             assert device_token.stat().st_mode & 0o077 == 0
             project = cli(device_token, "project", "create", "--name", "docker-persistent", "--repository", "/repo")
             backup = json.loads(docker("exec", name, "python3", "/usr/local/bin/factory-backup", "backup", "--source", "/data/factory.sqlite3", "--destination", "/data/backup.sqlite3"))
-            assert backup["schema_version"] == 6
+            assert backup["schema_version"] >= 6
             docker("restart", "--time", "10", name)
             port = json.loads(docker("inspect", "--format", '{{json .NetworkSettings.Ports}}', name))["7432/tcp"][0]
             url = "http://127.0.0.1:" + port["HostPort"]

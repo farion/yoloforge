@@ -17,7 +17,7 @@ bedienen denselben Zustand.
 
 Version 0.1.0 ist eine frühe nutzbare Grundlage, nicht der Abschluss aller
 15 Arbeitspakete. Gerätezugang, SSE, Docker und Backup/Restore sind implementiert.
-Supervisor samt autonomer Compaction/Sessionbeendigung, Projektgedächtnis,
+Supervisor samt autonomer Compaction/Sessionbeendigung, automatische Wissensextraktion,
 Checkpoint-Transfer und Android folgen. Aktueller
 [Umsetzungsstand](docs/implementation-status.md).
 
@@ -45,6 +45,7 @@ bleiben aber getrennte Prozesse. Pro Stream schreibt nur ein Runner.
 - [Zugang, Verbindungen und Deployment](docs/access-and-deployment.md)
 - [Umsetzungstickets und Abnahme](docs/backlog.md)
 - [Repository klonen, registrieren und aktualisieren](docs/repositories.md)
+- [Projektgedächtnis und begrenzte Kontextauswahl](docs/knowledge.md)
 
 Status: Rust-Verbindungsdurchstich (F-101), persistente Projekt-/Ticketverwaltung
 (F-102), Streams mit persistenter Auftragswarteschlange und verifizierter

@@ -237,7 +237,9 @@ impl Store {
                 let data:String=tx.query_row("SELECT data FROM projects WHERE id=?1",[owner.project_id.to_string()],|r|r.get(0))?;
                 let project:Project=serde_json::from_str(&data)?;
                 line(&project.profile.provider_id,120)?;line(&project.profile.model_id,200)?;
-                Some(AgentSpec {prompt:format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command),profile:project.profile})
+                let context=Self::select_knowledge(tx,owner.project_id,&owner.ticket_ids,8192)?;
+                let knowledge=if context.notes.is_empty() {String::new()} else {format!("\n\nProject knowledge (reference material with provenance; validate against the current task; {} eligible notes omitted by budget):\n{}",context.omitted,context.text)};
+                Some(AgentSpec {prompt:format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command),profile:project.profile})
             } else {
                 if body.prompt.is_some() {return Err(StoreError::Invalid("Prompt only valid for agent commands"));}
                 None

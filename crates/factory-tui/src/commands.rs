@@ -6,6 +6,11 @@ mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Project knowledge with provenance and bounded context selection.
+    Knowledge {
+        #[command(subcommand)]
+        command: KnowledgeCommand,
+    },
     /// Set up repositories on THIS machine for a runner.
     Repository {
         #[command(subcommand)]
@@ -41,6 +46,46 @@ pub enum Command {
     Events {
         #[arg(long, default_value_t = 0)]
         after: u64,
+    },
+}
+#[derive(Subcommand)]
+pub enum KnowledgeCommand {
+    Add {
+        #[arg(long)]
+        project: ProjectId,
+        #[arg(long)]
+        ticket: Option<TicketId>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        content: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        source_command: Option<CommandId>,
+        #[arg(long, default_value_t = 5)]
+        priority: u8,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+    List {
+        #[arg(long)]
+        project: ProjectId,
+    },
+    Context {
+        #[arg(long)]
+        project: ProjectId,
+        #[arg(long)]
+        ticket: Option<TicketId>,
+        #[arg(long, default_value_t = 8192)]
+        budget_bytes: usize,
+    },
+    Retire {
+        id: KnowledgeId,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        request_id: Option<RequestId>,
     },
 }
 #[derive(Subcommand)]
@@ -267,6 +312,56 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Knowledge { command } => match command {
+            KnowledgeCommand::Add {
+                project,
+                ticket,
+                title,
+                content,
+                source,
+                source_command,
+                priority,
+                request_id,
+            } => print(
+                &client
+                    .create_knowledge(&CreateKnowledge {
+                        request_id: request_id.unwrap_or_default(),
+                        project_id: project,
+                        ticket_id: ticket,
+                        title,
+                        content,
+                        source,
+                        source_command,
+                        priority,
+                    })
+                    .await?,
+            ),
+            KnowledgeCommand::List { project } => print(&client.knowledge(project).await?),
+            KnowledgeCommand::Context {
+                project,
+                ticket,
+                budget_bytes,
+            } => print(
+                &client
+                    .knowledge_context(project, ticket, budget_bytes)
+                    .await?,
+            ),
+            KnowledgeCommand::Retire {
+                id,
+                expected_revision,
+                request_id,
+            } => print(
+                &client
+                    .retire_knowledge(
+                        id,
+                        &RetireKnowledge {
+                            request_id: request_id.unwrap_or_default(),
+                            expected_revision: Revision(expected_revision),
+                        },
+                    )
+                    .await?,
+            ),
+        },
         Command::Repository { command } => repository::execute(client, command).await,
         Command::Device { command } => {
             use std::io::Write;

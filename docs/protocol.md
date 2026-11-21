@@ -1,5 +1,18 @@
 # Datenmodell und Runner-Protokoll
 
+## Gerätezugang und Projektgedächtnis
+
+Schema v6 (Release v0.1.1) ergänzt gehashte Geräte-Credentials und einmalige
+Enrollment-Codes. Rollen und Endpunkte sind in [deployment.md](deployment.md)
+dokumentiert; Protokollversion bleibt 1.
+
+Schema v7 (Entwicklungsstand v0.1.2-dev) ergänzt strukturierte Wissensnotizen.
+Anlegen und Stilllegen verwenden dieselbe transaktionale Request-Deduplizierung
+und das Eventlog wie Projektmutationen. Stilllegen prüft die erwartete Revision.
+Scope, Quellenvalidierung und Kontextgrenzen stehen in [knowledge.md](knowledge.md).
+Beim Enqueue eines Agenten werden Auswahl und Prompt atomar erfasst; der Runner
+erhält weiterhin einen vollständigen unveränderlichen `AgentSpec.prompt`.
+
 ## Gespeicherte Sessionauszüge (Schema v5)
 
 - `GET /v1/commands/{id}/excerpt`: letzter `SessionExcerpt` oder `null`;

@@ -44,6 +44,30 @@ id!(BootId);
 id!(CommandId);
 id!(QuestionId);
 id!(DeviceId);
+id!(KnowledgeId);
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeNote {
+    pub id: KnowledgeId,
+    pub project_id: ProjectId,
+    pub ticket_id: Option<TicketId>,
+    pub revision: Revision,
+    pub title: String,
+    pub content: String,
+    pub source: String,
+    pub source_command: Option<CommandId>,
+    pub priority: u8,
+    pub retired: bool,
+    pub created_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KnowledgeContext {
+    pub notes: Vec<KnowledgeNote>,
+    pub text: String,
+    pub budget_bytes: usize,
+    pub omitted: usize,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

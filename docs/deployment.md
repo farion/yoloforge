@@ -194,7 +194,10 @@ ein neues Volume; erst danach die gestoppte Dienstkonfiguration umschalten.
 Windows-x86_64-TUI-ZIP und SHA-256-Prüfsummen sowie ein GHCR-Serverimage. Die Serverimage-Pipeline baut zunächst
 x86_64. Binaries setzen Ubuntu 24.04 oder neuer voraus. CI testet Rust und die
 modellfreien Prozess-/PTY-Smokes. Zielrepository ist `farion/yoloforge`;
-es wurde noch kein Tag gepusht und kein öffentliches Release veröffentlicht.
+`v0.1.1` ist veröffentlicht. Linux- und Windows-TUI wurden nativ in CI gebaut und
+getestet. Die heruntergeladenen Linux-x86_64-TUI- und Server-Pakete wurden zusätzlich
+lokal inklusive Prüfsummen, Compose-Start und Online-Backup geprüft. ARM64 wurde
+gebaut und getestet, aber nicht auf einem separaten Betreibergerät abgenommen.
 
 Der Publish-Job wartet auf beide Linux-Architekturen, die Windows-TUI und das Image. Erst nach
 Prüfsummenprüfung wird ein vollständiges Release aus dem Draft veröffentlicht.
