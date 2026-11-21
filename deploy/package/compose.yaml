@@ -1,0 +1,25 @@
+services:
+  factory:
+    build: .
+    image: yoloforge-server:${YOLOFORGE_VERSION:?Set YOLOFORGE_VERSION to the extracted release tag}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FACTORY_PORT:-7432}:7432"
+    environment:
+      FACTORY_TOKEN_FILE: /run/secrets/bootstrap
+    secrets:
+      - bootstrap
+    volumes:
+      - factory-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 15s
+    init: true
+secrets:
+  bootstrap:
+    file: ${FACTORY_BOOTSTRAP_FILE:?Set the absolute bootstrap token path readable by uid 10001}
+volumes:
+  factory-data:

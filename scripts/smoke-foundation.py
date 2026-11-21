@@ -218,7 +218,7 @@ def main():
         git("add", "file.txt")
         git("commit", "-m", "initial")
         (repository / "file.txt").write_text("user changes\n")
-        mapping.write_text(json.dumps({project["id"]: str(repository)}))
+        cli("repository", "register", "--project", project["id"], "--directory", str(repository), "--repositories", str(mapping))
         second_stream = cli("stream", "create", "--project", project["id"], "--goal", "second workspace", "--runner", local_id)
         def prepare(stream_id):
             revision = next(s["revision"] for s in snapshot()["streams"] if s["id"] == stream_id)

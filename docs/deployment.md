@@ -7,7 +7,31 @@ keine Deployments aus. Ein Release veröffentlicht lediglich Artefakte.
 
 `yoloforge` ist der neue CLI-Einstieg; die folgenden `factory`-Befehle verwenden
 den kompatiblen Alias. Bestehende Datenpfade, Dienstnamen und Protokollkennungen
-bleiben kompatibel. Neue Release-Archive heißen `yoloforge-vVERSION-linux-ARCH.tar.gz`.
+bleiben kompatibel. Ab v0.1.1 sind die Komponenten getrennt:
+
+| Release-Asset | Inhalt |
+| --- | --- |
+| `yoloforge-server-vVERSION-linux-ARCH.tar.gz` | Server-Binary, Dockerfile für dieses Binary, Compose, Backup-Werkzeug, Betriebsdokumentation |
+| `yoloforge-tui-vVERSION-linux-ARCH.tar.gz` | Linux-TUI |
+| `yoloforge-tui-vVERSION-windows-x86_64.zip` | Windows-TUI als `.exe` |
+| `yoloforge-runner-vVERSION-linux-ARCH.tar.gz` | Separater Linux-Runner und Dienstvorlagen |
+| `*.sha256` | Prüfsumme des jeweiligen Archivs |
+| `server-image.json` | Optionales vorgebautes GHCR-Image, per Digest referenziert |
+
+`ARCH` ist `x86_64` oder `aarch64`. Eine Android-APK wird separat veröffentlicht,
+sobald die App implementiert und geprüft ist; derzeit existiert noch keine APK.
+
+Ansible lädt das passende **Server-Paket** aus dem neuesten vollständigen Release,
+prüft dessen `.sha256`, entpackt es versioniert und führt im Paketverzeichnis
+`docker compose -p yoloforge up -d --build` aus. `YOLOFORGE_VERSION` ist der geladene
+Tag; `FACTORY_BOOTSTRAP_FILE` verweist auf die private Bootstrap-Datei. Das enthaltene
+Dockerfile kopiert das fertige Binary ins Image: Auf dem Zielserver werden weder
+Rust noch ein Source-Checkout benötigt. Compose-Projektname und Datenvolume müssen
+bei Updates stabil bleiben. Das Paket funktioniert auch ohne Zugriff auf GHCR.
+
+Die folgende Quellbaum-Compose-Datei `deploy/compose.yaml` ist die alternative
+Variante für vorgebaute Images; im Release-Paket liegt die Binary-basierte
+Compose-Datei direkt neben dem Server-Binary.
 
 Implementiert: Factory-Container, Healthcheck, Geräte-/Runner-Credentials,
 SSE-Replay, Runner-Long-Poll, systemd-Vorlage, SSH-Launcher und SQLite-Backup/Restore.
@@ -166,18 +190,18 @@ ein neues Volume; erst danach die gestoppte Dienstkonfiguration umschalten.
 ## Releases und Prüfungen
 
 `.github/workflows/release.yml` baut bei einem zum Cargo-Versionsfeld passenden
-`v*`-Tag Linux-x86_64-/ARM64-Binaries, Archive mit Deploymentdateien und SHA-256-
-Prüfsummen sowie ein GHCR-Serverimage. Die Serverimage-Pipeline baut zunächst
+`v*`-Tag getrennte Server-/TUI-/Runner-Archive für Linux-x86_64/ARM64, ein
+Windows-x86_64-TUI-ZIP und SHA-256-Prüfsummen sowie ein GHCR-Serverimage. Die Serverimage-Pipeline baut zunächst
 x86_64. Binaries setzen Ubuntu 24.04 oder neuer voraus. CI testet Rust und die
 modellfreien Prozess-/PTY-Smokes. Zielrepository ist `farion/yoloforge`;
 es wurde noch kein Tag gepusht und kein öffentliches Release veröffentlicht.
 
-Der Publish-Job wartet auf beide Binary-Architekturen und das Image. Erst nach
+Der Publish-Job wartet auf beide Linux-Architekturen, die Windows-TUI und das Image. Erst nach
 Prüfsummenprüfung wird ein vollständiges Release aus dem Draft veröffentlicht.
 `server-image.json` enthält den unveränderlichen GHCR-Digest. Ansible löst
 `https://api.github.com/repos/farion/yoloforge/releases/latest` einmal pro Lauf
-auf, lädt die Assets dieses Tags, prüft die passende Prüfsumme und verwendet
-den Image-Digest. So werden während eines Builds keine halbfertigen Releases
+auf, lädt die Server-Assets dieses Tags und prüft die passende Prüfsumme.
+Alternativ kann es den Image-Digest verwenden. So werden während eines Builds keine halbfertigen Releases
 als neuestes Release installiert.
 
 Lokale Abnahme:

@@ -38,18 +38,39 @@ jobs:
       - run: cargo build --release --locked -p factoryd -p factory-runner -p factory-tui
       - name: Package binaries and deployment contract
         run: |
-          mkdir -p dist/yoloforge
-          cp target/release/{yoloforge,factory,factoryd,factory-runner} dist/yoloforge/
-          cp -r deploy dist/yoloforge/
-          cp scripts/factory-backup.py scripts/factory-connect.py docs/deployment.md LICENSE dist/yoloforge/
-          tar -C dist -czf yoloforge-${RELEASE_TAG}-linux-${{ matrix.arch }}.tar.gz yoloforge
-          sha256sum yoloforge-*.tar.gz > checksums-${{ matrix.arch }}.txt
+          python3 scripts/package-release.py --kind server --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
+          python3 scripts/package-release.py --kind tui --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
+          python3 scripts/package-release.py --kind runner --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
+      - name: Test the standalone server package
+        if: matrix.arch == 'x86_64'
+        run: python3 scripts/smoke-server-package.py "dist/yoloforge-server-${RELEASE_TAG}-linux-x86_64.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
           path: |
-            yoloforge-*.tar.gz
-            checksums-${{ matrix.arch }}.txt
+            dist/*.tar.gz
+            dist/*.sha256
+  windows-tui:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: cargo test --locked -p factory-tui --bin yoloforge
+      - run: cargo build --release --locked -p factory-tui --bin yoloforge
+      - run: python scripts/package-release.py --kind tui --os windows --arch x86_64 --version "$env:RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-tui
+          path: |
+            dist/*.zip
+            dist/*.sha256
   image:
     runs-on: ubuntu-24.04
     permissions:
@@ -85,7 +106,7 @@ jobs:
           name: server-image
           path: server-image.json
   publish:
-    needs: [binaries, image]
+    needs: [binaries, windows-tui, image]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -100,13 +121,16 @@ jobs:
         with:
           name: server-image
           path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-tui
+          path: release
       - name: Publish only the complete release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd release
-          sha256sum --check checksums-x86_64.txt
-          sha256sum --check checksums-aarch64.txt
+          sha256sum --check ./*.sha256
           test -s server-image.json
           gh release create "$RELEASE_TAG" --verify-tag --generate-notes --draft ./*
           gh release edit "$RELEASE_TAG" --draft=false --latest

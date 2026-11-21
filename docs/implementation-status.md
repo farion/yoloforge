@@ -14,13 +14,13 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | 6 | Echte Laptop-/Server-Abnahme | Alias rs9tm bekannt; erst nach Ansible-Deployment des Betreibers; kein Deployment durch Agent |
 | 7 | Gerätezugang, Rollen, Widerruf | API/CLI implementiert und getestet, einschließlich laufender SSE-/Long-Polls; TUI-Dialog offen |
 | 8 | OpenAI-/GitHub-/Forgejo-Zugangsverwaltung | Offen; lokale OpenCode-Anmeldung im Labor vorhanden |
-| 9 | Clone/Fetch und Repository-Einrichtung | Offen; registrierte lokale Repositories vorhanden |
+| 9 | Clone/Fetch und Repository-Einrichtung | Lokale CLI clone/register/fetch mit atomarer Runner-Zuordnung implementiert; TUI-/Remote-Aufträge offen |
 | 10 | Checkpoints und Laptop-/Server-Übergabe | Offen; abhängig von 1 |
 | 11 | Review und Integration | Offen; Agent-Erfolg führt bereits zu Review |
 | 12 | Projektgedächtnis und Kontextauswahl | Offen |
 | 13 | Supervisor | Offen; abhängig von 12; einschließlich selbst entschiedener Compaction und Sessionbeendigung |
 | 14 | Android und Push | Offen; reales Gerät/Push-Zugang für Abnahme nötig |
-| 15 | GitHub-Releases und Ansible-Vertrag | Ziel farion/yoloforge; Release-Pipeline vorbereitet; Veröffentlichung/CI-Abnahme ausstehend |
+| 15 | GitHub-Releases und Ansible-Vertrag | Ziel farion/yoloforge; getrennte Server-/Linux-TUI-/Windows-TUI-/Runner-Pakete; Release-Abnahme läuft; Android-APK erst mit implementierter App |
 
 Siehe `backlog.md` für Akzeptanzkriterien und `development.md` für bereits
 implementierte Bedienabläufe. Zugangsdaten nicht in dieses Dokument eintragen.

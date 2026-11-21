@@ -44,6 +44,7 @@ bleiben aber getrennte Prozesse. Pro Stream schreibt nur ein Runner.
 - [Datenmodell und Runner-Protokoll](docs/protocol.md)
 - [Zugang, Verbindungen und Deployment](docs/access-and-deployment.md)
 - [Umsetzungstickets und Abnahme](docs/backlog.md)
+- [Repository klonen, registrieren und aktualisieren](docs/repositories.md)
 
 Status: Rust-Verbindungsdurchstich (F-101), persistente Projekt-/Ticketverwaltung
 (F-102), Streams mit persistenter Auftragswarteschlange und verifizierter

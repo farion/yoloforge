@@ -2,9 +2,15 @@ use anyhow::Result;
 use clap::Subcommand;
 use factory_core::*;
 use factory_protocol::{client::FactoryClient, *};
+mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Set up repositories on THIS machine for a runner.
+    Repository {
+        #[command(subcommand)]
+        command: repository::RepositoryCommand,
+    },
     Device {
         #[command(subcommand)]
         command: DeviceCommand,
@@ -65,12 +71,18 @@ pub enum DeviceCommand {
     },
 }
 fn private_file(path: &std::path::Path) -> Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    Ok(std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?)
+    Ok(private_options().write(true).create_new(true).open(path)?)
+}
+fn private_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // Windows inherits the ACL of the operator-selected parent directory.
+    options
 }
 #[derive(Subcommand)]
 pub enum QuestionCommand {
@@ -255,6 +267,7 @@ fn print(value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
     match command {
+        Command::Repository { command } => repository::execute(client, command).await,
         Command::Device { command } => {
             use std::io::Write;
             match command {

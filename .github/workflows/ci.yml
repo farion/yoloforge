@@ -18,3 +18,12 @@ jobs:
       - run: python3 -u scripts/smoke-foundation.py
       - run: python3 -u scripts/smoke-tui-answers.py
       - run: python3 -u scripts/smoke-backup.py
+  windows-tui:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - run: cargo test --locked -p factory-tui --bin yoloforge
+      - run: cargo build --locked -p factory-tui --bin yoloforge
