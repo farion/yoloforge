@@ -8,11 +8,11 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 | --- | --- | --- |
 | 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg in derselben Session über API/CLI/TUI implementiert und mit echtem Agenten geprüft; Prozesscontainment und Fortsetzung nach Interrupt offen |
 | 2 | Recovery ungeklärter Aufträge | Offen |
-| 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen mit Versionen und CLI-Export implementiert; Binäranhänge, historischer Backfill und TUI-Archivbrowser noch offen |
+| 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen, CLI-Export und TUI-Archivbrowser mit eingefrorenem Revisionsstand implementiert; Binäranhänge und historischer Backfill offen |
 | 4 | SSE und Runner-Long-Poll | Implementiert und lokal getestet; TUI nutzt SSE, Runner Long-Poll |
 | 5 | Deployment, Backup/Restore, Updates | Container, Vorlagen und Backup/Restore lokal getestet; Zielinstallation durch Betreiber |
 | 6 | Echte Laptop-/Server-Abnahme | Erstinstallation v0.1.1 auf rs9tm lesend geprüft: Binary-Hash, Health/Auth, Portbindung und Persistenz passen. Runner-/Agentenbetrieb, Update und Rollback noch offen |
-| 7 | Gerätezugang, Rollen, Widerruf | API/CLI implementiert und getestet, einschließlich laufender SSE-/Long-Polls; TUI-Dialog offen |
+| 7 | Gerätezugang, Rollen, Widerruf | API/CLI und TUI-Geräteverwaltung implementiert und lokal getestet: Rollen, einmalige Enrollment-Codes, Runner-Scope, Widerruf einschließlich laufender SSE-/Long-Polls |
 | 8 | OpenAI-/GitHub-/Forgejo-Zugangsverwaltung | Offen; lokale OpenCode-Anmeldung im Labor vorhanden |
 | 9 | Clone/Fetch und Repository-Einrichtung | Lokale CLI clone/register/fetch mit atomarer Runner-Zuordnung implementiert; TUI-/Remote-Aufträge offen |
 | 10 | Checkpoints und Laptop-/Server-Übergabe | Offen; abhängig von 1 |

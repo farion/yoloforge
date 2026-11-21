@@ -17,6 +17,7 @@ import tempfile
 import termios
 import time
 import urllib.request
+import urllib.error
 import uuid
 
 
@@ -101,7 +102,11 @@ def main():
             api("PUT", prefix + command["id"] + "/excerpt", {"ownership_epoch": 1, "excerpt": {
                 "session_id": session, "revision": 1, "captured_unix_ms": 123, "older_omitted": True,
                 "messages": [{"id": "msg_excerpt_user", "kind": "user", "text": "Archived user request", "truncated": False},
-                             {"id": "msg_excerpt_assistant", "kind": "assistant", "text": "[Tool: shell | completed]\nGrüße from archived tool output", "truncated": True}]}}, registration)
+                              {"id": "msg_excerpt_assistant", "kind": "assistant", "text": "[Tool: shell | completed]\nGrüße from archived tool output", "truncated": True}]}}, registration)
+            api("PUT", prefix + command["id"] + "/archive", {"ownership_epoch": 1, "batch": {
+                "session_id": session, "revision": 1, "captured_unix_ms": 123, "final_scan_complete": False,
+                "messages": [{"id": "msg_raw_first", "text": "RAW_START " + "Grüße archive " * 1500 + " RAW_END"},
+                             {"id": "msg_raw_second", "text": "Second raw archive message"}]}}, registration)
             pid, fd = pty.fork()
             if pid == 0:
                 os.execve(str(ROOT / "target/debug/factory"), ["factory", "--server", url], env)
@@ -225,6 +230,28 @@ def main():
             visible("Archived user request")
             send(b"n")
             visible("Grüße from archived tool output")
+            send(b"\t")
+            pump(1.0)
+            visible("Vollstaendiges Nachrichtenarchiv")
+            visible("RAW_START")
+            send(b"]\x1b[F")
+            visible("RAW_END")
+            send(b"n")
+            visible("Second raw archive message")
+            api("PUT", prefix + command["id"] + "/archive", {"ownership_epoch": 1, "batch": {
+                "session_id": session, "revision": 2, "captured_unix_ms": 124, "final_scan_complete": False,
+                "messages": [{"id": "msg_raw_new", "text": "Newer archive revision"}]}}, registration)
+            send(b"n")
+            visible("Archivende dieses Revisionsstands")
+            visible("Second raw archive message")
+            send(b"p")
+            visible("RAW_START")
+            send(b"r")
+            pump(0.6)
+            send(b"n")
+            send(b"n")
+            visible("Newer archive revision")
+            print("PASS TUI raw archive navigation, untruncated Unicode parts and pinned revision refresh")
             send(b"\x1b")
             print("PASS read-only command prompt, captured profile and durable question history")
             send(b"6\r")
@@ -272,9 +299,66 @@ def main():
             check(api("GET", "/v1/snapshot")["controls"][0]["state"] == "released", "TUI scheduling resume failed")
             print("PASS TUI durable pause and explicit pre-execution resume")
             send(b"\x1b")
+            send(b"7")
+            pump(1.3)
+            visible("Geraete / Admin")
+            send(b"n\x13")
+            pump(1.0)
+            def enrollment_code():
+                drain()
+                resize()
+                rendered = screen_text(pump(0.5))
+                found = re.search(r"yf_[0-9a-f]{64}", rendered)
+                check(found is not None, "enrollment code not rendered")
+                return found.group(0)
+            code = enrollment_code()
+            credential = api("POST", "/v1/enroll", {"code": code, "name": "Grüße Tablet"})
+            check(credential["device"]["role"] == "operator", "TUI default role is not operator")
+            try:
+                api("POST", "/v1/enroll", {"code": code, "name": "reused"})
+                raise RuntimeError("enrollment code reused")
+            except urllib.error.HTTPError as error:
+                check(error.code == 404, "unexpected enrollment replay status")
+            def credential_status(path, token, expected):
+                request = urllib.request.Request(url + path, headers={"Authorization": "Bearer " + token, "x-factory-protocol": "1"})
+                try:
+                    opener.open(request, timeout=5).close()
+                    raise RuntimeError("restricted device access accepted")
+                except urllib.error.HTTPError as error:
+                    check(error.code == expected, "unexpected device access status")
+            credential_status("/v1/devices", credential["token"], 403)
+            send(b"\x1b")
+            pump(1.3)
+            visible("Grüße Tablet")
+            drain()
+            resize()
+            check(code not in screen_text(pump(0.5)), "dismissed enrollment code still displayed")
+            send(b"r")
+            visible(credential["device"]["id"])
+            send(b"\x13")
+            pump(1.0)
+            check(next(d for d in api("GET", "/v1/devices") if d["id"] == credential["device"]["id"])["revoked"], "TUI revoke was not persisted")
+            credential_status("/v1/snapshot", credential["token"], 401)
+            send(b"n\x1b[C\x13")
+            visible("Gueltige Runner-UUID erforderlich")
+            runner_scope = rid()
+            send(("\t\x1b[200~" + runner_scope + "\x1b[201~\x13").encode())
+            pump(1.0)
+            runner_credential = api("POST", "/v1/enroll", {"code": enrollment_code(), "name": "runner-device"})
+            check(runner_credential["device"]["role"] == "runner" and runner_credential["device"]["runner_id"] == runner_scope, "TUI runner scope differs")
+            send(b"\x1b")
+            pump(1.3)
+            visible("runner-device")
+            send(b"\x1b")
+            print("PASS TUI device roles, one-use enrollment, runner scope, hidden codes and live revocation")
             send(b"5\x1b[B\r\t\t\t")
             pump(1.3)
             visible("question.updated")
+            send(b"\t\t")
+            pump(0.7)
+            send(b"n")
+            visible("Second raw archive message")
+            send(b"\x1b[Z\x1b[Z")
             server.terminate()
             server.wait(timeout=8)
             pump(1.3)
@@ -282,6 +366,17 @@ def main():
             visible("question.updated")
             send(b"\t")
             visible("Grüße from archived tool output")
+            send(b"\t")
+            visible("Second raw archive message")
+            send(b"n")
+            visible("GETRENNT")
+            visible("Second raw archive message")
+            send(b"\x1b")
+            send(b"7")
+            visible("runner-device")
+            visible("veraltet")
+            send(b"n")
+            visible("Geraete / Admin")
             send(b"\x1b")
             send(b"6\x1b[B\x1b[B\r")
             visible("retained draft")

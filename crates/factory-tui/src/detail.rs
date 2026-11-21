@@ -99,6 +99,7 @@ pub struct Dialog {
     excerpt_reader: JoinHandle<()>,
     history: watch::Receiver<History>,
     reader: JoinHandle<()>,
+    archive: crate::archive::Browser,
 }
 impl Drop for Dialog {
     fn drop(&mut self) {
@@ -113,6 +114,7 @@ impl Dialog {
             ..Default::default()
         });
         let id = command.id;
+        let archive = crate::archive::Browser::new(id, client.clone());
         let excerpt_client = client.clone();
         let (excerpt_tx, excerpt) = watch::channel((None, "Lade Sessionauszug ...".into()));
         let excerpt_reader = tokio::spawn(async move {
@@ -169,13 +171,23 @@ impl Dialog {
             excerpt_reader,
             history,
             reader,
+            archive,
         }
     }
     pub fn key(&mut self, code: KeyCode) -> bool {
+        if self.page == 5
+            && !matches!(
+                code,
+                KeyCode::Esc | KeyCode::Tab | KeyCode::Right | KeyCode::BackTab | KeyCode::Left
+            )
+        {
+            self.archive.key(code);
+            return false;
+        }
         match code {
             KeyCode::Esc => return true,
-            KeyCode::Tab | KeyCode::Right => self.page = (self.page + 1) % 5,
-            KeyCode::BackTab | KeyCode::Left => self.page = (self.page + 4) % 5,
+            KeyCode::Tab | KeyCode::Right => self.page = (self.page + 1) % 6,
+            KeyCode::BackTab | KeyCode::Left => self.page = (self.page + 5) % 6,
             KeyCode::Char(c @ ('n' | 'p')) if self.page == 4 => {
                 let count = self
                     .excerpt
@@ -201,6 +213,10 @@ impl Dialog {
         false
     }
     pub fn draw(&mut self, frame: &mut Frame, snapshot: Option<&Snapshot>, online: bool) {
+        if self.page == 5 {
+            self.archive.draw(frame);
+            return;
+        }
         if let Some(current) =
             snapshot.and_then(|s| s.commands.iter().find(|c| c.id == self.command.id))
         {

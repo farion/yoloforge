@@ -35,6 +35,28 @@ Ausführungsergebnis bereits vorher; es wird nicht erneut ausgeführt.
 
 ## Export
 
+### TUI-Browser
+
+Auftrag unter `5` mit Enter öffnen, dann mit Tab zur sechsten Detailseite
+„Vollständiges Nachrichtenarchiv / JSON“. `n` und `p` wechseln gespeicherte
+Nachrichtenversionen. `[` und `]` wechseln bei großen Nachrichten verlustfrei
+zwischen UTF-8-sicheren JSON-Teilen von maximal 16 KiB; Pfeile/Bild auf/ab sowie
+Home/End scrollen innerhalb eines Teils. Alle projizierten Felder bleiben lesbar.
+
+Der Browser hält nur eine Nachrichtenversion und bis zu 1024 Rücksprungcursor
+im Speicher. Frühere Versionen bleiben mit `r` ab Archivbeginn erreichbar.
+Der Revisionsstand wird beim ersten Lesen festgehalten. Währenddessen neue Daten
+werden erst durch `r` sichtbar; das Archivende ist ausdrücklich gekennzeichnet.
+Netzfehler und ungültige Cursor erhalten die letzte geladene Nachricht.
+Es gibt keinen automatischen Vollarchivdownload oder eine Textkürzung auf
+Auszugslänge. Binäre Anhänge werden dadurch weiterhin nicht separat geladen.
+
+Der PTY-Test `scripts/smoke-tui-answers.py` prüft große Unicode-Nachrichten über
+mehrere JSON-Teile, Vor-/Zurücknavigation, eingefrorene Revision, explizites
+Neuladen und die Anzeige nach Verbindungsverlust.
+
+### CLI-Export
+
 ```sh
 yoloforge archive AUFTRAG-UUID --output session.jsonl
 ```
@@ -72,4 +94,5 @@ Archive ihrer eigenen Aufträge schreiben.
 
 Für vor Einführung des Archivs bereits abgeschlossene Aufträge erfolgt noch kein
 automatischer Backfill. Die Ratatui-Auszugansicht bleibt eine schnelle begrenzte
-Vorschau; das komplette projizierte Archiv ist über API und CLI zugänglich.
+Vorschau; das komplette projizierte Archiv ist über API, CLI und die zusätzliche
+TUI-Archivseite zugänglich.

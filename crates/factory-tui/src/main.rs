@@ -13,8 +13,10 @@ use ratatui::{
 };
 use std::{collections::BTreeMap, time::Duration};
 mod answer;
+mod archive;
 mod commands;
 mod detail;
+mod devices;
 mod manage;
 mod stream;
 
@@ -143,6 +145,8 @@ async fn main() -> Result<()> {
     let mut dialogs: BTreeMap<QuestionId, answer::Dialog> = BTreeMap::new();
     let mut open_question: Option<QuestionId> = None;
     let mut command_detail: Option<detail::Dialog> = None;
+    let mut device_dialog: Option<devices::Dialog> = None;
+    let mut open_devices = false;
     let mut stream_dialogs: BTreeMap<StreamId, stream::Dialog> = BTreeMap::new();
     let mut open_stream: Option<StreamId> = None;
     let mut management: BTreeMap<manage::Target, manage::Dialog> = BTreeMap::new();
@@ -184,6 +188,7 @@ async fn main() -> Result<()> {
             }
         }
         terminal.draw(|frame| {
+            if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
             if let Some(dialog)=&mut command_detail {dialog.draw(frame,last.as_ref(),online);return;}
             if let Some(dialog)=open_management.and_then(|id|management.get(&id)) {dialog.draw(frame,online);return;}
             if let Some(dialog)=open_stream.and_then(|id|stream_dialogs.get(&id)) {dialog.draw(frame,online,last.as_ref().and_then(|s|s.controls.iter().find(|c|c.stream_id==dialog.stream.id)));return;}
@@ -223,7 +228,7 @@ async fn main() -> Result<()> {
             frame.render_widget(Table::new(rows.into_iter().skip(row_offset).enumerate().map(|(i,row)|if matches!(view,1..=5) && i==0 {row.style(Style::default().bg(Color::DarkGray))} else {row}), [Constraint::Percentage(30), Constraint::Percentage(15), Constraint::Percentage(20), Constraint::Percentage(35)])
                 .header(Row::new(header).style(Style::default().fg(Color::Cyan)))
                 .block(Block::bordered().title(title)), chunks[1]);
-            frame.render_widget(Paragraph::new("1 Runner | 2 Projekte | 3 Tickets | 4 Streams | 5 Auftraege | 6 Fragen | links/rechts Projekt | q")
+            frame.render_widget(Paragraph::new("1 Runner | 2 Projekte | 3 Tickets | 4 Streams | 5 Auftraege | 6 Fragen | 7 Geraete | ←/→ Projekt | q")
                 .block(Block::bordered()), chunks[2]);
         })?;
         while let Ok((id, result)) = stream_rx.try_recv() {
@@ -239,6 +244,11 @@ async fn main() -> Result<()> {
         if event::poll(Duration::from_millis(50))? {
             let event = event::read()?;
             if let Event::Paste(text) = &event {
+                if open_devices {
+                    if let Some(dialog) = &mut device_dialog {
+                        dialog.insert(text);
+                    }
+                }
                 if let Some(dialog) = open_management.and_then(|id| management.get_mut(&id)) {
                     dialog.insert(text);
                 }
@@ -255,6 +265,14 @@ async fn main() -> Result<()> {
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     break;
+                }
+                if open_devices {
+                    if key.kind == KeyEventKind::Press
+                        && device_dialog.as_mut().is_some_and(|d| d.key(key))
+                    {
+                        open_devices = false;
+                    }
+                    continue;
                 }
                 if let Some(id) = open_question {
                     if key.kind == KeyEventKind::Press {
@@ -361,6 +379,12 @@ async fn main() -> Result<()> {
                     }
                     let previous = (view, selected_project);
                     match key.code {
+                        KeyCode::Char('7') => {
+                            if device_dialog.is_none() {
+                                device_dialog = Some(devices::Dialog::new(client.clone()));
+                            }
+                            open_devices = true;
+                        }
                         KeyCode::Enter if view == 4 => {
                             if let Some(command) = last
                                 .as_ref()
