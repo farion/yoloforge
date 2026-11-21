@@ -130,17 +130,7 @@ fn prepare_inner(
             },
         "Unexpected stream branch"
     );
-    let mapping =
-        mapping.context("Configure --repositories with project IDs and local repository paths")?;
-    let repositories: BTreeMap<ProjectId, PathBuf> =
-        serde_json::from_slice(&fs::read(mapping).context("Cannot read repository mapping")?)
-            .context("Invalid repository mapping")?;
-    let repository = fs::canonicalize(
-        repositories
-            .get(&spec.project_id)
-            .context("Project has no local repository mapping")?,
-    )
-    .context("Mapped repository does not exist")?;
+    let repository = repository(spec, mapping)?;
     let common = common_dir(&repository).context("Mapped path is not a Git repository")?;
     fs::create_dir_all(root).context("Cannot create workspace root")?;
     let root = fs::canonicalize(root)?;
@@ -276,6 +266,23 @@ fn prepare_inner(
     })
 }
 
+pub(crate) fn repository(spec: &WorkspaceSpec, mapping: Option<&Path>) -> Result<PathBuf> {
+    if let Some(setup) = &spec.setup {
+        return fs::canonicalize(&setup.repository_path)
+            .context("Project repository path does not exist on this runner");
+    }
+    let mapping =
+        mapping.context("Configure project setup in the TUI or provide --repositories")?;
+    let repositories: BTreeMap<ProjectId, PathBuf> =
+        serde_json::from_slice(&fs::read(mapping).context("Cannot read repository mapping")?)?;
+    fs::canonicalize(
+        repositories
+            .get(&spec.project_id)
+            .context("Project has no local repository mapping")?,
+    )
+    .context("Mapped repository does not exist")
+}
+
 pub fn existing(
     journal: &Journal,
     command: &RunnerCommand,
@@ -360,6 +367,7 @@ mod tests {
                 result: None,
                 created_unix_ms: 1,
                 workspace_spec: Some(WorkspaceSpec {
+                    setup: None,
                     checkpoint: None,
                     project_id: self.project,
                     branch: format!("factory/{stream_id}"),

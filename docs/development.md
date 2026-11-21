@@ -24,9 +24,12 @@ Test überschrieben. Der bestehende Server auf Port 7432 wird nicht verwendet.
 `2` → `n` legt ein Projekt an, `3` → `n` ein Ticket, `Ctrl-S` speichert.
 Ein JSON-Verbindungstest ist `bash scripts/dev-local.sh snapshot`.
 Ohne OpenCode-Konfiguration meldet der Runner `not_configured`; Projekte,
-Tickets und Oberfläche funktionieren bereits. Echte Agentenläufe benötigen
-zusätzlich eine OpenCode-Registrierung, Repository-Zuordnung und ein Projektprofil;
-siehe die weiteren Abschnitte unten.
+Tickets und Oberfläche funktionieren bereits. `2` → `n` öffnet jetzt den
+Projekt-Assistenten; vorhandene Projekte werden über `2` → `p` eingerichtet.
+Er erfasst Runner, Repository-Pfad, Service-Verbindung und Projekt-Harness und
+zeigt den Vorbereitungsstatus. Siehe [Projektanlage](project-setup.md), einschließlich
+der noch offenen Provider-Anmeldung. Die Runner-Übersicht zeigt weiterhin die
+globale Runner-Verbindung; projektspezifische Verbindungen werden im Auftrag geprüft.
 
 Bei direktem `cargo run --bin factory` werden Server und Token nicht automatisch
 angelegt. Dafür den manuellen Startablauf weiter unten verwenden.
@@ -76,8 +79,8 @@ importiert. Server und Runner gemeinsam aktualisieren.
 
 | Ansicht | Neue Einträge | Ausgewählten Eintrag öffnen |
 | --- | --- | --- |
-| `2` Projekte | `n`: Name, Repository und Basisbranch | `e`: Metadaten; `Enter`: Provider, Modell, Toolchain, Start-/Testbefehle |
-| `3` Tickets | `n`: Titel, Beschreibung, Abnahmekriterien und Priorität | `Enter`: Felder und Status bearbeiten |
+| `2` Projekte | `n`: Projekt-Assistent; `N`: nur Metadaten | `p`: Einrichtung; `s`: Ticketplanung; `e`: Metadaten; `Enter`: Profil |
+| `3` Tickets | `n`: Titel, Beschreibung, Abnahmekriterien und Priorität | `Enter`: Felder und Status; `d`: Abhängigkeiten |
 | `4` Streams | `n`: Ziel, Runner und optionale Tickets | `Enter`: Stream-Steuerung; `r`: Container-Recovery |
 
 Links/rechts wählt weiterhin das aktive Projekt für Tickets und Streams;
@@ -98,8 +101,9 @@ an lokal unveränderten Feldern und behält eigene Änderungen. Der geladene
 Serverwert geänderter Felder wird zur Prüfung angezeigt. Erst erneutes `Ctrl-S`
 sendet mit der neuen Revision. Ticketupdates enthalten nur geänderte Felder.
 
-Die Projektanlage registriert Metadaten; Repository-Klonen und die lokale
-Runner-Zuordnung bleiben wie bisher separat. Bestehende Metadaten lassen sich
+Die reine Projektanlage über `N` registriert nur Metadaten; der Assistent `n`/`p`
+übernimmt zusätzlich die Runner-Zuordnung vorhandener Repositories. Repository-
+Klonen bleibt separat. Bestehende Metadaten lassen sich
 mit `e` bearbeiten. Sobald das Projekt Streams besitzt, sind Repository und
 Basisbranch festgeschrieben; eine Änderung wird als Arbeitskonflikt abgewiesen.
 Der Name bleibt bearbeitbar. Das vermeidet das unbeabsichtigte Umleiten bestehender

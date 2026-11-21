@@ -312,6 +312,11 @@ pub(super) async fn pending_commands(
         };
         let store = app.store.clone();
         let identity = principal.clone();
+        let setup = guard.entries[&id]
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == PROJECT_SETUP_CAPABILITY);
         let reviews = guard.entries[&id]
             .input
             .capabilities
@@ -332,6 +337,9 @@ pub(super) async fn pending_commands(
                 return Err(StoreError::NotFound);
             }
             store.pending(id).map(|mut commands| {
+                commands.retain(|c| {
+                    setup || c.workspace_spec.as_ref().is_none_or(|s| s.setup.is_none())
+                });
                 commands.retain(|c| lifecycle || !c.requires_session_lifecycle());
                 commands.retain(|c| checkpoints || !c.requires_checkpoint());
                 commands.retain(|c| {
@@ -395,7 +403,13 @@ pub(super) async fn ack_command(
         .capabilities
         .iter()
         .any(|c| c == CHECKPOINT_CAPABILITY);
+    let setup = guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == PROJECT_SETUP_CAPABILITY);
     db_call(body.request_id, move || {
+        store.require_setup_support(runner, id, body.ownership_epoch, setup)?;
         store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;
         store.require_review_support(runner, id, body.ownership_epoch, reviews)?;
         store.acknowledge_supported(runner, id, body, lifecycle)

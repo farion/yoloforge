@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::os::unix::fs::MetadataExt;
 use std::{
-    collections::BTreeMap,
     fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -60,15 +59,7 @@ fn repository(r: &Record, args: &Args) -> Result<PathBuf> {
         .workspace_spec
         .as_ref()
         .context("Workspace spec missing")?;
-    let map: BTreeMap<ProjectId, PathBuf> = serde_json::from_slice(&fs::read(
-        args.repositories
-            .as_ref()
-            .context("Repository mapping missing")?,
-    )?)?;
-    Ok(fs::canonicalize(
-        map.get(&spec.project_id)
-            .context("Project repository mapping missing")?,
-    )?)
+    crate::workspace::repository(spec, args.repositories.as_deref())
 }
 fn head(repo: &std::path::Path, branch: &str) -> Result<String> {
     git(

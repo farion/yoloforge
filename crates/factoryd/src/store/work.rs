@@ -290,7 +290,7 @@ impl Store {
         if busy {
             return Err(StoreError::WorkConflict);
         }
-        let workspace_spec = if matches!(
+        let mut workspace_spec = if matches!(
             body.kind,
             CommandKind::PrepareWorkspace
                 | CommandKind::RunAgent
@@ -304,7 +304,23 @@ impl Store {
                 |r| r.get(0),
             )?;
             let project: Project = serde_json::from_str(&data)?;
+            let setup = if let Some(mut setup) = project.setup {
+                let binding =
+                    project
+                        .runner_bindings
+                        .get(&owner.runner_id)
+                        .ok_or(StoreError::Invalid(
+                        "Configure project setup for the target runner before preparing new work",
+                    ))?;
+                setup.runner_id = owner.runner_id;
+                setup.repository_path = binding.repository_path.clone();
+                setup.service_registration = binding.service_registration.clone();
+                Some(setup)
+            } else {
+                None
+            };
             Some(WorkspaceSpec {
+                setup,
                 checkpoint: owner.checkpoint.clone(),
                 project_id: project.id,
                 branch: owner.branch.clone(),
@@ -313,6 +329,15 @@ impl Store {
         } else {
             None
         };
+        if workspace_spec.is_some() && body.kind != CommandKind::PrepareWorkspace {
+            let prepared:Option<String>=tx.query_row("SELECT data FROM commands WHERE stream_id=?1 AND state='succeeded' AND json_extract(data,'$.kind')='prepare_workspace' AND json_extract(data,'$.ownership_epoch')=?2 ORDER BY rowid DESC LIMIT 1",params![id.to_string(),owner.ownership_epoch],|r|r.get(0)).optional()?;
+            if let Some(data) = prepared {
+                let c: RunnerCommand = serde_json::from_str(&data)?;
+                if let Some(spec) = c.workspace_spec {
+                    workspace_spec = Some(spec);
+                }
+            }
+        }
         let agent_spec = if body.kind == CommandKind::RunAgent {
             let prompt = body
                 .prompt

@@ -15,6 +15,9 @@ use ratatui::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Target {
+    SetupProject(Option<ProjectId>),
+    Scheduler(ProjectId),
+    Dependencies(TicketId),
     NewProject,
     Project(ProjectId),
     Profile(ProjectId),
@@ -25,6 +28,9 @@ pub enum Target {
 
 #[derive(Clone)]
 pub enum Request {
+    SetupProject(Box<SetupProject>),
+    Scheduler(ProjectId, SetScheduler),
+    Dependencies(TicketId, SetDependencies),
     Project(CreateProject),
     UpdateProject(ProjectId, UpdateProject),
     Profile(ProjectId, UpdateProfile),
@@ -35,6 +41,9 @@ pub enum Request {
 impl Request {
     pub fn id(&self) -> RequestId {
         match self {
+            Self::SetupProject(b) => b.request_id,
+            Self::Scheduler(_, b) => b.request_id,
+            Self::Dependencies(_, b) => b.request_id,
             Self::Project(b) => b.request_id,
             Self::UpdateProject(_, b) => b.request_id,
             Self::Profile(_, b) => b.request_id,
@@ -45,6 +54,15 @@ impl Request {
     }
     pub async fn send(&self, client: &FactoryClient) -> Result<(), ClientError> {
         match self {
+            Self::SetupProject(b) => {
+                client.setup_project(b).await?;
+            }
+            Self::Scheduler(id, b) => {
+                client.set_scheduler(*id, b).await?;
+            }
+            Self::Dependencies(id, b) => {
+                client.set_dependencies(*id, b).await?;
+            }
             Self::Project(b) => {
                 client.create_project(b).await?;
             }
@@ -119,6 +137,7 @@ enum State {
     Submitted,
 }
 pub struct Dialog {
+    setup_result: Option<ProjectSetupResult>,
     target: Target,
     title: String,
     revision: Revision,
@@ -153,6 +172,126 @@ impl Dialog {
             ]
         };
         let (title, revision, fields) = match target {
+            Target::SetupProject(id) => {
+                let p = id.and_then(|id| snapshot.projects.iter().find(|p| p.id == id));
+                if id.is_some() && p.is_none() {
+                    return None;
+                }
+                let setup = p.and_then(|p| p.setup.as_ref());
+                let mut runners = snapshot
+                    .runners
+                    .iter()
+                    .map(|r| (r.id.to_string(), format!("{} / {:?}", r.name, r.location)))
+                    .collect::<Vec<_>>();
+                if let Some(s) = setup {
+                    if !runners.iter().any(|(id, _)| id == &s.runner_id.to_string()) {
+                        runners.push((
+                            s.runner_id.to_string(),
+                            "Bisheriger Runner (offline)".into(),
+                        ));
+                    }
+                }
+                ("Projekt-Assistent | Tab: naechster Schritt | Ctrl-S: einrichten".into(),p.map_or(Revision(0),|p|p.revision),vec![
+                    Field::text("1. Projektname",p.map_or("",|p|p.name.as_str()),true,false),
+                    Field::text("2. Repository (Metadaten: URL oder Pfad)",p.map_or("",|p|p.repository.as_str()),true,false),
+                    Field::text("3. Basisbranch",p.map_or("main",|p|p.base_branch.as_str()),true,false),
+                    Field::select("4. Ausfuehrungsort / Runner (Space)",&setup.map(|s|s.runner_id.to_string()).unwrap_or_default(),runners,false),
+                    Field::text("5. Vorhandenes Git-Repository: absoluter Pfad AUF DEM RUNNER",setup.map_or("",|s|s.repository_path.as_str()),true,false),
+                    Field::text("6. OpenCode-Verbindung: leer = automatisch starten/finden; sonst Registrierungsdatei auf Runner",setup.map_or("",|s|s.service_registration.as_str()),false,false),
+                    Field::text("7. Provider",p.map_or("openai",|p|p.profile.provider_id.as_str()),true,false),
+                    Field::text("8. Modell-ID",p.map_or("",|p|p.profile.model_id.as_str()),true,false),
+                    Field::text("9. Projekt-Harness JSON: leer = Konfiguration aus Repository; sonst neue opencode.json (keine Secrets)",&setup.and_then(|s|s.harness.as_ref()).map(|h|serde_json::to_string_pretty(h).unwrap_or_default()).unwrap_or_default(),false,true),
+                    Field::text("10. Toolchain",p.map_or("",|p|p.profile.toolchain.as_str()),false,true),
+                    Field::text("11. Startbefehl",p.map_or("",|p|p.profile.start_command.as_str()),false,true),
+                    Field::text("12. Testbefehl",p.map_or("",|p|p.profile.test_command.as_str()),false,true),
+                ])
+            }
+            Target::Scheduler(id) => {
+                let project = snapshot.projects.iter().find(|p| p.id == id)?;
+                let policy = snapshot
+                    .scheduler_policies
+                    .iter()
+                    .find(|p| p.project_id == id);
+                let mut runners = snapshot
+                    .runners
+                    .iter()
+                    .map(|r| (r.id.to_string(), format!("{} ({:?})", r.name, r.connection)))
+                    .collect::<Vec<_>>();
+                if let Some(p) = policy {
+                    for id in &p.runner_ids {
+                        if !runners.iter().any(|(value, _)| value == &id.to_string()) {
+                            runners.push((id.to_string(), format!("{id} (nicht verbunden)")));
+                        }
+                    }
+                }
+                (
+                    format!("Ticketplanung: {}", project.name),
+                    policy.map_or(Revision(0), |p| p.revision),
+                    vec![
+                        Field::select(
+                            "Automatische Planung",
+                            if policy.is_some_and(|p| p.enabled) {
+                                "true"
+                            } else {
+                                "false"
+                            },
+                            vec![
+                                ("false".into(), "Deaktiviert".into()),
+                                ("true".into(), "Aktiviert".into()),
+                            ],
+                            false,
+                        ),
+                        Field::select(
+                            "Runner (Space: Auswahl)",
+                            &policy
+                                .map(|p| {
+                                    p.runner_ids
+                                        .iter()
+                                        .map(ToString::to_string)
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                })
+                                .unwrap_or_default(),
+                            runners,
+                            true,
+                        ),
+                        Field::text(
+                            "Maximal parallele Streams (1..16)",
+                            &policy.map_or(1, |p| p.max_parallel).to_string(),
+                            true,
+                            false,
+                        ),
+                        Field::text(
+                            "Verbleibendes Startbudget ersetzen (0..1000)",
+                            &policy.map_or(10, |p| p.remaining_starts).to_string(),
+                            true,
+                            false,
+                        ),
+                    ],
+                )
+            }
+            Target::Dependencies(id) => {
+                let t = snapshot.tickets.iter().find(|t| t.id == id)?;
+                (
+                    format!("Abhaengigkeiten: {} (nur Done gibt frei)", t.title),
+                    t.revision,
+                    vec![Field::select(
+                        "Voraussetzungen (Space: Auswahl)",
+                        &t.depends_on
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        snapshot
+                            .tickets
+                            .iter()
+                            .filter(|other| other.project_id == t.project_id && other.id != id)
+                            .map(|t| (t.id.to_string(), format!("{} [{:?}]", t.title, t.status)))
+                            .collect(),
+                        true,
+                    )],
+                )
+            }
             Target::NewProject => (
                 "Projekt anlegen".into(),
                 Revision(0),
@@ -290,6 +429,7 @@ impl Dialog {
             }
         };
         Some(Self {
+            setup_result: None,
             target,
             title,
             revision,
@@ -319,6 +459,22 @@ impl Dialog {
             f.text.insert_str(f.cursor, &text);
             f.cursor += text.len();
         }
+    }
+    pub fn setup_result(&mut self, result: ProjectSetupResult) {
+        self.setup_result = Some(result);
+    }
+    pub fn monitor(&mut self, snapshot: &Snapshot) {
+        let Some(result) = &self.setup_result else {
+            return;
+        };
+        let Some(c) = snapshot.commands.iter().find(|c| c.id == result.command.id) else {
+            return;
+        };
+        self.message=match &c.result {
+            Some(CommandOutput::Workspace {workspace})=>format!("Projekt eingerichtet. OpenCode-Service erreichbar (Provider-Login separat erforderlich). Worktree: {}\nStream: {}\nEsc, dann 4: diesen Stream waehlen und Agent starten.",workspace.path,c.stream_id),
+            Some(CommandOutput::WorkspaceError {workspace_error})=>format!("Einrichtung braucht Hilfe: {workspace_error}\nStream: {}. Nach Korrektur: Esc, 4, Stream oeffnen, Worktree vorbereiten erneut senden.",c.stream_id),
+            _=>format!("Einrichtung {:?} auf Runner {}. Projekt {}, Stream {}. Dieser Dialog zeigt das Ergebnis automatisch.",c.state,c.runner_id,result.project.id,c.stream_id),
+        };
     }
     fn reload(&mut self, snapshot: &Snapshot) {
         if matches!(
@@ -369,6 +525,92 @@ impl Dialog {
         let request_id = RequestId::new();
         let expected_revision = self.revision;
         Ok(match self.target {
+            Target::SetupProject(project_id) => {
+                let repository_path = value(4);
+                let service_registration = value(5);
+                if !repository_path.starts_with('/')
+                    || (!service_registration.is_empty() && !service_registration.starts_with('/'))
+                {
+                    return Err("Runner-Pfade muessen absolut sein".into());
+                }
+                let harness = if value(8).trim().is_empty() {
+                    None
+                } else {
+                    let config: serde_json::Value = serde_json::from_str(&value(8))
+                        .map_err(|_| "Harness: gueltiges JSON-Objekt erforderlich")?;
+                    if !config.is_object() {
+                        return Err("Harness muss ein JSON-Objekt sein".into());
+                    }
+                    Some(config)
+                };
+                Request::SetupProject(Box::new(SetupProject {
+                    request_id,
+                    project_id,
+                    expected_revision,
+                    name: value(0),
+                    repository: value(1),
+                    base_branch: value(2),
+                    profile: ExecutionProfile {
+                        provider_id: value(6),
+                        model_id: value(7),
+                        toolchain: value(9),
+                        start_command: value(10),
+                        test_command: value(11),
+                    },
+                    setup: ProjectSetup {
+                        runner_id: value(3).parse().map_err(|_| "Runner auswaehlen")?,
+                        repository_path,
+                        service_registration,
+                        harness,
+                    },
+                }))
+            }
+            Target::Scheduler(id) => {
+                let runner_ids = value(1)
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::parse)
+                    .collect::<Result<Vec<RunnerId>, _>>()
+                    .map_err(|_| "Runnerauswahl ungueltig")?;
+                let max_parallel = value(2).parse::<u8>().map_err(|_| "Parallelitaet: 1..16")?;
+                let start_budget = value(3)
+                    .parse::<u32>()
+                    .map_err(|_| "Startbudget: 0..1000")?;
+                if runner_ids.is_empty()
+                    || runner_ids.len() > 16
+                    || !(1..=16).contains(&max_parallel)
+                    || start_budget > 1000
+                {
+                    return Err(
+                        "1..16 Runner, Parallelitaet 1..16, Startbudget 0..1000 erforderlich"
+                            .into(),
+                    );
+                }
+                Request::Scheduler(
+                    id,
+                    SetScheduler {
+                        request_id,
+                        expected_revision,
+                        enabled: value(0) == "true",
+                        runner_ids,
+                        max_parallel,
+                        start_budget,
+                    },
+                )
+            }
+            Target::Dependencies(id) => Request::Dependencies(
+                id,
+                SetDependencies {
+                    request_id,
+                    expected_revision,
+                    depends_on: value(0)
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::parse)
+                        .collect::<Result<_, _>>()
+                        .map_err(|_| "Ticketauswahl ungueltig")?,
+                },
+            ),
             Target::NewProject => Request::Project(CreateProject {
                 request_id,
                 name: value(0),
@@ -458,9 +700,15 @@ impl Dialog {
         match result {
             Ok(()) => {
                 self.state = State::Submitted;
-                self.message = "Gespeichert. Esc: Liste.".into();
+                self.message = if matches!(self.target, Target::SetupProject(_)) {
+                    "Einrichtung eingereiht. Esc, dann 5: Auftrag/Fehler pruefen. Nach Erfolg 4: vorbereiteten Stream oeffnen und Agent starten. Provider-Anmeldung muss im OpenCode-Service vorhanden sein.".into()
+                } else {
+                    "Gespeichert. Esc: Liste.".into()
+                };
             }
-            Err(error @ ClientError::Http { status, .. }) if status.is_client_error() => {
+            Err(error @ ClientError::Http { status, .. })
+                if matches!(status.as_u16(), 400 | 401 | 403 | 404 | 409 | 422) =>
+            {
                 self.state = State::Conflict;
                 self.message = format!("{error}. Entwurf erhalten; Ctrl-R: neu laden und pruefen.");
             }
@@ -520,6 +768,7 @@ impl Dialog {
             if f.choices.is_empty() {
                 return Action::None;
             }
+            let previous = f.text.clone();
             match key.code {
                 KeyCode::Down | KeyCode::Up => {
                     f.choice = if f.text.is_empty() && !f.multiple {
@@ -555,6 +804,28 @@ impl Dialog {
                     f.cursor = f.text.len();
                 }
                 _ => {}
+            }
+            let selected = f.text.clone();
+            if self.focus == 3 && previous != selected {
+                if let Target::SetupProject(Some(project)) = self.target {
+                    let binding = snapshot
+                        .and_then(|s| s.projects.iter().find(|p| p.id == project))
+                        .and_then(|p| {
+                            selected
+                                .parse::<RunnerId>()
+                                .ok()
+                                .and_then(|id| p.runner_bindings.get(&id))
+                        });
+                    for (i, value) in [
+                        (4, binding.map_or("", |b| b.repository_path.as_str())),
+                        (5, binding.map_or("", |b| b.service_registration.as_str())),
+                    ] {
+                        self.fields[i].text = value.into();
+                        self.fields[i].base = value.into();
+                        self.fields[i].cursor = value.len();
+                    }
+                    self.message="Ausfuehrungsort gewechselt; die Pfade dieses Runners pruefen. Projekt-Harness bleibt gemeinsam.".into();
+                }
             }
             return Action::None;
         }
@@ -755,6 +1026,133 @@ mod tests {
         assert_eq!(body.expected_revision, Revision(2));
         assert_eq!(body.title, Some("old changed".into()));
         assert_eq!(body.description, None);
+    }
+    #[test]
+    fn setup_wizard_requires_host_and_freezes_project_config_after_uncertain_delivery() {
+        let mut s = snapshot();
+        let runner = RunnerId::new();
+        s.runners.push(RunnerView {
+            id: runner,
+            name: "Laptop".into(),
+            location: RunnerLocation::Local,
+            version: "test".into(),
+            connection: ConnectionState::Online,
+            last_seen_unix_ms: 1,
+            opencode: OpenCodeStatus::NotConfigured,
+        });
+        let mut d = Dialog::new(Target::SetupProject(None), &s).unwrap();
+        for (i, text) in [
+            (0, "Project"),
+            (1, "/repo"),
+            (4, "/repo"),
+            (7, "test"),
+            (8, "{\"mcp\":{\"servers\":{}}}"),
+        ] {
+            d.focus = i;
+            d.insert(text);
+        }
+        assert!(d.build().is_err());
+        d.fields[3].text = runner.to_string();
+        let first = send(&mut d, &s);
+        d.response(
+            first.id(),
+            Err(ClientError::Http {
+                status: "408".parse().unwrap(),
+                code: None,
+                current_revision: None,
+            }),
+        );
+        d.focus = 8;
+        d.insert("changed");
+        control(&mut d, 'r', &s);
+        let retry = send(&mut d, &s);
+        let (Request::SetupProject(a), Request::SetupProject(b)) = (first, retry) else {
+            panic!()
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            serde_json::to_value(&b).unwrap()
+        );
+        assert_eq!(a.setup.runner_id, runner);
+        assert!(a.setup.service_registration.is_empty());
+        assert!(a.setup.harness.unwrap().is_object());
+    }
+    #[test]
+    fn scheduler_rebase_keeps_user_parallelism_but_refreshes_consumed_budget() {
+        let mut s = snapshot();
+        let id = s.projects[0].id;
+        let runner = RunnerId::new();
+        s.scheduler_policies.push(SchedulerPolicy {
+            project_id: id,
+            revision: Revision(1),
+            enabled: true,
+            runner_ids: vec![runner],
+            max_parallel: 1,
+            remaining_starts: 10,
+        });
+        let mut d = Dialog::new(Target::Scheduler(id), &s).unwrap();
+        d.fields[2].text = "3".into();
+        let first = send(&mut d, &s);
+        d.response(
+            first.id(),
+            Err(ClientError::Http {
+                status: "409".parse().unwrap(),
+                code: Some(ErrorCode::RevisionConflict),
+                current_revision: Some(Revision(2)),
+            }),
+        );
+        s.scheduler_policies[0].revision = Revision(2);
+        s.scheduler_policies[0].remaining_starts = 9;
+        control(&mut d, 'r', &s);
+        let Request::Scheduler(_, b) = send(&mut d, &s) else {
+            panic!()
+        };
+        assert_eq!(b.max_parallel, 3);
+        assert_eq!(b.start_budget, 9);
+        assert_eq!(b.expected_revision, Revision(2));
+    }
+    #[test]
+    fn changing_setup_host_loads_its_paths_without_changing_project_harness() {
+        let mut s = snapshot();
+        let first = RunnerId::new();
+        let second = RunnerId::new();
+        for id in [first, second] {
+            s.runners.push(RunnerView {
+                id,
+                name: "host".into(),
+                location: RunnerLocation::Local,
+                version: "test".into(),
+                connection: ConnectionState::Online,
+                last_seen_unix_ms: 1,
+                opencode: OpenCodeStatus::NotConfigured,
+            });
+        }
+        let project = &mut s.projects[0];
+        let id = project.id;
+        project.setup = Some(ProjectSetup {
+            runner_id: first,
+            repository_path: "/first".into(),
+            service_registration: "/first/service.json".into(),
+            harness: Some(serde_json::json!({"instructions":["RULES.md"]})),
+        });
+        project.runner_bindings.insert(
+            second,
+            ProjectLocation {
+                repository_path: "/second".into(),
+                service_registration: "/second/service.json".into(),
+            },
+        );
+        let mut d = Dialog::new(Target::SetupProject(Some(id)), &s).unwrap();
+        let original = d.fields[8].text.clone();
+        d.focus = 3;
+        d.key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            true,
+            Some(&s),
+        );
+        assert_eq!(d.fields[4].text, "/second");
+        assert_eq!(d.fields[5].text, "/second/service.json");
+        assert_eq!(d.fields[8].text, original);
     }
     #[test]
     fn unknown_creation_freezes_request_across_close_reload_and_paste() {

@@ -538,6 +538,8 @@ pub fn agent_message_id(id: CommandId) -> String {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<ProjectSetup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointImport>,
     pub project_id: ProjectId,
     pub branch: String,
@@ -604,6 +606,10 @@ pub struct Revision(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runner_bindings: std::collections::BTreeMap<RunnerId, ProjectLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<ProjectSetup>,
     pub id: ProjectId,
     pub revision: Revision,
     pub name: String,
@@ -612,6 +618,22 @@ pub struct Project {
     pub created_unix_ms: u64,
     #[serde(default)]
     pub profile: ExecutionProfile,
+}
+/// Project harness settings and the selected execution-host binding. No credentials.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSetup {
+    pub runner_id: RunnerId,
+    pub repository_path: String,
+    /// Empty means discover/start the runner user's native OpenCode service.
+    pub service_registration: String,
+    /// None preserves the repository's native OpenCode config; Some creates a new config.
+    pub harness: Option<serde_json::Value>,
+}
+pub const PROJECT_SETUP_CAPABILITY: &str = "project-setup-v1";
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProjectLocation {
+    pub repository_path: String,
+    pub service_registration: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

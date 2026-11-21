@@ -83,7 +83,7 @@ impl Drop for TerminalGuard {
 
 fn opencode(status: &OpenCodeStatus) -> String {
     match status {
-        OpenCodeStatus::NotConfigured => "nicht konfiguriert".into(),
+        OpenCodeStatus::NotConfigured => "kein globaler Zugang (Projekt: p)".into(),
         OpenCodeStatus::Ready { version } => format!("bereit ({version})"),
         OpenCodeStatus::Unsupported { .. } => "Version nicht unterstuetzt".into(),
         OpenCodeStatus::Unavailable => "nicht erreichbar".into(),
@@ -237,8 +237,8 @@ async fn main() -> Result<()> {
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
-                1 => (["Projekt", "Branch", "Tickets", "ID"], " Projekte | n: neu | e: Metadaten | Enter: Profil ".to_string()),
-                2 => (["Ticket", "Status", "Prioritaet / Revision", "ID"], format!(" Tickets: {project_name} | n: neu | Enter: bearbeiten ")),
+                1 => (["Projekt", "Branch", "Tickets", "ID"], " Projekte | n: Assistent | p: einrichten | e: Metadaten | s: Planung | Enter: Profil ".to_string()),
+                2 => (["Ticket", "Status", "Prioritaet / Revision", "ID"], format!(" Tickets: {project_name} | n: neu | d: Abhaengigkeiten | Enter: bearbeiten ")),
                 3 => (["Stream", "Status", "Revision / Tickets", "ID"], format!(" Streams: {project_name} | n: neu | Enter: steuern | r: Recovery ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
@@ -255,9 +255,17 @@ async fn main() -> Result<()> {
                 dialog.response(result);
             }
         }
-        while let Ok((target, id, result)) = management_rx.try_recv() {
+        while let Ok((target, id, result, setup)) = management_rx.try_recv() {
             if let Some(dialog) = management.get_mut(&target) {
                 dialog.response(id, result);
+                if let Some(setup) = setup {
+                    dialog.setup_result(setup);
+                }
+            }
+        }
+        if let Some(snapshot) = last.as_ref() {
+            for dialog in management.values_mut() {
+                dialog.monitor(snapshot);
             }
         }
         while let Ok((target, id, result)) = recovery_rx.try_recv() {
@@ -362,8 +370,16 @@ async fn main() -> Result<()> {
                                 let client = client.clone();
                                 let tx = management_tx.clone();
                                 tokio::spawn(async move {
-                                    let result = request.send(&client).await;
-                                    let _ = tx.send((target, request.id(), result));
+                                    let (result, setup) =
+                                        if let manage::Request::SetupProject(b) = &request {
+                                            match client.setup_project(b).await {
+                                                Ok(v) => (Ok(()), Some(v)),
+                                                Err(e) => (Err(e), None),
+                                            }
+                                        } else {
+                                            (request.send(&client).await, None)
+                                        };
+                                    let _ = tx.send((target, request.id(), result, setup));
                                 });
                             }
                             manage::Action::None => {}
@@ -392,11 +408,26 @@ async fn main() -> Result<()> {
                     if let Some(snapshot) = &last {
                         let project = snapshot.projects.get(selected_project).map(|p| p.id);
                         let target = match (view, key.code) {
+                            (1, KeyCode::Char('s')) => snapshot
+                                .projects
+                                .get(row_offset)
+                                .map(|p| manage::Target::Scheduler(p.id)),
+                            (2, KeyCode::Char('d')) => snapshot
+                                .tickets
+                                .iter()
+                                .filter(|t| Some(t.project_id) == project)
+                                .nth(row_offset)
+                                .map(|t| manage::Target::Dependencies(t.id)),
                             (1, KeyCode::Char('e')) => snapshot
                                 .projects
                                 .get(row_offset)
                                 .map(|p| manage::Target::Project(p.id)),
-                            (1, KeyCode::Char('n')) => Some(manage::Target::NewProject),
+                            (1, KeyCode::Char('n')) => Some(manage::Target::SetupProject(None)),
+                            (1, KeyCode::Char('N')) => Some(manage::Target::NewProject),
+                            (1, KeyCode::Char('p')) => snapshot
+                                .projects
+                                .get(row_offset)
+                                .map(|p| manage::Target::SetupProject(Some(p.id))),
                             (1, KeyCode::Enter) => snapshot
                                 .projects
                                 .get(row_offset)

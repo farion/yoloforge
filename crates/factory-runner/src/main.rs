@@ -15,6 +15,7 @@ mod containment;
 mod journal;
 mod questions;
 mod review;
+mod setup;
 mod termination;
 mod workspace;
 use journal::{Journal, Record};
@@ -24,7 +25,7 @@ enum Location {
     Local,
     Server,
 }
-#[derive(Parser)]
+#[derive(Clone, Parser)]
 #[command(
     version,
     about = "Factory runner: durable commands, isolated Git worktrees and OpenCode checks"
@@ -66,6 +67,8 @@ async fn report(
     mut record: Record,
     args: &Args,
 ) -> Result<()> {
+    let effective = setup::effective(args, &record.command)?;
+    let args = &effective;
     if let Some(CommandOutput::Checkpoint { checkpoint }) = &record.result {
         let bytes = tokio::task::block_in_place(|| checkpoint::bundle_bytes(checkpoint))?;
         let receipt = client
@@ -214,6 +217,8 @@ async fn commands(
             "server returned a different runner's command"
         );
         let mut record = tokio::task::block_in_place(|| journal.receive(command))?;
+        let effective = setup::effective(args, &record.command)?;
+        let args = &effective;
         let ack = client
             .acknowledge(
                 args.id,
@@ -424,16 +429,9 @@ async fn commands(
                 CommandKind::CheckOpenCode => {
                     opencode_status(&args.opencode_registration).await.into()
                 }
-                CommandKind::PrepareWorkspace => tokio::task::block_in_place(|| {
-                    workspace::prepare(
-                        journal,
-                        &record.command,
-                        args.repositories.as_deref(),
-                        args.workspace_root
-                            .as_deref()
-                            .expect("workspace root initialized"),
-                    )
-                }),
+                CommandKind::PrepareWorkspace => {
+                    setup::prepare(journal, &record.command, args).await
+                }
                 CommandKind::RunAgent => unreachable!("agent execution handled above"),
                 CommandKind::Checkpoint => unreachable!("checkpoint execution handled above"),
                 CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview => {
@@ -496,6 +494,7 @@ async fn run(mut args: Args) -> Result<()> {
                         RUNTIME_TERMINATION_CAPABILITY.into(),
                         CHECKPOINT_CAPABILITY.into(),
                         REVIEW_CAPABILITY.into(),
+                        PROJECT_SETUP_CAPABILITY.into(),
                     ],
                     id: args.id,
                     instance_id,

@@ -40,6 +40,16 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn setup_project(&self, b: &SetupProject) -> Result<ProjectSetupResult, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/projects/setup", self.base))
+                .json(b)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn scheduler_policy(
         &self,
         id: ProjectId,

@@ -138,6 +138,7 @@ pub fn router_with_shutdown(
         .route("/v1/tickets/{id}", patch(update_ticket))
         .route("/v1/streams", post(create_stream))
         .route("/v1/streams/{id}/control", post(set_control))
+        .route("/v1/projects/setup", post(review_routes::setup))
         .route(
             "/v1/projects/{id}/scheduler",
             get(scheduler_routes::read).post(scheduler_routes::configure),
@@ -441,6 +442,7 @@ async fn snapshot(State(app): State<App>) -> Response {
     };
     let registry = app.registry.read().await;
     Json(Snapshot {
+        scheduler_policies: durable.scheduler_policies,
         protocol_version: PROTOCOL_VERSION,
         server_version: env!("CARGO_PKG_VERSION").into(),
         boot_id: app.boot_id,

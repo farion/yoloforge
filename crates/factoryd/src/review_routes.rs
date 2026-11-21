@@ -1,4 +1,17 @@
 use super::*;
+pub(super) async fn setup(
+    State(app): State<App>,
+    body: Result<Json<SetupProject>, JsonRejection>,
+) -> Response {
+    let Ok(Json(b)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid project setup",
+        );
+    };
+    db_call(b.request_id, move || app.store.setup_project(b)).await
+}
 pub(super) async fn review(
     State(app): State<App>,
     Path(id): Path<StreamId>,

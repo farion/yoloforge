@@ -6,6 +6,10 @@ Abhängigkeiten ausdrücklich `done` sind, werden berücksichtigt. `cancelled`
 erfüllt keine Abhängigkeit. Abhängigkeiten müssen im selben Projekt liegen;
 Zyklen und nachträgliche Änderungen bereits zugeordneter Tickets werden abgewiesen.
 
+TUI: `2` → Projekt → `s` für Aktivierung, Runner-Auswahl, Parallelität und
+Startbudget; `3` → Ticket → `d` für Abhängigkeiten. Ein Konflikt beim Budgetverbrauch
+verlangt `Ctrl-R`; unveränderte Felder übernehmen den aktuellen Serverstand.
+
 ```sh
 yoloforge ticket dependencies TICKET --expected-revision REV \
   --depends-on PREREQUISITE

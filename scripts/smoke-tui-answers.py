@@ -165,7 +165,7 @@ def main():
 
             resize()
             pump(1.5)
-            send(b"2n")
+            send(b"2N")  # legacy metadata-only form; new-project wizard has separate acceptance
             visible("Projekt anlegen")
             send("Grüße Projekt".encode())
             send(b"\t/unused-management\t\x13")

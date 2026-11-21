@@ -35,6 +35,7 @@ impl From<serde_json::Error> for StoreError {
 pub struct Store(Arc<Mutex<Connection>>);
 
 pub struct DurableSnapshot {
+    pub scheduler_policies: Vec<SchedulerPolicy>,
     pub projects: Vec<Project>,
     pub tickets: Vec<Ticket>,
     pub cursor: u64,
@@ -57,7 +58,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 20,
+            version <= 21,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -120,6 +121,9 @@ impl Store {
         if version < 20 {
             tx.execute_batch(include_str!("../migrations/020_scheduler.sql"))?;
         }
+        if version < 21 {
+            tx.execute_batch("PRAGMA user_version=21;")?;
+        }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
     }
@@ -168,6 +172,8 @@ impl Store {
         self.mutate(body.request_id, "project.create", &body, |tx| {
             project_fields(&body.name, &body.repository, &body.base_branch)?;
             let project = Project {
+                runner_bindings: Default::default(),
+                setup: None,
                 id: ProjectId::new(),
                 revision: Revision(1),
                 name: body.name.clone(),
@@ -375,8 +381,11 @@ impl Store {
         let commands = records(&tx, "SELECT data FROM commands ORDER BY rowid")?;
         let questions = records(&tx, "SELECT data FROM questions ORDER BY rowid")?;
         let controls = records(&tx, "SELECT data FROM controls ORDER BY rowid")?;
+        let scheduler_policies =
+            records(&tx, "SELECT data FROM scheduler_policies ORDER BY rowid")?;
         tx.commit()?;
         Ok(DurableSnapshot {
+            scheduler_policies,
             projects,
             tickets,
             cursor,
@@ -432,6 +441,7 @@ mod questions;
 mod reviews;
 mod scheduler;
 mod sessions;
+mod setup;
 mod supervisor;
 mod termination;
 mod work;

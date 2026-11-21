@@ -153,6 +153,8 @@ pub struct RunnerView {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub scheduler_policies: Vec<SchedulerPolicy>,
     pub protocol_version: u16,
     pub server_version: String,
     pub boot_id: BootId,
@@ -339,6 +341,24 @@ pub struct CreateProject {
     pub name: String,
     pub repository: String,
     pub base_branch: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupProject {
+    pub request_id: RequestId,
+    pub project_id: Option<ProjectId>,
+    pub expected_revision: Revision,
+    pub name: String,
+    pub repository: String,
+    pub base_branch: String,
+    pub profile: ExecutionProfile,
+    pub setup: ProjectSetup,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectSetupResult {
+    pub project: Project,
+    pub stream: Workstream,
+    pub command: RunnerCommand,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

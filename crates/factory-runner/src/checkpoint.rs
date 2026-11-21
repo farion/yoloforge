@@ -376,6 +376,7 @@ mod tests {
             state: CommandState::Accepted,
             result: None,
             workspace_spec: Some(WorkspaceSpec {
+                setup: None,
                 checkpoint: None,
                 project_id: project,
                 branch: format!("factory/{stream}"),

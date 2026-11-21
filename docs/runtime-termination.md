@@ -40,7 +40,7 @@ Anfordern dieser Beendigung.
 
 ## Grenzen und Versionierung
 
-- Server zuerst aktualisieren: DB-Schema 20, Runner-Journal 6,
+- Server zuerst aktualisieren: DB-Schema 21, Runner-Journal 7,
   Capability `runtime-termination-v1`.
 - Legacy-Bindungen ohne gespeicherte Daemon-ID werden nicht automatisch adoptiert.
 - Fehlen sowohl Journal als auch zentrale Bindung, bleibt der Auftrag reserviert.
