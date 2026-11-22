@@ -49,11 +49,8 @@ impl OpenCodeClient {
             "OpenCode-Service nicht erreichbar oder inkompatibel"
         );
         let mut lines = vec!["OpenCode-Service erreichbar (2.0.27)".to_string()];
-        if provider.is_empty() && model.is_empty() {
-            match self.default_model(directory).await {
-                Ok((p,m))=>lines.push(format!("Standardmodell: {p}/{m}")),
-                Err(_)=>lines.push("Kein Standardmodell verfuegbar: OpenCode oeffnen und Provider anmelden/Modell waehlen".into()),
-            }
+        if provider.is_empty() || model.is_empty() {
+            lines.push("Projektmodell fehlt: Provider-ID und Modell-ID explizit konfigurieren. Kein automatisches Ersatzmodell.".into());
         } else {
             lines.push(format!("Projektmodell: {provider}/{model}"));
         }
@@ -80,6 +77,9 @@ impl OpenCodeClient {
                 } else {
                     let name = item["name"].as_str().unwrap_or("?");
                     let count = item["connections"].as_array().map_or(0, Vec::len);
+                    if count == 0 && !item["id"].as_str().is_some_and(|id| id == provider) {
+                        continue;
+                    }
                     let needs_auth = item["connections"]
                         .as_array()
                         .is_some_and(|a| a.iter().any(|c| c["status"]["status"] == "needs_auth"));

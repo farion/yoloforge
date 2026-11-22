@@ -1,20 +1,22 @@
 //! Native SSH attachment. Credentials and host-key policy stay with the user's SSH setup.
 use anyhow::{ensure, Context, Result};
 use factory_core::{CommandId, RunnerId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
+mod editor;
+pub use editor::Dialog;
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Profile {
+pub(super) struct Profile {
     host: String,
     server: String,
     journal: String,
     #[serde(default)]
     opencode_registration: Option<String>,
 }
-pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
-    let path = std::env::var_os("YOLOFORGE_SSH_CONFIG")
+fn config_path() -> PathBuf {
+    std::env::var_os("YOLOFORGE_SSH_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             std::env::var_os("XDG_CONFIG_HOME")
@@ -23,7 +25,16 @@ pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
                     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
                 })
                 .join("yoloforge/ssh.json")
-        });
+        })
+}
+pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
+    configured_mode(runner, id, false)
+}
+pub fn readiness(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
+    configured_mode(runner, id, true)
+}
+fn configured_mode(runner: RunnerId, id: CommandId, readiness: bool) -> Result<Option<Command>> {
+    let path = config_path();
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -33,7 +44,7 @@ pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
         serde_json::from_slice(&bytes).context("Ungueltiges YoloForge-SSH-Profil")?;
     profiles
         .get(&runner)
-        .map(|p| command(p, runner, id))
+        .map(|p| command_mode(p, runner, id, readiness))
         .transpose()
 }
 fn quote(s: &str) -> Result<String> {
@@ -44,6 +55,9 @@ fn quote(s: &str) -> Result<String> {
     Ok(format!("'{}'", s.replace('\'', "'\\''")))
 }
 fn command(p: &Profile, runner: RunnerId, id: CommandId) -> Result<Command> {
+    command_mode(p, runner, id, false)
+}
+fn command_mode(p: &Profile, runner: RunnerId, id: CommandId, readiness: bool) -> Result<Command> {
     let url = reqwest::Url::parse(&p.server).context("Ungueltige Factory-URL im SSH-Profil")?;
     ensure!(
         matches!(url.scheme(), "http" | "https")
@@ -77,14 +91,22 @@ fn command(p: &Profile, runner: RunnerId, id: CommandId) -> Result<Command> {
     if let Some(path) = &p.opencode_registration {
         args.extend(["--opencode-registration".into(), path.clone()]);
     }
+    if readiness {
+        args.push("--session-readiness".into());
+    }
     let remote = args
         .iter()
         .map(|s| quote(s))
         .collect::<Result<Vec<_>>>()?
         .join(" ");
     let mut command = Command::new("ssh");
+    if readiness {
+        command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
+    } else {
+        command.arg("-t");
+    }
     command
-        .args(["-t", "--", &p.host, &remote])
+        .args(["--", &p.host, &remote])
         .env_remove("FACTORY_TOKEN")
         .env_remove("FACTORY_TOKEN_FILE")
         .env_remove("OPENCODE_PASSWORD");
@@ -111,6 +133,20 @@ mod tests {
         assert_eq!(&args[..3], ["-t", "--", "user@runner"]);
         assert!(args[3].contains(&id.to_string()));
         assert!(args[3].contains("'\\''quoted'\\''"));
+        let status = command_mode(&p, runner, id, true).unwrap();
+        let status_args = status
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &status_args[..5],
+            ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+        );
+        assert!(status_args
+            .last()
+            .unwrap()
+            .contains("'--session-readiness'"));
+        assert!(status_args.last().unwrap().contains(&id.to_string()));
         p.host = "-oProxyCommand=anything".into();
         assert!(command(&p, runner, id).is_err());
         assert!(quote("bad\npath").is_err());

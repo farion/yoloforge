@@ -31,6 +31,26 @@ pub async fn open(args: &Args, id: CommandId) -> Result<()> {
             std::path::Path::new(&execution.workspace.path),
         )
         .await?;
+    if args.session_readiness {
+        let profile = &record
+            .command
+            .agent_spec
+            .as_ref()
+            .context("Session model profile missing")?
+            .profile;
+        println!("Recorded execution: {}", record.command.id);
+        println!(
+            "{}",
+            client
+                .readiness(
+                    &execution.workspace.path,
+                    &profile.provider_id,
+                    &profile.model_id
+                )
+                .await?
+        );
+        return Ok(());
+    }
     let status = terminal
         .status()
         .context("Could not launch OpenCode terminal on runner")?;

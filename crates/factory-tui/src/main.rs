@@ -248,6 +248,7 @@ async fn main() -> Result<()> {
     let mut readiness_project = None;
     let (readiness_tx, mut readiness_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
     let mut native_notice = String::new();
+    let mut ssh_dialog: Option<ssh::Dialog> = None;
     let mut device_dialog: Option<devices::Dialog> = None;
     let mut open_devices = false;
     let mut stream_dialogs: BTreeMap<StreamId, stream::Dialog> = BTreeMap::new();
@@ -333,6 +334,7 @@ async fn main() -> Result<()> {
             }
         }
         terminal.draw(|frame| {
+            if let Some(dialog)=&ssh_dialog {dialog.draw(frame);return;}
             if let Some(report)=&readiness_view {frame.render_widget(Paragraph::new(report.as_str()).scroll((readiness_scroll,0)).wrap(ratatui::widgets::Wrap{trim:false}).block(Block::bordered().title(" Projektbereitschaft · ↑/↓: lesen · Esc: zurueck · o: OpenCode-Anmeldung ")),frame.area());return;}
             if let Some(dialog)=open_recovery.and_then(|id|recoveries.get_mut(&id)){dialog.draw(frame,online);return;}
             if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
@@ -365,7 +367,7 @@ async fn main() -> Result<()> {
             };
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
-                0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
+                0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status | s: SSH-Verbindung bearbeiten ".to_string()),
                 1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | r: Bereitschaft | o: Anmeldung | p: einrichten ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
@@ -373,7 +375,7 @@ async fn main() -> Result<()> {
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
             };
             row_offset = row_offset.min(rows.len().saturating_sub(1));
-            frame.render_widget(Table::new(rows.into_iter().skip(row_offset).enumerate().map(|(i,row)|if matches!(view,1..=5) && i==0 {row.style(Style::default().bg(Color::DarkGray))} else {row}), [Constraint::Percentage(30), Constraint::Percentage(15), Constraint::Percentage(20), Constraint::Percentage(35)])
+            frame.render_widget(Table::new(rows.into_iter().skip(row_offset).enumerate().map(|(i,row)|if matches!(view,0..=5) && i==0 {row.style(Style::default().bg(Color::DarkGray))} else {row}), [Constraint::Percentage(30), Constraint::Percentage(15), Constraint::Percentage(20), Constraint::Percentage(35)])
                 .header(Row::new(header).style(Style::default().fg(Color::Cyan)))
                 .block(Block::bordered().title(title)), chunks[1]);
             frame.render_widget(Paragraph::new("1 Runner | 2 Projekte | 3 Aufgaben | 4 Sessions | 5 Diagnose | 6 Fragen | 7 Geraete | ←/→ Projekt | q")
@@ -411,6 +413,10 @@ async fn main() -> Result<()> {
         if event::poll(Duration::from_millis(50))? {
             let event = event::read()?;
             if let Event::Paste(text) = &event {
+                if let Some(dialog) = &mut ssh_dialog {
+                    dialog.insert(text);
+                    continue;
+                }
                 if let Some(dialog) = open_recovery.and_then(|id| recoveries.get_mut(&id)) {
                     dialog.insert(text);
                     continue;
@@ -431,6 +437,12 @@ async fn main() -> Result<()> {
                 }
             }
             if let Event::Key(key) = event {
+                if let Some(dialog) = &mut ssh_dialog {
+                    if key.kind == KeyEventKind::Press && dialog.key(key) {
+                        ssh_dialog = None;
+                    }
+                    continue;
+                }
                 if key.kind == KeyEventKind::Press
                     && key.code == KeyCode::Char('c')
                     && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -625,6 +637,16 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if key.kind == KeyEventKind::Press {
+                    if view == 0 && key.code == KeyCode::Char('s') {
+                        if let Some(runner) = last.as_ref().and_then(|s| s.runners.get(row_offset))
+                        {
+                            match ssh::Dialog::new(runner.id) {
+                                Ok(dialog) => ssh_dialog = Some(dialog),
+                                Err(e) => native_notice = format!("SSH-Konfiguration: {e:#}"),
+                            }
+                        }
+                        continue;
+                    }
                     if view == 1 && matches!(key.code, KeyCode::Char('r' | 'o')) {
                         if let Some(snapshot) = &last {
                             if let Some(project) = snapshot.projects.get(row_offset) {

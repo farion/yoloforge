@@ -67,6 +67,9 @@ struct Args {
     /// Open the recorded OpenCode session without registering another runner or requiring a Factory token.
     #[arg(long, conflicts_with = "publish_result")]
     open_session: Option<CommandId>,
+    /// Print recorded session readiness without starting a terminal (usable over SSH).
+    #[arg(long, requires = "open_session")]
+    session_readiness: bool,
 }
 
 async fn report(

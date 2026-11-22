@@ -274,6 +274,7 @@ mod tests {
         .unwrap();
         let args = Args {
             open_session: None,
+            session_readiness: false,
             publish_result: None,
             review_image: None,
             review_docker_socket: "/var/run/docker.sock".into(),

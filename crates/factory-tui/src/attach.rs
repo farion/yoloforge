@@ -51,8 +51,47 @@ pub fn project_connection(
 }
 
 pub async fn project_terminal(snapshot: &Snapshot, id: ProjectId) -> Result<std::process::Command> {
+    if let Some(command) = remote_execution(snapshot, id) {
+        if let Some(remote) = crate::ssh::configured(command.runner_id, command.id)? {
+            return Ok(remote);
+        }
+    }
     let (client, path) = project_connection(snapshot, id)?;
     client.project_terminal_command(&path).await
+}
+
+fn remote_execution(snapshot: &Snapshot, id: ProjectId) -> Option<&RunnerCommand> {
+    snapshot.commands.iter().rev().find(|c| {
+        c.kind == CommandKind::RunAgent
+            && snapshot.streams.iter().any(|s| {
+                s.id == c.stream_id && s.project_id == id && s.ownership_epoch == c.ownership_epoch
+            })
+    })
+}
+
+async fn remote_report(command: std::process::Command) -> Result<String> {
+    use tokio::io::AsyncReadExt;
+    let mut command = tokio::process::Command::from(command);
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context("SSH konnte nicht gestartet werden")?;
+    let output = child.stdout.take().context("SSH-Ausgabe fehlt")?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut bytes = Vec::new();
+        output.take(65537).read_to_end(&mut bytes).await?;
+        anyhow::ensure!(bytes.len() <= 65536, "SSH-Bereitschaftsausgabe ist zu gross");
+        let status = child.wait().await?;
+        anyhow::ensure!(status.success(), "SSH-Pruefung fehlgeschlagen: SSH-Anmeldung, Hostschluessel, Runner-Version und Profil pruefen");
+        Ok::<_,anyhow::Error>(String::from_utf8_lossy(&bytes).chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect::<String>())
+    }).await.context("SSH-Bereitschaft: Zeitlimit ueberschritten")?;
+    if result.is_err() {
+        let _ = child.kill().await;
+    }
+    result
 }
 
 pub async fn readiness(snapshot: &Snapshot, id: ProjectId) -> Result<String> {
@@ -61,6 +100,12 @@ pub async fn readiness(snapshot: &Snapshot, id: ProjectId) -> Result<String> {
         .iter()
         .find(|p| p.id == id)
         .context("Projekt fehlt")?;
+    if let Some(command) = remote_execution(snapshot, id) {
+        if let Some(remote) = crate::ssh::readiness(command.runner_id, command.id)? {
+            let report = remote_report(remote).await?;
+            return Ok(format!("Aktuelles Projektmodell: {}/{}\nSSH-Runner {} (Status der aufgezeichneten Ausfuehrung)\n{}", project.profile.provider_id, project.profile.model_id, command.runner_id, report));
+        }
+    }
     let (client, path) = project_connection(snapshot, id)?;
     client
         .readiness(
@@ -134,6 +179,21 @@ pub fn run(mut command: std::process::Command) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_readiness_bounds_and_sanitizes_output_and_rejects_failures() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "printf 'Ready\\n\\033[31m' "]);
+        let report = super::remote_report(command).await.unwrap();
+        assert!(report.starts_with("Ready\n"));
+        assert!(!report.contains('\u{1b}'));
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        assert!(super::remote_report(command).await.is_err());
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "head -c 65537 /dev/zero"]);
+        assert!(super::remote_report(command).await.is_err());
+    }
     use super::*;
     #[tokio::test]
     async fn readiness_reports_expired_auth_and_mcp_without_exposing_credentials() {
@@ -147,10 +207,6 @@ mod tests {
         let server = std::thread::spawn(move || {
             for (path, body) in [
                 ("/api/info", json!({"version":"2.0.27"})),
-                (
-                    "/api/model/default",
-                    json!({"location":{"directory":expected},"data":{"providerID":"test","id":"model"}}),
-                ),
                 (
                     "/api/integration",
                     json!({"location":{"directory":expected},"data":[{"name":"Provider","connections":[{"status":{"status":"needs_auth","message":"secret-message","url":"secret-url"}}]}]}),
@@ -190,7 +246,7 @@ mod tests {
         let client = factory_opencode::OpenCodeClient::from_registration(&registration).unwrap();
         let text = client.readiness(&location, "", "").await.unwrap();
         server.join().unwrap();
-        assert!(text.contains("Standardmodell: test/model"));
+        assert!(text.contains("Projektmodell fehlt"));
         assert!(text.contains("Anmeldung abgelaufen"));
         assert!(text.contains("MCP Docs: needs_auth"));
         assert!(!text.contains("secret"));
