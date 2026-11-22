@@ -6,6 +6,14 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
 ## Prompt-Aufgaben und Projektpause (Schema 24)
 
+Erweiterung Schema 25: feste Sessionauswahl im Prompteditor (`Ctrl-G`),
+modellgestützte Zuordnung ohne Auswahl (`new`/`session`/`wait`), persistentes
+Projektlimit (`l`) und gekennzeichnete Orchestrator-Läufe in der Diagnose.
+Fortsetzungen behalten die Sessionwurzel und Aufgaben ihren eigenen
+Ausführungsbezug. Implementierungsumfang, Prüfungen und offene Punkte:
+[`task-routing.md`](task-routing.md). Die sieben Produktpakete sind noch nicht
+vollständig umgesetzt; insbesondere ist Rückfragenorchestrierung noch offen.
+
 Ergebnisübernahme (Runner-Journal 9): erfolgreiche lokale Aufgaben werden automatisch
 in den angegebenen Projektordner übernommen und bilden die Basis für Folgeaufgaben.
 Unabhängiger Snapshot-Index, journalisierter Commit, sauberer unveränderter Zielstand,

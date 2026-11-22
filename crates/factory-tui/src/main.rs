@@ -64,6 +64,9 @@ fn command_output(output: &CommandOutput) -> String {
     }
 }
 fn task_command<'a>(s: &'a Snapshot, t: &Ticket) -> Option<&'a RunnerCommand> {
+    if let Some(id) = t.execution_command {
+        return s.commands.iter().find(|c| c.id == id);
+    }
     s.commands.iter().rev().find(|c| {
         s.streams
             .iter()
@@ -91,6 +94,8 @@ fn task_progress(s: &Snapshot, t: &Ticket) -> (String, String) {
             if paused { "Pausiert" } else { "Wartet" }.into(),
             if s.runners.is_empty() {
                 "Wartet auf Runner"
+            } else if !t.routing_note.is_empty() {
+                t.routing_note.as_str()
             } else {
                 "Wird automatisch eingeplant"
             }
@@ -333,7 +338,7 @@ async fn main() -> Result<()> {
                     .map(|t| Row::new(vec![t.goal.clone(),stream_label(t.status).into(),t.ticket_ids.len().to_string(),t.id.to_string()])).collect()).unwrap_or_default()
             } else if view == 4 {
                 last.as_ref().map(|s| s.commands.iter().filter(|c| s.streams.iter().any(|t| t.id==c.stream_id && s.projects.get(selected_project).is_some_and(|p|p.id==t.project_id)))
-                    .map(|c| Row::new(vec![format!("{:?}",c.kind),c.agent_progress.as_ref().map(|a|format!("{:?}",a.phase)).unwrap_or_else(||format!("{:?}",c.state)),c.result.as_ref().map(command_output).or_else(||c.agent_progress.as_ref().map(|a|a.summary.clone())).unwrap_or_else(||"ausstehend".into()),c.id.to_string()])).collect()).unwrap_or_default()
+                    .map(|c| Row::new(vec![c.agent_spec.as_ref().filter(|a|!a.role.is_empty()).map(|a|a.role.clone()).unwrap_or_else(||format!("{:?}",c.kind)),c.agent_progress.as_ref().map(|a|format!("{:?}",a.phase)).unwrap_or_else(||format!("{:?}",c.state)),c.result.as_ref().map(command_output).or_else(||c.agent_progress.as_ref().map(|a|a.summary.clone())).unwrap_or_else(||"ausstehend".into()),c.id.to_string()])).collect()).unwrap_or_default()
             } else {
                 last.as_ref().map(|s|project_questions(s,selected_project).into_iter()
                     .map(|q|Row::new(vec![q.external.payload["title"].as_str().or_else(||q.external.payload["action"].as_str()).unwrap_or("Frage").to_string(),format!("{:?}",q.state),format!("{:?} / r{}",q.external.kind,q.revision.0),q.id.to_string()])).collect()).unwrap_or_default()
@@ -341,7 +346,7 @@ async fn main() -> Result<()> {
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
-                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause/Fortsetzen | p: einrichten | Enter: Profil ".to_string()),
+                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause/Fortsetzen | l: Sessionlimit | p: einrichten | Enter: Profil ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
@@ -573,11 +578,18 @@ async fn main() -> Result<()> {
                                 .nth(row_offset)
                                 .and_then(|t| task_command(snapshot, t))
                             {
-                                native_request = Some((command.stream_id, None));
+                                native_request = Some((
+                                    command.stream_id,
+                                    (command.kind == CommandKind::RunAgent).then_some(command.id),
+                                ));
                                 continue;
                             }
                         }
                         let target = match (view, key.code) {
+                            (1, KeyCode::Char('l')) => snapshot
+                                .projects
+                                .get(row_offset)
+                                .map(|p| manage::Target::SessionLimit(p.id)),
                             (1, KeyCode::Char('s')) => snapshot
                                 .projects
                                 .get(row_offset)

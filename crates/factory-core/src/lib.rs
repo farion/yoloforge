@@ -2,6 +2,9 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, time::Duration};
 use uuid::Uuid;
+pub fn default_session_limit() -> u8 {
+    1
+}
 mod images;
 pub use images::*;
 pub const TASK_IMAGES_CAPABILITY: &str = "task-images-v1";
@@ -422,6 +425,8 @@ pub struct ExecutionProfile {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentSpec {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<PromptImage>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -613,6 +618,8 @@ pub struct Revision(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default = "default_session_limit")]
+    pub max_sessions: u8,
     #[serde(default)]
     pub paused: bool,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -649,6 +656,12 @@ pub struct ProjectLocation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_command: Option<CommandId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_session: Option<CommandId>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub routing_note: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

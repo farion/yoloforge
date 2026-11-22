@@ -155,6 +155,11 @@ def main():
                     pump(.2)
                     assert time.monotonic() < deadline, "Automatic policy missing"
                 send("\x1b")
+                send("2l")
+                send("\x7f2\x13")
+                assert snapshot()["projects"][0]["max_sessions"] == 2
+                assert snapshot()["scheduler_policies"][0]["max_parallel"] == 2
+                send("\x1b")
                 send("2 ")
                 send("\x1b[B")
                 send("\x13")
@@ -184,8 +189,10 @@ def main():
                 while len(snapshot()["commands"]) == 1:
                     pump(.2)
                     assert time.monotonic() < deadline, "Prompt was not scheduled after resume"
-                assert any(task["id"] in s["ticket_ids"] for s in snapshot()["streams"])
-                print("PASS TUI prompt and image persist without metadata; pause holds work and resume schedules automatically")
+                state = snapshot()
+                assert any(s["goal"] == "Orchestrator" for s in state["streams"])
+                assert not any(task["id"] in s["ticket_ids"] for s in state["streams"]), "Task bypassed the orchestrator"
+                print("PASS TUI session limit, prompt and image persist; pause holds work and resume prepares the orchestrator")
         finally:
             if pid:
                 os.kill(pid, signal.SIGTERM)

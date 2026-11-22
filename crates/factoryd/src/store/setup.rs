@@ -55,7 +55,7 @@ impl Store {
                 p.name=b.name.clone();p.profile=b.profile.clone();p.setup=Some(b.setup.clone());p.revision.0+=1;p
             }else {
                 if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}
-                Project {paused:false,runner_bindings:Default::default(),id:ProjectId::new(),revision:Revision(1),name:b.name.clone(),repository:b.repository.clone(),base_branch:b.base_branch.clone(),profile:b.profile.clone(),setup:Some(b.setup.clone()),created_unix_ms:super::super::unix_ms()}
+                Project {max_sessions:default_session_limit(),paused:false,runner_bindings:Default::default(),id:ProjectId::new(),revision:Revision(1),name:b.name.clone(),repository:b.repository.clone(),base_branch:b.base_branch.clone(),profile:b.profile.clone(),setup:Some(b.setup.clone()),created_unix_ms:super::super::unix_ms()}
             };
             project.runner_bindings.insert(b.setup.runner_id,ProjectLocation {repository_path:b.setup.repository_path.clone(),service_registration:b.setup.service_registration.clone()});
             tx.execute("INSERT INTO projects(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![project.id.to_string(),serde_json::to_string(&project)?])?;

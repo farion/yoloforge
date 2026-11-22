@@ -140,6 +140,10 @@ pub fn router_with_shutdown(
         .route("/v1/streams/{id}/control", post(set_control))
         .route("/v1/projects/setup", post(review_routes::setup))
         .route(
+            "/v1/projects/{id}/session-limit",
+            post(review_routes::session_limit),
+        )
+        .route(
             "/v1/projects/{id}/pause",
             post(review_routes::pause_project),
         )

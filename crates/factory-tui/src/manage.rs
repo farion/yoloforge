@@ -15,6 +15,7 @@ use ratatui::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Target {
+    SessionLimit(ProjectId),
     Pause(ProjectId),
     SetupProject(Option<ProjectId>),
     Scheduler(ProjectId),
@@ -29,6 +30,7 @@ pub enum Target {
 
 #[derive(Clone)]
 pub enum Request {
+    SessionLimit(ProjectId, SetSessionLimit),
     Pause(ProjectId, PauseProject),
     Task(SaveTask),
     SetupProject(Box<SetupProject>),
@@ -42,6 +44,7 @@ pub enum Request {
 impl Request {
     pub fn id(&self) -> RequestId {
         match self {
+            Self::SessionLimit(_, b) => b.request_id,
             Self::Pause(_, b) => b.request_id,
             Self::Task(b) => b.request_id,
             Self::SetupProject(b) => b.request_id,
@@ -55,6 +58,9 @@ impl Request {
     }
     pub async fn send(&self, client: &FactoryClient) -> Result<(), ClientError> {
         match self {
+            Self::SessionLimit(id, b) => {
+                client.set_session_limit(*id, b).await?;
+            }
             Self::Pause(id, b) => {
                 client.pause_project(*id, b).await?;
             }
@@ -138,6 +144,9 @@ enum State {
     Submitted,
 }
 pub struct Dialog {
+    task_session: Option<CommandId>,
+    task_sessions: Vec<(Option<CommandId>, String)>,
+    task_session_dirty: bool,
     task_project: Option<ProjectId>,
     task_images: Vec<PromptImage>,
     task_images_dirty: bool,
@@ -238,7 +247,19 @@ impl Dialog {
             Constraint::Length(4),
         ])
         .split(frame.area());
-        frame.render_widget(Paragraph::new(self.title.as_str()), areas[0]);
+        let selected = self
+            .task_sessions
+            .iter()
+            .find(|(id, _)| *id == self.task_session)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("Ausgewaehlte Session nicht mehr verfuegbar");
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}\nSession: {} · Ctrl-G: wechseln",
+                self.title, selected
+            )),
+            areas[0],
+        );
         let f = &self.fields[0];
         let text = format!("{}▏{}", &f.text[..f.cursor], &f.text[f.cursor..]);
         let width = areas[1].width.saturating_sub(2).max(1);
@@ -266,6 +287,19 @@ impl Dialog {
     }
     pub fn new(target: Target, snapshot: &Snapshot) -> Option<Self> {
         let (title, revision, fields) = match target {
+            Target::SessionLimit(id) => {
+                let p = snapshot.projects.iter().find(|p| p.id == id)?;
+                (
+                    format!("Sessionlimit: {}", p.name),
+                    p.revision,
+                    vec![Field::text(
+                        "Maximal gleichzeitig arbeitende Sessions",
+                        &p.max_sessions.to_string(),
+                        true,
+                        false,
+                    )],
+                )
+            }
             Target::Pause(id) => {
                 let p = snapshot.projects.iter().find(|p| p.id == id)?;
                 (
@@ -543,6 +577,44 @@ impl Dialog {
             }
         };
         Some(Self {
+            task_session: match target {
+                Target::Ticket(id) => snapshot
+                    .tickets
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.requested_session),
+                _ => None,
+            },
+            task_session_dirty: false,
+            task_sessions: {
+                let project = match target {
+                    Target::NewTicket(id) => Some(id),
+                    Target::Ticket(id) => snapshot
+                        .tickets
+                        .iter()
+                        .find(|t| t.id == id)
+                        .map(|t| t.project_id),
+                    _ => None,
+                };
+                let mut choices = vec![(None, "Automatisch durch Orchestrator".into())];
+                for stream in snapshot
+                    .streams
+                    .iter()
+                    .filter(|s| Some(s.project_id) == project)
+                {
+                    if let Some(c) = snapshot.commands.iter().rev().find(|c| {
+                        c.stream_id == stream.id
+                            && c.kind == CommandKind::RunAgent
+                            && c.agent_spec.as_ref().is_some_and(|a| !a.read_only)
+                    }) {
+                        choices.push((
+                            Some(c.session_root()),
+                            format!("{} ({})", stream.goal, &c.session_root().to_string()[..8]),
+                        ));
+                    }
+                }
+                choices
+            },
             task_images_dirty: false,
             task_project: match target {
                 Target::NewTicket(id) => Some(id),
@@ -635,6 +707,10 @@ impl Dialog {
             fresh.task_images = self.task_images.clone();
             fresh.task_images_dirty = true;
         }
+        if self.task_session_dirty {
+            fresh.task_session = self.task_session;
+            fresh.task_session_dirty = true;
+        }
         fresh.focus = self.focus;
         fresh.message =
             "Aktuellen Stand geladen; eigene Aenderungen behalten. Felder pruefen, dann Ctrl-S."
@@ -662,6 +738,16 @@ impl Dialog {
         let request_id = RequestId::new();
         let expected_revision = self.revision;
         Ok(match self.target {
+            Target::SessionLimit(id) => Request::SessionLimit(
+                id,
+                SetSessionLimit {
+                    request_id,
+                    expected_revision,
+                    max_sessions: value(0)
+                        .parse()
+                        .map_err(|_| "Sessionlimit: Zahl zwischen 1 und 16 eingeben")?,
+                },
+            ),
             Target::SetupProject(project_id) => {
                 if value(6).is_empty() != value(7).is_empty() {
                     return Err("Provider und Modell gemeinsam angeben oder beide fuer automatische Auswahl leer lassen".into());
@@ -795,6 +881,7 @@ impl Dialog {
                     return Err("Text oder Bild eingeben".into());
                 }
                 Request::Task(SaveTask {
+                    requested_session: self.task_session,
                     request_id,
                     expected_revision,
                     project_id: self.task_project.ok_or("Projekt fehlt")?,
@@ -912,6 +999,19 @@ impl Dialog {
     }
     pub fn key(&mut self, mut key: KeyEvent, online: bool, snapshot: Option<&Snapshot>) -> Action {
         if self.is_task() {
+            if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if self.state == State::Editing {
+                    let current = self
+                        .task_sessions
+                        .iter()
+                        .position(|(id, _)| *id == self.task_session)
+                        .unwrap_or(0);
+                    self.task_session =
+                        self.task_sessions[(current + 1) % self.task_sessions.len()].0;
+                    self.task_session_dirty = true;
+                }
+                return Action::None;
+            }
             if key.code == KeyCode::Enter {
                 if key
                     .modifiers
@@ -1258,6 +1358,31 @@ mod tests {
             Action::Send(r) => r,
             _ => panic!("expected request"),
         }
+    }
+    #[test]
+    fn session_selection_is_fixed_in_uncertain_requests_and_limit_has_project_revision() {
+        let s = snapshot();
+        let root = CommandId::new();
+        let mut d = Dialog::new(Target::NewTicket(s.projects[0].id), &s).unwrap();
+        d.task_sessions.push((Some(root), "Calculator".into()));
+        d.paste("Add multiplication");
+        control(&mut d, 'g', &s);
+        let first = send(&mut d, &s);
+        let Request::Task(b) = &first else { panic!() };
+        assert_eq!(b.requested_session, Some(root));
+        d.state = State::Uncertain;
+        control(&mut d, 'g', &s);
+        let retry = send(&mut d, &s);
+        let Request::Task(b) = retry else { panic!() };
+        assert_eq!(b.requested_session, Some(root));
+        assert_eq!(b.request_id, first.id());
+        let mut limit = Dialog::new(Target::SessionLimit(s.projects[0].id), &s).unwrap();
+        let Request::SessionLimit(id, b) = send(&mut limit, &s) else {
+            panic!()
+        };
+        assert_eq!(id, s.projects[0].id);
+        assert_eq!(b.expected_revision, s.projects[0].revision);
+        assert_eq!(b.max_sessions, 1);
     }
     #[test]
     fn prompt_editor_pastes_images_inline_and_freezes_uncertain_submission() {

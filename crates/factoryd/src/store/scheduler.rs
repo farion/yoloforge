@@ -47,6 +47,14 @@ fn save_ticket(tx: &Transaction<'_>, t: &mut Ticket) -> Result<()> {
 fn done(t: &Ticket) -> bool {
     matches!(t.status, TicketState::Done | TicketState::Cancelled)
 }
+pub(super) fn set_limit(tx: &Transaction<'_>, id: ProjectId, limit: u8) -> Result<()> {
+    if let Some(mut p) = policy(tx, id)? {
+        p.max_parallel = limit;
+        p.revision.0 += 1;
+        save_policy(tx, &p)?;
+    }
+    Ok(())
+}
 impl Store {
     pub fn recover_local_projects(&self, runner: RunnerId) -> Result<()> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
@@ -174,7 +182,7 @@ impl Store {
                     revision: Revision(1),
                     enabled: true,
                     runner_ids: vec![runner],
-                    max_parallel: 1,
+                    max_parallel: p.max_sessions,
                     remaining_starts: UNLIMITED_STARTS,
                 },
             )?;
@@ -239,6 +247,21 @@ impl Store {
                     remaining_starts: b.start_budget,
                 };
                 save_policy(tx, &p)?;
+                let raw: String = tx.query_row(
+                    "SELECT data FROM projects WHERE id=?1",
+                    [id.to_string()],
+                    |r| r.get(0),
+                )?;
+                let mut project: Project = serde_json::from_str(&raw)?;
+                if project.max_sessions != p.max_parallel {
+                    project.max_sessions = p.max_parallel;
+                    project.revision.0 += 1;
+                    tx.execute(
+                        "UPDATE projects SET data=?1 WHERE id=?2",
+                        params![serde_json::to_string(&project)?, id.to_string()],
+                    )?;
+                    event(tx, "project.session_limit", id.to_string(), &project)?;
+                }
                 Ok(p)
             },
         )
@@ -377,6 +400,9 @@ impl Store {
                     false,
                 ) {
                     Ok(c) => {
+                        let mut ticket = t.clone();
+                        ticket.execution_command = Some(c.id);
+                        save_ticket(&tx, &mut ticket)?;
                         tx.execute(
                             "UPDATE scheduler_runs SET agent_id=?1 WHERE ticket_id=?2",
                             params![c.id.to_string(), tid.to_string()],
@@ -404,6 +430,14 @@ impl Store {
                 p.runner_ids.iter().map(|r| (*r, 0)).collect();
             let mut active = 0;
             for s in &streams {
+                let controller: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM orchestrators WHERE stream_id=?1 UNION ALL SELECT 1 FROM supervisor_policies WHERE stream_id=?1)",
+                    [s.id.to_string()],
+                    |r| r.get(0),
+                )?;
+                if controller {
+                    continue;
+                }
                 let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",[s.id.to_string()],|r|r.get(0))?;
                 let finished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs r JOIN commands c ON c.id=COALESCE(r.agent_id,r.prepare_id) WHERE r.stream_id=?1 AND (c.state IN ('failed','cancelled') OR (r.agent_id IS NOT NULL AND c.state='succeeded')))",[s.id.to_string()],|r|r.get(0))?;
                 if busy
@@ -464,6 +498,41 @@ impl Store {
                     continue;
                 }
                 let goal = t.title.chars().take(60).collect::<String>();
+                tx.execute_batch("SAVEPOINT routing_evaluation")?;
+                let routed = match super::routing::route(&tx, &p, &mut t) {
+                    Ok(route) => route,
+                    Err(
+                        StoreError::WorkConflict
+                        | StoreError::Invalid(_)
+                        | StoreError::RevisionConflict(_),
+                    ) => {
+                        tx.execute_batch("ROLLBACK TO routing_evaluation")?;
+                        t = all.get(&t.id).ok_or(StoreError::Internal)?.clone();
+                        super::routing::note(&tx,&mut t,"Orchestrator kann noch nicht starten; Projektprofil, Runner-Zuordnung und Steuerung pruefen")?;
+                        super::routing::Route::Pending
+                    }
+                    Err(e) => return Err(e),
+                };
+                tx.execute_batch("RELEASE routing_evaluation")?;
+                match routed {
+                    super::routing::Route::Pending => continue,
+                    super::routing::Route::Session(root) => {
+                        if let Some(runner) =
+                            super::routing::continue_task(&tx, &mut t, root, &prompt)?
+                        {
+                            all.insert(t.id, t.clone());
+                            active += 1;
+                            *counts.entry(runner).or_default() += 1;
+                            if p.remaining_starts != UNLIMITED_STARTS {
+                                p.remaining_starts -= 1;
+                            }
+                            p.revision.0 += 1;
+                            save_policy(&tx, &p)?;
+                        }
+                        continue;
+                    }
+                    super::routing::Route::New => {}
+                }
                 let stream = Self::create_stream_in(
                     &tx,
                     &CreateStream {
@@ -488,6 +557,7 @@ impl Store {
                 )?;
                 tx.execute("INSERT INTO scheduler_runs(ticket_id,stream_id,prepare_id,prompt) VALUES(?1,?2,?3,?4)",params![t.id.to_string(),stream.id.to_string(),c.id.to_string(),prompt])?;
                 t.status = TicketState::InProgress;
+                t.execution_command = Some(c.id);
                 save_ticket(&tx, &mut t)?;
                 all.insert(t.id, t.clone());
                 if p.remaining_starts != UNLIMITED_STARTS {

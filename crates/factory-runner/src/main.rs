@@ -329,7 +329,13 @@ async fn commands(
                 questions::process(client, journal, &mut record, args, registration).await?;
             }
             if matches!(progress.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
-                if progress.phase == AgentPhase::Succeeded {
+                if progress.phase == AgentPhase::Succeeded
+                    && record
+                        .command
+                        .agent_spec
+                        .as_ref()
+                        .is_some_and(|s| !s.read_only)
+                {
                     match tokio::task::block_in_place(||publication::publish(journal,&record,args)) {
                         Ok(Some(path))=>progress.summary.push_str(&format!("\n\nErgebnis automatisch im Projektordner bereitgestellt: {}",path.display())),
                         Ok(None)=>{},

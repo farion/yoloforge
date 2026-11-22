@@ -1,4 +1,18 @@
 use super::*;
+pub(super) async fn session_limit(
+    State(app): State<App>,
+    Path(id): Path<ProjectId>,
+    body: Result<Json<SetSessionLimit>, JsonRejection>,
+) -> Response {
+    let Ok(Json(b)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid session limit",
+        );
+    };
+    db_call(b.request_id, move || app.store.set_session_limit(id, b)).await
+}
 pub(super) async fn pause_project(
     State(app): State<App>,
     Path(id): Path<ProjectId>,

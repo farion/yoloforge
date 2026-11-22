@@ -58,7 +58,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 24,
+            version <= 25,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -135,6 +135,13 @@ impl Store {
                 INSERT OR IGNORE INTO local_project_recovery(command_id) SELECT id FROM commands WHERE state='failed' AND json_extract(data,'$.kind')='prepare_workspace' AND json_extract(data,'$.workspace_spec.setup.repository_source') LIKE '/%' AND json_extract(data,'$.result.workspace_error') LIKE 'Repository import failed;%';
                 PRAGMA user_version=24;")?;
         }
+        if version < 25 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS orchestrators(project_id TEXT PRIMARY KEY,stream_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS task_routing(ticket_id TEXT PRIMARY KEY,data TEXT NOT NULL CHECK(json_valid(data)));
+                UPDATE projects SET data=json_set(data,'$.max_sessions',COALESCE((SELECT json_extract(s.data,'$.max_parallel') FROM scheduler_policies s WHERE s.project_id=projects.id),1)) WHERE json_extract(data,'$.max_sessions') IS NULL;
+                UPDATE tickets SET data=json_set(data,'$.execution_command',(SELECT COALESCE(r.agent_id,r.prepare_id) FROM scheduler_runs r WHERE r.ticket_id=tickets.id)) WHERE EXISTS(SELECT 1 FROM scheduler_runs r WHERE r.ticket_id=tickets.id);
+                PRAGMA user_version=25;")?;
+        }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
     }
@@ -183,6 +190,7 @@ impl Store {
         self.mutate(body.request_id, "project.create", &body, |tx| {
             project_fields(&body.name, &body.repository, &body.base_branch)?;
             let project = Project {
+                max_sessions: default_session_limit(),
                 paused: false,
                 runner_bindings: Default::default(),
                 setup: None,
@@ -221,6 +229,9 @@ impl Store {
             }
             let now = super::unix_ms();
             let ticket = Ticket {
+                execution_command: None,
+                requested_session: None,
+                routing_note: String::new(),
                 prompt: None,
                 images: vec![],
                 depends_on: vec![],
@@ -453,6 +464,7 @@ mod excerpts;
 mod knowledge;
 mod questions;
 mod reviews;
+mod routing;
 mod scheduler;
 mod sessions;
 mod setup;

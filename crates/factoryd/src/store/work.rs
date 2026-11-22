@@ -282,7 +282,7 @@ impl Store {
         }
         if !supervised {
             let reserved: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1 UNION ALL SELECT 1 FROM orchestrators WHERE stream_id=?1)",
                 [id.to_string()],
                 |r| r.get(0),
             )?;
@@ -437,7 +437,7 @@ impl Store {
                 prompt
             };
             let mut images = Vec::new();
-            for ticket in &owner.ticket_ids {
+            for ticket in owner.ticket_ids.iter().filter(|_| previous.is_none()) {
                 let data: String = tx.query_row(
                     "SELECT data FROM tickets WHERE id=?1",
                     [ticket.to_string()],
@@ -448,6 +448,11 @@ impl Store {
             }
             validate_images(&images).map_err(StoreError::Invalid)?;
             Some(AgentSpec {
+                role: if supervised {
+                    "supervisor".into()
+                } else {
+                    String::new()
+                },
                 images,
                 read_only: supervised,
                 continuation,
@@ -515,6 +520,12 @@ impl Store {
                 let mut value = command(tx, id, runner, body.ownership_epoch)?;
                 if value.state == CommandState::Pending {
                     let paused:bool=tx.query_row("SELECT COALESCE(json_extract(p.data,'$.paused'),0) FROM projects p JOIN streams s ON s.project_id=p.id WHERE s.id=?1",[value.stream_id.to_string()],|r|r.get(0))?;if paused{return Err(StoreError::WorkConflict);}
+                    if value.kind==CommandKind::RunAgent && value.agent_spec.as_ref().is_some_and(|a|!a.read_only) {
+                        let owner=stream(tx,value.stream_id)?;
+                        let limit:u8=tx.query_row("SELECT COALESCE(json_extract(data,'$.max_sessions'),1) FROM projects WHERE id=?1",[owner.project_id.to_string()],|r|r.get(0))?;
+                        let active:u64=tx.query_row("SELECT COUNT(DISTINCT c.stream_id) FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.state='accepted' AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0",[owner.project_id.to_string()],|r|r.get(0))?;
+                        if active>=u64::from(limit) {return Err(StoreError::WorkConflict);}
+                    }
                     value.state = CommandState::Accepted;
                     save_command(tx, &value, "accepted")?;
                     let mut owner = stream(tx, value.stream_id)?;

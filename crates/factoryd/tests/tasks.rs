@@ -2,6 +2,347 @@ use factory_core::*;
 use factory_protocol::*;
 use factoryd::store::Store;
 
+fn complete(s: &Store, c: &RunnerCommand, result: CommandOutput) {
+    s.acknowledge(
+        c.runner_id,
+        c.id,
+        AckCommand {
+            request_id: RequestId::new(),
+            ownership_epoch: c.ownership_epoch,
+        },
+    )
+    .unwrap();
+    s.complete(
+        c.runner_id,
+        c.id,
+        CommandResult {
+            request_id: RequestId::new(),
+            ownership_epoch: c.ownership_epoch,
+            result,
+        },
+    )
+    .unwrap();
+}
+fn prepare(s: &Store, c: &RunnerCommand) {
+    complete(
+        s,
+        c,
+        CommandOutput::Workspace {
+            workspace: Workspace {
+                path: format!("/work/{}", c.stream_id),
+                branch: c.workspace_spec.as_ref().unwrap().branch.clone(),
+                base_commit: "a".repeat(40),
+            },
+        },
+    );
+}
+fn decide(s: &Store, c: &RunnerCommand, text: &str) {
+    assert_eq!(c.agent_spec.as_ref().unwrap().role, "orchestrator");
+    assert!(c.agent_spec.as_ref().unwrap().read_only);
+    complete(
+        s,
+        c,
+        CommandOutput::Agent {
+            agent: AgentProgress {
+                session_id: c.session_id(),
+                message_id: agent_message_id(c.id),
+                phase: AgentPhase::Succeeded,
+                summary: text.into(),
+            },
+        },
+    );
+}
+fn route_new(s: &Store, task: TicketId) {
+    for _ in 0..5 {
+        s.scheduler_tick().unwrap();
+        let snap = s.snapshot().unwrap();
+        if snap
+            .streams
+            .iter()
+            .any(|stream| stream.ticket_ids.contains(&task))
+        {
+            return;
+        }
+        let c = snap
+            .commands
+            .iter()
+            .find(|c| c.state == CommandState::Pending)
+            .unwrap();
+        if c.kind == CommandKind::PrepareWorkspace {
+            prepare(s, c);
+        } else {
+            decide(s, c, r#"{"action":"new","reason":"Independent task"}"#);
+        }
+    }
+    panic!("routing did not assign task");
+}
+
+#[test]
+fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let s = Store::open(&path).unwrap();
+    let p = s
+        .create_project(CreateProject {
+            request_id: RequestId::new(),
+            name: "Fixed".into(),
+            repository: "factory:managed".into(),
+            base_branch: "main".into(),
+        })
+        .unwrap();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    let task = |text: &str, session| SaveTask {
+        request_id: RequestId::new(),
+        id: None,
+        expected_revision: Revision(0),
+        project_id: p.id,
+        prompt: text.into(),
+        images: vec![],
+        requested_session: session,
+    };
+    let first = s.save_task(task("Build calculator", None)).unwrap();
+    s.autostart_runner(runner).unwrap();
+    route_new(&s, first.id);
+    let prep = s
+        .pending(runner)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.kind == CommandKind::PrepareWorkspace)
+        .unwrap();
+    prepare(&s, &prep);
+    s.scheduler_tick().unwrap();
+    let c = s
+        .pending(runner)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.kind == CommandKind::RunAgent)
+        .unwrap();
+    let follow = s.save_task(task("Add multiplication", Some(c.id))).unwrap();
+    s.scheduler_tick().unwrap();
+    assert!(!s
+        .snapshot()
+        .unwrap()
+        .streams
+        .iter()
+        .any(|s| s.ticket_ids.contains(&follow.id)));
+    complete(
+        &s,
+        &c,
+        CommandOutput::Agent {
+            agent: AgentProgress {
+                session_id: c.session_id(),
+                message_id: agent_message_id(c.id),
+                phase: AgentPhase::Succeeded,
+                summary: "Calculator done".into(),
+            },
+        },
+    );
+    s.scheduler_tick().unwrap();
+    assert!(!s
+        .snapshot()
+        .unwrap()
+        .streams
+        .iter()
+        .any(|s| s.ticket_ids.contains(&follow.id)));
+    s.report_archive(
+        runner,
+        c.id,
+        ReportArchive {
+            ownership_epoch: 1,
+            batch: ArchiveBatch {
+                session_id: c.session_id(),
+                revision: 1,
+                captured_unix_ms: 1,
+                final_scan_complete: true,
+                messages: vec![],
+            },
+        },
+    )
+    .unwrap();
+    s.scheduler_tick().unwrap();
+    s.scheduler_tick().unwrap();
+    let continued = s
+        .pending(runner)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.kind == CommandKind::RunAgent)
+        .unwrap();
+    assert_eq!(continued.session_root(), c.id);
+    assert_eq!(continued.stream_id, c.stream_id);
+    assert!(continued
+        .agent_spec
+        .as_ref()
+        .unwrap()
+        .prompt
+        .starts_with("Add multiplication"));
+    assert_eq!(
+        s.snapshot()
+            .unwrap()
+            .tickets
+            .iter()
+            .find(|t| t.id == first.id)
+            .unwrap()
+            .execution_command,
+        Some(c.id)
+    );
+    complete(
+        &s,
+        &continued,
+        CommandOutput::Agent {
+            agent: AgentProgress {
+                session_id: continued.session_id(),
+                message_id: agent_message_id(continued.id),
+                phase: AgentPhase::Succeeded,
+                summary: "Multiplication done".into(),
+            },
+        },
+    );
+    s.report_archive(
+        runner,
+        continued.id,
+        ReportArchive {
+            ownership_epoch: 1,
+            batch: ArchiveBatch {
+                session_id: continued.session_id(),
+                revision: 1,
+                captured_unix_ms: 1,
+                final_scan_complete: true,
+                messages: vec![],
+            },
+        },
+    )
+    .unwrap();
+    let automatic = s.save_task(task("Add division", None)).unwrap();
+    s.scheduler_tick().unwrap();
+    let routing = s
+        .pending(runner)
+        .unwrap()
+        .into_iter()
+        .find(|c| {
+            c.agent_spec
+                .as_ref()
+                .is_some_and(|a| a.role == "orchestrator")
+        })
+        .unwrap();
+    assert!(routing
+        .agent_spec
+        .as_ref()
+        .unwrap()
+        .prompt
+        .contains(&c.id.to_string()));
+    decide(
+        &s,
+        &routing,
+        &serde_json::json!({"action":"session","session_id":c.id,"reason":"Continue calculator"})
+            .to_string(),
+    );
+    s.scheduler_tick().unwrap();
+    let reuse = s
+        .pending(runner)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.agent_spec.as_ref().is_some_and(|a| !a.read_only))
+        .unwrap();
+    assert_eq!(reuse.session_root(), c.id);
+    assert_eq!(
+        reuse
+            .agent_spec
+            .as_ref()
+            .unwrap()
+            .continuation
+            .as_ref()
+            .unwrap()
+            .previous_command_id,
+        continued.id
+    );
+    assert_eq!(
+        s.snapshot()
+            .unwrap()
+            .tickets
+            .iter()
+            .find(|t| t.id == automatic.id)
+            .unwrap()
+            .execution_command,
+        Some(reuse.id)
+    );
+    let p = s.snapshot().unwrap().projects[0].clone();
+    let limit = SetSessionLimit {
+        request_id: RequestId::new(),
+        expected_revision: p.revision,
+        max_sessions: 3,
+    };
+    let changed = s.set_session_limit(p.id, limit.clone()).unwrap();
+    assert_eq!(changed.max_sessions, 3);
+    assert_eq!(
+        s.set_session_limit(p.id, limit).unwrap().revision,
+        changed.revision
+    );
+    assert!(s
+        .set_session_limit(
+            p.id,
+            SetSessionLimit {
+                request_id: RequestId::new(),
+                expected_revision: p.revision,
+                max_sessions: 2
+            }
+        )
+        .is_err());
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.scheduler_policy(p.id).unwrap().unwrap().max_parallel, 3);
+    assert_eq!(s.snapshot().unwrap().projects[0].max_sessions, 3);
+}
+
+#[test]
+fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
+    for answer in [
+        r#"{"action":"wait","reason":"Need a related result"}"#,
+        r#"{"action":"session","session_id":"00000000-0000-0000-0000-000000000000","reason":"invalid candidate"}"#,
+        "not JSON",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("db")).unwrap();
+        let p = s
+            .create_project(CreateProject {
+                request_id: RequestId::new(),
+                name: "Waiting".into(),
+                repository: "factory:managed".into(),
+                base_branch: "main".into(),
+            })
+            .unwrap();
+        let runner = RunnerId::new();
+        s.autostart_runner(runner).unwrap();
+        let t = s
+            .save_task(SaveTask {
+                request_id: RequestId::new(),
+                id: None,
+                expected_revision: Revision(0),
+                project_id: p.id,
+                prompt: "Follow up".into(),
+                images: vec![],
+                requested_session: None,
+            })
+            .unwrap();
+        s.autostart_runner(runner).unwrap();
+        s.scheduler_tick().unwrap();
+        prepare(&s, &s.pending(runner).unwrap()[0]);
+        s.scheduler_tick().unwrap();
+        let c = s.pending(runner).unwrap()[0].clone();
+        decide(&s, &c, answer);
+        for _ in 0..5 {
+            s.scheduler_tick().unwrap();
+        }
+        let snap = s.snapshot().unwrap();
+        assert_eq!(snap.commands.len(), 2);
+        assert!(!snap
+            .streams
+            .iter()
+            .any(|stream| stream.ticket_ids.contains(&t.id)));
+        assert!(!snap.tickets[0].routing_note.is_empty());
+    }
+}
+
 #[test]
 fn legacy_missing_folder_failure_gets_one_fenced_replacement_and_scheduler_continues() {
     let dir = tempfile::tempdir().unwrap();
@@ -145,6 +486,7 @@ fn legacy_missing_folder_failure_gets_one_fenced_replacement_and_scheduler_conti
     .unwrap();
     let next = s
         .save_task(SaveTask {
+            requested_session: None,
             request_id: RequestId::new(),
             id: None,
             expected_revision: Revision(0),
@@ -154,6 +496,7 @@ fn legacy_missing_folder_failure_gets_one_fenced_replacement_and_scheduler_conti
         })
         .unwrap();
     s.scheduler_tick().unwrap();
+    route_new(&s, next.id);
     assert!(s
         .snapshot()
         .unwrap()
@@ -177,6 +520,7 @@ fn prompt_images_autostart_pause_restart_and_capability_fencing() {
         .unwrap();
     let image = PromptImage::from_bytes("example.png".into(), b"\x89PNG\r\n\x1a\nfixture").unwrap();
     let b = SaveTask {
+        requested_session: None,
         request_id: RequestId::new(),
         id: None,
         expected_revision: Revision(0),
@@ -280,8 +624,32 @@ fn prompt_images_autostart_pause_restart_and_capability_fencing() {
     s.scheduler_tick().unwrap();
     let commands = s.snapshot().unwrap().commands;
     assert_eq!(commands.len(), 2);
-    let c = commands
+    let routing = commands
         .iter()
+        .find(|c| c.kind == CommandKind::RunAgent)
+        .unwrap();
+    assert_eq!(
+        routing.agent_spec.as_ref().unwrap().images,
+        vec![image.clone()]
+    );
+    decide(
+        &s,
+        routing,
+        r#"{"action":"new","reason":"Build first task"}"#,
+    );
+    s.scheduler_tick().unwrap();
+    let prep = s
+        .pending(runner)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.kind == CommandKind::PrepareWorkspace)
+        .unwrap();
+    prepare(&s, &prep);
+    s.scheduler_tick().unwrap();
+    let c = s
+        .pending(runner)
+        .unwrap()
+        .into_iter()
         .find(|c| c.kind == CommandKind::RunAgent)
         .unwrap();
     let spec = c.agent_spec.as_ref().unwrap();
@@ -324,6 +692,7 @@ fn prompt_images_autostart_pause_restart_and_capability_fencing() {
     next.prompt = "Next task".into();
     let next = s.save_task(next).unwrap();
     s.scheduler_tick().unwrap();
+    route_new(&s, next.id);
     assert!(s
         .snapshot()
         .unwrap()

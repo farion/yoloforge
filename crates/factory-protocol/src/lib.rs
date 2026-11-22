@@ -391,6 +391,8 @@ pub struct CreateTicket {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SaveTask {
+    #[serde(default)]
+    pub requested_session: Option<CommandId>,
     pub request_id: RequestId,
     pub id: Option<TicketId>,
     pub expected_revision: Revision,
@@ -404,6 +406,13 @@ pub struct PauseProject {
     pub request_id: RequestId,
     pub expected_revision: Revision,
     pub paused: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSessionLimit {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub max_sessions: u8,
 }
 
 /// Partial update; omitted fields retain their value. Empty strings clear text fields.

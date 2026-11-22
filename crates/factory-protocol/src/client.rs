@@ -40,6 +40,20 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn set_session_limit(
+        &self,
+        id: ProjectId,
+        b: &SetSessionLimit,
+    ) -> Result<Project, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/projects/{id}/session-limit", self.base))
+                .json(b)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn pause_project(
         &self,
         id: ProjectId,

@@ -634,6 +634,7 @@ mod tests {
                 base_branch: "main".into(),
             }),
             agent_spec: Some(AgentSpec {
+                role: String::new(),
                 images: vec![],
                 read_only: false,
                 continuation: None,
