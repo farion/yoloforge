@@ -152,105 +152,145 @@ fn migration_retires_unscoped_legacy_supervisor_observations_without_deleting_pr
 
 #[tokio::test]
 async fn legacy_runner_cannot_poll_or_ack_new_lifecycle_payloads() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("db")).unwrap();
-    let first = command(&store);
-    finish_agent(&store, &first, "done".into());
-    let follow = store
-        .continue_agent(
-            first.stream_id,
-            ContinueAgent {
-                request_id: RequestId::new(),
-                expected_revision: store.snapshot().unwrap().streams[0].revision,
-                previous_command_id: first.id,
-                prompt: "follow-up".into(),
-            },
-        )
-        .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let token = "test-only-lifecycle-capabilities-0123456789";
-    let server = tokio::spawn(async move {
-        axum::serve(listener, factoryd::router(token, store))
+    for capability in [SESSION_LIFECYCLE_CAPABILITY, CONTEXT_PLANNING_CAPABILITY] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("db")).unwrap();
+        let first = command(&store);
+        finish_agent(&store, &first, "done".into());
+        let follow = if capability == CONTEXT_PLANNING_CAPABILITY {
+            let snapshot = store.snapshot().unwrap();
+            let project = &snapshot.projects[0];
+            let mut profile = project.profile.clone();
+            profile.context_planning = Some(ContextPlanning {
+                tokenizer: ContextTokenizer::O200kBase,
+                knowledge_tokens: 128,
+            });
+            store
+                .update_profile(
+                    project.id,
+                    UpdateProfile {
+                        request_id: RequestId::new(),
+                        expected_revision: project.revision,
+                        profile,
+                    },
+                )
+                .unwrap();
+            store
+                .enqueue(
+                    first.stream_id,
+                    EnqueueCommand {
+                        request_id: RequestId::new(),
+                        expected_revision: snapshot.streams[0].revision,
+                        kind: CommandKind::RunAgent,
+                        prompt: Some("New task with explicit tokenizer".into()),
+                    },
+                )
+                .unwrap()
+        } else {
+            store
+                .continue_agent(
+                    first.stream_id,
+                    ContinueAgent {
+                        request_id: RequestId::new(),
+                        expected_revision: store.snapshot().unwrap().streams[0].revision,
+                        previous_command_id: first.id,
+                        prompt: "follow-up".into(),
+                    },
+                )
+                .unwrap()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let token = "test-only-lifecycle-capabilities-0123456789";
+        let server = tokio::spawn(async move {
+            axum::serve(listener, factoryd::router(token, store))
+                .await
+                .unwrap()
+        });
+        let http = reqwest::Client::new();
+        let mut input = RegisterRunner {
+            id: first.runner_id,
+            instance_id: InstanceId::new(),
+            name: "compatibility".into(),
+            location: RunnerLocation::Local,
+            version: "0.1.1".into(),
+            opencode: OpenCodeStatus::NotConfigured,
+            capabilities: vec![],
+        };
+        let register = || {
+            http.post(format!("{base}/v1/runners/register"))
+                .bearer_auth(token)
+                .header(VERSION_HEADER, "1")
+        };
+        let registration: Registration = register()
+            .json(&input)
+            .send()
             .await
             .unwrap()
-    });
-    let http = reqwest::Client::new();
-    let mut input = RegisterRunner {
-        id: first.runner_id,
-        instance_id: InstanceId::new(),
-        name: "compatibility".into(),
-        location: RunnerLocation::Local,
-        version: "0.1.1".into(),
-        opencode: OpenCodeStatus::NotConfigured,
-        capabilities: vec![],
-    };
-    let register = || {
-        http.post(format!("{base}/v1/runners/register"))
-            .bearer_auth(token)
-            .header(VERSION_HEADER, "1")
-    };
-    let registration: Registration = register()
-        .json(&input)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let poll = || {
-        http.get(format!("{base}/v1/runners/{}/commands", first.runner_id))
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let poll = || {
+            http.get(format!("{base}/v1/runners/{}/commands", first.runner_id))
+                .bearer_auth(token)
+                .header(VERSION_HEADER, "1")
+                .header(RUNNER_HEADER, registration.registration_id.to_string())
+        };
+        let pending: Vec<RunnerCommand> = poll()
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(pending.is_empty());
+        let response = http
+            .post(format!(
+                "{base}/v1/runners/{}/commands/{}/ack",
+                first.runner_id, follow.id
+            ))
             .bearer_auth(token)
             .header(VERSION_HEADER, "1")
             .header(RUNNER_HEADER, registration.registration_id.to_string())
-    };
-    let pending: Vec<RunnerCommand> = poll()
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(pending.is_empty());
-    let response = http
-        .post(format!(
-            "{base}/v1/runners/{}/commands/{}/ack",
-            first.runner_id, follow.id
-        ))
-        .bearer_auth(token)
-        .header(VERSION_HEADER, "1")
-        .header(RUNNER_HEADER, registration.registration_id.to_string())
-        .json(&AckCommand {
-            request_id: RequestId::new(),
-            ownership_epoch: 1,
-        })
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
-    input.capabilities.push(SESSION_LIFECYCLE_CAPABILITY.into());
-    register()
-        .json(&input)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    let pending: Vec<RunnerCommand> = poll()
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(pending, vec![follow]);
-    server.abort();
+            .json(&AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if capability == CONTEXT_PLANNING_CAPABILITY {
+                reqwest::StatusCode::BAD_REQUEST
+            } else {
+                reqwest::StatusCode::CONFLICT
+            }
+        );
+        input.capabilities.push(capability.into());
+        register()
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let pending: Vec<RunnerCommand> = poll()
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(pending, vec![follow]);
+        server.abort();
+    }
 }
 
 fn finish_agent(store: &Store, c: &RunnerCommand, summary: String) {
