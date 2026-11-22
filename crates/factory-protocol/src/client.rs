@@ -40,6 +40,88 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn archive_files(
+        &self,
+        id: CommandId,
+        through: Option<u64>,
+    ) -> Result<ArchiveBlobIndex, ClientError> {
+        let mut request = self
+            .http
+            .get(format!("{}/v1/commands/{id}/files", self.base));
+        if let Some(revision) = through {
+            request = request.query(&[("through_revision", revision)]);
+        }
+        Self::decode(request.send().await).await
+    }
+    pub async fn archive_file_chunk(
+        &self,
+        id: CommandId,
+        hash: &str,
+        offset: u64,
+    ) -> Result<ArchiveBlobChunk, ClientError> {
+        if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ClientError::InvalidResponse);
+        }
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/commands/{id}/files/{hash}/{offset}",
+                    self.base
+                ))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn report_archive_file(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        body: &ReportArchiveBlob,
+    ) -> Result<ArchiveBlobProgress, ClientError> {
+        Self::decode(
+            self.http
+                .put(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/files",
+                    self.base
+                ))
+                .header("x-factory-runner-registration", registration.to_string())
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn runner_archive(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        id: CommandId,
+        epoch: u64,
+        after: u64,
+        through: u64,
+    ) -> Result<ArchivePage, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!(
+                    "{}/v1/runners/{runner}/commands/{id}/archive",
+                    self.base
+                ))
+                .header("x-factory-runner-registration", registration.to_string())
+                .query(&[
+                    ("ownership_epoch", epoch),
+                    ("after", after),
+                    ("through_revision", through),
+                ])
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub fn base_url(&self) -> &str {
+        &self.base
+    }
     pub async fn report_hosted_review(
         &self,
         id: CommandId,

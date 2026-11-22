@@ -88,7 +88,10 @@ fn remote_execution(snapshot: &Snapshot, id: ProjectId) -> Option<&RunnerCommand
 async fn remote_report(command: std::process::Command) -> Result<String> {
     remote_report_timeout(command, 30).await
 }
-async fn remote_report_timeout(command: std::process::Command, seconds: u64) -> Result<String> {
+pub(crate) async fn remote_report_timeout(
+    command: std::process::Command,
+    seconds: u64,
+) -> Result<String> {
     use tokio::io::AsyncReadExt;
     let mut command = tokio::process::Command::from(command);
     let mut child = command
@@ -97,16 +100,18 @@ async fn remote_report_timeout(command: std::process::Command, seconds: u64) -> 
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .context("SSH konnte nicht gestartet werden")?;
-    let output = child.stdout.take().context("SSH-Ausgabe fehlt")?;
+        .context(
+            "Runner-Helfer konnte nicht gestartet werden (lokales Programm bzw. SSH pruefen)",
+        )?;
+    let output = child.stdout.take().context("Runner-Helferausgabe fehlt")?;
     let result = tokio::time::timeout(std::time::Duration::from_secs(seconds), async {
         let mut bytes = Vec::new();
         output.take(65537).read_to_end(&mut bytes).await?;
-        anyhow::ensure!(bytes.len() <= 65536, "SSH-Bereitschaftsausgabe ist zu gross");
+        anyhow::ensure!(bytes.len() <= 65536, "Runner-Helferausgabe ist zu gross");
         let status = child.wait().await?;
-        anyhow::ensure!(status.success(), "SSH-Pruefung fehlgeschlagen: SSH-Anmeldung, Hostschluessel, Runner-Version und Profil pruefen");
+        anyhow::ensure!(status.success(), "Runner-Helfer fehlgeschlagen: Journal, Konfiguration, Zugangsdaten und bei SSH Hostschluessel/Anmeldung pruefen");
         Ok::<_,anyhow::Error>(String::from_utf8_lossy(&bytes).chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect::<String>())
-    }).await.context("SSH-Bereitschaft: Zeitlimit ueberschritten")?;
+    }).await.context("Runner-Helfer: Zeitlimit ueberschritten; Ergebnis vor Neuversuch abgleichen")?;
     if result.is_err() {
         let _ = child.kill().await;
     }

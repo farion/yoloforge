@@ -3,6 +3,57 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 pub const ARCHIVE_FILES_KEY: &str = "__yoloforge_files_v1";
 pub const ARCHIVE_FILE_LIMIT: usize = 4 * 1024 * 1024;
+pub const ARCHIVE_BLOB_LIMIT: u64 = 64 * 1024 * 1024;
+pub const ARCHIVE_CHUNK_LIMIT: usize = 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveBlob {
+    pub sha256: String,
+    pub bytes: u64,
+    pub uri: String,
+    pub name: String,
+    pub mime: String,
+    pub message_id: String,
+    pub source_revision: u64,
+    pub captured_unix_ms: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveBlobChunk {
+    pub file: ArchiveBlob,
+    pub offset: u64,
+    pub data: String,
+}
+impl ArchiveBlobChunk {
+    pub fn new(file: ArchiveBlob, offset: u64, bytes: &[u8]) -> Self {
+        Self {
+            file,
+            offset,
+            data: STANDARD.encode(bytes),
+        }
+    }
+    pub fn bytes(&self) -> Result<Vec<u8>, &'static str> {
+        if self.data.len() > ARCHIVE_CHUNK_LIMIT.div_ceil(3) * 4 {
+            return Err("Archive chunk too large");
+        }
+        let bytes = STANDARD
+            .decode(&self.data)
+            .map_err(|_| "Invalid archive chunk encoding")?;
+        if bytes.is_empty() || bytes.len() > ARCHIVE_CHUNK_LIMIT {
+            return Err("Invalid archive chunk size");
+        }
+        Ok(bytes)
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchiveBlobIndex {
+    pub files: Vec<ArchiveBlob>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchiveBlobProgress {
+    pub next_offset: u64,
+    pub complete: bool,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchiveFile {

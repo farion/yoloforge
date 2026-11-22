@@ -1,5 +1,26 @@
 # Autonomer Session-Supervisor
 
+## Nacharbeit und Neuverteilung (0.1.3-dev)
+
+`continue` erzeugt fuer konkret unerfuellte Originalanforderungen nach Erfolg
+einen neuen Schreibauftrag in derselben Session. Die Entscheidung enthaelt dazu
+`followup`; finales Archiv, unveraendertes Profil, Ownership, Projektpause und
+Arbeitsbudget werden weiterhin geprueft. Explizite Interviews werden ausgeschlossen.
+Auftrag, Wissensnotiz und Entscheidungsbeleg entstehen atomar.
+
+`reallocate` wird nur nach bestaetigter Entfernung der dedizierten Runtime eines
+fehlgeschlagenen Auftrags angeboten. Unfixierte zugeordnete Aufgaben werden mit
+ihrem Originalprompt/Bildern erneut bereitgestellt. Ticketbezogenes Quellenwissen
+verweist auf den vorherigen Auftrag. Der regulaere Orchestrator entscheidet ueber
+die neue Session; alte Worktrees bleiben erhalten, ihre Aenderungen werden nicht
+automatisch kopiert. Feste Sessionbindungen, Interviews und ungeklaerte native
+Unterbrechungen werden nicht neuverteilt. Beendete Runtime-Sessions werden aus dem
+Routingkatalog ausgeschlossen.
+
+Store-Tests pruefen Restart/Einmaligkeit, Budget, Interview, fehlenden Stoppnachweis
+und konkurrierend gesetzte feste Sessionbindung. Realmodell-Abnahmen dieser beiden
+neuen Aktionen stehen noch aus; der bisherige autonome Abschluss wurde real geprueft.
+
 Entwicklungsstand nach v0.1.1, Schema 14. Der Factory-Daemon führt einen
 dauerhaften Bewertungszyklus aus. Ein echter OpenCode-Agent bewertet Sessions
 mit dem Provider/Modell des Projekts. Er entscheidet selbst zwischen `wait`,

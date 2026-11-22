@@ -36,6 +36,69 @@ pub fn readiness(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
 pub fn fetch_repository(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
     configured_operation(runner, id, true, true)
 }
+pub fn publish_review(
+    runner: RunnerId,
+    id: CommandId,
+    config: &str,
+    token_file: &str,
+) -> Result<Option<Command>> {
+    let bytes = match std::fs::read(config_path()) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let profiles: BTreeMap<RunnerId, Profile> = serde_json::from_slice(&bytes)?;
+    let Some(p) = profiles.get(&runner) else {
+        return Ok(None);
+    };
+    publication_command(p, runner, id, config, token_file).map(Some)
+}
+fn publication_command(
+    p: &Profile,
+    runner: RunnerId,
+    id: CommandId,
+    config: &str,
+    token_file: &str,
+) -> Result<Command> {
+    // Validate the same SSH host/Factory identity as the other runner helpers.
+    let validated = command_operation(p, runner, id, true, true)?;
+    let mut args = validated
+        .get_args()
+        .map(|s| s.to_os_string())
+        .collect::<Vec<_>>();
+    args.pop().context("Remote command missing")?;
+    let remote = [
+        "env",
+        "-u",
+        "FACTORY_TOKEN",
+        &format!("FACTORY_TOKEN_FILE={token_file}"),
+        "factory-runner",
+        "--id",
+        &runner.to_string(),
+        "--name",
+        "hosting-tui",
+        "--server",
+        &p.server,
+        "--journal",
+        &p.journal,
+        "--publish-review",
+        &id.to_string(),
+        "--hosting-config",
+        config,
+    ]
+    .into_iter()
+    .map(quote)
+    .collect::<Result<Vec<_>>>()?
+    .join(" ");
+    let mut command = Command::new("ssh");
+    command
+        .args(args)
+        .arg(remote)
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TOKEN_FILE")
+        .env_remove("OPENCODE_PASSWORD");
+    Ok(command)
+}
 pub fn project_readiness(
     runner: RunnerId,
     id: CommandId,
@@ -168,6 +231,38 @@ fn command_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn publication_pins_review_and_quotes_paths_without_transporting_tokens() {
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let p = Profile {
+            host: "user@runner".into(),
+            server: "http://127.0.0.1:7432".into(),
+            journal: "/runner/journal".into(),
+            opencode_registration: None,
+        };
+        let command = publication_command(
+            &p,
+            runner,
+            id,
+            "/config/it's hosting.json",
+            "/private/operator token",
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args[0], "-T");
+        let remote = args.last().unwrap();
+        assert!(remote.contains(&format!("'--publish-review' '{}'", id)));
+        assert!(remote.contains("'FACTORY_TOKEN_FILE=/private/operator token'"));
+        assert!(remote.contains("'/config/it'\\''s hosting.json'"));
+        assert!(!remote.contains("--fetch-repository") && !remote.contains("--open-session"));
+        assert!(command
+            .get_envs()
+            .any(|(k, v)| k == "FACTORY_TOKEN" && v.is_none()));
+    }
     #[test]
     fn fetch_is_noninteractive_and_pins_the_prepared_command() {
         let runner = RunnerId::new();

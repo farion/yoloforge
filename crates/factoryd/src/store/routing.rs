@@ -86,7 +86,9 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
             continue;
         }
         let owner = super::work::stream(tx, c.stream_id)?;
-        if super::sessions::closed(tx, c.session_root())? {
+        if super::sessions::closed(tx, c.session_root())?
+            || super::termination::load(tx, c.id)?.is_some()
+        {
             continue;
         }
         let knowledge = Store::select_knowledge(

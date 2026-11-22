@@ -31,6 +31,7 @@ impl Store {
         Ok(())
     }
     pub fn setup_project(&self, mut b: SetupProject) -> Result<ProjectSetupResult> {
+        super::knowledge::validate_plan(&b.profile)?;
         if b.repository.trim().is_empty() {
             b.repository = "factory:managed".into();
         }

@@ -39,4 +39,36 @@ neues privates `yoloforge-attachments-...`-Verzeichnis im aktuellen Arbeitsordne
 einschliesslich Manifest. Vorhandene Verzeichnisse/Dateien werden nicht ersetzt.
 Android bietet inzwischen Archivnavigation und SHA256-geprueften Export ueber
 den System-Dateidialog; die Byte-/UI-Tests bestehen, die Dateidialog-Abnahme auf
-einem echten Geraet fehlt noch. Große externe Binärobjekte bleiben offen.
+einem echten Geraet fehlt noch.
+
+## Grosse Dateien und erhaltene externe Quellen (Schema 31)
+
+Zusaetzliche lokale Dateien werden bis 64 MiB je Datei, 16 Dateien und 256 MiB
+je Auftrag in private Runner-Spools kopiert. Der Upload erfolgt wiederaufnehmbar
+in 1-MiB-Bloecken. Factory veroeffentlicht nur vollstaendige Dateien nach Pruefung
+des Gesamtdigests; identische Bloecke sind wiederholbar, abweichende werden abgelehnt.
+Die Metadaten enthalten Message-ID, Quellrevision und Erfassungszeitpunkt.
+Eine spaeter rekonstruierte Datei ist kein Beweis fuer ihren historischen Inhalt.
+
+`factory-runner --archive-source-root /absolute/directory` erlaubt zusaetzliche
+lokale Quellverzeichnisse. Standard ist allein der Ausfuehrungsworktree. HTTP-URIs
+werden nicht abgerufen. Geoeffnete Deskriptoren werden auf Rootzugehoerigkeit und
+regulaere Dateien geprueft; Symlink-Escapes werden abgewiesen.
+
+Nach Wiederherstellung einer Quelle kann beim gestoppten Runner mit dessen normalen
+Identitaets-/Journalargumenten `--rescan-archive-files COMMAND_UUID` ein erneuter
+Scan vorgemerkt werden. Beim naechsten Runnerstart liest er die Referenzen aus dem
+zentralen Archiv, auch wenn die native Session nicht mehr existiert. Ein erhaltenes
+Ausfuehrungsjournal ist erforderlich. Ohne erhaltene Bytes gibt es keine Rekonstruktion.
+
+CLI, TUI (`e`) und Android laden die zusaetzlichen Dateien blockweise und pruefen
+SHA256 vor der finalen Bereitstellung. APIs: `GET /v1/commands/{id}/files`,
+`GET /v1/commands/{id}/files/{sha256}/{offset}` und registrierungs-/ownershipgebundenes
+`PUT /v1/runners/{runner}/commands/{id}/files`. SQLite-Backups enthalten die Bloecke.
+Alte Inline-Unverfuegbarkeitsmeldungen bleiben als historische Beobachtung erhalten.
+
+`scripts/smoke-archive-blobs.py` hat grosse Dateien, Server-/Runner-Neustart,
+Quellloeschung, externe Rekonstruktion und bytegleichen CLI-Export geprueft
+(`/tmp/opencode/yf-archive-blobs-zxnu2z8u`). OpenCode ist dort synthetisch,
+Factory/Runner/CLI sind echte Prozesse. Der gleiche Test bestaetigt Quarantaene
+nach Verlust eines bereits angenommenen Auftragsjournals ohne Prompt-Replay.

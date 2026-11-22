@@ -314,17 +314,33 @@ async fn publish_pull(
     Ok(url)
 }
 pub async fn publish(args: &Args, client: &FactoryClient, id: CommandId) -> Result<()> {
+    publish_pinned(args, client, id, None).await
+}
+async fn publish_pinned(
+    args: &Args,
+    client: &FactoryClient,
+    id: CommandId,
+    pinned: Option<&Destination>,
+) -> Result<()> {
     let config: Config = serde_json::from_slice(&std::fs::read(
         args.hosting_config
             .as_ref()
             .context("Hosting configuration missing")?,
     )?)?;
     let destination = validate(&config)?;
+    ensure!(
+        pinned.is_none_or(|expected| expected == &destination),
+        "Hosting destination changed before publication"
+    );
     let journal = args
         .journal
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!(".factory-data/runner-{}.sqlite3", args.id)));
     let record = crate::attach::read_record(&journal, &args.server, args.id, id)?;
+    ensure!(
+        !record.recovery_required,
+        "Review journal requires recovery"
+    );
     let snapshot = client.snapshot().await?;
     let current = snapshot
         .commands
@@ -431,6 +447,74 @@ pub async fn publish(args: &Args, client: &FactoryClient, id: CommandId) -> Resu
     println!("{url}");
     Ok(())
 }
+
+fn candidates(
+    snapshot: &factory_protocol::Snapshot,
+    runner: RunnerId,
+    project: ProjectId,
+) -> Vec<CommandId> {
+    if snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == project)
+        .is_none_or(|p| p.paused)
+    {
+        return Vec::new();
+    }
+    snapshot.commands.iter().filter(|c|c.kind==CommandKind::ReviewCheckpoint && c.state==CommandState::Succeeded
+        && c.runner_id==runner && snapshot.streams.iter().any(|s|s.id==c.stream_id && s.project_id==project
+            && s.runner_id==runner && s.ownership_epoch==c.ownership_epoch)
+        && matches!(&c.result,Some(CommandOutput::Review {review}) if review.test_exit_code==0))
+        .map(|c|c.id).collect()
+}
+
+/// Separate helper lifecycle: Git/API latency cannot interrupt execution heartbeats.
+/// Per-review receipts are the durable deduplication source; retries only reconcile
+/// uncertain PR creation and never issue a second creation POST.
+pub async fn watch(args: &Args, client: &FactoryClient, project: ProjectId) -> Result<()> {
+    let config: Config = serde_json::from_slice(&std::fs::read(
+        args.hosting_config
+            .as_ref()
+            .context("Hosting configuration missing")?,
+    )?)?;
+    let pinned = validate(&config)?;
+    let mut completed = std::collections::BTreeSet::new();
+    let mut retry_at = std::collections::BTreeMap::new();
+    loop {
+        let current: Config =
+            serde_json::from_slice(&std::fs::read(args.hosting_config.as_ref().unwrap())?)?;
+        ensure!(
+            validate(&current)? == pinned,
+            "Hosting destination changed; restart helper explicitly to select a new destination"
+        );
+        if let Ok(snapshot) = client.snapshot().await {
+            for id in candidates(&snapshot, args.id, project) {
+                if completed.contains(&id)
+                    || retry_at
+                        .get(&id)
+                        .is_some_and(|t| std::time::Instant::now() < *t)
+                {
+                    continue;
+                }
+                match publish_pinned(args, client, id, Some(&pinned)).await {
+                    Ok(()) => {
+                        completed.insert(id);
+                        retry_at.remove(&id);
+                    }
+                    Err(_) => {
+                        eprintln!("Publication {id} deferred; inspect review evidence, hosting receipt and configured credentials. Retrying reconciliation in 120 seconds.");
+                        retry_at.insert(
+                            id,
+                            std::time::Instant::now() + std::time::Duration::from_secs(120),
+                        );
+                    }
+                }
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
 async fn report(client: &FactoryClient, receipt: &Receipt, ownership_epoch: u64) -> Result<()> {
     let i = &receipt.identity;
     client
@@ -456,6 +540,34 @@ async fn report(client: &FactoryClient, receipt: &Receipt, ownership_epoch: u64)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_publication_is_project_scoped_paused_and_ownership_fenced() {
+        let runner = RunnerId::new();
+        let project = ProjectId::new();
+        let stream = StreamId::new();
+        let command = CommandId::new();
+        let mut snapshot:factory_protocol::Snapshot=serde_json::from_value(json!({
+            "protocol_version":1,"server_version":"fixture","boot_id":InstanceId::new(),"revision":0,"event_cursor":0,"runners":[],"tickets":[],
+            "projects":[{"id":project,"name":"publication","repository":"/repo","base_branch":"main","revision":1,"created_unix_ms":1}],
+            "streams":[{"id":stream,"project_id":project,"revision":1,"goal":"review","runner_id":runner,"ownership_epoch":1,"branch":"factory/review","ticket_ids":[],"status":"review","created_unix_ms":1}],
+            "commands":[{"id":command,"stream_id":stream,"runner_id":runner,"ownership_epoch":1,"kind":"review_checkpoint","state":"succeeded","created_unix_ms":1,
+                "result":{"review":{"checkpoint":CommandId::new(),"target_commit":"a".repeat(40),"candidate_commit":"b".repeat(40),"tree":"c".repeat(40),"image":"test","test_exit_code":0,"log_path":"/log",
+                    "removal":{"runtime":{"container_id":"d".repeat(64),"started_at":"fixture"},"daemon_id":"fixture","observed_unix_ms":1}}}}]
+        })).unwrap();
+        assert_eq!(candidates(&snapshot, runner, project), vec![command]);
+        assert!(candidates(&snapshot, RunnerId::new(), project).is_empty());
+        assert!(candidates(&snapshot, runner, ProjectId::new()).is_empty());
+        snapshot.projects[0].paused = true;
+        assert!(candidates(&snapshot, runner, project).is_empty());
+        snapshot.projects[0].paused = false;
+        snapshot.streams[0].ownership_epoch = 2;
+        assert!(candidates(&snapshot, runner, project).is_empty());
+        snapshot.streams[0].ownership_epoch = 1;
+        if let Some(CommandOutput::Review { review }) = &mut snapshot.commands[0].result {
+            review.test_exit_code = 1;
+        }
+        assert!(candidates(&snapshot, runner, project).is_empty());
+    }
     use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
     use std::sync::{Arc, Mutex};
     fn identity(repository: PathBuf) -> Identity {

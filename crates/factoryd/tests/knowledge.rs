@@ -40,6 +40,78 @@ fn note(project: ProjectId, ticket: Option<TicketId>, title: &str) -> CreateKnow
 }
 
 #[test]
+fn explicit_tokenizer_budget_counts_unicode_and_provenance_and_survives_restart() {
+    for kind in [
+        ContextTokenizer::Cl100kBase,
+        ContextTokenizer::O200kBase,
+        ContextTokenizer::P50kBase,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let store = Store::open(&path).unwrap();
+        let mut p = project(&store);
+        let mut body = note(p.id, None, "Unicode and literal special-token text");
+        body.content = "Grüße 🛠 日本語 <|endoftext|>".repeat(20);
+        store.create_knowledge(body).unwrap();
+        let original = store.knowledge_context(p.id, None, 16384).unwrap();
+        let tokenizer = match kind {
+            ContextTokenizer::Cl100kBase => tiktoken_rs::cl100k_base(),
+            ContextTokenizer::O200kBase => tiktoken_rs::o200k_base(),
+            ContextTokenizer::P50kBase => tiktoken_rs::p50k_base(),
+        }
+        .unwrap();
+        let count = tokenizer.encode_ordinary(&original.text).len();
+        for (budget, expected_notes) in [(count, 1), (count - 1, 0), (0, 0)] {
+            p = store
+                .update_profile(
+                    p.id,
+                    UpdateProfile {
+                        request_id: RequestId::new(),
+                        expected_revision: p.revision,
+                        profile: ExecutionProfile {
+                            provider_id: "explicit-provider".into(),
+                            model_id: "explicit-model".into(),
+                            context_planning: Some(ContextPlanning {
+                                tokenizer: kind,
+                                knowledge_tokens: budget,
+                            }),
+                            ..Default::default()
+                        },
+                    },
+                )
+                .unwrap();
+            let selected = store.knowledge_context(p.id, None, 16384).unwrap();
+            assert_eq!(selected.notes.len(), expected_notes);
+            let measurement = selected.token_plan.unwrap();
+            assert_eq!(
+                measurement.tokens,
+                tokenizer.encode_ordinary(&selected.text).len()
+            );
+            assert!(measurement.tokens <= budget);
+            assert_eq!(measurement.tokenizer, kind);
+        }
+        let revision = p.revision;
+        let mut invalid = p.profile.clone();
+        invalid.context_planning.as_mut().unwrap().knowledge_tokens = 16385;
+        assert!(store
+            .update_profile(
+                p.id,
+                UpdateProfile {
+                    request_id: RequestId::new(),
+                    expected_revision: revision,
+                    profile: invalid
+                }
+            )
+            .is_err());
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let selected = store.knowledge_context(p.id, None, 16384).unwrap();
+        assert!(selected.notes.is_empty());
+        assert_eq!(selected.token_plan.unwrap().budget_tokens, 0);
+    }
+}
+
+#[test]
 fn scoped_budgeted_context_retirement_and_deduplication_survive_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");

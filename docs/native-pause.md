@@ -26,6 +26,18 @@ Containment-Nachweis noch eine Freigabe für einen konsistenten Checkpoint/Hando
 Fehlende Journale, nicht passende Sessionidentität, aktive Ausführung oder offene
 Inbox bleiben ungeklärt; kein blinder Neuversuch und keine automatische Freigabe.
 
+Ab 0.1.3-dev werden erstmals lokal empfangene, serverseitig bereits angenommene
+Schreibauftraege dauerhaft als `recovery_required` gesperrt. Das gilt auch fuer
+Workspace-/Review-/Integrationsauftraege und fuer terminale Cleanup-Auftraege.
+Eine nach verlorenem Ack erneut zugestellte Arbeit mit vorhandenem Empfangsjournal
+ist davon nicht betroffen. Bei Agentenauftraegen prueft der Runner ausschliesslich
+lesend die native Session-ID, Herkunft, Modell, Workspacepfad, Prompt/Bilddigest,
+Aktivitaet und Inbox. Das Ergebnis erscheint als `unknown` in der bestehenden
+Auftragsdiagnose; selbst beobachtetes `succeeded` ersetzt keine verlorene
+Schreibabsicht. Keine automatischen Antworten, Compactions, Interrupts oder
+Publikationen werden aus diesem Zustand ausgefuehrt. Zur Wiederherstellung ist
+das urspruengliche Runner-Journal mit seinen Write-ahead-Belegen erforderlich.
+
 Tests prüfen verlorene Interruptantworten mit Journal-Neustart, aktive Sessions,
 offene Inbox, Freigabe erst nach Finalisierung sowie Archiv-/Revisionsschutz und
 Fortsetzung unter derselben Session-ID. Die explizite Realmodell-Abnahme lautet:

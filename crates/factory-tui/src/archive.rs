@@ -182,9 +182,15 @@ pub struct Browser {
     task: Option<JoinHandle<()>>,
     tx: mpsc::UnboundedSender<Result<ArchivePage, ClientError>>,
     rx: mpsc::UnboundedReceiver<Result<ArchivePage, ClientError>>,
+    export_task: Option<JoinHandle<()>>,
+    export_tx: mpsc::UnboundedSender<String>,
+    export_rx: mpsc::UnboundedReceiver<String>,
 }
 impl Drop for Browser {
     fn drop(&mut self) {
+        if let Some(task) = &self.export_task {
+            task.abort();
+        }
         if let Some(task) = &self.task {
             task.abort();
         }
@@ -193,6 +199,7 @@ impl Drop for Browser {
 impl Browser {
     pub fn new(command: CommandId, client: FactoryClient) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (export_tx, export_rx) = mpsc::unbounded_channel();
         Self {
             command,
             client,
@@ -201,6 +208,9 @@ impl Browser {
             task: None,
             tx,
             rx,
+            export_task: None,
+            export_tx,
+            export_rx,
         }
     }
     fn load(&mut self, request: Request) {
@@ -217,6 +227,10 @@ impl Browser {
         }));
     }
     fn poll(&mut self) {
+        while let Ok(message) = self.export_rx.try_recv() {
+            self.state.message = message;
+            self.export_task = None;
+        }
         while let Ok(result) = self.rx.try_recv() {
             if let Some(request) = self.pending.take() {
                 match result {
@@ -239,28 +253,43 @@ impl Browser {
     pub fn key(&mut self, code: KeyCode) {
         self.poll();
         if code == KeyCode::Char('e') {
-            if let Some(entry) = &self.state.entry {
-                let result = (|| -> anyhow::Result<String> {
-                    let path = std::env::current_dir()?.join(format!(
-                        "yoloforge-attachments-{}-{}-{}",
-                        self.command,
-                        entry.sequence,
-                        RequestId::new()
-                    ));
-                    let mut export = crate::commands::archive_files::Export::new(&path)?;
-                    export.entry(entry)?;
-                    export.finish()?;
-                    Ok(format!(
-                        "{} Dateien, {} nicht verfuegbar: {}",
-                        export.count,
-                        export.unavailable,
-                        path.display()
-                    ))
-                })();
-                self.state.message = match result {
-                    Ok(message) => message,
-                    Err(error) => format!("Dateiexport fehlgeschlagen: {error}"),
-                };
+            if self.export_task.is_some() {
+                return;
+            }
+            if let Some(entry) = self.state.entry.clone() {
+                let client = self.client.clone();
+                let command = self.command;
+                let through = self.state.through;
+                let tx = self.export_tx.clone();
+                self.state.message = "Exportiere Anhaenge und pruefe SHA256 …".into();
+                self.export_task = Some(tokio::spawn(async move {
+                    let result = async {
+                        let path = std::env::current_dir()?.join(format!(
+                            "yoloforge-attachments-{}-{}-{}",
+                            command,
+                            entry.sequence,
+                            RequestId::new()
+                        ));
+                        let mut export = crate::commands::archive_files::Export::new(&path)?;
+                        export.entry(&entry)?;
+                        export
+                            .supplemental(&client, command, through, entry.message["id"].as_str())
+                            .await?;
+                        export.finish()?;
+                        Ok::<_, anyhow::Error>(format!(
+                            "{} Dateien, {} nicht verfuegbar: {}",
+                            export.count,
+                            export.unavailable,
+                            path.display()
+                        ))
+                    }
+                    .await;
+                    let message = match result {
+                        Ok(message) => message,
+                        Err(error) => format!("Dateiexport fehlgeschlagen: {error}"),
+                    };
+                    let _ = tx.send(message);
+                }));
             } else {
                 self.state.message = "Keine Nachricht fuer den Dateiexport geladen".into();
             }

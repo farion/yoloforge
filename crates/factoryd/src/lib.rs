@@ -99,9 +99,20 @@ pub fn router_with_shutdown(
             get(compaction_routes::runner_read).put(compaction_routes::report),
         )
         .route("/v1/commands/{id}/archive", get(archive_routes::read))
+        .route("/v1/commands/{id}/files", get(archive_routes::files))
+        .route(
+            "/v1/commands/{id}/files/{hash}/{offset}",
+            get(archive_routes::file_chunk),
+        )
+        .route(
+            "/v1/runners/{runner}/commands/{id}/files",
+            axum::routing::put(archive_routes::write_file)
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .route(
             "/v1/runners/{runner}/commands/{id}/archive",
             axum::routing::put(archive_routes::write)
+                .get(archive_routes::runner_read)
                 .layer(axum::extract::DefaultBodyLimit::max(9 * 1024 * 1024)),
         )
         .route("/v1/knowledge", post(knowledge_routes::create))

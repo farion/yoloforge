@@ -14,6 +14,76 @@ pub(crate) struct Export {
     pub unavailable: usize,
 }
 impl Export {
+    pub async fn supplemental(
+        &mut self,
+        client: &factory_protocol::client::FactoryClient,
+        id: CommandId,
+        through: Option<u64>,
+        message_id: Option<&str>,
+    ) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let index = match client.archive_files(id, through).await {
+            Ok(index) => index,
+            Err(factory_protocol::client::ClientError::Http { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(index.files.len() <= 16, "Invalid supplemental file index");
+        for file in index.files {
+            if message_id.is_some_and(|m| m != file.message_id) {
+                continue;
+            }
+            ensure!(
+                file.sha256.len() == 64
+                    && file
+                        .sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && file.bytes > 0
+                    && file.bytes <= ARCHIVE_BLOB_LIMIT,
+                "Invalid supplemental file metadata"
+            );
+            if !self.seen.contains(&file.sha256) {
+                let mut output = tempfile::NamedTempFile::new_in(&self.directory)?;
+                let mut offset = 0;
+                let mut digest = Sha256::new();
+                while offset < file.bytes {
+                    let chunk = client.archive_file_chunk(id, &file.sha256, offset).await?;
+                    ensure!(
+                        chunk.file == file && chunk.offset == offset,
+                        "Supplemental file identity changed"
+                    );
+                    let bytes = chunk.bytes().map_err(anyhow::Error::msg)?;
+                    ensure!(
+                        offset + bytes.len() as u64 <= file.bytes,
+                        "Supplemental file exceeds declared size"
+                    );
+                    output.write_all(&bytes)?;
+                    digest.update(&bytes);
+                    offset += bytes.len() as u64;
+                }
+                ensure!(
+                    format!("{:x}", digest.finalize()) == file.sha256,
+                    "Supplemental file hash mismatch"
+                );
+                output.as_file().sync_all()?;
+                output
+                    .persist_noclobber(self.directory.join(&file.sha256))
+                    .map_err(|e| e.error)?;
+                self.seen.insert(file.sha256.clone());
+                self.count += 1;
+            }
+            writeln!(
+                self.manifest,
+                "{}",
+                serde_json::json!({"status":"captured_supplement","file":file.sha256,"metadata":file})
+            )?;
+        }
+        Ok(())
+    }
     pub fn new(directory: &Path) -> Result<Self> {
         let builder = std::fs::DirBuilder::new();
         #[cfg(unix)]

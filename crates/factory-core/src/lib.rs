@@ -10,6 +10,7 @@ pub use images::*;
 mod archive_files;
 pub use archive_files::*;
 pub const TASK_IMAGES_CAPABILITY: &str = "task-images-v1";
+pub const CONTEXT_PLANNING_CAPABILITY: &str = "context-planning-v1";
 pub const LOCAL_PROJECT_CAPABILITY: &str = "local-project-create-v1";
 pub const UNLIMITED_STARTS: u32 = u32::MAX;
 
@@ -146,6 +147,8 @@ pub struct KnowledgeNote {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KnowledgeContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_plan: Option<ContextTokenCount>,
     pub notes: Vec<KnowledgeNote>,
     pub text: String,
     pub budget_bytes: usize,
@@ -431,11 +434,34 @@ pub struct BundleReceipt {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_planning: Option<ContextPlanning>,
     pub toolchain: String,
     pub start_command: String,
     pub test_command: String,
     pub provider_id: String,
     pub model_id: String,
+}
+
+/// Explicit tokenizer binding for this exact project model, not model selection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextPlanning {
+    pub tokenizer: ContextTokenizer,
+    pub knowledge_tokens: usize,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextTokenizer {
+    Cl100kBase,
+    O200kBase,
+    P50kBase,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ContextTokenCount {
+    pub tokenizer: ContextTokenizer,
+    pub tokens: usize,
+    pub budget_tokens: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -488,16 +514,22 @@ pub enum SupervisorAction {
     Compact,
     Close,
     Terminate,
+    Continue,
+    Reallocate,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorDecision {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub followup: String,
     pub action: SupervisorAction,
     pub reason: String,
     pub memory: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SupervisorEvaluation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup_command_id: Option<CommandId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeRef>,
     pub command_id: CommandId,

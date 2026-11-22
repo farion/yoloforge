@@ -717,6 +717,283 @@ fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
             .is_err());
     }
 }
+
+#[test]
+fn supervisor_followup_is_once_in_same_session_and_yields_to_budget_and_interview() {
+    for mode in ["continue", "budget", "interview"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let store = Store::open(&path).unwrap();
+        let mut target = command(&store);
+        if mode == "interview" {
+            target.agent_spec.as_mut().unwrap().prompt = "Grill me before implementing".into();
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "UPDATE commands SET data=?1 WHERE id=?2",
+                    rusqlite::params![
+                        serde_json::to_string(&target).unwrap(),
+                        target.id.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        finish_agent(
+            &store,
+            &target,
+            "Implementation present but requested tests were not run".into(),
+        );
+        let policy = supervisor(&store, &target);
+        let evaluation = store
+            .supervisor_evaluations(policy.project_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let worker = store
+            .acknowledge(
+                target.runner_id,
+                evaluation.command_id,
+                AckCommand {
+                    request_id: RequestId::new(),
+                    ownership_epoch: 1,
+                },
+            )
+            .unwrap();
+        if mode == "budget" {
+            store
+                .set_token_budget(
+                    policy.project_id,
+                    SetTokenBudget {
+                        request_id: RequestId::new(),
+                        expected_revision: Revision(0),
+                        limits: TokenLimits {
+                            work: Some(0),
+                            orchestration: None,
+                            memory: None,
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        finish_agent(&store,&worker,json!({"action":"continue","reason":"Requested tests are missing","memory":"Tests are still unverified","followup":"Run the originally requested tests and fix failures."}).to_string());
+        store.supervisor_tick(policy.next_unix_ms + 1).unwrap();
+        let resolved = store
+            .supervisor_evaluations(policy.project_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        if mode == "continue" {
+            assert_eq!(resolved.outcome, "applied");
+            let id = resolved.followup_command_id.unwrap();
+            let next = store
+                .pending(target.runner_id)
+                .unwrap()
+                .into_iter()
+                .find(|c| c.id == id)
+                .unwrap();
+            assert_eq!(next.session_id(), target.session_id());
+            assert_eq!(next.stream_id, target.stream_id);
+            assert_eq!(
+                next.agent_spec
+                    .as_ref()
+                    .unwrap()
+                    .continuation
+                    .as_ref()
+                    .unwrap()
+                    .previous_command_id,
+                target.id
+            );
+            assert!(!next.agent_spec.as_ref().unwrap().read_only);
+            assert!(resolved.knowledge_id.is_some());
+            drop(store);
+            let store = Store::open(&path).unwrap();
+            store.supervisor_tick(policy.next_unix_ms + 2).unwrap();
+            assert_eq!(
+                store
+                    .snapshot()
+                    .unwrap()
+                    .commands
+                    .iter()
+                    .filter(|c| c.agent_spec.as_ref().is_some_and(|s| s
+                        .continuation
+                        .as_ref()
+                        .is_some_and(|v| v.previous_command_id == target.id)))
+                    .count(),
+                1
+            );
+        } else {
+            assert_eq!(
+                resolved.outcome,
+                if mode == "budget" {
+                    "precondition_failed"
+                } else {
+                    "human_interview_preserves_session"
+                }
+            );
+            assert!(resolved.followup_command_id.is_none() && resolved.knowledge_id.is_none());
+        }
+    }
+}
+
+#[test]
+fn reallocation_requires_stopped_runtime_and_preserves_fixed_session_and_task_provenance() {
+    for mode in ["stopped", "unverified", "fixed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let store = Store::open(&path).unwrap();
+        let target = command(&store);
+        let owner = store
+            .snapshot()
+            .unwrap()
+            .streams
+            .into_iter()
+            .find(|s| s.id == target.stream_id)
+            .unwrap();
+        let ticket = store
+            .save_task(SaveTask {
+                request_id: RequestId::new(),
+                id: None,
+                expected_revision: Revision(0),
+                project_id: owner.project_id,
+                prompt: "Complete the original task".into(),
+                images: vec![],
+                requested_session: None,
+            })
+            .unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("UPDATE tickets SET data=json_set(data,'$.execution_command',?2,'$.status','in_progress') WHERE id=?1",rusqlite::params![ticket.id.to_string(),target.id.to_string()]).unwrap();
+        db.execute(
+            "INSERT INTO stream_tickets(ticket_id,stream_id) VALUES(?1,?2)",
+            rusqlite::params![ticket.id.to_string(), target.stream_id.to_string()],
+        )
+        .unwrap();
+        let runtime = RuntimeRef {
+            container_id: "e".repeat(64),
+            started_at: "fixture".into(),
+        };
+        store
+            .report_runtime_binding(
+                target.runner_id,
+                target.id,
+                RuntimeBinding {
+                    command_id: target.id,
+                    stream_id: target.stream_id,
+                    runner_id: target.runner_id,
+                    ownership_epoch: 1,
+                    runtime: runtime.clone(),
+                    daemon_id: "fixture-daemon".into(),
+                    endpoint: "http://127.0.0.1:4096".into(),
+                    workspace: "/work".into(),
+                },
+            )
+            .unwrap();
+        if mode != "unverified" {
+            let termination = store
+                .request_termination(
+                    target.id,
+                    RequestTermination {
+                        request_id: RequestId::new(),
+                        expected_stream_revision: owner.revision,
+                        runtime: runtime.clone(),
+                        previous_request: None,
+                        reason: "Unrecoverable attempt; preserve work for reassessment".into(),
+                    },
+                )
+                .unwrap();
+            store
+                .report_termination(
+                    target.runner_id,
+                    target.id,
+                    ReportTermination {
+                        request_id: termination.request_id,
+                        ownership_epoch: 1,
+                        state: TerminationState::Stopped,
+                        proof: Some(RemovalProof {
+                            runtime: runtime.clone(),
+                            daemon_id: "fixture-daemon".into(),
+                            observed_unix_ms: 1,
+                        }),
+                    },
+                )
+                .unwrap();
+        }
+        let policy = supervisor(&store, &target);
+        let evaluation = store
+            .supervisor_evaluations(owner.project_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let worker = store
+            .acknowledge(
+                target.runner_id,
+                evaluation.command_id,
+                AckCommand {
+                    request_id: RequestId::new(),
+                    ownership_epoch: 1,
+                },
+            )
+            .unwrap();
+        if mode == "fixed" {
+            db.execute(
+                "UPDATE tickets SET data=json_set(data,'$.requested_session',?2) WHERE id=?1",
+                rusqlite::params![ticket.id.to_string(), target.id.to_string()],
+            )
+            .unwrap();
+        }
+        finish_agent(&store,&worker,json!({"action":"reallocate","reason":"Original task still needs work in an eligible session","memory":"Prior work remains in the stopped worktree; inspect retained evidence before redoing it."}).to_string());
+        store.supervisor_tick(policy.next_unix_ms + 1).unwrap();
+        let result = store
+            .supervisor_evaluations(owner.project_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let task = store
+            .snapshot()
+            .unwrap()
+            .tickets
+            .into_iter()
+            .find(|t| t.id == ticket.id)
+            .unwrap();
+        assert_eq!(task.prompt, ticket.prompt);
+        assert_eq!(task.images, ticket.images);
+        if mode == "stopped" {
+            assert_eq!(result.outcome, "applied");
+            assert_eq!(task.status, TicketState::Ready);
+            assert!(task.execution_command.is_none());
+            assert!(store
+                .knowledge_context(owner.project_id, Some(ticket.id), 8192)
+                .unwrap()
+                .text
+                .contains(&target.id.to_string()));
+            store
+                .create_stream(CreateStream {
+                    request_id: RequestId::new(),
+                    project_id: owner.project_id,
+                    runner_id: target.runner_id,
+                    goal: "New allocation".into(),
+                    ticket_ids: vec![ticket.id],
+                })
+                .unwrap();
+            drop(store);
+            let store = Store::open(&path).unwrap();
+            store.supervisor_tick(policy.next_unix_ms + 2).unwrap();
+            assert_eq!(
+                store
+                    .events(0, 200)
+                    .unwrap()
+                    .events
+                    .iter()
+                    .filter(|e| e.kind == "task.reallocated")
+                    .count(),
+                1
+            );
+        } else {
+            assert_eq!(result.outcome, "inapplicable");
+            assert_eq!(task.execution_command, Some(target.id));
+            assert!(result.knowledge_id.is_none());
+        }
+    }
+}
 #[test]
 fn supervisor_discards_decisions_after_policy_change() {
     let dir = tempfile::tempdir().unwrap();
@@ -1731,6 +2008,138 @@ fn archive_preserves_untruncated_versions_reverts_and_fenced_final_scan_after_re
     assert_eq!(messages.last().unwrap().message["text"], text);
     body.batch.revision = 5;
     assert!(store.report_archive(c.runner_id, c.id, body).is_err());
+}
+
+#[test]
+fn large_archive_blob_is_hidden_until_verified_and_replays_chunks_after_restart() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let c = command(&store);
+    let bytes = vec![0x5a; 5 * 1024 * 1024 + 17];
+    let file = ArchiveBlob {
+        sha256: format!("{:x}", Sha256::digest(&bytes)),
+        bytes: bytes.len() as u64,
+        uri: "file:///work/large.bin".into(),
+        name: "../../large.bin".into(),
+        mime: "application/octet-stream".into(),
+        message_id: "msg_large".into(),
+        source_revision: 1,
+        captured_unix_ms: 100,
+    };
+    let first = ReportArchiveBlob {
+        ownership_epoch: 1,
+        chunk: ArchiveBlobChunk::new(file.clone(), 0, &bytes[..ARCHIVE_CHUNK_LIMIT]),
+    };
+    assert!(
+        store
+            .report_archive_blob(c.runner_id, c.id, first.clone())
+            .is_err(),
+        "unreferenced bytes must not be admitted"
+    );
+    store
+        .report_archive(
+            c.runner_id,
+            c.id,
+            ReportArchive {
+                ownership_epoch: 1,
+                batch: ArchiveBatch {
+                    session_id: c.session_id(),
+                    revision: 1,
+                    captured_unix_ms: 1,
+                    final_scan_complete: true,
+                    messages: vec![
+                        json!({"id":"msg_large","content":[{"uri":file.uri,"mime":file.mime}]}),
+                    ],
+                },
+            },
+        )
+        .unwrap();
+    assert!(
+        !store
+            .report_archive_blob(c.runner_id, c.id, first.clone())
+            .unwrap()
+            .complete
+    );
+    assert!(store.archive_blobs(c.id, None).unwrap().files.is_empty());
+    assert!(store.archive_blob_chunk(c.id, &file.sha256, 0).is_err());
+    let mut altered = first.clone();
+    altered.chunk.data = "AAAA".into();
+    assert!(store
+        .report_archive_blob(c.runner_id, c.id, altered)
+        .is_err());
+    let mut foreign = first.clone();
+    foreign.ownership_epoch = 2;
+    assert!(store
+        .report_archive_blob(c.runner_id, c.id, foreign)
+        .is_err());
+    assert!(store
+        .report_archive_blob(RunnerId::new(), c.id, first.clone())
+        .is_err());
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .report_archive_blob(c.runner_id, c.id, first.clone())
+            .unwrap()
+            .next_offset,
+        ARCHIVE_CHUNK_LIMIT as u64
+    );
+    for offset in (ARCHIVE_CHUNK_LIMIT..bytes.len()).step_by(ARCHIVE_CHUNK_LIMIT) {
+        let end = (offset + ARCHIVE_CHUNK_LIMIT).min(bytes.len());
+        let mut report = ReportArchiveBlob {
+            ownership_epoch: 1,
+            chunk: ArchiveBlobChunk::new(file.clone(), offset as u64, &bytes[offset..end]),
+        };
+        if end == bytes.len() {
+            let valid = report.clone();
+            report.chunk =
+                ArchiveBlobChunk::new(file.clone(), offset as u64, &vec![0; end - offset]);
+            assert!(store
+                .report_archive_blob(c.runner_id, c.id, report)
+                .is_err());
+            assert!(store.archive_blobs(c.id, None).unwrap().files.is_empty());
+            report = valid;
+        }
+        assert_eq!(
+            store
+                .report_archive_blob(c.runner_id, c.id, report)
+                .unwrap()
+                .complete,
+            end == bytes.len()
+        );
+    }
+    assert_eq!(
+        store.archive_blobs(c.id, Some(1)).unwrap().files,
+        vec![file.clone()]
+    );
+    assert!(store.archive_blobs(c.id, Some(0)).unwrap().files.is_empty());
+    let mut downloaded = Vec::new();
+    while downloaded.len() < bytes.len() {
+        let chunk = store
+            .archive_blob_chunk(c.id, &file.sha256, downloaded.len() as u64)
+            .unwrap();
+        assert_eq!(chunk.file, file);
+        downloaded.extend(chunk.bytes().unwrap());
+    }
+    assert_eq!(downloaded, bytes);
+    assert!(
+        store
+            .report_archive_blob(c.runner_id, c.id, first)
+            .unwrap()
+            .complete
+    );
+    assert_eq!(
+        store
+            .events(0, 200)
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e.kind == "archive.file")
+            .count(),
+        1
+    );
 }
 
 #[test]

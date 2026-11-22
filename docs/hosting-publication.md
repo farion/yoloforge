@@ -1,5 +1,25 @@
 # Hosting-Push und Pull Requests
 
+## TUI und automatische Publikation (0.1.3-dev)
+
+In der Auftragsliste oeffnet `h` den Assistenten fuer den ausgewaehlten erfolgreichen
+Review. Review-ID und Commit bleiben gepinnt; Journal-, Hosting-Konfigurations-
+und Factory-Token-Dateipfad werden explizit eingegeben. `Ctrl-S` publiziert bzw.
+gleicht den vorhandenen Beleg ab. SSH-Runner nutzen ihr gespeichertes Profil und
+remote vorhandene Dateien. Zugangsdaten werden nicht als CLI-Argumente transportiert.
+
+`--watch-publications PROJECT_UUID --hosting-config /path/hosting.json` startet
+statt des Execution-Runners einen eigenen projektspezifischen Helfer mit Operator-
+oder Admin-Token. Er publiziert erfolgreiche Reviews aktueller Ownership nur bei
+unpausiertem Projekt, verwendet das bestehende Publikationsjournal und wartet nach
+Fehlern 120 Sekunden. Das Hosting-Ziel bleibt fuer seine Prozesslaufzeit gepinnt.
+Ein unklarer PR-POST wird durch Suche abgeglichen, nicht blind wiederholt.
+Quarantaenisierte Review-Journale werden nicht publiziert.
+
+Auswahl-/Pause-/Ownership-, SSH-Quoting- und Antwortverlusttests bestehen. Die
+fruehere echte GitHub-Abnahme betrifft den zugrunde liegenden Publikationshelfer;
+eine neue End-to-End-Abnahme des Watchers gegen GitHub/Forgejo steht noch aus.
+
 Ein neuer expliziter Runner-Helfer veröffentlicht einen **erfolgreich geprüften
 Review-Kandidaten** auf GitHub oder Forgejo. Er liest das Runner-Journal ohne
 Runner-Prozesslock und bestätigt Review-Ergebnis, Ownership-Epoche, Commit und

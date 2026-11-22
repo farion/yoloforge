@@ -243,6 +243,11 @@ public final class MainActivity extends Activity {
             JSONObject state=result.optJSONObject("status");long frozen=revision==null?(state==null?0:state.optLong("revision")):revision;
             JSONArray entries=result.getJSONArray("entries");long next=result.getLong("next_after");
             if(entries.length()>0 && next<=after)throw new Exception("Archivcursor ist nicht fortgeschritten");
+            JSONArray supplements;
+            try{supplements=api().request("GET","/v1/commands/"+id+"/files?through_revision="+frozen,null).getJSONArray("files");}
+            catch(Api.HttpFailure error){if(error.status!=404)throw error;supplements=new JSONArray();}
+            if(supplements.length()>16)throw new Exception("Ungueltiger Archivdateiindex");
+            final JSONArray blobs=supplements;
             ui(()->{if(generation!=started)return;archiveRevision=frozen;
                 message("Archivstand "+frozen+(state!=null && state.optBoolean("final_scan_complete")?" · Scan abgeschlossen":" · noch unvollstaendig"));
                 JSONObject termination=result.optJSONObject("termination");if(termination!=null && termination.optBoolean("archive_may_be_incomplete"))text("Die Runtime wurde mit moeglicherweise unvollstaendigem Archiv beendet.");
@@ -252,6 +257,11 @@ public final class MainActivity extends Activity {
                         String label=attachment.optString("name","Anhang");if(!"captured".equals(attachment.optString("status"))){text(label+" · nicht verfuegbar");continue;}
                         button("Anhang speichern: "+label,()->chooseArchiveFile(attachment));
                     }}catch(Exception e){text("Archivinhalt ungueltig: "+e.getMessage());}
+                    for(int j=0;j<blobs.length();j++){JSONObject blob=blobs.optJSONObject(j);if(blob==null || !blob.optString("message_id").equals(msg.optString("id")))continue;
+                        try{JSONObject descriptor=new JSONObject().put("status","stored_blob").put("command_id",id).put("name",blob.optString("name")).put("blob",blob);
+                            button("Archivdatei speichern: "+blob.optString("name")+" ("+blob.optLong("bytes")+" Bytes)",()->chooseArchiveFile(descriptor));
+                        }catch(Exception e){text("Ungueltiger Dateiindex");}
+                    }
                 }
                 if(entries.length()==0)text("Ende des Archivs");else button("Naechste Seite",()->archive(id,next,frozen));
                 if(after>0)button("Zum Anfang",()->archive(id,0,frozen));
@@ -260,15 +270,23 @@ public final class MainActivity extends Activity {
         });
     }
     private void chooseArchiveFile(JSONObject file){try{
-        ArchiveContent.bytes(file);
+        if("stored_blob".equals(file.optString("status")))ArchiveBlobs.validate(file);else ArchiveContent.bytes(file);
         vault.put("archive-export",new JSONObject().put("base",api().base).put("file",file));
         startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/octet-stream").putExtra(Intent.EXTRA_TITLE,ArchiveContent.safeName(file.optString("name"))),12);
     }catch(Exception e){message(e.getMessage());}}
     private void exportArchiveFile(android.net.Uri uri){background(()->{
         JSONObject pending=vault.get("archive-export");if(pending==null)throw new Exception("Kein Anhang zum Export gespeichert");
         if(!api().base.equals(pending.getString("base")))throw new Exception("Anhang gehoert zu einer anderen Factory");
-        byte[] bytes=ArchiveContent.bytes(pending.getJSONObject("file"));
-        try(var out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new Exception("Ausgabedatei nicht verfuegbar");out.write(bytes);out.flush();}
+        JSONObject file=pending.getJSONObject("file");
+        if("stored_blob".equals(file.optString("status"))){
+            java.io.File temporary=ArchiveBlobs.download(api(),file,getCacheDir());
+            try(var in=new java.io.FileInputStream(temporary);var out=getContentResolver().openOutputStream(uri,"wt")){
+                if(out==null)throw new Exception("Ausgabedatei nicht verfuegbar");byte[] buffer=new byte[65536];int n;while((n=in.read(buffer))!=-1)out.write(buffer,0,n);out.flush();
+            }finally{temporary.delete();}
+        }else{
+            byte[] bytes=ArchiveContent.bytes(file);
+            try(var out=getContentResolver().openOutputStream(uri,"wt")){if(out==null)throw new Exception("Ausgabedatei nicht verfuegbar");out.write(bytes);out.flush();}
+        }
         vault.put("archive-export",null);ui(()->message("Anhang gespeichert und SHA256 geprueft"));
     });}
     private void questions() {

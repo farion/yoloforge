@@ -19,6 +19,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 url = "2"
 futures-util = "0.3"
 reqwest.workspace = true
+tiktoken-rs = "0.12.1"
 
 [dev-dependencies]
 factory-protocol = { workspace = true, features = ["client"] }

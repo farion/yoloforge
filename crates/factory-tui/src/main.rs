@@ -20,6 +20,7 @@ mod commands;
 mod detail;
 mod devices;
 mod harness;
+mod hosting;
 mod manage;
 mod recovery;
 mod session;
@@ -253,6 +254,7 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
     let (readiness_tx, mut readiness_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
     let mut native_notice = String::new();
     let mut ssh_dialog: Option<ssh::Dialog> = None;
+    let mut hosting_dialog: Option<hosting::Dialog> = None;
     let mut device_dialog: Option<devices::Dialog> = None;
     let mut open_devices = false;
     let mut stream_dialogs: BTreeMap<StreamId, stream::Dialog> = BTreeMap::new();
@@ -339,6 +341,7 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
         }
         terminal.draw(|frame| {
             if let Some(dialog)=&ssh_dialog {dialog.draw(frame);return;}
+            if let Some(dialog)=&hosting_dialog {dialog.render(frame);return;}
             if let Some(report)=&readiness_view {frame.render_widget(Paragraph::new(report.as_str()).scroll((readiness_scroll,0)).wrap(ratatui::widgets::Wrap{trim:false}).block(Block::bordered().title(if readiness_project.is_some() {" Projektbereitschaft · ↑/↓: lesen · Esc: zurueck · o: OpenCode-Anmeldung "} else {" Projektinformationen · ↑/↓: lesen · Esc: zurueck "})),frame.area());return;}
             if let Some(dialog)=open_recovery.and_then(|id|recoveries.get_mut(&id)){dialog.draw(frame,online);return;}
             if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
@@ -375,7 +378,7 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
                 1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | b: Tokenlimits | f: Fetch | r: Bereitschaft | u: Verbrauch | o: Anmeldung | p: einrichten ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
-                4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
+                4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf | h: Review publizieren ")),
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
             };
             row_offset = row_offset.min(rows.len().saturating_sub(1));
@@ -417,6 +420,10 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
         if event::poll(Duration::from_millis(50))? {
             let event = event::read()?;
             if let Event::Paste(text) = &event {
+                if let Some(dialog) = &mut hosting_dialog {
+                    dialog.insert(text);
+                    continue;
+                }
                 if let Some(dialog) = &mut ssh_dialog {
                     dialog.insert(text);
                     continue;
@@ -441,6 +448,29 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
                 }
             }
             if let Event::Key(key) = event {
+                if let Some(dialog) = &mut hosting_dialog {
+                    if key.kind == KeyEventKind::Press {
+                        match dialog.key(key) {
+                            hosting::Action::Close => hosting_dialog = None,
+                            hosting::Action::Publish(publication) => {
+                                hosting_dialog = None;
+                                readiness_view =
+                                    Some("Veroeffentliche geprueften Review-Kandidaten …".into());
+                                readiness_project = None;
+                                readiness_scroll = 0;
+                                readiness_generation = readiness_generation.wrapping_add(1);
+                                let generation = readiness_generation;
+                                let tx = readiness_tx.clone();
+                                tokio::spawn(async move {
+                                    let report=publication.run().await.unwrap_or_else(|e|format!("Publikation nicht bestaetigt: {e:#}\nDenselben Review mit derselben Konfiguration erneut abgleichen."));
+                                    let _ = tx.send((generation, report));
+                                });
+                            }
+                            hosting::Action::None => {}
+                        }
+                    }
+                    continue;
+                }
                 if let Some(dialog) = &mut ssh_dialog {
                     if key.kind == KeyEventKind::Press && dialog.key(key) {
                         ssh_dialog = None;
@@ -818,7 +848,7 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
                             }
                             open_devices = true;
                         }
-                        KeyCode::Enter if view == 4 => {
+                        KeyCode::Enter | KeyCode::Char('h') if view == 4 => {
                             if let Some(command) = last
                                 .as_ref()
                                 .and_then(|s| {
@@ -836,7 +866,15 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
                                 })
                                 .cloned()
                             {
-                                command_detail = Some(detail::Dialog::new(command, client.clone()));
+                                if key.code == KeyCode::Char('h') {
+                                    match hosting::Dialog::new(&command, client.base_url()) {
+                                        Ok(dialog) => hosting_dialog = Some(dialog),
+                                        Err(e) => native_notice = e.to_string(),
+                                    }
+                                } else {
+                                    command_detail =
+                                        Some(detail::Dialog::new(command, client.clone()));
+                                }
                             }
                         }
                         KeyCode::Enter | KeyCode::Char('c' | 'v') if view == 3 => {

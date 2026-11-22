@@ -61,7 +61,29 @@ pub(super) fn save_command(tx: &Transaction<'_>, value: &RunnerCommand, state: &
 }
 
 impl Store {
+    pub fn require_context_planning_support(
+        &self,
+        runner: RunnerId,
+        id: CommandId,
+        epoch: u64,
+        supported: bool,
+    ) -> Result<()> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        let c = command(&tx, id, runner, epoch)?;
+        if !supported
+            && c.agent_spec
+                .as_ref()
+                .is_some_and(|s| s.profile.context_planning.is_some())
+        {
+            return Err(StoreError::Invalid(
+                "Runner lacks context-planning-v1 capability",
+            ));
+        }
+        Ok(())
+    }
     pub fn update_profile(&self, id: ProjectId, body: UpdateProfile) -> Result<Project> {
+        super::knowledge::validate_plan(&body.profile)?;
         self.mutate(
             body.request_id,
             &format!("project.profile/{id}"),

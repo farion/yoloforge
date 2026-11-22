@@ -22,6 +22,10 @@ impl Drop for Journal {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
+    /// The server already accepted this command, but its local write-ahead
+    /// history was absent. Never infer that no external side effect occurred.
+    #[serde(default)]
+    pub recovery_required: bool,
     #[serde(default)]
     pub repository: Option<crate::managed::Plan>,
     #[serde(default)]
@@ -139,6 +143,8 @@ impl Journal {
             return Ok(record);
         }
         let record = Record {
+            recovery_required: command.state != CommandState::Pending
+                && command.kind != CommandKind::CheckOpenCode,
             repository: None,
             review: None,
             checkpoint: None,
@@ -187,7 +193,7 @@ impl Journal {
         Ok(result)
     }
     pub fn archive_backfill(&self, now: u64) -> Result<Option<Record>> {
-        let raw:Option<String>=self.db.query_row("SELECT data FROM commands WHERE json_extract(data,'$.reported')=1 AND json_extract(data,'$.command.kind')='run_agent' AND json_extract(data,'$.result') IS NOT NULL AND json_extract(data,'$.agent.prompt_attempted')=1 AND COALESCE(json_extract(data,'$.archive.finished'),0)=0 AND COALESCE(json_extract(data,'$.archive.retry_after_ms'),0)<=?1 ORDER BY COALESCE(json_extract(data,'$.archive.retry_after_ms'),0),rowid LIMIT 1",[now.min(i64::MAX as u64)],|r|r.get(0)).optional()?;
+        let raw:Option<String>=self.db.query_row("SELECT data FROM commands WHERE json_extract(data,'$.reported')=1 AND json_extract(data,'$.command.kind')='run_agent' AND json_extract(data,'$.result') IS NOT NULL AND json_extract(data,'$.agent.prompt_attempted')=1 AND (COALESCE(json_extract(data,'$.archive.finished'),0)=0 OR COALESCE(json_extract(data,'$.archive.supplement_scan_complete'),0)=0 OR EXISTS(SELECT 1 FROM json_each(json_extract(commands.data,'$.archive.blobs')) b WHERE json_extract(b.value,'$.offset')<json_extract(b.value,'$.file.bytes'))) AND COALESCE(json_extract(data,'$.archive.retry_after_ms'),0)<=?1 ORDER BY COALESCE(json_extract(data,'$.archive.retry_after_ms'),0),rowid LIMIT 1",[now.min(i64::MAX as u64)],|r|r.get(0)).optional()?;
         raw.map(|raw| serde_json::from_str(&raw).map_err(Into::into))
             .transpose()
     }
@@ -270,5 +276,35 @@ mod tests {
         assert!(journal.unreported().unwrap().is_empty());
         drop(journal);
         assert!(Journal::open(&path, "http://127.0.0.1:7432", RunnerId::new()).is_err());
+    }
+
+    #[test]
+    fn lost_accepted_write_journal_is_quarantined_durably_but_lost_ack_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runner.db");
+        let runner = RunnerId::new();
+        let mut command: RunnerCommand = serde_json::from_value(serde_json::json!({
+            "id": CommandId::new(), "stream_id": StreamId::new(), "runner_id": runner,
+            "ownership_epoch": 1, "kind": "run_agent", "state": "pending", "created_unix_ms": 1
+        }))
+        .unwrap();
+        let journal = Journal::open(&path, "http://factory.invalid", runner).unwrap();
+        let original = journal.receive(command.clone()).unwrap();
+        assert!(!original.recovery_required);
+        command.state = CommandState::Accepted;
+        let replay = journal.receive(command.clone()).unwrap();
+        assert!(!replay.recovery_required);
+        assert_eq!(replay.ack_request, original.ack_request);
+        command.id = CommandId::new();
+        assert!(journal.receive(command.clone()).unwrap().recovery_required);
+        drop(journal);
+        let journal = Journal::open(&path, "http://factory.invalid", runner).unwrap();
+        assert!(journal.receive(command.clone()).unwrap().recovery_required);
+        command.id = CommandId::new();
+        command.kind = CommandKind::PrepareWorkspace;
+        assert!(journal.receive(command.clone()).unwrap().recovery_required);
+        command.id = CommandId::new();
+        command.kind = CommandKind::CheckOpenCode;
+        assert!(!journal.receive(command).unwrap().recovery_required);
     }
 }

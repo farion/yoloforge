@@ -468,6 +468,10 @@ pub enum ProjectCommand {
         provider: String,
         #[arg(long)]
         model: String,
+        #[arg(long, value_parser = ["cl100k_base", "o200k_base", "p50k_base"], requires = "knowledge_tokens")]
+        context_tokenizer: Option<String>,
+        #[arg(long, requires = "context_tokenizer")]
+        knowledge_tokens: Option<usize>,
         #[arg(long)]
         request_id: Option<RequestId>,
     },
@@ -832,6 +836,7 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             )?;
             file.sync_all()?;
             if let Some(files) = &mut files {
+                files.supplemental(client, id, through, None).await?;
                 files.finish()?;
             }
             print(
@@ -1103,6 +1108,8 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                     test_command,
                     provider,
                     model,
+                    context_tokenizer,
+                    knowledge_tokens,
                     request_id,
                 },
         } => print(
@@ -1113,6 +1120,18 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                         request_id: request(request_id),
                         expected_revision: Revision(expected_revision),
                         profile: ExecutionProfile {
+                            context_planning: context_tokenizer
+                                .map(|tokenizer| {
+                                    Ok::<_, anyhow::Error>(ContextPlanning {
+                                        tokenizer: serde_json::from_value(
+                                            serde_json::Value::String(tokenizer),
+                                        )?,
+                                        knowledge_tokens: knowledge_tokens.ok_or_else(|| {
+                                            anyhow::anyhow!("Knowledge token budget required")
+                                        })?,
+                                    })
+                                })
+                                .transpose()?,
                             toolchain,
                             start_command,
                             test_command,

@@ -6,6 +6,36 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
 ## Prompt-Aufgaben und Projektpause (Schema 24)
 
+### Neue Softwarepakete in 0.1.3-dev (Schema 31)
+
+Die folgenden Ergaenzungen aktualisieren die Detailstaende der Tabelle unten:
+
+- **Recovery (2):** Verlorene Journale bereits angenommener Schreibauftraege werden
+  dauerhaft quarantänisiert. Native Identitaet/Prompt/Bild-Digest/Aktivitaet werden
+  lesend diagnostiziert; keine automatische Schreibwiederholung oder Freigabe.
+  Echter Prozess-/Neustarttest bestanden (`smoke-archive-blobs.py`). Wiederherstellung
+  verlorener Ausfuehrungsabsichten ohne belastbare Evidenz bleibt ausgeschlossen.
+- **Archiv (3):** Separate hashgepruefte Bloecke bis 64 MiB je Datei, explizite externe
+  lokale Quellroots und Rescan aus zentralen Referenzen implementiert. CLI/TUI/Android
+  exportieren diese Dateien; Prozessabnahme mit Quell-/Sessionloeschung und Restart
+  sowie Android-SAF-Abnahme fuer >4 MiB bestanden. Details: `archive-files.md`.
+- **Hosting (11):** TUI-Assistent (`h`) und projektgebundener Publikations-Watcher
+  implementiert; Auswahl-/Ownership-/Pause-/SSH-/Antwortverlusttests bestanden.
+  Neue Watcher-/TUI-End-to-End-Hostingabnahme und Forgejo-Ziel bleiben offen.
+- **Kontext (12):** Explizite Modell-/Tokenizerbindung mit cl100k/o200k/p50k und
+  Tokenbudget fuer injiziertes Wissen implementiert und getestet. Das ist keine
+  Tokenplanung der gesamten Sessionhistorie/Tools/Bilder (`context-planning.md`).
+- **Supervisor (13):** Atomare Nacharbeit in derselben Session und Neuverteilung
+  nach nachgewiesener Runtime-Entfernung implementiert. Neustart, Arbeitsbudget,
+  feste Sessionbindung und Interviewschutz getestet (`supervisor.md`). Realmodell-
+  Abnahme der neuen Aktionen und weitergehende Stall-/Konfliktablaeufe bleiben offen.
+
+Pruefung dieses Pakets: `cargo test --workspace --locked` und Clippy mit
+`-D warnings` bestanden (umgebungsgebundene Docker-/Clipboard-Tests ignoriert).
+Android Debug/Release-Build und Lint bestanden; stabil signiertes Entwicklungs-APK
+im Emulator installiert. Bildpicker, kleiner und grosser SAF-Export bytegleich
+geprueft: `/tmp/opencode/yf-android-device-8cfw9sv1`. Noch kein neues Stable-Release.
+
 Erweiterung Schema 25: feste Sessionauswahl im Prompteditor (`Ctrl-G`),
 modellgestützte Zuordnung ohne Auswahl (`new`/`session`/`wait`), persistentes
 Projektlimit (`l`) und gekennzeichnete Orchestrator-Läufe in der Diagnose.

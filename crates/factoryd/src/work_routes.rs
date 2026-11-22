@@ -332,6 +332,11 @@ pub(super) async fn pending_commands(
             .capabilities
             .iter()
             .any(|c| c == SESSION_LIFECYCLE_CAPABILITY);
+        let context_planning = guard.entries[&id]
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == CONTEXT_PLANNING_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
@@ -341,6 +346,12 @@ pub(super) async fn pending_commands(
                     setup || c.workspace_spec.as_ref().is_none_or(|s| s.setup.is_none())
                 });
                 commands.retain(|c| lifecycle || !c.requires_session_lifecycle());
+                commands.retain(|c| {
+                    context_planning
+                        || c.agent_spec
+                            .as_ref()
+                            .is_none_or(|s| s.profile.context_planning.is_none())
+                });
                 commands.retain(|c| checkpoints || !c.requires_checkpoint());
                 commands.retain(|c| {
                     reviews
@@ -413,7 +424,18 @@ pub(super) async fn ack_command(
         .capabilities
         .iter()
         .any(|c| c == TASK_IMAGES_CAPABILITY);
+    let context_planning = guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == CONTEXT_PLANNING_CAPABILITY);
     db_call(body.request_id, move || {
+        store.require_context_planning_support(
+            runner,
+            id,
+            body.ownership_epoch,
+            context_planning,
+        )?;
         store.require_image_support(runner, id, body.ownership_epoch, images)?;
         store.require_setup_support(runner, id, body.ownership_epoch, setup)?;
         store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;

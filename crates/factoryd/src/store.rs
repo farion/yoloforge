@@ -59,7 +59,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 30,
+            version <= 31,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -157,6 +157,9 @@ impl Store {
         }
         if version < 30 {
             tx.execute_batch(include_str!("../migrations/030_token_budgets.sql"))?;
+        }
+        if version < 31 {
+            tx.execute_batch(include_str!("../migrations/031_archive_blobs.sql"))?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -474,6 +477,7 @@ impl Store {
 }
 
 mod archive;
+mod archive_blobs;
 mod checkpoints;
 mod compaction;
 mod controls;

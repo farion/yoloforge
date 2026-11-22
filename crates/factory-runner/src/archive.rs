@@ -11,12 +11,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Cursor {
     #[serde(default)]
+    pub(crate) blobs: Vec<crate::archive_blobs::Pending>,
+    #[serde(default)]
+    pub(crate) supplement_scan_complete: bool,
+    #[serde(default)]
+    pub(crate) supplement_after: u64,
+    #[serde(default)]
     retry_after_ms: u64,
     #[serde(default)]
     backfill_failures: u8,
     #[serde(default)]
     backfill_error: String,
-    revision: u64,
+    pub(crate) revision: u64,
     next: Option<String>,
     final_scan: bool,
     pub(crate) finished: bool,
@@ -74,11 +80,52 @@ pub async fn step(
         return Ok(true);
     }
     if record.archive.finished {
-        return Ok(true);
+        // Supplemental reconstruction is idle work after the result is reported.
+        // It reads Factory's immutable archive, so OpenCode may already be gone.
+        if record.reported && !record.archive.supplement_scan_complete {
+            let page = factory
+                .runner_archive(
+                    record.command.runner_id,
+                    registration,
+                    record.command.id,
+                    record.command.ownership_epoch,
+                    record.archive.supplement_after,
+                    record.archive.revision,
+                )
+                .await?;
+            if page.entries.is_empty() {
+                record.archive.supplement_scan_complete = true;
+            } else {
+                ensure!(
+                    page.next_after > record.archive.supplement_after,
+                    "Archive source cursor did not advance"
+                );
+                let messages = page
+                    .entries
+                    .into_iter()
+                    .map(|e| e.message)
+                    .collect::<Vec<_>>();
+                let revision = record.archive.revision;
+                tokio::task::block_in_place(|| {
+                    crate::archive_blobs::capture(record, args, &messages, revision)
+                })?;
+                record.archive.supplement_after = page.next_after;
+            }
+            tokio::task::block_in_place(|| journal.save(record))?;
+        }
+        return crate::archive_blobs::step(factory, journal, record, registration).await;
     }
     if record.archive.pending.is_some() {
         upload(factory, journal, record, registration).await?;
-        return Ok(record.archive.finished);
+        return Ok(record.archive.finished
+            && record
+                .archive
+                .blobs
+                .iter()
+                .all(|b| b.offset == b.file.bytes));
+    }
+    if !crate::archive_blobs::step(factory, journal, record, registration).await? {
+        return Ok(false);
     }
     let final_result = record.result.is_some();
     if final_result && !record.archive.final_scan {
@@ -121,6 +168,9 @@ pub async fn step(
     let captured_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;
+    tokio::task::block_in_place(|| {
+        crate::archive_blobs::capture(record, args, &messages, revision)
+    })?;
     let batch = ArchiveBatch {
         session_id,
         revision,
@@ -132,7 +182,13 @@ pub async fn step(
     record.archive.pending = Some(batch);
     tokio::task::block_in_place(|| journal.save(record))?;
     upload(factory, journal, record, registration).await?;
-    Ok(record.archive.finished || !final_result)
+    Ok((record.archive.finished
+        && record
+            .archive
+            .blobs
+            .iter()
+            .all(|b| b.offset == b.file.bytes))
+        || !final_result)
 }
 async fn upload(
     factory: &FactoryClient,
@@ -205,7 +261,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let router = Router::new()
-            .route("/v1/runners/{runner}/commands/{id}/archive", put(receive))
+            .route("/v1/runners/{runner}/commands/{id}/archive", put(receive).get(|| async {Json(serde_json::json!({"status":null,"entries":[],"next_after":0,"termination":null}))}))
             .with_state(seen.clone());
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let client = FactoryClient::new(&endpoint, "test-archive-token-0123456789abcdef").unwrap();
@@ -261,6 +317,17 @@ mod tests {
         assert!(saved.archive.finished);
         assert_eq!(saved.result, result);
         assert!(saved.reported);
+        backfill(&client, &journal, &args, RegistrationId::new())
+            .await
+            .unwrap();
+        assert!(
+            journal
+                .record(id)
+                .unwrap()
+                .unwrap()
+                .archive
+                .supplement_scan_complete
+        );
         assert!(journal.archive_backfill(u64::MAX).unwrap().is_none());
         let requests = seen.lock().unwrap();
         assert_eq!(requests.len(), 2);

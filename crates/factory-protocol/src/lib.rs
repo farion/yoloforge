@@ -56,6 +56,12 @@ pub struct ReportArchive {
     pub ownership_epoch: u64,
     pub batch: ArchiveBatch,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportArchiveBlob {
+    pub ownership_epoch: u64,
+    pub chunk: ArchiveBlobChunk,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

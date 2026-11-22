@@ -9,6 +9,7 @@ use factory_protocol::{
 use std::{path::PathBuf, time::Duration};
 mod agent;
 mod archive;
+mod archive_blobs;
 mod archive_files;
 mod attach;
 mod checkpoint;
@@ -19,6 +20,7 @@ mod journal;
 mod managed;
 mod publication;
 mod questions;
+mod recovery;
 mod review;
 mod setup;
 mod termination;
@@ -63,6 +65,12 @@ struct Args {
     /// Managed worktrees; defaults to a runner-specific directory beside the journal.
     #[arg(long)]
     workspace_root: Option<PathBuf>,
+    /// Additional explicit runner-local roots allowed for archived file attachments.
+    #[arg(long)]
+    archive_source_root: Vec<PathBuf>,
+    /// Revisit immutable archived file references after restoring surviving source files (runner stopped).
+    #[arg(long, conflicts_with_all = ["watch_publications","publish_review","publish_result","open_session","fetch_repository"])]
+    rescan_archive_files: Option<CommandId>,
     /// Repair publication of an already successful task (requires an operator Factory token).
     #[arg(long)]
     publish_result: Option<CommandId>,
@@ -82,8 +90,11 @@ struct Args {
     #[arg(long, conflicts_with_all = ["open_session", "publish_result"], requires = "hosting_config")]
     publish_review: Option<CommandId>,
     /// Runner-local hosting destination and token-file configuration.
-    #[arg(long, requires = "publish_review")]
+    #[arg(long)]
     hosting_config: Option<PathBuf>,
+    /// Continuously publish successful reviews for exactly this project (separate helper process).
+    #[arg(long, requires = "hosting_config", conflicts_with_all = ["publish_review", "open_session", "fetch_repository", "publish_result"])]
+    watch_publications: Option<ProjectId>,
 }
 
 async fn report(
@@ -221,7 +232,9 @@ async fn commands(
         let c = cleanups[*next_cleanup % cleanups.len()].clone();
         *next_cleanup = next_cleanup.wrapping_add(1);
         let mut record = tokio::task::block_in_place(|| journal.receive(c))?;
-        termination::process(client, journal, &mut record, args, registration).await?;
+        if !record.recovery_required {
+            termination::process(client, journal, &mut record, args, registration).await?;
+        }
     }
     let outbox = tokio::task::block_in_place(|| journal.unreported())?;
     for record in outbox {
@@ -245,6 +258,22 @@ async fn commands(
         let mut record = tokio::task::block_in_place(|| journal.receive(command))?;
         let effective = setup::effective(args, &record.command)?;
         let args = &effective;
+        if record.recovery_required {
+            if record.command.kind == CommandKind::RunAgent {
+                client
+                    .observe_agent(
+                        args.id,
+                        registration,
+                        record.command.id,
+                        &ObserveAgent {
+                            ownership_epoch: record.command.ownership_epoch,
+                            progress: recovery::observe(&record, args).await,
+                        },
+                    )
+                    .await?;
+            }
+            return Ok(true);
+        }
         let ack = client
             .acknowledge(
                 args.id,
@@ -507,6 +536,13 @@ async fn opencode_status(path: &Option<PathBuf>) -> OpenCodeStatus {
 }
 
 async fn run(mut args: Args) -> Result<()> {
+    for root in &mut args.archive_source_root {
+        anyhow::ensure!(
+            root.is_absolute() && root.is_dir(),
+            "Archive source roots must be existing absolute directories on this runner"
+        );
+        *root = root.canonicalize()?;
+    }
     if let Some(id) = args.fetch_repository {
         return attach::fetch_repository(&args, id).await;
     }
@@ -514,6 +550,9 @@ async fn run(mut args: Args) -> Result<()> {
         return attach::open(&args, id).await;
     }
     let client = FactoryClient::from_env(&args.server)?;
+    if let Some(project) = args.watch_publications {
+        return hosting::watch(&args, &client, project).await;
+    }
     if let Some(id) = args.publish_review {
         return hosting::publish(&args, &client, id).await;
     }
@@ -522,6 +561,23 @@ async fn run(mut args: Args) -> Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!(".factory-data/runner-{}.sqlite3", args.id)));
     let journal = Journal::open(&path, &args.server, args.id)?;
+    if let Some(id) = args.rescan_archive_files {
+        let mut record = journal
+            .record(id)?
+            .ok_or_else(|| anyhow::anyhow!("Execution journal missing"))?;
+        anyhow::ensure!(
+            !record.recovery_required
+                && record.reported
+                && record.archive.finished
+                && record.agent.is_some(),
+            "Rescan requires a retained completed execution and final archive"
+        );
+        record.archive.supplement_scan_complete = false;
+        record.archive.supplement_after = 0;
+        journal.save(&record)?;
+        println!("Archived source rescan scheduled for {id}; restart the normal runner with the required archive source roots.");
+        return Ok(());
+    }
     if args.workspace_root.is_none() {
         args.workspace_root = Some(
             path.parent()
@@ -609,6 +665,7 @@ async fn run(mut args: Args) -> Result<()> {
                         REVIEW_CAPABILITY.into(),
                         PROJECT_SETUP_CAPABILITY.into(),
                         TASK_IMAGES_CAPABILITY.into(),
+                        CONTEXT_PLANNING_CAPABILITY.into(),
                         LOCAL_PROJECT_CAPABILITY.into(),
                     ],
                     id: args.id,

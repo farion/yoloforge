@@ -1,5 +1,16 @@
 use super::*;
 
+pub(super) fn validate_plan(profile: &ExecutionProfile) -> Result<()> {
+    if profile
+        .context_planning
+        .as_ref()
+        .is_some_and(|p| p.knowledge_tokens > 16384)
+    {
+        return Err(StoreError::Invalid("Knowledge token budget exceeds 16384"));
+    }
+    Ok(())
+}
+
 fn branch(value: &str) -> Result<()> {
     line(value, 240)?;
     if value == "HEAD"
@@ -248,6 +259,14 @@ impl Store {
         if let Some(value) = selected_branch {
             branch(value)?;
         }
+        let project_data: String = tx.query_row(
+            "SELECT data FROM projects WHERE id=?1",
+            [project.to_string()],
+            |r| r.get(0),
+        )?;
+        let project_value: Project = serde_json::from_str(&project_data)?;
+        let plan = project_value.profile.context_planning;
+        let tokenizer = plan.as_ref().map(|p| tokenizer(p.tokenizer)).transpose()?;
         // Filter scope in SQL before limiting; unrelated ticket notes cannot crowd out project notes.
         let ticket_json = serde_json::to_string(tickets)?;
         let filter="project_id=?1 AND retired=0 AND (ticket_id IS NULL OR ticket_id IN (SELECT value FROM json_each(?2))) AND (json_extract(data,'$.branch') IS NULL OR json_extract(data,'$.branch')=?3)";
@@ -264,6 +283,11 @@ impl Store {
             |r| r.get::<_, String>(0),
         )?;
         let mut context = KnowledgeContext {
+            token_plan: plan.as_ref().map(|p| ContextTokenCount {
+                tokenizer: p.tokenizer,
+                tokens: 0,
+                budget_tokens: p.knowledge_tokens,
+            }),
             notes: Vec::new(),
             text: String::new(),
             budget_bytes: budget,
@@ -281,11 +305,40 @@ impl Store {
                 note.content
             );
             if context.text.len() + item.len() <= budget {
+                let tokens = tokenizer
+                    .as_ref()
+                    .map(|t| t.encode_ordinary(&format!("{}{item}", context.text)).len());
+                if tokens
+                    .zip(plan.as_ref())
+                    .is_some_and(|(count, p)| count > p.knowledge_tokens)
+                {
+                    continue;
+                }
                 context.text.push_str(&item);
+                if let (Some(count), Some(plan)) = (tokens, &mut context.token_plan) {
+                    plan.tokens = count;
+                }
                 context.notes.push(note);
                 context.omitted -= 1;
             }
         }
         Ok(context)
     }
+}
+
+fn tokenizer(kind: ContextTokenizer) -> Result<&'static tiktoken_rs::CoreBPE> {
+    use std::sync::OnceLock;
+    static CL: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
+    static O: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
+    static P: OnceLock<tiktoken_rs::CoreBPE> = OnceLock::new();
+    let (cache, build): (_, fn() -> anyhow::Result<tiktoken_rs::CoreBPE>) = match kind {
+        ContextTokenizer::Cl100kBase => (&CL, tiktoken_rs::cl100k_base),
+        ContextTokenizer::O200kBase => (&O, tiktoken_rs::o200k_base),
+        ContextTokenizer::P50kBase => (&P, tiktoken_rs::p50k_base),
+    };
+    if cache.get().is_none() {
+        let value = build().map_err(|_| StoreError::Internal)?;
+        let _ = cache.set(value);
+    }
+    cache.get().ok_or(StoreError::Internal)
 }

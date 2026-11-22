@@ -184,7 +184,7 @@ pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
 fn valid_reason(reason: &str) -> bool {
     !reason.trim().is_empty() && reason.len() <= 512 && !reason.chars().any(|c| c.is_control())
 }
-fn requests_interview(prompt: &str) -> bool {
+pub(super) fn requests_interview(prompt: &str) -> bool {
     let prompt = prompt
         .split("\n\nProject execution profile:")
         .next()

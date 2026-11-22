@@ -1,5 +1,18 @@
 //! Revision-fenced management forms. Uncertain writes retain their immutable request.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+fn context_planning(value: &str) -> Result<Option<factory_core::ContextPlanning>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    let plan: factory_core::ContextPlanning = serde_json::from_str(value).map_err(|_| {
+        "Kontextplanung: {\"tokenizer\":\"o200k_base\",\"knowledge_tokens\":2048}".to_string()
+    })?;
+    if plan.knowledge_tokens > 16384 {
+        return Err("Kontext-Tokenbudget maximal 16384".into());
+    }
+    Ok(Some(plan))
+}
 use factory_core::*;
 use factory_protocol::{
     client::{ClientError, FactoryClient},
@@ -384,6 +397,7 @@ impl Dialog {
                     Field::text("15. Programm (lokal) oder HTTP(S)-URL (entfernt)","",false,false),
                     Field::text("16. Lokale Argumente: ein Argument je Zeile, keine Shell-Quotes", "",false,true),
                     Field::text("17. Regeldateien/Globs/URLs hinzufuegen: ein Eintrag je Zeile", "",false,true),
+                    Field::text("18. Kontextplanung JSON (optional: tokenizer + knowledge_tokens)",&p.and_then(|p|p.profile.context_planning.as_ref()).map(|v|serde_json::to_string(v).unwrap()).unwrap_or_default(),false,true),
                 ])
             }
             Target::Scheduler(id) => {
@@ -540,6 +554,16 @@ impl Dialog {
                         Field::text("Toolchain", &p.profile.toolchain, false, true),
                         Field::text("Startbefehl", &p.profile.start_command, false, true),
                         Field::text("Testbefehl", &p.profile.test_command, false, true),
+                        Field::text(
+                            "Kontextplanung JSON (optional: tokenizer + knowledge_tokens)",
+                            &p.profile
+                                .context_planning
+                                .as_ref()
+                                .map(|v| serde_json::to_string(v).unwrap())
+                                .unwrap_or_default(),
+                            false,
+                            true,
+                        ),
                     ],
                 )
             }
@@ -818,6 +842,7 @@ impl Dialog {
                     repository: value(1),
                     base_branch: value(2),
                     profile: ExecutionProfile {
+                        context_planning: context_planning(&value(17))?,
                         provider_id: value(6),
                         model_id: value(7),
                         toolchain: value(9),
@@ -908,6 +933,7 @@ impl Dialog {
                     request_id,
                     expected_revision,
                     profile: ExecutionProfile {
+                        context_planning: context_planning(&value(5))?,
                         provider_id: value(0),
                         model_id: value(1),
                         toolchain: value(2),

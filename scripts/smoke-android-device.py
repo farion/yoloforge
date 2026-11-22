@@ -9,6 +9,7 @@ root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--serial',required=True)
 parser.add_argument('--upgrade-to',help='Exercise the in-app latest-release installer and require this version afterwards')
+parser.add_argument('--large-files',action='store_true',help='Require the supplemental chunked archive-file UI (0.1.3-dev or newer)')
 args=parser.parse_args()
 assert args.serial.startswith('emulator-'),'This destructive fixture reset is only for a dedicated emulator'
 base=Path(tempfile.mkdtemp(prefix='yf-android-device-',dir='/tmp/opencode'))
@@ -56,7 +57,14 @@ try:
     api('POST',prefix+command['id']+'/ack',{'request_id':rid(),'ownership_epoch':1},registration)
     filename='yf-proof-'+uuid.uuid4().hex[:8]+'.bin';data=b'\x00\xffSAF export acceptance'
     attachment={'uri':'file:///unused/'+filename,'name':filename,'mime':'application/octet-stream','status':'captured','sha256':hashlib.sha256(data).hexdigest(),'data':base64.b64encode(data).decode()}
-    api('PUT',prefix+command['id']+'/archive',{'ownership_epoch':1,'batch':{'session_id':'ses_factory_'+command['id'].replace('-',''),'revision':1,'captured_unix_ms':1,'final_scan_complete':False,'messages':[{'id':'msg_device_archive','text':'Device archive proof','__yoloforge_files_v1':[attachment]}]}},registration)
+    large_name='yf-large-'+uuid.uuid4().hex[:8]+'.bin';large_uri='file:///unused/'+large_name
+    api('PUT',prefix+command['id']+'/archive',{'ownership_epoch':1,'batch':{'session_id':'ses_factory_'+command['id'].replace('-',''),'revision':1,'captured_unix_ms':1,'final_scan_complete':False,'messages':[{'id':'msg_device_archive','text':'Device archive proof','content':[{'type':'file','uri':large_uri,'mime':'application/octet-stream'}] if args.large_files else [],'__yoloforge_files_v1':[attachment]}]}},registration)
+    if args.large_files:
+        large_data=b'\x00\xffAndroid supplemental archive\n'*180000
+        blob={'sha256':hashlib.sha256(large_data).hexdigest(),'bytes':len(large_data),'uri':large_uri,'name':large_name,'mime':'application/octet-stream','message_id':'msg_device_archive','source_revision':1,'captured_unix_ms':100}
+        for offset in range(0,len(large_data),1024*1024):
+            receipt=api('PUT',prefix+command['id']+'/files',{'ownership_epoch':1,'chunk':{'file':blob,'offset':offset,'data':base64.b64encode(large_data[offset:offset+1024*1024]).decode()}},registration)
+        assert receipt['complete']
     code=api('POST','/v1/devices/enrollment',{'role':'operator','runner_id':None,'ttl_seconds':300})['code']
     shell('pm','clear','dev.yoloforge.mobile')
     shell('pm','grant','dev.yoloforge.mobile','android.permission.ACCESS_LOCAL_NETWORK')
@@ -82,6 +90,11 @@ try:
     exported=run(*adb,'exec-out','cat','/sdcard/Download/'+filename)
     assert exported==data
     print('PASS real SAF create-document dialog and byte-identical binary export',flush=True)
+    if args.large_files:
+        tap('Archivdatei speichern: '+large_name+' ('+str(len(large_data))+' Bytes)');tap('Save')
+        node('Anhang gespeichert und SHA256 geprueft',seconds=90)
+        assert run(*adb,'exec-out','cat','/sdcard/Download/'+large_name)==large_data
+        print('PASS Android chunked >4 MiB download, full SHA256 verification and SAF export',flush=True)
     if args.upgrade_to:
         before=shell('dumpsys','package','dev.yoloforge.mobile');assert 'versionName='+args.upgrade_to+'\n' not in before
         tap('Zurueck');tap('Projekte');tap('App-Updates')
