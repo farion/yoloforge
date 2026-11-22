@@ -67,6 +67,7 @@ fn summary(event: &FactoryEvent) -> String {
     let text = progress
         .and_then(|v| v["summary"].as_str())
         .or_else(|| p["summary"].as_str())
+        .or_else(|| p["url"].as_str())
         .unwrap_or("");
     format!(
         "#{} | {} ms UTC | {} | {} {} {}",

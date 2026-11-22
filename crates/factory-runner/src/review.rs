@@ -38,6 +38,18 @@ pub struct Plan {
     remove_attempted: bool,
     removed: Option<RemovalProof>,
 }
+impl Plan {
+    pub(crate) fn hosting_source(&self) -> Result<(PathBuf, String)> {
+        ensure!(
+            self.removed.is_some() && self.exit == Some(0),
+            "Review runtime must be removed after successful tests"
+        );
+        let ReviewJob::Review { target_branch, .. } = &self.job else {
+            anyhow::bail!("Only a review candidate can be published");
+        };
+        Ok((self.repository.clone(), target_branch.clone()))
+    }
+}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

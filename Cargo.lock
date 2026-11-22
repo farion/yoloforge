@@ -545,6 +545,7 @@ dependencies = [
  "factory-opencode",
  "factory-protocol",
  "fs2",
+ "reqwest",
  "rusqlite",
  "rustix 1.1.6",
  "serde",

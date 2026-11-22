@@ -107,9 +107,12 @@ pub async fn step(
             && session["location"]["directory"] == execution.workspace.path,
         "Archive session identity changed"
     );
-    let (messages, next) = client
+    let (mut messages, next) = client
         .archive_page(&session_id, record.archive.next.as_deref())
         .await?;
+    tokio::task::block_in_place(|| {
+        crate::archive_files::capture(&mut messages, &execution.workspace.path)
+    })?;
     let revision = record
         .archive
         .revision

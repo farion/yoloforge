@@ -409,6 +409,13 @@ pub struct PauseProject {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReportHostedReview {
+    pub request_id: RequestId,
+    pub ownership_epoch: u64,
+    pub result: HostedReview,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetSessionLimit {
     pub request_id: RequestId,
     pub expected_revision: Revision,

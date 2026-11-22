@@ -57,7 +57,7 @@ pub async fn open(args: &Args, id: CommandId) -> Result<()> {
     ensure!(status.success(), "OpenCode terminal exited with {status}");
     Ok(())
 }
-fn read_record(
+pub(crate) fn read_record(
     path: &std::path::Path,
     server: &str,
     runner: RunnerId,
@@ -91,7 +91,10 @@ fn read_record(
     ensure!(
         record.command.id == id
             && record.command.runner_id == runner
-            && record.command.kind == CommandKind::RunAgent,
+            && matches!(
+                record.command.kind,
+                CommandKind::RunAgent | CommandKind::ReviewCheckpoint
+            ),
         "Journal command identity mismatch"
     );
     tx.commit()?;

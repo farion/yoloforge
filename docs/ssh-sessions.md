@@ -62,5 +62,9 @@ Vor der ersten Agent-Session ist Remote-Projektbereitschaft noch nicht verfuegba
   fuer mehrere Runner und begrenzte, bereinigte SSH-Ausgabe sind bestanden.
 - Der Bereitschaftshelfer wurde lokal gegen die echte OpenAI-Session ohne
   Factory-Token bei laufendem Runner geprueft.
+- `scripts/smoke-ssh-readiness.py` prueft zusaetzlich den echten SSH-Hop ueber
+  einen temporaeren Loopback-sshd mit eigenem Client-/Hostschluessel, festem
+  lesenden Helferkommando und gepinntem known_hosts-Eintrag. Bestanden; kein
+  System-sshd und keine Benutzer-SSH-Konfiguration werden veraendert.
 - Der SSH-Hop auf einen separaten Host und echte Remote-OAuth-Anmeldung sind
   noch nicht abgenommen. Es wurde kein Zielhost aktualisiert.

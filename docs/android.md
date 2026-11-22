@@ -21,8 +21,8 @@ cd android
 ./gradlew :app:connectedDebugAndroidTest
 ```
 
-APK: `android/app/build/outputs/apk/debug/app-debug.apk` (Debugsignatur,
-kein stabil signiertes Release). CI baut das APK als Entwicklungsartefakt.
+Debug-APK: `android/app/build/outputs/apk/debug/app-debug.apk`. CI baut dieses
+APK als Entwicklungsartefakt. Für lokal signierte Release-Builds siehe unten.
 Gradle Wrapper 9.4.1 ist mit Distributions-SHA256 gepinnt.
 
 Lokal bestanden: Build, Lint und vier Instrumentierungstests im isolierten
@@ -55,5 +55,29 @@ dauerhafter Push bei geschlossener App**. Doze, Netzwechsel, Widerruf, Deep-Link
 Rennen und echtes Gerät sind noch abzunehmen.
 
 Erweiterte/bedingte Frageformulare verweisen auf den Desktop. Vollständiger
-Archivbrowser, automatische Wiedereroeffnung des Editors nach Rotation, stabile Release-Signierung und
+Archivbrowser, automatische Wiedereroeffnung des Editors nach Rotation und
 automatische APK-Updates bleiben offen.
+
+## Stabile Release-Signierung
+
+Auf ausdrücklichen Wunsch wurde ein dauerhafter RSA-4096-Release-Schlüssel lokal
+angelegt: `$XDG_DATA_HOME/yoloforge/signing/android`, standardmäßig
+`~/.local/share/yoloforge/signing/android`. Das private Verzeichnis enthält
+`release.p12`, Passwortdatei, `signing.json` und Sicherungshinweise. Für spätere
+App-Updates muss dieses gesamte Verzeichnis erhalten und sicher gesichert werden.
+Private Schlüssel und Kennwörter gehören nicht ins Repository; dort liegt nur
+der öffentliche Zertifikatsfingerprint in `android/release-certificate.sha256`.
+
+```sh
+python3 scripts/android-release.py
+```
+
+Der Helfer baut mit JDK 17, führt Release-Lint und `apksigner verify` aus und
+vergleicht den Signer mit dem gepinnten Fingerprint. Ausgabe:
+`dist/yoloforge-android-vVERSION.apk` plus SHA256-Datei. Version und monotoner
+Android-VersionCode werden aus der Cargo-Workspace-Version abgeleitet.
+Vorhandene abweichende Ausgabeartefakte werden nicht überschrieben.
+`--init-signing` ist nur für die einmalige Einrichtung eines bislang nicht
+vorhandenen Schlüsselverzeichnisses gedacht; es ersetzt niemals einen Schlüssel.
+CI-Signierung/automatische Veröffentlichung des APK ist noch nicht eingerichtet;
+die privaten Schlüsseldaten wurden nicht auf GitHub hochgeladen.

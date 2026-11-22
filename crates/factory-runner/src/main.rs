@@ -9,10 +9,12 @@ use factory_protocol::{
 use std::{path::PathBuf, time::Duration};
 mod agent;
 mod archive;
+mod archive_files;
 mod attach;
 mod checkpoint;
 mod compaction;
 mod containment;
+mod hosting;
 mod journal;
 mod managed;
 mod publication;
@@ -70,6 +72,12 @@ struct Args {
     /// Print recorded session readiness without starting a terminal (usable over SSH).
     #[arg(long, requires = "open_session")]
     session_readiness: bool,
+    /// Push a verified review candidate and create/reconcile its hosting pull request.
+    #[arg(long, conflicts_with_all = ["open_session", "publish_result"], requires = "hosting_config")]
+    publish_review: Option<CommandId>,
+    /// Runner-local hosting destination and token-file configuration.
+    #[arg(long, requires = "publish_review")]
+    hosting_config: Option<PathBuf>,
 }
 
 async fn report(
@@ -485,6 +493,9 @@ async fn run(mut args: Args) -> Result<()> {
         return attach::open(&args, id).await;
     }
     let client = FactoryClient::from_env(&args.server)?;
+    if let Some(id) = args.publish_review {
+        return hosting::publish(&args, &client, id).await;
+    }
     let path = args
         .journal
         .clone()

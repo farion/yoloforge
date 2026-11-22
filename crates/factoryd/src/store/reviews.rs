@@ -42,6 +42,82 @@ fn save(tx: &Transaction<'_>, c: &RunnerCommand, job: &ReviewJob) -> Result<()> 
     event(tx, "review.requested", c.id.to_string(), job)
 }
 impl Store {
+    pub fn report_hosted_review(
+        &self,
+        id: CommandId,
+        body: ReportHostedReview,
+    ) -> Result<HostedReview> {
+        self.mutate(
+            body.request_id,
+            &format!("review.hosting/{id}"),
+            &body,
+            |tx| {
+                let raw: String = tx
+                    .query_row(
+                        "SELECT data FROM commands WHERE id=?1",
+                        [id.to_string()],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .ok_or(StoreError::NotFound)?;
+                let command: RunnerCommand = serde_json::from_str(&raw)?;
+                let owner = super::work::stream(tx, command.stream_id)?;
+                let Some(CommandOutput::Review { review }) = &command.result else {
+                    return Err(StoreError::WorkConflict);
+                };
+                let ReviewJob::Review { target_branch, .. } = load(tx, id)? else {
+                    return Err(StoreError::WorkConflict);
+                };
+                let result = &body.result;
+                if command.state != CommandState::Succeeded
+                    || command.kind != CommandKind::ReviewCheckpoint
+                    || owner.ownership_epoch != body.ownership_epoch
+                    || command.ownership_epoch != body.ownership_epoch
+                    || owner.runner_id != command.runner_id
+                    || result.review_command != id
+                    || result.candidate_commit != review.candidate_commit
+                    || result.target_branch != target_branch
+                    || result.publication_branch != format!("yoloforge/review-{id}")
+                {
+                    return Err(StoreError::WorkConflict);
+                }
+                line(&result.repository, 240)?;
+                line(&result.url, 2048)?;
+                let url = url::Url::parse(&result.url)
+                    .map_err(|_| StoreError::Invalid("Invalid hosting URL"))?;
+                if url.scheme() != "https"
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                    || !url
+                        .path()
+                        .starts_with(&format!("/{}/pull", result.repository))
+                {
+                    return Err(StoreError::Invalid("Invalid hosting URL"));
+                }
+                let previous: Option<String> = tx
+                    .query_row(
+                        "SELECT data FROM hosted_reviews WHERE command_id=?1",
+                        [id.to_string()],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if let Some(previous) = previous {
+                    if serde_json::from_str::<HostedReview>(&previous)? != *result {
+                        return Err(StoreError::WorkConflict);
+                    }
+                    return Ok(result.clone());
+                }
+                tx.execute(
+                    "INSERT INTO hosted_reviews(command_id,data) VALUES(?1,?2)",
+                    params![id.to_string(), serde_json::to_string(result)?],
+                )?;
+                event(tx, "review.published", id.to_string(), result)?;
+                Ok(result.clone())
+            },
+        )
+    }
     pub fn request_review(&self, id: StreamId, body: RequestReview) -> Result<RunnerCommand> {
         self.mutate(
             body.request_id,

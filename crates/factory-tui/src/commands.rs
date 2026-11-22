@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use factory_core::*;
 use factory_protocol::{client::FactoryClient, *};
+mod archive_files;
 mod repository;
 
 #[derive(Subcommand)]
@@ -108,6 +109,9 @@ pub enum Command {
         id: CommandId,
         #[arg(long)]
         output: std::path::PathBuf,
+        /// Extract verified captured binary attachments into a new private directory.
+        #[arg(long)]
+        attachments: Option<std::path::PathBuf>,
     },
     /// Project knowledge with provenance and bounded context selection.
     Knowledge {
@@ -748,10 +752,18 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                 .await?,
         ),
         Command::Compaction { id } => print(&client.compaction(id).await?),
-        Command::Archive { id, output } => {
+        Command::Archive {
+            id,
+            output,
+            attachments,
+        } => {
             use std::io::Write;
             let mut page = client.archive(id, 0, None).await?;
             let mut file = private_file(&output)?;
+            let mut files = attachments
+                .as_ref()
+                .map(|p| archive_files::Export::new(p))
+                .transpose()?;
             let status = page.status.clone();
             let termination = page.termination.clone();
             let through = Some(status.as_ref().map_or(0, |v| v.revision));
@@ -768,6 +780,9 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                 }
                 anyhow::ensure!(page.next_after > after, "Archive cursor did not advance");
                 for entry in page.entries {
+                    if let Some(files) = &mut files {
+                        files.entry(&entry)?;
+                    }
                     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
                     count += 1;
                 }
@@ -780,8 +795,11 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                 serde_json::json!({"export_complete":true,"versions":count,"through_revision":through})
             )?;
             file.sync_all()?;
+            if let Some(files) = &mut files {
+                files.finish()?;
+            }
             print(
-                &serde_json::json!({"output":output,"versions":count,"final_scan_complete":status.is_some_and(|v|v.final_scan_complete) && termination.as_ref().is_none_or(|t|!t.archive_may_be_incomplete),"termination":termination}),
+                &serde_json::json!({"output":output,"versions":count,"attachments":attachments,"files_extracted":files.as_ref().map(|f|f.count),"files_unavailable":files.as_ref().map(|f|f.unavailable),"final_scan_complete":status.is_some_and(|v|v.final_scan_complete) && termination.as_ref().is_none_or(|t|!t.archive_may_be_incomplete),"termination":termination}),
             )
         }
         Command::Knowledge { command } => match command {

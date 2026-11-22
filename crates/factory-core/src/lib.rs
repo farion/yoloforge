@@ -7,6 +7,8 @@ pub fn default_session_limit() -> u8 {
 }
 mod images;
 pub use images::*;
+mod archive_files;
+pub use archive_files::*;
 pub const TASK_IMAGES_CAPABILITY: &str = "task-images-v1";
 pub const LOCAL_PROJECT_CAPABILITY: &str = "local-project-create-v1";
 pub const UNLIMITED_STARTS: u32 = u32::MAX;
@@ -89,7 +91,7 @@ pub fn compaction_message_id(id: RequestId) -> String {
     format!("msg_factory_compact_{}", id.0.simple())
 }
 
-/// Untruncated projected OpenCode messages. Binary objects referenced by messages are not embedded.
+/// Untruncated projected OpenCode messages, optionally augmented with bounded file snapshots.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArchiveBatch {
     pub session_id: String,
@@ -382,6 +384,16 @@ pub struct IntegrationResult {
     pub target_branch: String,
     pub previous_commit: String,
     pub commit: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostedReview {
+    pub review_command: CommandId,
+    pub candidate_commit: String,
+    pub target_branch: String,
+    pub publication_branch: String,
+    pub repository: String,
+    pub url: String,
 }
 pub const CHECKPOINT_CAPABILITY: &str = "git-checkpoint-v1";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -28,6 +28,17 @@ pub(crate) fn git(repository: &Path, args: &[&str]) -> Result<String> {
     git_env(repository, args, &[])
 }
 pub(crate) fn git_env(repository: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    git_with_timeout(repository, args, env, Duration::from_secs(5))
+}
+pub(crate) fn git_network(repository: &Path, args: &[&str]) -> Result<String> {
+    git_with_timeout(repository, args, &[], Duration::from_secs(60))
+}
+fn git_with_timeout(
+    repository: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<String> {
     let out = tempfile::tempfile()?;
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
@@ -46,7 +57,7 @@ pub(crate) fn git_env(repository: &Path, args: &[&str], env: &[(&str, &str)]) ->
         .stdout(out.try_clone()?)
         .stderr(Stdio::null())
         .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
             ensure!(

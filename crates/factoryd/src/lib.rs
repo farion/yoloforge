@@ -134,6 +134,7 @@ pub fn router_with_shutdown(
             post(answer_delivery),
         )
         .route("/v1/projects/{id}/profile", patch(update_profile))
+        .route("/v1/commands/{id}/hosting", post(review_routes::hosted))
         .route("/v1/tickets", post(create_ticket))
         .route("/v1/tickets/{id}", patch(update_ticket))
         .route("/v1/streams", post(create_stream))

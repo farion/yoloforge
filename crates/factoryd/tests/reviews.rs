@@ -181,6 +181,21 @@ fn review_pins_profile_and_source_and_only_matching_test_evidence_can_authorize_
             }
         )
         .is_err());
+    let hosted = ReportHostedReview {
+        request_id: RequestId::new(),
+        ownership_epoch: 1,
+        result: HostedReview {
+            review_command: reviewed.id,
+            candidate_commit: report.candidate_commit.clone(),
+            target_branch: "main".into(),
+            publication_branch: format!("yoloforge/review-{}", reviewed.id),
+            repository: "owner/repo".into(),
+            url: "https://github.com/owner/repo/pull/1".into(),
+        },
+    };
+    assert!(store
+        .report_hosted_review(reviewed.id, hosted.clone())
+        .is_err());
     result(
         &store,
         &reviewed,
@@ -188,6 +203,29 @@ fn review_pins_profile_and_source_and_only_matching_test_evidence_can_authorize_
             review: report.clone(),
         },
     );
+    let mut wrong_hosted = hosted.clone();
+    wrong_hosted.request_id = RequestId::new();
+    wrong_hosted.result.candidate_commit = "f".repeat(40);
+    assert!(store
+        .report_hosted_review(reviewed.id, wrong_hosted)
+        .is_err());
+    assert_eq!(
+        store
+            .report_hosted_review(reviewed.id, hosted.clone())
+            .unwrap(),
+        hosted.result
+    );
+    assert_eq!(
+        Store::open(&path)
+            .unwrap()
+            .report_hosted_review(reviewed.id, hosted.clone())
+            .unwrap(),
+        hosted.result
+    );
+    let mut retarget = hosted.clone();
+    retarget.request_id = RequestId::new();
+    retarget.result.url = "https://github.com/owner/repo/pull/2".into();
+    assert!(store.report_hosted_review(reviewed.id, retarget).is_err());
     let request = RequestIntegration {
         request_id: RequestId::new(),
         expected_revision: rev(&store, s.id),

@@ -1,4 +1,21 @@
 use super::*;
+pub(super) async fn hosted(
+    State(app): State<App>,
+    Path(id): Path<CommandId>,
+    body: Result<Json<ReportHostedReview>, JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid hosted review receipt",
+        );
+    };
+    db_call(body.request_id, move || {
+        app.store.report_hosted_review(id, body)
+    })
+    .await
+}
 pub(super) async fn session_limit(
     State(app): State<App>,
     Path(id): Path<ProjectId>,

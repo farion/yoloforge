@@ -50,6 +50,7 @@ jobs:
       - run: python3 -u scripts/smoke-foundation.py
       - run: python3 -u scripts/smoke-tui-answers.py
       - run: python3 -u scripts/smoke-backup.py
+      - run: python3 -u scripts/smoke-archive-files.py
   windows-tui:
     runs-on: windows-2025
     steps:

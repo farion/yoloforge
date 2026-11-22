@@ -17,6 +17,14 @@ const LABELS: [&str; 4] = [
     "Runner-Journal (absoluter Pfad)",
     "OpenCode-Service-Registrierung (optional)",
 ];
+// Explicit unlock matters when another TUI thread forks a native process while
+// saving: the child briefly shares our open-file description until exec.
+struct ConfigLock(File);
+impl Drop for ConfigLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 
 /// Local connection settings only; runner identity is pinned when opening the form.
 pub struct Dialog {
@@ -122,6 +130,7 @@ impl Dialog {
             .open(lock_path)?;
         lock.try_lock()
             .context("SSH-Konfiguration wird gerade in einer anderen TUI bearbeitet")?;
+        let _lock = ConfigLock(lock);
         ensure!(read(&self.path)? == self.original, "SSH-Konfiguration wurde extern geaendert. Ctrl-R: neu laden; Entwurf wird dabei verworfen.");
         let bytes = serde_json::to_vec_pretty(&next)?;
         let mut temporary = tempfile::NamedTempFile::new_in(parent)?;

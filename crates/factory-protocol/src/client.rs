@@ -40,6 +40,20 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn report_hosted_review(
+        &self,
+        id: CommandId,
+        body: &ReportHostedReview,
+    ) -> Result<HostedReview, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/commands/{id}/hosting", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn set_session_limit(
         &self,
         id: ProjectId,
