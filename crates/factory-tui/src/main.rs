@@ -21,6 +21,7 @@ mod devices;
 mod harness;
 mod manage;
 mod recovery;
+mod session;
 mod stream;
 
 fn project_questions(snapshot: &Snapshot, index: usize) -> Vec<&Question> {
@@ -67,6 +68,20 @@ fn task_command<'a>(s: &'a Snapshot, t: &Ticket) -> Option<&'a RunnerCommand> {
             .iter()
             .any(|stream| stream.id == c.stream_id && stream.ticket_ids.contains(&t.id))
     })
+}
+fn stream_label(state: StreamState) -> &'static str {
+    match state {
+        StreamState::Idle => "Bereit",
+        StreamState::Queued => "Wartet",
+        StreamState::Running => "In Bearbeitung",
+        StreamState::WaitingInput => "Rueckfrage offen",
+        StreamState::Pausing => "Wird pausiert",
+        StreamState::Paused => "Pausiert",
+        StreamState::Blocked => "Braucht Aufmerksamkeit",
+        StreamState::Review => "Ergebnis vorhanden",
+        StreamState::Completed => "Abgeschlossen",
+        StreamState::Failed => "Fehler",
+    }
 }
 fn task_progress(s: &Snapshot, t: &Ticket) -> (String, String) {
     let paused = s.projects.iter().any(|p| p.id == t.project_id && p.paused);
@@ -217,6 +232,7 @@ async fn main() -> Result<()> {
     let mut dialogs: BTreeMap<QuestionId, answer::Dialog> = BTreeMap::new();
     let mut open_question: Option<QuestionId> = None;
     let mut command_detail: Option<detail::Dialog> = None;
+    let mut session_view: Option<session::View> = None;
     let mut device_dialog: Option<devices::Dialog> = None;
     let mut open_devices = false;
     let mut stream_dialogs: BTreeMap<StreamId, stream::Dialog> = BTreeMap::new();
@@ -272,6 +288,7 @@ async fn main() -> Result<()> {
             if let Some(dialog)=open_management.and_then(|id|management.get(&id)) {dialog.draw(frame,online);return;}
             if let Some(dialog)=open_stream.and_then(|id|stream_dialogs.get(&id)) {dialog.draw(frame,online,last.as_ref().and_then(|s|s.controls.iter().find(|c|c.stream_id==dialog.stream.id)));return;}
             if let Some(dialog)=open_question.and_then(|id|dialogs.get(&id)) {dialog.draw(frame,online);return;}
+            if let Some(dialog)=&mut session_view {dialog.draw(frame,last.as_ref(),online);return;}
             let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4), Constraint::Length(3)]).split(frame.area());
             frame.render_widget(Paragraph::new(status.as_str()).block(Block::bordered().title(" YoloForge "))
                 .style(Style::default().fg(if online { Color::Green } else { Color::Yellow })), chunks[0]);
@@ -286,7 +303,7 @@ async fn main() -> Result<()> {
                     .map(|t| {let (progress,detail)=task_progress(s,t);Row::new(vec![t.prompt.as_deref().unwrap_or(&t.title).lines().next().unwrap_or("Bildaufgabe").to_string(), progress, t.images.len().to_string(),detail])}).collect()).unwrap_or_default()
             } else if view == 3 {
                 last.as_ref().map(|s| s.streams.iter().filter(|t| s.projects.get(selected_project).is_some_and(|p| p.id == t.project_id))
-                    .map(|t| Row::new(vec![t.goal.clone(),format!("{:?}",t.status),format!("r{} / {} Tickets",t.revision.0,t.ticket_ids.len()),t.id.to_string()])).collect()).unwrap_or_default()
+                    .map(|t| Row::new(vec![t.goal.clone(),stream_label(t.status).into(),t.ticket_ids.len().to_string(),t.id.to_string()])).collect()).unwrap_or_default()
             } else if view == 4 {
                 last.as_ref().map(|s| s.commands.iter().filter(|c| s.streams.iter().any(|t| t.id==c.stream_id && s.projects.get(selected_project).is_some_and(|p|p.id==t.project_id)))
                     .map(|c| Row::new(vec![format!("{:?}",c.kind),c.agent_progress.as_ref().map(|a|format!("{:?}",a.phase)).unwrap_or_else(||format!("{:?}",c.state)),c.result.as_ref().map(command_output).or_else(||c.agent_progress.as_ref().map(|a|a.summary.clone())).unwrap_or_else(||"ausstehend".into()),c.id.to_string()])).collect()).unwrap_or_default()
@@ -299,7 +316,7 @@ async fn main() -> Result<()> {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
                 1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause/Fortsetzen | p: einrichten | Enter: Profil ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
-                3 => (["Stream", "Status", "Revision / Tickets", "ID"], format!(" Streams: {project_name} | n: neu | Enter: steuern | r: Recovery ")),
+                3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode-Session | c: Steuerung ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
             };
@@ -307,7 +324,7 @@ async fn main() -> Result<()> {
             frame.render_widget(Table::new(rows.into_iter().skip(row_offset).enumerate().map(|(i,row)|if matches!(view,1..=5) && i==0 {row.style(Style::default().bg(Color::DarkGray))} else {row}), [Constraint::Percentage(30), Constraint::Percentage(15), Constraint::Percentage(20), Constraint::Percentage(35)])
                 .header(Row::new(header).style(Style::default().fg(Color::Cyan)))
                 .block(Block::bordered().title(title)), chunks[1]);
-            frame.render_widget(Paragraph::new("1 Runner | 2 Projekte | 3 Aufgaben | 4 Streams | 5 Auftraege | 6 Fragen | 7 Geraete | ←/→ Projekt | q")
+            frame.render_widget(Paragraph::new("1 Runner | 2 Projekte | 3 Aufgaben | 4 Sessions | 5 Diagnose | 6 Fragen | 7 Geraete | ←/→ Projekt | q")
                 .block(Block::bordered()), chunks[2]);
         })?;
         while let Ok((id, result)) = stream_rx.try_recv() {
@@ -470,6 +487,51 @@ async fn main() -> Result<()> {
                     }
                     continue;
                 }
+                if let Some(dialog) = &mut session_view {
+                    if key.kind == KeyEventKind::Press {
+                        match dialog.key(key.code, last.as_ref()) {
+                            session::Action::Close => session_view = None,
+                            session::Action::Question(id) => {
+                                if let Some(q) = last
+                                    .as_ref()
+                                    .and_then(|s| s.questions.iter().find(|q| q.id == id))
+                                    .cloned()
+                                {
+                                    dialogs.entry(id).or_insert_with(|| answer::Dialog::new(q));
+                                    open_question = Some(id);
+                                }
+                            }
+                            session::Action::Controls => {
+                                if let Some(s) = &last {
+                                    if let Some(current) =
+                                        s.streams.iter().find(|v| v.id == dialog.stream).cloned()
+                                    {
+                                        let previous = s
+                                            .commands
+                                            .iter()
+                                            .rev()
+                                            .find(|c| {
+                                                c.stream_id == current.id
+                                                    && c.kind == CommandKind::RunAgent
+                                            })
+                                            .filter(|c| c.state == CommandState::Succeeded)
+                                            .map(|c| c.id);
+                                        open_stream = Some(current.id);
+                                        stream_dialogs
+                                            .entry(current.id)
+                                            .and_modify(|d| d.reopen(current.clone(), previous))
+                                            .or_insert_with(|| {
+                                                stream::Dialog::new(current, previous)
+                                            })
+                                            .context(s);
+                                    }
+                                }
+                            }
+                            session::Action::None => {}
+                        }
+                    }
+                    continue;
+                }
                 if key.kind == KeyEventKind::Press {
                     if let Some(snapshot) = &last {
                         let project = snapshot.projects.get(selected_project).map(|p| p.id);
@@ -481,8 +543,8 @@ async fn main() -> Result<()> {
                                 .nth(row_offset)
                                 .and_then(|t| task_command(snapshot, t))
                             {
-                                command_detail =
-                                    Some(detail::Dialog::new(command.clone(), client.clone()));
+                                session_view =
+                                    Some(session::View::new(command.stream_id, client.clone()));
                                 continue;
                             }
                         }
@@ -589,7 +651,7 @@ async fn main() -> Result<()> {
                                 command_detail = Some(detail::Dialog::new(command, client.clone()));
                             }
                         }
-                        KeyCode::Enter if view == 3 => {
+                        KeyCode::Enter | KeyCode::Char('c') if view == 3 => {
                             if let Some(current) = last
                                 .as_ref()
                                 .and_then(|s| {
@@ -604,6 +666,11 @@ async fn main() -> Result<()> {
                                 })
                                 .cloned()
                             {
+                                if key.code == KeyCode::Enter {
+                                    session_view =
+                                        Some(session::View::new(current.id, client.clone()));
+                                    continue;
+                                }
                                 open_stream = Some(current.id);
                                 let previous = last
                                     .as_ref()

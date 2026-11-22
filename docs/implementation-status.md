@@ -6,6 +6,12 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
 ## Prompt-Aufgaben und Projektpause (Schema 24)
 
+Session-Einstieg: Enter auf einem Arbeitsbereich oder einer gestarteten Aufgabe
+öffnet die live synchronisierte OpenCode-Unterhaltung mit Werkzeugausgaben und
+Rückfragen; technische Steuerung liegt hinter `c`. Vollständiges Archiv, frühere
+Sessions und Rückkehr zur Live-Ansicht sind erreichbar. Unit- und lesender PTY-Test
+gegen die lokale Minesweeper-Session bestanden; siehe `session-view.md`.
+
 TUI-Aufgaben erfassen nur Prompt und optionale Bilder (bis vier PNG/JPEG/GIF/WebP,
 zusammen 4 MiB). Ein einzelner Prompt-Editor ersetzt die schrittweise Erfassung:
 Enter sendet, Shift-/Alt-Enter erzeugt neue Zeilen, Ctrl-V liest Bild/Text aus der
