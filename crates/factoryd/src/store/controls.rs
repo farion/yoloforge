@@ -41,14 +41,21 @@ pub(super) fn stream_status(
 ) -> Result<StreamState> {
     Ok(match load(tx, id)?.map(|c| c.state) {
         Some(PauseState::Requested | PauseState::ResumeRequested) => StreamState::Pausing,
-        Some(PauseState::HeldBeforeExecution | PauseState::Frozen) => StreamState::Paused,
+        Some(
+            PauseState::HeldBeforeExecution | PauseState::Frozen | PauseState::SessionInterrupted,
+        ) => StreamState::Paused,
         Some(PauseState::InterruptUnverified) => StreamState::Blocked,
         _ => fallback,
     })
 }
 pub(super) fn completed(tx: &Transaction<'_>, stream: StreamId, command: CommandId) -> Result<()> {
     if let Some(mut control) = load(tx, stream)? {
-        if control.command_id == Some(command) && control.state != PauseState::Released {
+        if control.command_id == Some(command)
+            && !matches!(
+                control.state,
+                PauseState::Released | PauseState::SessionInterrupted
+            )
+        {
             control.state = PauseState::InterruptUnverified;
             control.summary =
                 "Command completed while stop was requested; process quiescence not verified"
@@ -101,7 +108,8 @@ impl Store {
                 },
                 ControlAction::Resume=>{
                     let previous=previous.ok_or(StoreError::WorkConflict)?;
-                    if !matches!(previous.state,PauseState::HeldBeforeExecution|PauseState::Frozen) {return Err(StoreError::WorkConflict);}
+                    if !matches!(previous.state,PauseState::HeldBeforeExecution|PauseState::Frozen|PauseState::SessionInterrupted) {return Err(StoreError::WorkConflict);}
+                    if previous.state==PauseState::SessionInterrupted && active.is_some() {return Err(StoreError::WorkConflict);}
                     let frozen=previous.state==PauseState::Frozen;
                     if frozen && (previous.proof.as_ref().is_none_or(|p|!p.frozen) || active.as_ref().map(|c|c.id)!=previous.command_id) {return Err(StoreError::WorkConflict);}
                     StreamControl {retry:None,action:ControlAction::Resume,request_id:body.request_id,state:if frozen {PauseState::ResumeRequested}else{PauseState::Released},summary:if frozen {"Thaw requested; awaiting owning runner"}else{"Scheduling released explicitly"}.into(),..previous}
@@ -175,6 +183,17 @@ impl Store {
             }
         }
         let valid = match body.state {
+            PauseState::SessionInterrupted => {
+                control.action == ControlAction::Pause
+                    && body.proof.is_none()
+                    && control.proof.is_none()
+                    && matches!(
+                        control.state,
+                        PauseState::Requested
+                            | PauseState::InterruptUnverified
+                            | PauseState::SessionInterrupted
+                    )
+            }
             PauseState::InterruptUnverified => body.proof.is_none(),
             PauseState::HeldBeforeExecution => {
                 control.action == ControlAction::Pause

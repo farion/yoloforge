@@ -22,7 +22,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def inside(binaries, provider, model, registration=None, followup=False, memory=False):
+def inside(binaries, provider, model, registration=None, followup=False, memory=False, native_pause=False):
     local = registration is not None
     registration = registration if local else json.load(sys.stdin)
     directory = Path(tempfile.mkdtemp(prefix="factory-image-", dir="/tmp/opencode" if local else "/home/factory/workspace"))
@@ -113,6 +113,43 @@ def inside(binaries, provider, model, registration=None, followup=False, memory=
                 routing = [c for c in snapshot["commands"] if (c.get("agent_spec") or {}).get("role") == "orchestrator"]
                 assert routing and any(c["state"] == "succeeded" for c in routing), "No successful model routing evaluation"
                 print("PASS real orchestrator routes image task before work starts", flush=True)
+                if native_pause:
+                    root=completed[0]["id"];stream_id=completed[0]["stream_id"]
+                    def fixed(prompt):
+                        return api("POST","/v1/tasks",{"request_id":str(uuid.uuid4()),"id":None,"expected_revision":0,
+                            "project_id":setup["project"]["id"],"requested_session":root,"images":[],"prompt":prompt})
+                    def wait_for(predicate, seconds=180):
+                        end=time.monotonic()+seconds
+                        while time.monotonic()<end:
+                            value=predicate(api("GET","/v1/snapshot"))
+                            if value:return value
+                            time.sleep(.3)
+                        raise AssertionError("Native lifecycle acceptance timed out")
+                    def execution(s,t):
+                        ticket=next(ti for ti in s["tickets"] if ti["id"]==t["id"])
+                        return next((c for c in s["commands"] if c["id"]==ticket.get("execution_command")),None)
+                    def control(action):
+                        s=api("GET","/v1/snapshot");stream=next(sv for sv in s["streams"] if sv["id"]==stream_id)
+                        return api("POST","/v1/streams/"+stream_id+"/control",{"request_id":str(uuid.uuid4()),"expected_revision":stream["revision"],"action":action})
+                    paused_task=fixed("Use one shell tool call to run exactly: printf started > native-pause-proof.txt; sleep 90. Do not delegate or ask questions. After the sleep report completion.")
+                    paused_command=wait_for(lambda s: execution(s,paused_task) if (work/"native-pause-proof.txt").exists() else None)
+                    control("pause")
+                    interrupted=wait_for(lambda s: next((c for c in s["commands"] if c["id"]==paused_command["id"] and c["state"]=="failed"),None))
+                    assert interrupted["result"]["agent"]["phase"]=="interrupted",interrupted.get("result")
+                    archive=api("GET","/v1/commands/"+interrupted["id"]+"/archive")
+                    assert archive["status"]["final_scan_complete"]
+                    s=api("GET","/v1/snapshot")
+                    assert next(c for c in s["controls"] if c["stream_id"]==stream_id)["state"]=="session_interrupted"
+                    assert (work/"native-pause-proof.txt").read_text()=="started"
+                    control("resume")
+                    resumed_task=fixed("The prior command was intentionally interrupted. Do not rerun its sleep. Keep image-proof.txt unchanged. Replace native-pause-proof.txt with exactly the word resumed. Do not ask questions or delegate; report the result.")
+                    resumed=wait_for(lambda s: next((c for c in s["commands"] if (execution(s,resumed_task) or {}).get("id")==c["id"] and c["state"] in ("succeeded","failed")),None))
+                    assert resumed["state"]=="succeeded",resumed.get("result")
+                    assert resumed["agent_spec"]["continuation"]=={"root_command_id":root,"previous_command_id":interrupted["id"]}
+                    assert (Path(source)/"native-pause-proof.txt").read_text().strip()=="resumed"
+                    assert (Path(source)/"image-proof.txt").read_text().strip()=="red"
+                    print("PASS native interrupt, final archive, explicit release and new prompt in the same session; no process-stop claim",flush=True)
+                    return
                 if followup:
                     root = completed[0]["id"]
                     follow = api("POST", "/v1/tasks", {"request_id":str(uuid.uuid4()),"id":None,"expected_revision":0,
@@ -157,14 +194,15 @@ def main():
     parser.add_argument("--local-registration", type=Path, help="Use an existing local service without starting/stopping it; retain separate Factory evidence under /tmp/opencode")
     parser.add_argument("--followup", action="store_true", help="Also verify fixed-session continuation and an automatically answered real model question")
     parser.add_argument("--memory", action="store_true", help="Verify automatic branch-scoped knowledge extraction after the follow-up")
+    parser.add_argument("--native-pause",action="store_true",help="Real native interrupt, archive, release and fixed-session continuation acceptance")
     args = parser.parse_args()
     if args.memory:
         args.followup=True
     if args.local_registration:
-        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory)
+        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory, args.native_pause)
         return
     if args.inside:
-        inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory)
+        inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory, native_pause=args.native_pause)
         return
     state = json.loads((ROOT / "spikes/opencode/.runtime/state.json").read_text())
     container = state["container"]
@@ -174,7 +212,7 @@ def main():
         for name in ["factoryd", "factory-runner"]:
             subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + target + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + target + "/test.py"], check=True, capture_output=True)
-        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []),
+        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []) + (["--native-pause"] if args.native_pause else []),
             input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=900 if args.memory else 600 if args.followup else 300)
         assert result.returncode == 0, "Real image-prompt acceptance failed"
     finally:

@@ -125,7 +125,7 @@ impl Store {
             || value.state != CommandState::Accepted
             || matches!(
                 body.progress.phase,
-                AgentPhase::Succeeded | AgentPhase::Failed
+                AgentPhase::Succeeded | AgentPhase::Failed | AgentPhase::Interrupted
             )
         {
             return Err(StoreError::WorkConflict);
@@ -398,7 +398,9 @@ impl Store {
                     return Err(StoreError::WorkConflict);
                 }
                 if parent.id != previous
-                    || parent.state != CommandState::Succeeded
+                    || !(parent.state == CommandState::Succeeded
+                        || (parent.state == CommandState::Failed
+                            && matches!(&parent.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted)))
                     || parent.runner_id != owner.runner_id
                     || parent.ownership_epoch != owner.ownership_epoch
                     || parent
@@ -600,7 +602,18 @@ impl Store {
                     }
                     (CommandKind::RunAgent, CommandOutput::Agent { agent }) => {
                         validate_agent(&value, agent)?;
-                        if !matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
+                        if !matches!(
+                            agent.phase,
+                            AgentPhase::Succeeded | AgentPhase::Failed | AgentPhase::Interrupted
+                        ) {
+                            return Err(StoreError::WorkConflict);
+                        }
+                        if agent.phase == AgentPhase::Interrupted
+                            && super::controls::load(tx, value.stream_id)?.is_none_or(|c| {
+                                c.command_id != Some(id)
+                                    || c.state != PauseState::SessionInterrupted
+                            })
+                        {
                             return Err(StoreError::WorkConflict);
                         }
                         value.agent_progress = Some(agent.clone());

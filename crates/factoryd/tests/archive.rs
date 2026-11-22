@@ -1119,6 +1119,127 @@ fn continuation_keeps_root_session_and_rejects_stale_parent_or_missing_archive()
     assert_eq!(third.session_root(), first.id);
 }
 
+#[test]
+fn interrupted_native_session_requires_confirmation_archive_and_explicit_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = Store::open(&path).unwrap();
+    let first = command(&store);
+    let result = CommandResult {
+        request_id: RequestId::new(),
+        ownership_epoch: 1,
+        result: CommandOutput::Agent {
+            agent: AgentProgress {
+                session_id: first.session_id(),
+                message_id: agent_message_id(first.id),
+                phase: AgentPhase::Interrupted,
+                summary: "Native interruption, not process termination".into(),
+            },
+        },
+    };
+    assert!(store
+        .complete(first.runner_id, first.id, result.clone())
+        .is_err());
+    let control = store
+        .set_control(
+            first.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Pause,
+            },
+        )
+        .unwrap();
+    store
+        .report_control(
+            first.runner_id,
+            first.id,
+            ReportControl {
+                ownership_epoch: 1,
+                control_request: control.request_id,
+                proof: None,
+                state: PauseState::SessionInterrupted,
+                summary: "Native session is inactive and interrupted".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .set_control(
+                first.stream_id,
+                SetControl {
+                    request_id: RequestId::new(),
+                    expected_revision: store.snapshot().unwrap().streams[0].revision,
+                    action: ControlAction::Resume,
+                }
+            )
+            .is_err(),
+        "Cannot release before command finalization"
+    );
+    let completed = store.complete(first.runner_id, first.id, result).unwrap();
+    assert_eq!(
+        completed.state,
+        CommandState::Failed,
+        "Interrupted work must never claim success"
+    );
+    assert_eq!(
+        store.snapshot().unwrap().streams[0].status,
+        StreamState::Paused
+    );
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let continuation = |store: &Store| ContinueAgent {
+        request_id: RequestId::new(),
+        expected_revision: store.snapshot().unwrap().streams[0].revision,
+        previous_command_id: first.id,
+        prompt: "Continue from the preserved work".into(),
+    };
+    assert!(store
+        .continue_agent(first.stream_id, continuation(&store))
+        .is_err());
+    store
+        .set_control(
+            first.stream_id,
+            SetControl {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                action: ControlAction::Resume,
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .continue_agent(first.stream_id, continuation(&store))
+            .is_err(),
+        "Final archive still required"
+    );
+    store
+        .report_archive(
+            first.runner_id,
+            first.id,
+            ReportArchive {
+                ownership_epoch: 1,
+                batch: ArchiveBatch {
+                    session_id: first.session_id(),
+                    revision: 1,
+                    captured_unix_ms: 1,
+                    final_scan_complete: true,
+                    messages: vec![],
+                },
+            },
+        )
+        .unwrap();
+    let follow = store
+        .continue_agent(first.stream_id, continuation(&store))
+        .unwrap();
+    assert_eq!(follow.session_id(), first.session_id());
+    assert_ne!(follow.id, first.id);
+    assert_eq!(
+        follow.agent_spec.unwrap().profile,
+        first.agent_spec.unwrap().profile
+    );
+}
+
 fn command(store: &Store) -> RunnerCommand {
     let p = store
         .create_project(CreateProject {

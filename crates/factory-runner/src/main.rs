@@ -315,6 +315,18 @@ async fn commands(
                         },
                     )
                     .await?;
+                if state == PauseState::SessionInterrupted {
+                    record.result = Some(CommandOutput::Agent {
+                        agent: AgentProgress {
+                            session_id: record.command.session_id(),
+                            message_id: agent_message_id(record.command.id),
+                            phase: AgentPhase::Interrupted,
+                            summary: "Native session interrupted; work retained, background processes not verified stopped".into(),
+                        },
+                    });
+                    tokio::task::block_in_place(|| journal.save(&record))?;
+                    report(client, journal, registration, record, args).await?;
+                }
                 return Ok(true);
             }
             let mut progress = agent::step(journal, &mut record, args).await?;

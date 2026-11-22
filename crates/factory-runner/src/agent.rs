@@ -202,9 +202,6 @@ pub async fn pause(
         ));
     }
     let summary = "Interrupt intent recorded; execution/process quiescence unverified";
-    if record.agent.as_ref().unwrap().interrupt_attempted {
-        return Ok((PauseState::InterruptUnverified, summary.into()));
-    }
     let Some(path) = args.opencode_registration.as_ref() else {
         return Ok((
             PauseState::InterruptUnverified,
@@ -230,9 +227,44 @@ pub async fn pause(
                 && s["location"]["directory"] == execution.workspace.path),
         "Session identity changed"
     );
-    record.agent.as_mut().unwrap().interrupt_attempted = true;
-    tokio::task::block_in_place(|| journal.save(record))?;
-    let _ = client.interrupt(&record.command.session_id()).await;
+    if !record.agent.as_ref().unwrap().interrupt_attempted {
+        record.agent.as_mut().unwrap().interrupt_attempted = true;
+        tokio::task::block_in_place(|| journal.save(record))?;
+        let _ = client.interrupt(&record.command.session_id()).await;
+    }
+    // Reconcile even after a lost interrupt response or runner restart. Never
+    // infer process-tree quiescence from the native session's terminal outcome.
+    let id = record.command.session_id();
+    let observed = client.session(&id).await?;
+    let execution = record.agent.as_ref().unwrap();
+    let spec = record
+        .command
+        .agent_spec
+        .as_ref()
+        .context("Agent specification missing")?;
+    if observed.is_some_and(|s| {
+        s["outcome"] == "interrupted"
+            && s["id"] == id
+            && s["metadata"]["factory_command"] == record.command.session_root().to_string()
+            && s["location"]["directory"] == execution.workspace.path
+            && s["model"]["providerID"] == spec.profile.provider_id
+            && s["model"]["id"] == spec.profile.model_id
+    }) && client
+        .message(&id, &agent_message_id(record.command.id))
+        .await?
+        .is_some_and(|m| m["type"] == "user" && m["text"] == spec.prompt)
+        && !client.active(&id).await?
+        && client
+            .session_items(&id, "inbox")
+            .await?
+            .as_array()
+            .is_some_and(|items| items.is_empty())
+    {
+        return Ok((
+            PauseState::SessionInterrupted,
+            "Native session interrupted; background processes not verified stopped".into(),
+        ));
+    }
     Ok((PauseState::InterruptUnverified, summary.into()))
 }
 
@@ -343,7 +375,7 @@ async fn advance(
                     && previous.command.ownership_epoch == command.ownership_epoch
                     && previous.command.session_root() == command.session_root()
                     && previous.archive.finished
-                    && matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if agent.phase==AgentPhase::Succeeded)
+                    && matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Interrupted))
                     && prior.endpoint == execution.endpoint
                     && prior.workspace == execution.workspace
                     && prior.runtime == execution.runtime,
@@ -367,14 +399,18 @@ async fn advance(
             let messages = client
                 .session_items(&session_id, "message?type=assistant&order=desc&limit=1")
                 .await?;
-            record.agent.as_mut().unwrap().previous_assistant = Some(
-                messages
-                    .as_array()
-                    .and_then(|m| m.first())
-                    .and_then(|m| m["id"].as_str())
-                    .context("Previous assistant missing")?
-                    .into(),
+            let previous_assistant = messages
+                .as_array()
+                .context("Invalid assistant messages")?
+                .first()
+                .and_then(|m| m["id"].as_str())
+                .map(String::from);
+            ensure!(
+                previous_assistant.is_some()
+                    || matches!(&previous.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted),
+                "Previous assistant missing"
             );
+            record.agent.as_mut().unwrap().previous_assistant = previous_assistant;
         }
         if spec.read_only {
             ensure!(
@@ -584,15 +620,21 @@ mod tests {
         } else if path == "/api/model/default" {
             json!({"location":{"directory":"/prepared"},"data":{"providerID":"openai","id":if mode==0 {"test"}else{"changed-default"}}})
         } else if path == "/api/session/active" {
-            json!({"data":{}})
+            if mode == 6 {
+                json!({"data":{id.clone():{}}})
+            } else {
+                json!({"data":{}})
+            }
         } else if path == format!("/api/session/{id}") {
             if mode == 0 {
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
             json!({"data":{"id":id,"metadata":{"factory_command":fake.command.id},"location":{"directory":"/prepared"},
-                "model":{"providerID":spec.profile.provider_id,"id":spec.profile.model_id},"outcome":if mode==4 {"interrupted"} else {"succeeded"}}})
+                "model":{"providerID":spec.profile.provider_id,"id":spec.profile.model_id},"outcome":if matches!(mode,4|6|7|8) {"interrupted"} else {"succeeded"}}})
+        } else if path.ends_with("/inbox") && mode == 7 {
+            json!({"data":[{"id":"msg_pending"}]})
         } else if path.ends_with(&format!("/message/{}", agent_message_id(fake.command.id))) {
-            if mode == 1 {
+            if matches!(mode, 1 | 8) {
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
             json!({"data":{"type":"user","text":if mode==3 {"different"} else {&spec.prompt}}})
@@ -771,6 +813,20 @@ mod tests {
             1,
             "uncertain interrupt must not be reposted after restart"
         );
+        for blocked in [6, 7, 8] {
+            mode.store(blocked, Ordering::SeqCst);
+            assert_eq!(
+                pause(&journal, &mut record, &args).await.unwrap().0,
+                PauseState::InterruptUnverified
+            );
+        }
+        mode.store(4, Ordering::SeqCst);
+        assert_eq!(
+            pause(&journal, &mut record, &args).await.unwrap().0,
+            PauseState::SessionInterrupted,
+            "inactive interrupted session reconciles the lost response after restart"
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
         record.agent.as_mut().unwrap().prompt_attempted = false;
         assert_eq!(
             pause(&journal, &mut record, &args).await.unwrap().0,

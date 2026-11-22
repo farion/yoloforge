@@ -258,6 +258,7 @@ pub enum PauseState {
     Requested,
     HeldBeforeExecution,
     InterruptUnverified,
+    SessionInterrupted,
     Frozen,
     ResumeRequested,
     Released,
@@ -544,6 +545,7 @@ pub enum AgentPhase {
     Unknown,
     Succeeded,
     Failed,
+    Interrupted,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

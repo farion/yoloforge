@@ -618,7 +618,7 @@ async fn main() -> Result<()> {
                                                 c.stream_id == current.id
                                                     && c.kind == CommandKind::RunAgent
                                             })
-                                            .filter(|c| c.state == CommandState::Succeeded)
+                                            .filter(|c| c.state == CommandState::Succeeded || matches!(&c.result, Some(CommandOutput::Agent { agent }) if c.state == CommandState::Failed && agent.phase == AgentPhase::Interrupted))
                                             .map(|c| c.id);
                                         open_stream = Some(current.id);
                                         stream_dialogs
@@ -835,7 +835,7 @@ async fn main() -> Result<()> {
                                                 && c.kind == CommandKind::RunAgent
                                         })
                                     })
-                                    .filter(|c| c.state == CommandState::Succeeded)
+                                    .filter(|c| c.state == CommandState::Succeeded || matches!(&c.result, Some(CommandOutput::Agent { agent }) if c.state == CommandState::Failed && agent.phase == AgentPhase::Interrupted))
                                     .map(|c| c.id);
                                 stream_dialogs
                                     .entry(current.id)

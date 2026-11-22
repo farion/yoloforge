@@ -308,7 +308,10 @@ pub(super) fn continue_task(
         )?;
         return Ok(None);
     };
-    if previous.state != CommandState::Succeeded {
+    if previous.state != CommandState::Succeeded
+        && !(previous.state == CommandState::Failed
+            && matches!(&previous.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted))
+    {
         note(
             tx,
             t,

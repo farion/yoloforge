@@ -116,5 +116,7 @@ als Release-Artefakte hoch und entfernt die temporaeren Schluesseldateien.
 Bei aktiviertem Job blockiert ein Signierfehler die Gesamtveroeffentlichung.
 Secrets und Variable wurden nach ausdruecklicher Freigabe fuer
 `farion/yoloforge` eingerichtet; der lokale Schluessel bleibt fuer Sicherung und
-lokale Builds erhalten. Die CI-Ausfuehrung dieses Signierpfads muss beim naechsten
-Release noch bestaetigt werden. Ohne Aktivierung bleiben die anderen Release-Ziele nutzbar.
+lokale Builds erhalten. Der eigenstaendige CI-Signierlauf
+`45036459858` hat den signierten Entwicklungsbuild erfolgreich erzeugt.
+Der versionierte Releasepfad bleibt beim naechsten Release zu pruefen.
+Ohne Aktivierung bleiben die anderen Release-Ziele nutzbar.

@@ -226,6 +226,13 @@ impl View {
         let phase = command
             .map(|c| match c.state {
                 CommandState::Succeeded => "Ergebnis vorhanden",
+                CommandState::Failed
+                    if c.agent_progress
+                        .as_ref()
+                        .is_some_and(|a| a.phase == AgentPhase::Interrupted) =>
+                {
+                    "Unterbrochen (Hintergrundprozesse ungeprueft)"
+                }
                 CommandState::Failed => "Fehler",
                 _ => match c.agent_progress.as_ref().map(|a| a.phase) {
                     Some(AgentPhase::WaitingInput) => "Rueckfrage offen",
