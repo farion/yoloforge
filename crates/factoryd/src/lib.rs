@@ -397,8 +397,19 @@ async fn register(
     {
         let store = app.store.clone();
         let runner = body.id;
+        let local = body
+            .capabilities
+            .iter()
+            .any(|c| c == LOCAL_PROJECT_CAPABILITY);
         if !matches!(
-            tokio::task::spawn_blocking(move || store.autostart_runner(runner)).await,
+            tokio::task::spawn_blocking(move || {
+                store.autostart_runner(runner)?;
+                if local {
+                    store.recover_local_projects(runner)?;
+                }
+                Ok::<_, StoreError>(())
+            })
+            .await,
             Ok(Ok(()))
         ) {
             return db_error(StoreError::Internal, RequestId::new());
@@ -460,8 +471,20 @@ async fn heartbeat(
         .any(|c| c == TASK_IMAGES_CAPABILITY)
     {
         let store = app.store.clone();
+        let local = entry
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == LOCAL_PROJECT_CAPABILITY);
         if !matches!(
-            tokio::task::spawn_blocking(move || store.autostart_runner(id)).await,
+            tokio::task::spawn_blocking(move || {
+                store.autostart_runner(id)?;
+                if local {
+                    store.recover_local_projects(id)?;
+                }
+                Ok::<_, StoreError>(())
+            })
+            .await,
             Ok(Ok(()))
         ) {
             return db_error(StoreError::Internal, RequestId::new());

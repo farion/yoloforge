@@ -58,7 +58,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 23,
+            version <= 24,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -129,6 +129,11 @@ impl Store {
         }
         if version < 23 {
             tx.execute_batch("PRAGMA user_version=23;")?;
+        }
+        if version < 24 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS local_project_recovery(command_id TEXT PRIMARY KEY,replacement_id TEXT);
+                INSERT OR IGNORE INTO local_project_recovery(command_id) SELECT id FROM commands WHERE state='failed' AND json_extract(data,'$.kind')='prepare_workspace' AND json_extract(data,'$.workspace_spec.setup.repository_source') LIKE '/%' AND json_extract(data,'$.result.workspace_error') LIKE 'Repository import failed;%';
+                PRAGMA user_version=24;")?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))

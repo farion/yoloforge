@@ -51,7 +51,8 @@ Ticks erzeugen keine zweite Zuweisung oder einen zweiten Start.
 Das Parallelitätslimit zählt auch manuelle Streams mit offenen Tickets und
 laufende Aufträge. Bei Prompt-Aufgaben gibt ein finales Ergebnis den Planungsplatz
 frei, ohne manuelles Abschließen. Laufende Rückfragen belegen ihn weiterhin.
-Für alte Tickets bleiben Fehler und Review belegt, bis sie abgeschlossen werden.
+Das gilt auch für alte automatisch eingeplante Tickets; manuelles Done ist zum
+Freigeben des Planungsplatzes nicht erforderlich.
 Agentenerfolg ist weiterhin kein Nachweis einer beendeten Runtime und integriert
 keine Änderungen automatisch.
 Offline-Runner behalten ihre persistente Queue; es gibt keine automatische

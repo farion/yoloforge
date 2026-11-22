@@ -604,7 +604,7 @@ impl Dialog {
             return;
         };
         self.message=match &c.result {
-            Some(CommandOutput::Workspace {workspace})=>format!("Projekt eingerichtet. OpenCode-Service erreichbar (Provider-Login separat erforderlich). Worktree: {}\nStream: {}\nEsc, dann 4: diesen Stream waehlen und Agent starten.",workspace.path,c.stream_id),
+            Some(CommandOutput::Workspace {workspace})=>format!("Projekt eingerichtet, OpenCode erreichbar. Aufgaben werden automatisch gestartet.\nArbeitsordner: {}\nEsc: zurueck; 3 und n: Prompt eingeben.",workspace.path),
             Some(CommandOutput::WorkspaceError {workspace_error})=>format!("Einrichtung braucht Hilfe: {workspace_error}\nStream: {}. Nach Korrektur: Esc, 4, Stream oeffnen, Worktree vorbereiten erneut senden.",c.stream_id),
             _=>format!("Einrichtung {:?} auf Runner {}. Projekt {}, Stream {}. Dieser Dialog zeigt das Ergebnis automatisch.",c.state,c.runner_id,result.project.id,c.stream_id),
         };
@@ -828,7 +828,7 @@ impl Dialog {
             Ok(()) => {
                 self.state = State::Submitted;
                 self.message = if matches!(self.target, Target::SetupProject(_)) {
-                    "Einrichtung eingereiht. Esc, dann 5: Auftrag/Fehler pruefen. Nach Erfolg 4: vorbereiteten Stream oeffnen und Agent starten. Provider-Anmeldung muss im OpenCode-Service vorhanden sein.".into()
+                    "Projekt wird eingerichtet. Aufgaben werden nach der Vorbereitung automatisch gestartet.".into()
                 } else {
                     "Gespeichert. Esc: Liste.".into()
                 };

@@ -20,6 +20,8 @@ pub struct Plan {
     path: PathBuf,
     attempted: bool,
     ready: bool,
+    #[serde(default)]
+    create_local: bool,
 }
 fn directory(root: &Path, id: ProjectId) -> PathBuf {
     root.join(".repositories").join(id.to_string())
@@ -98,11 +100,18 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
             path: dir.join(r.command.id.to_string()),
             attempted: false,
             ready: false,
+            create_local: Path::new(&setup.repository_source).is_absolute()
+                && matches!(fs::symlink_metadata(&setup.repository_source),Err(e) if e.kind()==std::io::ErrorKind::NotFound),
         };
         save(j, r, &plan)?;
         plan
     };
     if !plan.ready {
+        if plan.create_local {
+            tokio::task::block_in_place(|| {
+                initialize_local(&plan.source, &plan.branch, spec.project_id)
+            })?;
+        }
         ensure!(!plan.attempted,"Repository creation outcome unconfirmed; retry preparation as a new command (previous attempt retained)");
         fs::create_dir(&plan.path)
             .context("Managed repository destination already occupied; nothing overwritten")?;
@@ -196,18 +205,88 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
     resolve(&spec, &root)?;
     Ok(())
 }
+// Publish only a complete repository, without replacing an entry created by another process.
+fn initialize_local(source: &str, branch: &str, project: ProjectId) -> Result<()> {
+    let target = Path::new(source);
+    if fs::symlink_metadata(target).is_ok() {
+        ensure!(
+            !fs::symlink_metadata(target)?.file_type().is_symlink(),
+            "Project folder was replaced by a symlink"
+        );
+        ensure!(
+            git(target, &["config", "--local", "--get", "factory.projectId"])?
+                == project.to_string(),
+            "Project folder was occupied during creation; existing files preserved"
+        );
+        git(
+            target,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{branch}^{{commit}}"),
+            ],
+        )?;
+        return Ok(());
+    }
+    let parent = target.parent().context("Project folder has no parent")?;
+    fs::create_dir_all(parent).context("Cannot create project parent folder")?;
+    let attempt = tempfile::Builder::new()
+        .prefix(".yoloforge-create-")
+        .tempdir_in(parent)?
+        .keep();
+    git(&attempt, &["init", "--initial-branch", branch])?;
+    git(
+        &attempt,
+        &[
+            "config",
+            "--local",
+            "factory.projectId",
+            &project.to_string(),
+        ],
+    )?;
+    crate::workspace::git_env(
+        &attempt,
+        &[
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initialize Factory project",
+        ],
+        &[
+            ("GIT_AUTHOR_NAME", "YoloForge"),
+            ("GIT_AUTHOR_EMAIL", "factory@yoloforge.invalid"),
+            ("GIT_COMMITTER_NAME", "YoloForge"),
+            ("GIT_COMMITTER_EMAIL", "factory@yoloforge.invalid"),
+        ],
+    )?;
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        &attempt,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .context("Project folder occupied during creation; prepared repository retained")?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
-    async fn exercise(import: bool) {
+    async fn exercise(import: bool, local: bool) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("work");
         let path = dir.path().join("journal");
         let runner = RunnerId::new();
         let project = ProjectId::new();
         let stream = StreamId::new();
-        let source = if import {
+        let source = if local {
+            dir.path()
+                .join("new-parent/new-project")
+                .to_string_lossy()
+                .into_owned()
+        } else if import {
             let repo = dir.path().join("source");
             fs::create_dir(&repo).unwrap();
             git(&repo, &["init", "-b", "main"]).unwrap();
@@ -245,6 +324,9 @@ mod tests {
         let j = Journal::open(&path, &args.server, runner).unwrap();
         let mut r = j.receive(c.clone()).unwrap();
         ensure_repository(&j, &mut r, &args).await.unwrap();
+        if local {
+            assert!(Path::new(&source).join(".git").is_dir());
+        }
         let resolved = resolve(c.workspace_spec.as_ref().unwrap(), &root).unwrap();
         let head = git(&resolved, &["rev-parse", "main"]).unwrap();
         let CommandOutput::Workspace { workspace } = crate::workspace::prepare(&j, &c, None, &root)
@@ -293,10 +375,30 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_project_manages_its_own_repository_and_preserves_work_after_restart() {
-        exercise(false).await;
+        exercise(false, false).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn import_preserves_source_and_refuses_occupied_or_rebound_destinations() {
-        exercise(true).await;
+        exercise(true, false).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requested_missing_folder_is_created_and_recovers_after_restart() {
+        exercise(false, true).await;
+    }
+    #[test]
+    fn local_initialization_reconciles_its_own_folder_and_never_adopts_occupied_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("project");
+        let project = ProjectId::new();
+        initialize_local(path.to_str().unwrap(), "main", project).unwrap();
+        fs::write(path.join("draft"), "preserve").unwrap();
+        initialize_local(path.to_str().unwrap(), "main", project).unwrap();
+        assert!(initialize_local(path.to_str().unwrap(), "main", ProjectId::new()).is_err());
+        assert_eq!(fs::read_to_string(path.join("draft")).unwrap(), "preserve");
+        let occupied = dir.path().join("occupied");
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("file"), "user").unwrap();
+        assert!(initialize_local(occupied.to_str().unwrap(), "main", project).is_err());
+        assert!(!occupied.join(".git").exists());
     }
 }

@@ -26,7 +26,11 @@ def main():
     parser.add_argument("--auto", action="store_true", help="Exercise native-service discovery/start with a fixture executable")
     parser.add_argument("--empty", action="store_true", help="Create a project with Ctrl-S only: no repository, path, model or config input")
     parser.add_argument("--tasks", action="store_true", help="Also exercise prompt/image entry and project pause/resume")
+    parser.add_argument("--native", action="store_true", help="Start a real isolated OpenCode service; never use the shared desktop service")
+    parser.add_argument("--new-folder", action="store_true", help="Create a missing project folder rather than importing an existing repository")
     options = parser.parse_args()
+    if options.new_folder:
+        options.empty = True
     if options.empty:
         options.auto = True
     class Health(http.server.BaseHTTPRequestHandler):
@@ -53,7 +57,23 @@ def main():
         registration.chmod(0o600)
         env = {**os.environ, "FACTORY_TOKEN": uuid.uuid4().hex * 2, "TERM": "xterm-256color"}
         env.pop("FACTORY_TOKEN_FILE", None)
-        if options.auto:
+        if options.native:
+            import shutil
+            opencode = shutil.which("opencode")
+            assert opencode, "OpenCode binary required"
+            for key, child in [("HOME", "home"), ("XDG_STATE_HOME", "state"), ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")]:
+                env[key] = str(base / child)
+                (base / child).mkdir()
+            for key in list(env):
+                if key.startswith("OPENCODE_"):
+                    env.pop(key)
+            env["OPENCODE_DB"] = str(base / "opencode.db")
+            import socket
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            subprocess.run([opencode, "service", "set", "port", str(port)], env=env, cwd=base, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20, check=True)
+        elif options.auto:
             bindir = base / "bin"
             bindir.mkdir()
             native = base / "state" / "opencode" / "service.json"
@@ -93,6 +113,8 @@ def main():
                 pump()
             pump(1.5)
             send("2n")
+            if options.new_folder:
+                send("\t" + str(base / "requested/new-project"))
             config = {"$schema": "https://opencode.ai/config.json", "mcp": {"servers": {}}, "instructions": ["AGENTS.md"]}
             if not options.empty:
                 send(" Wizard Project\t" + str(repo) + "\t\t \t" + str(repo) + "\t" + ("" if options.auto else str(registration)) + "\topenai\ttest\t")
@@ -114,7 +136,9 @@ def main():
             work = Path(command["result"]["workspace"]["path"])
             if options.empty:
                 assert not (work / "opencode.json").exists()
-                assert state["projects"][0]["repository"] == "factory:managed"
+                assert state["projects"][0]["repository"] == (str(base / "requested/new-project") if options.new_folder else "factory:managed")
+                if options.new_folder:
+                    assert (base / "requested/new-project/.git").is_dir()
                 assert state["projects"][0]["profile"]["model_id"] == ""
                 assert state["projects"][0]["setup"]["repository_path"] == ""
             else:
@@ -122,7 +146,7 @@ def main():
             assert not (repo / "opencode.json").exists()
             assert len(state["projects"]) == len(state["streams"]) == 1
             assert state["projects"][0]["setup"]["runner_id"] == runner
-            if options.auto:
+            if options.auto and not options.native:
                 assert (base / "starts").read_text() == "start\n"
             print("PASS zero-input project creates managed Git/worktree and verifies discovered OpenCode" if options.empty else "PASS TUI project and structured MCP editor preserve config; real runner prepares workspace and verifies OpenCode")
             if options.tasks:
@@ -172,6 +196,8 @@ def main():
                 if process and process.poll() is None:
                     process.terminate()
                     process.wait(timeout=10)
+            if options.native and (base / "state/opencode/service.json").exists():
+                subprocess.run([opencode, "service", "stop"], env=env, cwd=base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=True)
             health.shutdown()
 
 

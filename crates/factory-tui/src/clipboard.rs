@@ -32,3 +32,36 @@ pub fn read() -> Result<Content, String> {
         .map(Content::Text)
         .map_err(|_| "Kein Bild oder Text in der Zwischenablage".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Run scripts/smoke-clipboard.py in an isolated X server"]
+    fn isolated_native_clipboard_roundtrip() {
+        assert_eq!(
+            std::env::var("FACTORY_ISOLATED_CLIPBOARD_TEST").as_deref(),
+            Ok("1")
+        );
+        let mut owner = arboard::Clipboard::new().unwrap();
+        let bytes = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        owner
+            .set_image(arboard::ImageData {
+                width: 2,
+                height: 1,
+                bytes: std::borrow::Cow::Owned(bytes.clone()),
+            })
+            .unwrap();
+        let Content::Image(pasted) = read().unwrap() else {
+            panic!("Expected native clipboard image");
+        };
+        assert_eq!(pasted.mime, "image/png");
+        factory_core::validate_images(&[pasted]).unwrap();
+        owner.set_text("Unicode: äöü\nsecond line").unwrap();
+        let Content::Text(text) = read().unwrap() else {
+            panic!("Expected clipboard text");
+        };
+        assert_eq!(text, "Unicode: äöü\nsecond line");
+    }
+}

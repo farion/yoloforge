@@ -496,6 +496,7 @@ async fn run(mut args: Args) -> Result<()> {
                         REVIEW_CAPABILITY.into(),
                         PROJECT_SETUP_CAPABILITY.into(),
                         TASK_IMAGES_CAPABILITY.into(),
+                        LOCAL_PROJECT_CAPABILITY.into(),
                     ],
                     id: args.id,
                     instance_id,

@@ -48,6 +48,70 @@ fn done(t: &Ticket) -> bool {
     matches!(t.status, TicketState::Done | TicketState::Cancelled)
 }
 impl Store {
+    pub fn recover_local_projects(&self, runner: RunnerId) -> Result<()> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let commands: Vec<RunnerCommand> = {
+            let mut stmt=tx.prepare("SELECT c.data FROM local_project_recovery r JOIN commands c ON c.id=r.command_id WHERE r.replacement_id IS NULL AND c.runner_id=?1")?;
+            let rows = stmt.query_map([runner.to_string()], |r| r.get::<_, String>(0))?;
+            rows.map(|r| Ok(serde_json::from_str(&r?)?))
+                .collect::<Result<Vec<_>>>()?
+        };
+        for old in commands {
+            let owner = super::work::stream(&tx, old.stream_id)?;
+            let latest: String = tx.query_row(
+                "SELECT id FROM commands WHERE stream_id=?1 ORDER BY rowid DESC LIMIT 1",
+                [owner.id.to_string()],
+                |r| r.get(0),
+            )?;
+            if latest != old.id.to_string()
+                || owner.runner_id != runner
+                || owner.ownership_epoch != old.ownership_epoch
+            {
+                continue;
+            }
+            tx.execute_batch("SAVEPOINT local_project_retry")?;
+            match Self::enqueue_in(
+                &tx,
+                owner.id,
+                &EnqueueCommand {
+                    request_id: RequestId::new(),
+                    expected_revision: owner.revision,
+                    kind: CommandKind::PrepareWorkspace,
+                    prompt: None,
+                },
+                None,
+                false,
+            ) {
+                Ok(new) => {
+                    // Never replay a previous attempt against changed project configuration.
+                    if new.workspace_spec != old.workspace_spec {
+                        tx.execute_batch("ROLLBACK TO local_project_retry")?;
+                    } else {
+                        tx.execute("UPDATE local_project_recovery SET replacement_id=?1 WHERE command_id=?2",params![new.id.to_string(),old.id.to_string()])?;
+                        tx.execute("UPDATE scheduler_runs SET prepare_id=?1 WHERE prepare_id=?2 AND agent_id IS NULL",params![new.id.to_string(),old.id.to_string()])?;
+                        event(
+                            &tx,
+                            "project.folder_retry",
+                            owner.id.to_string(),
+                            &serde_json::json!({"previous_command":old.id,"replacement_command":new.id}),
+                        )?;
+                    }
+                }
+                Err(
+                    StoreError::WorkConflict
+                    | StoreError::Invalid(_)
+                    | StoreError::RevisionConflict(_),
+                ) => {
+                    tx.execute_batch("ROLLBACK TO local_project_retry")?;
+                }
+                Err(e) => return Err(e),
+            }
+            tx.execute_batch("RELEASE local_project_retry")?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn autostart_runner(&self, runner: RunnerId) -> Result<()> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -343,10 +407,9 @@ impl Store {
                 let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",[s.id.to_string()],|r|r.get(0))?;
                 let finished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs r JOIN commands c ON c.id=COALESCE(r.agent_id,r.prepare_id) WHERE r.stream_id=?1 AND (c.state IN ('failed','cancelled') OR (r.agent_id IS NOT NULL AND c.state='succeeded')))",[s.id.to_string()],|r|r.get(0))?;
                 if busy
-                    || s.ticket_ids.iter().any(|id| {
-                        all.get(id)
-                            .is_some_and(|t| !done(t) && !(t.prompt.is_some() && finished))
-                    })
+                    || s.ticket_ids
+                        .iter()
+                        .any(|id| all.get(id).is_some_and(|t| !done(t) && !finished))
                 {
                     active += 1;
                     *counts.entry(s.runner_id).or_default() += 1;

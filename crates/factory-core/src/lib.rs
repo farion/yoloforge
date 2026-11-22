@@ -5,6 +5,7 @@ use uuid::Uuid;
 mod images;
 pub use images::*;
 pub const TASK_IMAGES_CAPABILITY: &str = "task-images-v1";
+pub const LOCAL_PROJECT_CAPABILITY: &str = "local-project-create-v1";
 pub const UNLIMITED_STARTS: u32 = u32::MAX;
 
 macro_rules! id {

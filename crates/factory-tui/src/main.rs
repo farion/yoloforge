@@ -61,6 +61,64 @@ fn command_output(output: &CommandOutput) -> String {
         CommandOutput::CheckpointError { checkpoint_error } => checkpoint_error.clone(),
     }
 }
+fn task_command<'a>(s: &'a Snapshot, t: &Ticket) -> Option<&'a RunnerCommand> {
+    s.commands.iter().rev().find(|c| {
+        s.streams
+            .iter()
+            .any(|stream| stream.id == c.stream_id && stream.ticket_ids.contains(&t.id))
+    })
+}
+fn task_progress(s: &Snapshot, t: &Ticket) -> (String, String) {
+    let paused = s.projects.iter().any(|p| p.id == t.project_id && p.paused);
+    let Some(c) = task_command(s, t) else {
+        return (
+            if paused { "Pausiert" } else { "Wartet" }.into(),
+            if s.runners.is_empty() {
+                "Wartet auf Runner"
+            } else {
+                "Wird automatisch eingeplant"
+            }
+            .into(),
+        );
+    };
+    let label = match c.state {
+        CommandState::Pending => {
+            if paused {
+                "Pausiert"
+            } else {
+                "Wartet auf Runner"
+            }
+        }
+        CommandState::Accepted => {
+            if c.kind == CommandKind::PrepareWorkspace {
+                "Wird vorbereitet"
+            } else {
+                "In Bearbeitung"
+            }
+        }
+        CommandState::Failed => {
+            if c.kind == CommandKind::PrepareWorkspace {
+                "Einrichtung fehlgeschlagen"
+            } else {
+                "Fehler"
+            }
+        }
+        CommandState::Succeeded => {
+            if c.kind == CommandKind::PrepareWorkspace {
+                "Bereit zum Start"
+            } else {
+                "Ergebnis vorhanden"
+            }
+        }
+    };
+    let detail = c
+        .result
+        .as_ref()
+        .map(command_output)
+        .or_else(|| c.agent_progress.as_ref().map(|a| a.summary.clone()))
+        .unwrap_or_default();
+    (label.into(), detail)
+}
 
 #[derive(Parser)]
 #[command(version, about = "YoloForge terminal client")]
@@ -85,7 +143,7 @@ impl Drop for TerminalGuard {
 
 fn opencode(status: &OpenCodeStatus) -> String {
     match status {
-        OpenCodeStatus::NotConfigured => "kein globaler Zugang (Projekt: p)".into(),
+        OpenCodeStatus::NotConfigured => "Zugang wird je Projekt ermittelt".into(),
         OpenCodeStatus::Ready { version } => format!("bereit ({version})"),
         OpenCodeStatus::Unsupported { .. } => "Version nicht unterstuetzt".into(),
         OpenCodeStatus::Unavailable => "nicht erreichbar".into(),
@@ -225,7 +283,7 @@ async fn main() -> Result<()> {
                     s.tickets.iter().filter(|t| t.project_id == p.id).count().to_string(), p.id.to_string()])).collect()).unwrap_or_default()
             } else if view == 2 {
                 last.as_ref().map(|s| s.tickets.iter().filter(|t| s.projects.get(selected_project).is_some_and(|p| p.id == t.project_id))
-                    .map(|t| Row::new(vec![t.prompt.as_deref().unwrap_or(&t.title).lines().next().unwrap_or("Bildaufgabe").to_string(), format!("{:?}",t.status), t.images.len().to_string(),String::new()])).collect()).unwrap_or_default()
+                    .map(|t| {let (progress,detail)=task_progress(s,t);Row::new(vec![t.prompt.as_deref().unwrap_or(&t.title).lines().next().unwrap_or("Bildaufgabe").to_string(), progress, t.images.len().to_string(),detail])}).collect()).unwrap_or_default()
             } else if view == 3 {
                 last.as_ref().map(|s| s.streams.iter().filter(|t| s.projects.get(selected_project).is_some_and(|p| p.id == t.project_id))
                     .map(|t| Row::new(vec![t.goal.clone(),format!("{:?}",t.status),format!("r{} / {} Tickets",t.revision.0,t.ticket_ids.len()),t.id.to_string()])).collect()).unwrap_or_default()
@@ -240,7 +298,7 @@ async fn main() -> Result<()> {
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
                 1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause/Fortsetzen | p: einrichten | Enter: Profil ".to_string()),
-                2 => (["Prompt", "Fortschritt", "Bilder", ""], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: bearbeiten ")),
+                2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Stream", "Status", "Revision / Tickets", "ID"], format!(" Streams: {project_name} | n: neu | Enter: steuern | r: Recovery ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
@@ -415,6 +473,19 @@ async fn main() -> Result<()> {
                 if key.kind == KeyEventKind::Press {
                     if let Some(snapshot) = &last {
                         let project = snapshot.projects.get(selected_project).map(|p| p.id);
+                        if view == 2 && key.code == KeyCode::Enter {
+                            if let Some(command) = snapshot
+                                .tickets
+                                .iter()
+                                .filter(|t| Some(t.project_id) == project)
+                                .nth(row_offset)
+                                .and_then(|t| task_command(snapshot, t))
+                            {
+                                command_detail =
+                                    Some(detail::Dialog::new(command.clone(), client.clone()));
+                                continue;
+                            }
+                        }
                         let target = match (view, key.code) {
                             (1, KeyCode::Char('s')) => snapshot
                                 .projects

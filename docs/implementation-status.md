@@ -4,7 +4,7 @@ Quelle: Arbeitsauftrag des Betreibers, alle 15 offenen Punkte umzusetzen.
 Ein Eintrag gilt erst nach implementierter Funktion und dokumentierter Abnahme
 als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
-## Prompt-Aufgaben und Projektpause (Schema 23)
+## Prompt-Aufgaben und Projektpause (Schema 24)
 
 TUI-Aufgaben erfassen nur Prompt und optionale Bilder (bis vier PNG/JPEG/GIF/WebP,
 zusammen 4 MiB). Ein einzelner Prompt-Editor ersetzt die schrittweise Erfassung:
@@ -25,11 +25,23 @@ Aufgabe starten, ohne manuelles Done. Store-Integrationstest prüft Prompt/Bilde
 Pause vor Annahme, Neustart, Capability-Fencing und Folgeaufgabe. Der PTY-Test
 `scripts/smoke-project-setup.py --empty --tasks` prüft echte TUI/Factory/Runner,
 Prompt-/Bildpersistenz und Pause/Fortsetzen bis zur automatischen Einplanung.
-OpenCode-Erreichbarkeit nutzt dabei ein Fixture. Prompt-Editor, Unicode-Navigation,
+Mit `--new-folder --native --tasks` wurde auch ein echter isolierter OpenCode-
+Service gestartet und der fehlende Projektordner angelegt. Prompt-Editor, Unicode-Navigation,
 Anhangentfernung und unveränderliche Wiederholung sind zusätzlich unit-getestet.
 Der PTY-Test fügt eine Bilddatei direkt in den Prompt ein und sendet mit Enter.
-Native Desktop-Zwischenablage und Realmodell-Bildverarbeitung sind noch nicht
-interaktiv abgenommen.
+`scripts/smoke-clipboard.py` prüft echte X11-Bild-/Text-Zwischenablage im isolierten
+Xvfb. Wayland-/Windows-Desktop-Abnahme steht noch aus. `scripts/smoke-prompt-image.py`
+prüft mit echtem Modell den gesamten Ablauf vom fehlenden Projektordner über
+automatische Einplanung und Inline-Bild bis zum geschriebenen Ergebnis und finalen
+Archiv; bestanden (rotes Bild korrekt erkannt).
+
+Fehlende absolute Projektordner werden als neue Projekte angelegt und ohne
+Überschreiben veröffentlicht; vorhandene Repositories bleiben Importquellen.
+Unter Schema 23 gescheiterte lokale Imports werden nach Registrierung eines
+`local-project-create-v1`-Runners einmalig erneut vorbereitet. Wiederaufnahme ist
+revisions-/epochengebunden, respektiert Pause und führt die Planung weiter.
+Migration, Neustart und Folgeaufgabe sind geprüft. Auch alte automatisch geplante
+Tickets brauchen nach einem finalen Ergebnis kein manuelles Done.
 
 | Nr. | Arbeitspaket | Stand / Abnahme |
 | --- | --- | --- |
@@ -63,4 +75,4 @@ Autonome Supervisor-Beendigungsanfragen mit atomarer Wissenssicherung sind
 implementiert und mit synthetischen Modellentscheidungen geprüft; Realmodell-
 Abnahme bleibt offen. Cleanup nach abgeschlossenem Erfolg bewahrt Ergebnis und
 Archiv und ist mit echtem Modell geprüft; Supervisor-Close fordert Cleanup atomar
-mit an. Details: `runtime-termination.md` (DB 23, Runner-Journal 8).
+mit an. Details: `runtime-termination.md` (DB 24, Runner-Journal 8).

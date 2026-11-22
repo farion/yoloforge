@@ -546,6 +546,7 @@ dependencies = [
  "factory-protocol",
  "fs2",
  "rusqlite",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "sha2",
