@@ -160,6 +160,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@v4
         with:
           pattern: linux-*
@@ -185,5 +187,9 @@ jobs:
           cd release
           sha256sum --check ./*.sha256
           test -s server-image.json
-          gh release create "$RELEASE_TAG" --verify-tag --generate-notes --draft ./*
+          notes=(--generate-notes)
+          if test -f "../docs/release-notes/${RELEASE_TAG}.md"; then
+            notes=(--notes-file "../docs/release-notes/${RELEASE_TAG}.md")
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag "${notes[@]}" --draft ./*
           gh release edit "$RELEASE_TAG" --draft=false --latest

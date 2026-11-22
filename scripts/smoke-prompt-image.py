@@ -22,7 +22,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def inside(binaries, provider, model, registration=None, followup=False, memory=False, native_pause=False, memory_correction=False):
+def inside(binaries, provider, model, registration=None, followup=False, memory=False, native_pause=False, memory_correction=False, supervisor=False):
     local = registration is not None
     registration = registration if local else json.load(sys.stdin)
     directory = Path(tempfile.mkdtemp(prefix="factory-image-", dir="/tmp/opencode" if local else "/home/factory/workspace"))
@@ -113,6 +113,26 @@ def inside(binaries, provider, model, registration=None, followup=False, memory=
                 routing = [c for c in snapshot["commands"] if (c.get("agent_spec") or {}).get("role") == "orchestrator"]
                 assert routing and any(c["state"] == "succeeded" for c in routing), "No successful model routing evaluation"
                 print("PASS real orchestrator routes image task before work starts", flush=True)
+                if supervisor:
+                    project=setup["project"]["id"];root=completed[0]["id"]
+                    policy=api("GET","/v1/projects/"+project+"/supervisor")
+                    assert policy and policy["enabled"]
+                    api("PUT","/v1/projects/"+project+"/supervisor",{"request_id":str(uuid.uuid4()),"expected_revision":policy["revision"],"stream_id":policy["stream_id"],"enabled":True,"evaluation_budget":3,"interval_seconds":30})
+                    # Automatic closure intentionally preserves a 15-minute follow-up grace.
+                    supervisor_deadline=time.monotonic()+1200
+                    while time.monotonic()<supervisor_deadline:
+                        closure=api("GET","/v1/commands/"+root+"/closure")
+                        if closure:
+                            evaluations=api("GET","/v1/projects/"+project+"/supervisor/evaluations")
+                            applied=[e for e in evaluations if e["target_command_id"]==root and e["resolved"] and (e.get("decision") or {}).get("action")=="close" and e.get("knowledge_id")]
+                            assert len(applied)==1,evaluations
+                            assert api("GET","/v1/commands/"+root+"/archive")["status"]["final_scan_complete"]
+                            notes=api("GET","/v1/projects/"+project+"/knowledge")
+                            assert any(n["id"]==applied[0]["knowledge_id"] and n.get("source_command")==root for n in notes)
+                            print("PASS real supervisor closes achieved session goal with retained archive and source-linked memory",flush=True)
+                            return
+                        time.sleep(.5)
+                    raise AssertionError("Supervisor did not close the achieved goal within its bounded evaluation budget")
                 if native_pause:
                     root=completed[0]["id"];stream_id=completed[0]["stream_id"]
                     def fixed(prompt):
@@ -219,18 +239,21 @@ def main():
     parser.add_argument("--memory", action="store_true", help="Verify automatic branch-scoped knowledge extraction after the follow-up")
     parser.add_argument("--native-pause",action="store_true",help="Real native interrupt, archive, release and fixed-session continuation acceptance")
     parser.add_argument("--memory-correction",action="store_true",help="Verify real model supersedes a contradicted prior branch observation")
+    parser.add_argument("--supervisor",action="store_true",help="Real autonomous closure of a completed task with archived memory")
     args = parser.parse_args()
     if args.native_pause and (args.followup or args.memory or args.memory_correction):
         parser.error("--native-pause must run separately from question/memory acceptance")
+    if args.supervisor and (args.native_pause or args.followup or args.memory or args.memory_correction):
+        parser.error("--supervisor must run separately from continuation acceptance")
     if args.memory_correction:
         args.memory=True
     if args.memory:
         args.followup=True
     if args.local_registration:
-        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory, args.native_pause, args.memory_correction)
+        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory, args.native_pause, args.memory_correction, args.supervisor)
         return
     if args.inside:
-        inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory, native_pause=args.native_pause, memory_correction=args.memory_correction)
+        inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory, native_pause=args.native_pause, memory_correction=args.memory_correction, supervisor=args.supervisor)
         return
     state = json.loads((ROOT / "spikes/opencode/.runtime/state.json").read_text())
     container = state["container"]
@@ -240,7 +263,7 @@ def main():
         for name in ["factoryd", "factory-runner"]:
             subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + target + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + target + "/test.py"], check=True, capture_output=True)
-        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []) + (["--native-pause"] if args.native_pause else []) + (["--memory-correction"] if args.memory_correction else []),
+        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []) + (["--native-pause"] if args.native_pause else []) + (["--memory-correction"] if args.memory_correction else []) + (["--supervisor"] if args.supervisor else []),
             input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=900 if args.memory else 600 if args.followup else 300)
         assert result.returncode == 0, "Real image-prompt acceptance failed"
     finally:

@@ -16,7 +16,12 @@ import urllib.parse
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
+    parser.add_argument("--stack-limit-mib",type=int,help="Unix-only child stack regression check, e.g. 1 MiB like the Windows main stack")
     args = parser.parse_args()
+    if args.stack_limit_mib is not None:
+        if os.name=="nt" or args.stack_limit_mib<1:parser.error("Stack limit requires Unix and at least 1 MiB")
+        import resource
+        resource.setrlimit(resource.RLIMIT_STACK,(args.stack_limit_mib*1024*1024,resource.getrlimit(resource.RLIMIT_STACK)[1]))
     token = secrets.token_hex(32)
     snapshot = {"protocol_version": 1, "server_version": "fixture", "boot_id": str(uuid.uuid4()),
                 "revision": 0, "runners": [], "projects": [], "tickets": [], "event_cursor": 0}
