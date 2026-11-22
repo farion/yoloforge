@@ -140,8 +140,9 @@ def main():
                 import base64
                 image.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3e0AAAAASUVORK5CYII="))
                 send("3n")
-                send("Build from this image\t" + str(image))
-                send("\x13")
+                send("Build from this image")
+                send("\x1b[200~" + str(image) + "\x1b[201~")
+                send("\r")
                 state = snapshot()
                 assert len(state["tickets"]) == 1
                 task = state["tickets"][0]
@@ -151,7 +152,6 @@ def main():
                 assert len(snapshot()["commands"]) == 1, "Paused task was started"
                 worker.terminate()
                 worker.wait(timeout=10)
-                send("\x1b")
                 send("2 ")
                 send("\x1b[A")
                 send("\x13")

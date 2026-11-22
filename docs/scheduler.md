@@ -1,7 +1,12 @@
 # Abhängigkeitengesteuerte Ticketplanung
 
 Projekte sind standardmäßig aktiv. In der TUI unter `3` → `n` einen Prompt
-eingeben und mit `Ctrl-S` absenden; optional Bilder als lokale Dateipfade ergänzen.
+eingeben und mit Enter absenden; Shift-/Alt-Enter fügt eine neue Zeile ein.
+Der Prompt-Editor hat keine Formularschritte: Ctrl-V fügt ein Bild oder Text aus
+der lokalen Zwischenablage ein, alternativ eine Bilddatei ins Terminal ziehen.
+Anhänge erscheinen direkt unter dem Text; Ctrl-D entfernt den letzten Anhang.
+Ctrl-S bleibt als Sende-Kürzel verfügbar. Nach bestätigtem Versand schließt der
+Editor automatisch; bei unklarem Versand bleibt der unveränderliche Entwurf erhalten.
 Titel, Priorität, Statuswahl und Scheduler-Aktivierung entfallen.
 Ein kompatibler Runner richtet die Standardplanung mit unbegrenzten Starts ein;
 ohne Modellvorgabe wird das OpenCode-Standardmodell verwendet. Neue Prompts

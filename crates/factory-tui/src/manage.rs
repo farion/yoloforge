@@ -140,6 +140,7 @@ enum State {
 pub struct Dialog {
     task_project: Option<ProjectId>,
     task_images: Vec<PromptImage>,
+    task_images_dirty: bool,
     setup_result: Option<ProjectSetupResult>,
     target: Target,
     title: String,
@@ -157,6 +158,112 @@ pub enum Action {
 }
 
 impl Dialog {
+    fn is_task(&self) -> bool {
+        matches!(self.target, Target::NewTicket(_) | Target::Ticket(_))
+    }
+    pub fn task_submitted(&self) -> bool {
+        self.is_task() && self.state == State::Submitted
+    }
+    fn attach(&mut self, image: PromptImage) {
+        if self.state != State::Editing {
+            return;
+        }
+        let mut images = self.task_images.clone();
+        images.push(image);
+        match validate_images(&images) {
+            Ok(()) => {
+                self.task_images = images;
+                self.task_images_dirty = true;
+                self.message = "Bild eingefuegt".into();
+            }
+            Err(e) => self.message = e.into(),
+        }
+    }
+    pub fn paste(&mut self, text: &str) {
+        if self.state != State::Editing {
+            return;
+        }
+        if self.is_task() {
+            let candidate = text.trim().trim_matches(['\'', '"']);
+            let path = reqwest::Url::parse(candidate)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+                .unwrap_or_else(|| {
+                    let mut name = candidate.to_string();
+                    if candidate.starts_with('/') {
+                        for c in [' ', '(', ')', '\'', '"'] {
+                            name = name.replace(&format!("\\{c}"), &c.to_string());
+                        }
+                    }
+                    std::path::PathBuf::from(name)
+                });
+            let is_image = path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
+                matches!(
+                    s.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "webp"
+                )
+            });
+            if !candidate.contains(['\n', '\r']) && path.is_absolute() && is_image {
+                let result = (|| -> Result<PromptImage, String> {
+                    use std::io::Read;
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(&path)
+                        .map_err(|e| format!("Bild nicht lesbar: {e}"))?
+                        .take((IMAGE_BYTES + 1) as u64)
+                        .read_to_end(&mut bytes)
+                        .map_err(|e| e.to_string())?;
+                    PromptImage::from_bytes(
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        &bytes,
+                    )
+                    .map_err(str::to_string)
+                })();
+                match result {
+                    Ok(image) => self.attach(image),
+                    Err(e) => self.message = e,
+                }
+                return;
+            }
+        }
+        self.insert(text);
+    }
+    fn draw_prompt(&self, frame: &mut Frame, online: bool) {
+        let areas = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(3),
+            Constraint::Length(self.task_images.len() as u16 + 1),
+            Constraint::Length(4),
+        ])
+        .split(frame.area());
+        frame.render_widget(Paragraph::new(self.title.as_str()), areas[0]);
+        let f = &self.fields[0];
+        let text = format!("{}▏{}", &f.text[..f.cursor], &f.text[f.cursor..]);
+        let width = areas[1].width.saturating_sub(2).max(1);
+        let cursor_lines = Paragraph::new(format!("{}▏", &f.text[..f.cursor]))
+            .wrap(Wrap { trim: false })
+            .line_count(width);
+        let scroll = cursor_lines
+            .saturating_sub(areas[1].height.saturating_sub(2) as usize)
+            .min(u16::MAX as usize) as u16;
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0))
+                .block(Block::bordered().title(" Prompt ")),
+            areas[1],
+        );
+        let attachments = self
+            .task_images
+            .iter()
+            .enumerate()
+            .map(|(i, image)| Line::from(format!("[Bild {}: {}]", i + 1, clean(&image.name))))
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(attachments), areas[2]);
+        frame.render_widget(Paragraph::new(format!("Enter: senden · Shift/Alt-Enter: neue Zeile · Ctrl-V: Bild/Text einfuegen\nBilddatei hineinziehen · Ctrl-D: letztes Bild entfernen · Esc: zurueck\n{}{}",if online {""}else{"Offline – Entwurf bleibt erhalten. "},self.message)).wrap(Wrap{trim:false}),areas[3]);
+    }
     pub fn new(target: Target, snapshot: &Snapshot) -> Option<Self> {
         let (title, revision, fields) = match target {
             Target::Pause(id) => {
@@ -376,15 +483,7 @@ impl Dialog {
                 (
                     format!("Aufgabe: {}", p.name),
                     Revision(0),
-                    vec![
-                        Field::text("Prompt", "", false, true),
-                        Field::text(
-                            "Bilder (optional: ein Dateipfad pro Zeile)",
-                            "",
-                            false,
-                            true,
-                        ),
-                    ],
+                    vec![Field::text("Prompt", "", false, true)],
                 )
             }
             Target::Ticket(id) => {
@@ -395,10 +494,7 @@ impl Dialog {
                 (
                     "Aufgabe bearbeiten".into(),
                     t.revision,
-                    vec![
-                        Field::text("Prompt", &text, false, true),
-                        Field::text("Weitere Bilder (ein Dateipfad pro Zeile)", "", false, true),
-                    ],
+                    vec![Field::text("Prompt", &text, false, true)],
                 )
             }
             Target::NewStream(id) => {
@@ -447,6 +543,7 @@ impl Dialog {
             }
         };
         Some(Self {
+            task_images_dirty: false,
             task_project: match target {
                 Target::NewTicket(id) => Some(id),
                 Target::Ticket(id) => snapshot
@@ -533,6 +630,10 @@ impl Dialog {
                     .position(|(id, _)| id == &new.text)
                     .unwrap_or(0);
             }
+        }
+        if self.task_images_dirty {
+            fresh.task_images = self.task_images.clone();
+            fresh.task_images_dirty = true;
         }
         fresh.focus = self.focus;
         fresh.message =
@@ -688,24 +789,7 @@ impl Dialog {
                 },
             ),
             Target::NewTicket(_) | Target::Ticket(_) => {
-                let mut images = self.task_images.clone();
-                for path in value(1).lines().filter(|p| !p.trim().is_empty()) {
-                    use std::io::Read;
-                    let path = std::path::Path::new(path.trim());
-                    let mut bytes = Vec::new();
-                    std::fs::File::open(path)
-                        .map_err(|e| e.to_string())?
-                        .take((IMAGE_BYTES + 1) as u64)
-                        .read_to_end(&mut bytes)
-                        .map_err(|e| e.to_string())?;
-                    images.push(PromptImage::from_bytes(
-                        path.file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        &bytes,
-                    )?);
-                }
+                let images = self.task_images.clone();
                 validate_images(&images)?;
                 if value(0).trim().is_empty() && images.is_empty() {
                     return Err("Text oder Bild eingeben".into());
@@ -826,7 +910,36 @@ impl Dialog {
             },
         )
     }
-    pub fn key(&mut self, key: KeyEvent, online: bool, snapshot: Option<&Snapshot>) -> Action {
+    pub fn key(&mut self, mut key: KeyEvent, online: bool, snapshot: Option<&Snapshot>) -> Action {
+        if self.is_task() {
+            if key.code == KeyCode::Enter {
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                {
+                    self.insert("\n");
+                    return Action::None;
+                }
+                key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+                if self.state == State::Editing {
+                    match crate::clipboard::read() {
+                        Ok(crate::clipboard::Content::Image(image)) => self.attach(image),
+                        Ok(crate::clipboard::Content::Text(text)) => self.paste(&text),
+                        Err(e) => self.message = e,
+                    }
+                }
+                return Action::None;
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
+                if self.state == State::Editing {
+                    self.task_images.pop();
+                    self.task_images_dirty = true;
+                }
+                return Action::None;
+            }
+        }
         if key.code == KeyCode::Esc {
             return Action::Close;
         }
@@ -949,6 +1062,28 @@ impl Dialog {
             return Action::None;
         }
         match key.code {
+            KeyCode::Up | KeyCode::Down if f.multiline => {
+                let start = f.text[..f.cursor].rfind('\n').map_or(0, |i| i + 1);
+                let column = f.text[start..f.cursor].chars().count();
+                let target = if key.code == KeyCode::Up {
+                    if start == 0 {
+                        return Action::None;
+                    }
+                    let end = start - 1;
+                    let begin = f.text[..end].rfind('\n').map_or(0, |i| i + 1);
+                    (begin, end)
+                } else {
+                    let Some(next) = f.text[f.cursor..].find('\n').map(|i| f.cursor + i + 1) else {
+                        return Action::None;
+                    };
+                    let end = f.text[next..].find('\n').map_or(f.text.len(), |i| next + i);
+                    (next, end)
+                };
+                f.cursor = f.text[target.0..target.1]
+                    .char_indices()
+                    .nth(column)
+                    .map_or(target.1, |(i, _)| target.0 + i);
+            }
             KeyCode::Left => {
                 f.cursor = f.text[..f.cursor]
                     .char_indices()
@@ -958,8 +1093,12 @@ impl Dialog {
             KeyCode::Right => {
                 f.cursor += f.text[f.cursor..].chars().next().map_or(0, char::len_utf8)
             }
-            KeyCode::Home => f.cursor = 0,
-            KeyCode::End => f.cursor = f.text.len(),
+            KeyCode::Home => f.cursor = f.text[..f.cursor].rfind('\n').map_or(0, |i| i + 1),
+            KeyCode::End => {
+                f.cursor += f.text[f.cursor..]
+                    .find('\n')
+                    .unwrap_or(f.text.len() - f.cursor)
+            }
             KeyCode::Backspace => {
                 let start = f.text[..f.cursor]
                     .char_indices()
@@ -979,6 +1118,10 @@ impl Dialog {
         Action::None
     }
     pub fn draw(&self, frame: &mut Frame, online: bool) {
+        if self.is_task() {
+            self.draw_prompt(frame, online);
+            return;
+        }
         let areas = Layout::vertical([
             Constraint::Length(4),
             Constraint::Min(4),
@@ -1117,6 +1260,86 @@ mod tests {
         }
     }
     #[test]
+    fn prompt_editor_pastes_images_inline_and_freezes_uncertain_submission() {
+        let s = snapshot();
+        let mut d = Dialog::new(Target::NewTicket(s.projects[0].id), &s).unwrap();
+        assert_eq!(d.fields.len(), 1);
+        d.paste("Baue dies\nmit Tests");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image with spaces.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nfixture").unwrap();
+        d.paste(&format!("'{}'", path.display()));
+        assert_eq!(d.task_images.len(), 1);
+        assert_eq!(d.fields[0].text, "Baue dies\nmit Tests");
+        d.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            true,
+            Some(&s),
+        );
+        assert!(d.fields[0].text.ends_with('\n'));
+        let Action::Send(first) = d.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            true,
+            Some(&s),
+        ) else {
+            panic!("Enter must send");
+        };
+        let Request::Task(task) = &first else {
+            panic!()
+        };
+        assert_eq!(task.images.len(), 1);
+        d.state = State::Uncertain;
+        d.paste("changed");
+        d.key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            true,
+            Some(&s),
+        );
+        let Action::Send(second) = d.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            true,
+            Some(&s),
+        ) else {
+            panic!()
+        };
+        assert_eq!(first.id(), second.id());
+        assert_eq!(d.task_images.len(), 1);
+        d.response(first.id(), Ok(()));
+        assert!(d.task_submitted());
+    }
+    #[test]
+    fn prompt_editor_removes_attachments_and_moves_across_unicode_lines() {
+        let s = snapshot();
+        let mut d = Dialog::new(Target::NewTicket(s.projects[0].id), &s).unwrap();
+        d.paste("äbc\nöx");
+        d.key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            true,
+            Some(&s),
+        );
+        assert_eq!(&d.fields[0].text[..d.fields[0].cursor], "äb");
+        d.attach(PromptImage::from_bytes("a.png".into(), b"\x89PNG\r\n\x1a\nfixture").unwrap());
+        d.key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            true,
+            Some(&s),
+        );
+        assert!(d.task_images.is_empty());
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| d.draw(f, true)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Enter: senden"));
+        assert!(!rendered.contains("Verwaltung"));
+        assert!(!rendered.contains("Revision"));
+    }
+    #[test]
     fn conflict_rebase_retains_only_local_edits_and_uses_new_revision() {
         let mut snapshot = snapshot();
         snapshot.tickets[0].prompt = Some("old".into());
@@ -1137,7 +1360,7 @@ mod tests {
         snapshot.tickets[0].revision = Revision(2);
         control(&mut d, 'r', &snapshot);
         assert_eq!(d.fields[0].text, "old changed");
-        assert_eq!(d.fields[1].text, "");
+        assert_eq!(d.fields.len(), 1);
         let second = send(&mut d, &snapshot);
         assert_ne!(first.id(), second.id());
         let Request::Task(body) = second else {

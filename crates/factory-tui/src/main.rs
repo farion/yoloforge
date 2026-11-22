@@ -14,6 +14,7 @@ use ratatui::{
 use std::{collections::BTreeMap, time::Duration};
 mod answer;
 mod archive;
+mod clipboard;
 mod commands;
 mod detail;
 mod devices;
@@ -262,6 +263,12 @@ async fn main() -> Result<()> {
                 if let Some(setup) = setup {
                     dialog.setup_result(setup);
                 }
+                if dialog.task_submitted() {
+                    if open_management == Some(target) {
+                        open_management = None;
+                    }
+                    management.remove(&target);
+                }
             }
         }
         if let Some(snapshot) = last.as_ref() {
@@ -287,7 +294,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 if let Some(dialog) = open_management.and_then(|id| management.get_mut(&id)) {
-                    dialog.insert(text);
+                    dialog.paste(text);
                 }
                 if let Some(dialog) = open_stream.and_then(|id| stream_dialogs.get_mut(&id)) {
                     dialog.insert(text);

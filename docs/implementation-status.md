@@ -7,7 +7,12 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 ## Prompt-Aufgaben und Projektpause (Schema 23)
 
 TUI-Aufgaben erfassen nur Prompt und optionale Bilder (bis vier PNG/JPEG/GIF/WebP,
-zusammen 4 MiB; lokale Dateipfade). `/v1/tasks` speichert die Bilddaten dauerhaft;
+zusammen 4 MiB). Ein einzelner Prompt-Editor ersetzt die schrittweise Erfassung:
+Enter sendet, Shift-/Alt-Enter erzeugt neue Zeilen, Ctrl-V liest Bild/Text aus der
+lokalen Zwischenablage (Linux X11/Wayland, Windows); hineingezogene Bilddateien
+werden direkt angehängt. Ctrl-D entfernt den letzten Anhang. Die Zwischenablage
+gehört zum TUI-Host; SSH stellt nicht automatisch die lokale Desktop-Zwischenablage
+bereit. `/v1/tasks` speichert die Bilddaten dauerhaft;
 der Runner übergibt sie als Inline-Dateien an OpenCode und prüft beim Wiederanlauf
 den Bild-Digest der Prompt-Projektion. Alte Runner dürfen Bildaufträge nicht annehmen
 (`task-images-v1`). Binäranhänge aus Agentenantworten/Archiv-Backfill bleiben offen.
@@ -20,8 +25,11 @@ Aufgabe starten, ohne manuelles Done. Store-Integrationstest prüft Prompt/Bilde
 Pause vor Annahme, Neustart, Capability-Fencing und Folgeaufgabe. Der PTY-Test
 `scripts/smoke-project-setup.py --empty --tasks` prüft echte TUI/Factory/Runner,
 Prompt-/Bildpersistenz und Pause/Fortsetzen bis zur automatischen Einplanung.
-OpenCode-Erreichbarkeit nutzt dabei ein Fixture; Realmodell-Bildverarbeitung
-ist noch nicht abgenommen.
+OpenCode-Erreichbarkeit nutzt dabei ein Fixture. Prompt-Editor, Unicode-Navigation,
+Anhangentfernung und unveränderliche Wiederholung sind zusätzlich unit-getestet.
+Der PTY-Test fügt eine Bilddatei direkt in den Prompt ein und sendet mit Enter.
+Native Desktop-Zwischenablage und Realmodell-Bildverarbeitung sind noch nicht
+interaktiv abgenommen.
 
 | Nr. | Arbeitspaket | Stand / Abnahme |
 | --- | --- | --- |
