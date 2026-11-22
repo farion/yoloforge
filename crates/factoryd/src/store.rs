@@ -486,6 +486,7 @@ mod setup;
 mod supervisor;
 mod tasks;
 mod termination;
+mod usage;
 mod work;
 
 fn records<T: DeserializeOwned>(tx: &Transaction<'_>, sql: &str) -> Result<Vec<T>> {

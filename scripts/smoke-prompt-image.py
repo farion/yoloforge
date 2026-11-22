@@ -22,7 +22,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def inside(binaries, provider, model, registration=None, followup=False, memory=False, native_pause=False):
+def inside(binaries, provider, model, registration=None, followup=False, memory=False, native_pause=False, memory_correction=False):
     local = registration is not None
     registration = registration if local else json.load(sys.stdin)
     directory = Path(tempfile.mkdtemp(prefix="factory-image-", dir="/tmp/opencode" if local else "/home/factory/workspace"))
@@ -77,7 +77,7 @@ def inside(binaries, provider, model, registration=None, followup=False, memory=
                     assert all(n.get("branch")==branch and n["priority"]==1 for n in matching)
                     assert len(matching)==1
                     print("PASS real memory extraction retains source command, evaluation provenance and branch scope",flush=True)
-                    return
+                    return matching[0]
                 time.sleep(.5)
             raise AssertionError("No reusable memory extracted for finalized proof-file convention")
         def chunk(kind, data):
@@ -170,7 +170,30 @@ def inside(binaries, provider, model, registration=None, followup=False, memory=
                                 assert (Path(source)/"answer-proof.txt").read_text().strip()=="blue"
                                 assert (Path(source)/"image-proof.txt").read_text().strip()=="red"
                                 print("PASS real fixed-session continuation, automatic question answer and follow-up publication",flush=True)
-                                verify_memory(command)
+                                previous_note=verify_memory(command)
+                                if memory_correction:
+                                    corrected=api("POST","/v1/tasks",{"request_id":str(uuid.uuid4()),"id":None,"expected_revision":0,
+                                        "project_id":setup["project"]["id"],"requested_session":root,"images":[],
+                                        "prompt":"Change the previous proof-file convention: all *-proof.txt files must now contain exactly one UPPERCASE English color word, replacing the earlier lowercase convention. Update image-proof.txt to RED and answer-proof.txt to BLUE. Verify both file contents. Do not ask questions or delegate. Explicitly explain the old-to-new convention correction and retain the two color meanings in your final summary."})
+                                    correction_deadline=time.monotonic()+240
+                                    while time.monotonic()<correction_deadline:
+                                        s=api("GET","/v1/snapshot")
+                                        task_state=next(t for t in s["tickets"] if t["id"]==corrected["id"])
+                                        changed=next((c for c in s["commands"] if c["id"]==task_state.get("execution_command")),None)
+                                        if changed:
+                                            assert changed["state"]!="failed",changed.get("result")
+                                            if changed["state"]=="succeeded":break
+                                        time.sleep(.3)
+                                    else:raise AssertionError("Correction task timed out")
+                                    replacement=verify_memory(changed)
+                                    assert replacement.get("supersedes")==previous_note["id"],replacement
+                                    notes=api("GET","/v1/projects/"+setup["project"]["id"]+"/knowledge")
+                                    old=next(n for n in notes if n["id"]==previous_note["id"])
+                                    assert old["retired"] and old["superseded_by"]==replacement["id"]
+                                    assert replacement["branch"]==old["branch"] and replacement["source_command"]==changed["id"]
+                                    assert (Path(source)/"image-proof.txt").read_text().strip()=="RED"
+                                    assert (Path(source)/"answer-proof.txt").read_text().strip()=="BLUE"
+                                    print("PASS real model corrects contradicted branch memory atomically with linked provenance",flush=True)
                                 return
                         time.sleep(.3)
                     raise AssertionError("Follow-up with orchestrated question timed out")
@@ -195,14 +218,19 @@ def main():
     parser.add_argument("--followup", action="store_true", help="Also verify fixed-session continuation and an automatically answered real model question")
     parser.add_argument("--memory", action="store_true", help="Verify automatic branch-scoped knowledge extraction after the follow-up")
     parser.add_argument("--native-pause",action="store_true",help="Real native interrupt, archive, release and fixed-session continuation acceptance")
+    parser.add_argument("--memory-correction",action="store_true",help="Verify real model supersedes a contradicted prior branch observation")
     args = parser.parse_args()
+    if args.native_pause and (args.followup or args.memory or args.memory_correction):
+        parser.error("--native-pause must run separately from question/memory acceptance")
+    if args.memory_correction:
+        args.memory=True
     if args.memory:
         args.followup=True
     if args.local_registration:
-        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory, args.native_pause)
+        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory, args.native_pause, args.memory_correction)
         return
     if args.inside:
-        inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory, native_pause=args.native_pause)
+        inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory, native_pause=args.native_pause, memory_correction=args.memory_correction)
         return
     state = json.loads((ROOT / "spikes/opencode/.runtime/state.json").read_text())
     container = state["container"]
@@ -212,7 +240,7 @@ def main():
         for name in ["factoryd", "factory-runner"]:
             subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + target + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + target + "/test.py"], check=True, capture_output=True)
-        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []) + (["--native-pause"] if args.native_pause else []),
+        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []) + (["--native-pause"] if args.native_pause else []) + (["--memory-correction"] if args.memory_correction else []),
             input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=900 if args.memory else 600 if args.followup else 300)
         assert result.returncode == 0, "Real image-prompt acceptance failed"
     finally:

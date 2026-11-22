@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
         }
         terminal.draw(|frame| {
             if let Some(dialog)=&ssh_dialog {dialog.draw(frame);return;}
-            if let Some(report)=&readiness_view {frame.render_widget(Paragraph::new(report.as_str()).scroll((readiness_scroll,0)).wrap(ratatui::widgets::Wrap{trim:false}).block(Block::bordered().title(" Projektbereitschaft · ↑/↓: lesen · Esc: zurueck · o: OpenCode-Anmeldung ")),frame.area());return;}
+            if let Some(report)=&readiness_view {frame.render_widget(Paragraph::new(report.as_str()).scroll((readiness_scroll,0)).wrap(ratatui::widgets::Wrap{trim:false}).block(Block::bordered().title(if readiness_project.is_some() {" Projektbereitschaft · ↑/↓: lesen · Esc: zurueck · o: OpenCode-Anmeldung "} else {" Projektverbrauch · ↑/↓: lesen · Esc: zurueck "})),frame.area());return;}
             if let Some(dialog)=open_recovery.and_then(|id|recoveries.get_mut(&id)){dialog.draw(frame,online);return;}
             if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
             if let Some(dialog)=&mut command_detail {dialog.draw(frame,last.as_ref(),online);return;}
@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status | s: SSH-Verbindung bearbeiten ".to_string()),
-                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | r: Bereitschaft | o: Anmeldung | p: einrichten ".to_string()),
+                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | r: Bereitschaft | u: Verbrauch | o: Anmeldung | p: einrichten ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
@@ -647,6 +647,30 @@ async fn main() -> Result<()> {
                         }
                         continue;
                     }
+                    if view == 1 && key.code == KeyCode::Char('u') {
+                        if let Some(project) =
+                            last.as_ref().and_then(|s| s.projects.get(row_offset))
+                        {
+                            let id = project.id;
+                            readiness_view = Some("Lade archivierte Verbrauchsdaten …".into());
+                            readiness_scroll = 0;
+                            readiness_generation = readiness_generation.wrapping_add(1);
+                            readiness_project = None;
+                            let generation = readiness_generation;
+                            let client = client.clone();
+                            let tx = readiness_tx.clone();
+                            tokio::spawn(async move {
+                                let text = match client.project_usage(id).await {
+                                    Ok(report) => usage::render(&report),
+                                    Err(_) => {
+                                        "Verbrauch nicht abrufbar; Serververbindung pruefen.".into()
+                                    }
+                                };
+                                let _ = tx.send((generation, text));
+                            });
+                        }
+                        continue;
+                    }
                     if view == 1 && matches!(key.code, KeyCode::Char('r' | 'o')) {
                         if let Some(snapshot) = &last {
                             if let Some(project) = snapshot.projects.get(row_offset) {
@@ -896,3 +920,4 @@ async fn main() -> Result<()> {
     events.abort();
     Ok(())
 }
+mod usage;

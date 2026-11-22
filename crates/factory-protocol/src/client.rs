@@ -622,6 +622,15 @@ impl FactoryClient {
         )
         .await
     }
+    pub async fn project_usage(&self, id: ProjectId) -> Result<ProjectUsage, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/projects/{id}/usage", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn knowledge_context(
         &self,
         id: ProjectId,

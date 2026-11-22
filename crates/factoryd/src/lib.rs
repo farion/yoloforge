@@ -108,6 +108,7 @@ pub fn router_with_shutdown(
         .route("/v1/knowledge/{id}", get(knowledge_routes::read))
         .route("/v1/knowledge/{id}/retire", post(knowledge_routes::retire))
         .route("/v1/projects/{id}/knowledge", get(knowledge_routes::list))
+        .route("/v1/projects/{id}/usage", get(knowledge_routes::usage))
         .route("/v1/projects/{id}/context", get(knowledge_routes::context))
         .route("/healthz", get(health))
         .route(

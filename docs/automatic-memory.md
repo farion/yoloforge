@@ -41,3 +41,11 @@ Archive bleiben unberührt. Der Test prüft Antwortverlust, Neustart und identis
 Batch-Replay. Nicht mehr erreichbare Sessions, verlorene Journale oder serverseitig
 gesperrte/terminierte Quellen können so nicht rekonstruiert werden. Begrenzte
 Binärsnapshots und Export sind unter [archive-files.md](archive-files.md) beschrieben.
+## Realmodell-Korrekturabnahme
+
+`scripts/smoke-prompt-image.py --local-registration PATH --provider PROVIDER_ID
+--model MODEL_ID --memory-correction` prueft eine echte Konventionsaenderung:
+Proof-Dateien zuerst kleingeschrieben, danach explizit grossgeschrieben. Das Modell
+extrahiert die Korrektur, ersetzt die angebotene alte Branch-Notiz und erhaelt
+bidirektionale Provenienz. Mit `openai/gpt-6.2-sol` bestanden; lokale Belege:
+`/tmp/opencode/factory-image-751slsmk`.

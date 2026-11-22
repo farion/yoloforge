@@ -1120,6 +1120,105 @@ fn continuation_keeps_root_session_and_rejects_stale_parent_or_missing_archive()
 }
 
 #[test]
+fn usage_deduplicates_continuation_snapshots_and_preserves_unknown_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.db");
+    let store = Store::open(&path).unwrap();
+    let first = command(&store);
+    let project = store.snapshot().unwrap().projects[0].id;
+    let message = |input, cost| {
+        serde_json::json!({"id":"msg_usage","type":"assistant",
+        "model":{"providerID":"openai","id":"test"},"time":{"completed":1},
+        "tokens":{"input":input,"output":5,"reasoning":2,"cache":{"read":3,"write":0}},"cost":cost})
+    };
+    let batch = |revision, messages, final_scan_complete| ReportArchive {
+        ownership_epoch: 1,
+        batch: ArchiveBatch {
+            session_id: first.session_id(),
+            revision,
+            captured_unix_ms: revision,
+            final_scan_complete,
+            messages,
+        },
+    };
+    let initial = batch(1, vec![message(10, 0.1)], false);
+    store
+        .report_archive(first.runner_id, first.id, initial.clone())
+        .unwrap();
+    store
+        .report_archive(first.runner_id, first.id, initial)
+        .unwrap();
+    store
+        .report_archive(
+            first.runner_id,
+            first.id,
+            batch(2, vec![message(12, 0.2)], true),
+        )
+        .unwrap();
+    store
+        .complete(
+            first.runner_id,
+            first.id,
+            CommandResult {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+                result: CommandOutput::Agent {
+                    agent: AgentProgress {
+                        session_id: first.session_id(),
+                        message_id: agent_message_id(first.id),
+                        phase: AgentPhase::Succeeded,
+                        summary: "done".into(),
+                    },
+                },
+            },
+        )
+        .unwrap();
+    let next = store
+        .continue_agent(
+            first.stream_id,
+            ContinueAgent {
+                request_id: RequestId::new(),
+                expected_revision: store.snapshot().unwrap().streams[0].revision,
+                previous_command_id: first.id,
+                prompt: "next".into(),
+            },
+        )
+        .unwrap();
+    store
+        .acknowledge_supported(
+            next.runner_id,
+            next.id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            },
+            true,
+        )
+        .unwrap();
+    store.report_archive(next.runner_id,next.id,batch(1,vec![message(12,0.2),serde_json::json!({
+        "id":"msg_unknown_usage","type":"assistant","model":{"providerID":"openai","id":"test"},"tokens":-1,"cost":"unknown"
+    })],false)).unwrap();
+    let report = store.project_usage(project).unwrap();
+    assert_eq!(report.groups.len(), 1);
+    let group = &report.groups[0];
+    assert_eq!(group.assistant_messages, 2);
+    assert_eq!(group.unfinished_messages, 1);
+    assert_eq!(group.messages_missing_tokens, 1);
+    assert_eq!(group.messages_missing_cost, 1);
+    assert_eq!(group.tokens.input, 12);
+    assert_eq!(group.tokens.output, 5);
+    assert_eq!(group.tokens.reasoning, 2);
+    assert_eq!(group.tokens.cache.read, 3);
+    assert_eq!(group.reported_cost_usd, 0.2);
+    assert_eq!(group.model_id.as_deref(), Some("test"));
+    assert_eq!(group.role, "work");
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.project_usage(project).unwrap(), report);
+    assert!(store.project_usage(ProjectId::new()).is_err());
+}
+
+#[test]
 fn interrupted_native_session_requires_confirmation_archive_and_explicit_release() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");

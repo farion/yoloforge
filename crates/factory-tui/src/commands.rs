@@ -113,6 +113,10 @@ pub enum Command {
         #[arg(long)]
         attachments: Option<std::path::PathBuf>,
     },
+    /// Observed project tokens/cost by model and role; deduplicated archived messages.
+    Usage {
+        project: ProjectId,
+    },
     /// Project knowledge with provenance and bounded context selection.
     Knowledge {
         #[command(subcommand)]
@@ -802,6 +806,7 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                 &serde_json::json!({"output":output,"versions":count,"attachments":attachments,"files_extracted":files.as_ref().map(|f|f.count),"files_unavailable":files.as_ref().map(|f|f.unavailable),"final_scan_complete":status.is_some_and(|v|v.final_scan_complete) && termination.as_ref().is_none_or(|t|!t.archive_may_be_incomplete),"termination":termination}),
             )
         }
+        Command::Usage { project } => print(&client.project_usage(project).await?),
         Command::Knowledge { command } => match command {
             KnowledgeCommand::Show { id } => print(&client.knowledge_note(id).await?),
             KnowledgeCommand::Add {

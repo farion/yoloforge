@@ -1,4 +1,7 @@
 use super::*;
+pub(super) async fn usage(State(app): State<App>, Path(id): Path<ProjectId>) -> Response {
+    db_call(RequestId::new(), move || app.store.project_usage(id)).await
+}
 pub(super) async fn read(State(app): State<App>, Path(id): Path<KnowledgeId>) -> Response {
     db_call(RequestId::new(), move || app.store.knowledge_note(id)).await
 }
