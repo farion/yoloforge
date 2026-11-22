@@ -308,6 +308,8 @@ pub struct ExternalQuestion {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Question {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub orchestration_note: String,
     pub id: QuestionId,
     pub command_id: CommandId,
     pub session_id: String,

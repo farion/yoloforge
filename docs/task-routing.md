@@ -41,10 +41,15 @@ nicht die Ergebniszuordnung älterer Aufgaben überschreiben.
 Store-Tests prüfen feste und modellgewählte Fortsetzung, Warten auf Abschlussarchiv,
 fehlgeschlagene/ungültige Entscheidungen, Neustart, unveränderte Request-Wiederholung,
 Bildweitergabe und persistente Limits. TUI-Tests prüfen eingefrorene Sessionauswahl
-bei unklarer Zustellung. Eine echte Modell-End-to-End-Abnahme des neuen Routings
-steht noch aus.
+bei unklarer Zustellung. Echte Modell-End-to-End-Abnahme mit Bildaufgabe,
+Orchestrator-Zuordnung, fester Sessionfortsetzung, automatischer Rueckfrage und
+Ergebnisveroeffentlichung bestanden (`smoke-prompt-image.py --local-registration
+... --followup`); Nachweise unter `/tmp/opencode/factory-image-4nc2soic`.
 
-Dies ist die Aufgabenrouting-Komponente. Automatische Rückfragenbeantwortung,
-ereignisgesteuerte Supervisor-Integration, Kostenkontrolle, Provider-/MCP-Login,
-nativer Remote-Einstieg, erweiterte Wissensextraktion/Anhangarchivierung,
+Dies ist die Aufgabenrouting-Komponente. Rueckfragenbeantwortung wurde mit Schema 26
+ergaenzt (`question-orchestration.md`). Lokaler Anmeldeeinstieg und SSH-Sessions
+sind in `project-readiness.md` und `ssh-sessions.md` dokumentiert.
+Der Supervisor wird am Orchestrator automatisch eingerichtet, mit begrenztem
+Budget und Vorrang fuer Aufgaben/Fragen. Erweiterte Kostenkontrolle,
+vollstaendiger Remote-Login, erweiterte Wissensextraktion/Anhangarchivierung,
 Hosting-Integration und Android/Push sind dadurch noch nicht abgeschlossen.

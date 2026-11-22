@@ -1,6 +1,6 @@
 use super::*;
 
-fn save(tx: &Transaction<'_>, question: &mut Question) -> Result<()> {
+pub(super) fn save(tx: &Transaction<'_>, question: &mut Question) -> Result<()> {
     question.revision.0 = question
         .revision
         .0
@@ -12,7 +12,7 @@ fn save(tx: &Transaction<'_>, question: &mut Question) -> Result<()> {
     )?;
     event(tx, "question.updated", question.id.to_string(), question)
 }
-fn load(tx: &Transaction<'_>, id: QuestionId) -> Result<Question> {
+pub(super) fn load(tx: &Transaction<'_>, id: QuestionId) -> Result<Question> {
     let data: Option<String> = tx
         .query_row(
             "SELECT data FROM questions WHERE id=?1",
@@ -101,6 +101,7 @@ impl Store {
                 }
             } else {
                 let value = Question {
+                    orchestration_note: String::new(),
                     id: QuestionId::new(),
                     command_id: id,
                     session_id: command.session_id(),
@@ -135,55 +136,61 @@ impl Store {
             body.request_id,
             &format!("question.answer/{id}"),
             &body,
-            |tx| {
-                let mut value = load(tx, id)?;
-                if value.revision != body.expected_revision {
-                    return Err(StoreError::RevisionConflict(value.revision));
-                }
-                let data: String = tx.query_row(
-                    "SELECT data FROM commands WHERE id=?1",
-                    [value.command_id.to_string()],
-                    |r| r.get(0),
-                )?;
-                let command: RunnerCommand = serde_json::from_str(&data)?;
-                if super::controls::load(tx, command.stream_id)?
-                    .is_some_and(|c| c.state != PauseState::Released)
-                {
-                    return Err(StoreError::WorkConflict);
-                }
-                if command.state != CommandState::Accepted
-                    || command
-                        .agent_progress
-                        .as_ref()
-                        .is_some_and(|p| p.phase == AgentPhase::Unknown)
-                    || !matches!(
-                        value.state,
-                        QuestionState::Pending | QuestionState::Rejected
-                    )
-                {
-                    return Err(StoreError::WorkConflict);
-                }
-                if !body.answer.is_object() || serde_json::to_vec(&body.answer)?.len() > 32768 {
-                    return Err(StoreError::Invalid("Invalid answer object"));
-                }
-                if value.external.kind == QuestionKind::Permission
-                    && (body.answer.as_object().unwrap().len() != 1
-                        || !matches!(
-                            body.answer["decision"].as_str(),
-                            Some("once" | "always" | "reject")
-                        ))
-                {
-                    return Err(StoreError::Invalid(
-                        "Permission decision must be once, always or reject",
-                    ));
-                }
-                value.answer = Some(body.answer.clone());
-                value.answer_request = Some(body.request_id);
-                value.state = QuestionState::AnswerQueued;
-                save(tx, &mut value)?;
-                Ok(value)
-            },
+            |tx| Self::queue_answer(tx, id, &body),
         )
+    }
+
+    pub(super) fn queue_answer(
+        tx: &Transaction<'_>,
+        id: QuestionId,
+        body: &AnswerQuestion,
+    ) -> Result<Question> {
+        let mut value = load(tx, id)?;
+        if value.revision != body.expected_revision {
+            return Err(StoreError::RevisionConflict(value.revision));
+        }
+        let data: String = tx.query_row(
+            "SELECT data FROM commands WHERE id=?1",
+            [value.command_id.to_string()],
+            |r| r.get(0),
+        )?;
+        let command: RunnerCommand = serde_json::from_str(&data)?;
+        if super::controls::load(tx, command.stream_id)?
+            .is_some_and(|c| c.state != PauseState::Released)
+        {
+            return Err(StoreError::WorkConflict);
+        }
+        if command.state != CommandState::Accepted
+            || command
+                .agent_progress
+                .as_ref()
+                .is_some_and(|p| p.phase == AgentPhase::Unknown)
+            || !matches!(
+                value.state,
+                QuestionState::Pending | QuestionState::Rejected
+            )
+        {
+            return Err(StoreError::WorkConflict);
+        }
+        if !body.answer.is_object() || serde_json::to_vec(&body.answer)?.len() > 32768 {
+            return Err(StoreError::Invalid("Invalid answer object"));
+        }
+        if value.external.kind == QuestionKind::Permission
+            && (body.answer.as_object().unwrap().len() != 1
+                || !matches!(
+                    body.answer["decision"].as_str(),
+                    Some("once" | "always" | "reject")
+                ))
+        {
+            return Err(StoreError::Invalid(
+                "Permission decision must be once, always or reject",
+            ));
+        }
+        value.answer = Some(body.answer.clone());
+        value.answer_request = Some(body.request_id);
+        value.state = QuestionState::AnswerQueued;
+        save(tx, &mut value)?;
+        Ok(value)
     }
 
     pub fn answer_delivery(

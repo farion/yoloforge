@@ -15,6 +15,30 @@ fn save_policy(tx: &Transaction<'_>, p: &SupervisorPolicy) -> Result<()> {
     tx.execute("INSERT INTO supervisor_policies(project_id,stream_id,data) VALUES(?1,?2,?3) ON CONFLICT(project_id) DO UPDATE SET data=excluded.data",params![p.project_id.to_string(),p.stream_id.to_string(),serde_json::to_string(p)?])?;
     event(tx, "supervisor.policy", p.project_id.to_string(), p)
 }
+pub(super) fn ensure_automatic(
+    tx: &Transaction<'_>,
+    project: ProjectId,
+    stream: StreamId,
+) -> Result<()> {
+    if policy(tx, project)?.is_none() {
+        save_policy(
+            tx,
+            &SupervisorPolicy {
+                project_id: project,
+                stream_id: stream,
+                revision: Revision(1),
+                enabled: true,
+                remaining_evaluations: 12,
+                interval_seconds: 300,
+                next_unix_ms: super::super::unix_ms().saturating_add(300_000),
+            },
+        )?;
+    }
+    Ok(())
+}
+fn waiting_work(tx: &Transaction<'_>, project: ProjectId) -> Result<bool> {
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM tickets t WHERE t.project_id=?1 AND json_extract(t.data,'$.status') IN ('backlog','ready') AND NOT EXISTS(SELECT 1 FROM stream_tickets st WHERE st.ticket_id=t.id)) OR EXISTS(SELECT 1 FROM questions q JOIN commands c ON c.id=q.command_id JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(q.data,'$.state')='pending' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0)",[project.to_string()],|r|r.get(0))?)
+}
 fn load_command(tx: &Transaction<'_>, id: CommandId) -> Result<RunnerCommand> {
     let data: String = tx.query_row(
         "SELECT data FROM commands WHERE id=?1",
@@ -80,6 +104,14 @@ impl Store {
                 continue;
             }
             if !p.enabled || p.remaining_evaluations == 0 || now < p.next_unix_ms {
+                continue;
+            }
+            let automatic: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM orchestrators WHERE project_id=?1 AND stream_id=?2)",
+                params![p.project_id.to_string(), p.stream_id.to_string()],
+                |r| r.get(0),
+            )?;
+            if automatic && waiting_work(&tx, p.project_id)? {
                 continue;
             }
             let owner = super::work::stream(&tx, p.stream_id)?;
@@ -232,6 +264,19 @@ fn candidate(
             continue;
         }
         if c.state == CommandState::Succeeded {
+            let automatic: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM orchestrators WHERE project_id=?1 AND stream_id=?2)",
+                params![p.project_id.to_string(), p.stream_id.to_string()],
+                |r| r.get(0),
+            )?;
+            if automatic {
+                let captured:Option<u64>=tx.query_row("SELECT json_extract(data,'$.captured_unix_ms') FROM archive_status WHERE command_id=?1",[c.id.to_string()],|r|r.get(0)).optional()?;
+                if captured
+                    .is_none_or(|time| super::super::unix_ms().saturating_sub(time) < 900_000)
+                {
+                    continue;
+                }
+            }
             let archived:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1 AND json_extract(data,'$.final_scan_complete')=1)",[c.id.to_string()],|r|r.get(0))?;
             if !archived {
                 continue;
@@ -286,6 +331,14 @@ fn resolve(
     }
     if decision.action == SupervisorAction::Wait {
         e.outcome = "wait".into();
+        return Ok(());
+    }
+    if matches!(
+        decision.action,
+        SupervisorAction::Close | SupervisorAction::Terminate
+    ) && waiting_work(tx, p.project_id)?
+    {
+        e.outcome = "pending_work_preserves_session".into();
         return Ok(());
     }
     if (decision.action == SupervisorAction::Compact

@@ -486,6 +486,81 @@ fn supervisor(store: &Store, target: &RunnerCommand) -> SupervisorPolicy {
     p
 }
 #[test]
+fn pending_followup_fences_an_already_running_supervisor_close_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let target = command(&store);
+    store
+        .complete(
+            target.runner_id,
+            target.id,
+            CommandResult {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+                result: CommandOutput::Agent {
+                    agent: AgentProgress {
+                        session_id: target.session_id(),
+                        message_id: agent_message_id(target.id),
+                        phase: AgentPhase::Succeeded,
+                        summary: "done".into(),
+                    },
+                },
+            },
+        )
+        .unwrap();
+    store
+        .report_archive(
+            target.runner_id,
+            target.id,
+            ReportArchive {
+                ownership_epoch: 1,
+                batch: ArchiveBatch {
+                    session_id: target.session_id(),
+                    revision: 1,
+                    captured_unix_ms: 1,
+                    final_scan_complete: true,
+                    messages: vec![],
+                },
+            },
+        )
+        .unwrap();
+    let policy = supervisor(&store, &target);
+    let eval = store
+        .pending(target.runner_id)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.stream_id == policy.stream_id && c.kind == CommandKind::RunAgent)
+        .unwrap();
+    store
+        .acknowledge(
+            target.runner_id,
+            eval.id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            },
+        )
+        .unwrap();
+    store
+        .save_task(SaveTask {
+            request_id: RequestId::new(),
+            id: None,
+            expected_revision: Revision(0),
+            project_id: policy.project_id,
+            prompt: "Continue this work".into(),
+            images: vec![],
+            requested_session: Some(target.id),
+        })
+        .unwrap();
+    store.complete(target.runner_id,eval.id,CommandResult{request_id:RequestId::new(),ownership_epoch:1,result:CommandOutput::Agent{agent:AgentProgress{session_id:eval.session_id(),message_id:agent_message_id(eval.id),phase:AgentPhase::Succeeded,summary:r#"{"action":"close","reason":"Goal complete","memory":"The previous task completed"}"#.into()}}}).unwrap();
+    store.supervisor_tick(policy.next_unix_ms).unwrap();
+    assert_eq!(
+        store.supervisor_evaluations(policy.project_id).unwrap()[0].outcome,
+        "pending_work_preserves_session"
+    );
+    assert!(store.session_closure(target.id).unwrap().is_none());
+}
+#[test]
 fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
     for action in ["compact", "close", "terminate"] {
         let dir = tempfile::tempdir().unwrap();

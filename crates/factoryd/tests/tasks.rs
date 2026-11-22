@@ -2,6 +2,136 @@ use factory_core::*;
 use factory_protocol::*;
 use factoryd::store::Store;
 
+#[test]
+fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
+    for (human, reply, expected) in [
+        (
+            false,
+            r#"{"action":"answer","answer":{"color":"blue"},"reason":"Matches the task"}"#,
+            Some("blue"),
+        ),
+        (
+            true,
+            r#"{"action":"answer","answer":{"color":"blue"},"reason":"Matches the task"}"#,
+            Some("red"),
+        ),
+        (
+            false,
+            r#"{"action":"escalate","reason":"User preference is missing"}"#,
+            None,
+        ),
+        (
+            false,
+            r#"{"action":"answer","answer":{"color":"invalid"},"reason":"Unsupported choice"}"#,
+            None,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let s = Store::open(&path).unwrap();
+        let p = s
+            .create_project(CreateProject {
+                request_id: RequestId::new(),
+                name: "Questions".into(),
+                repository: "factory:managed".into(),
+                base_branch: "main".into(),
+            })
+            .unwrap();
+        s.create_ticket(CreateTicket {
+            request_id: RequestId::new(),
+            project_id: p.id,
+            title: "Build blue UI".into(),
+            description: "Use blue".into(),
+            acceptance_criteria: String::new(),
+            priority: 1,
+        })
+        .unwrap();
+        let runner = RunnerId::new();
+        s.autostart_runner(runner).unwrap();
+        s.scheduler_tick().unwrap();
+        prepare(&s, &s.pending(runner).unwrap()[0]);
+        s.scheduler_tick().unwrap();
+        let worker = s.pending(runner).unwrap()[0].clone();
+        s.acknowledge(
+            runner,
+            worker.id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            },
+        )
+        .unwrap();
+        let question=s.sync_questions(runner,worker.id,QuestionSnapshot{ownership_epoch:1,questions:vec![ExternalQuestion{kind:QuestionKind::Form,external_id:"form_color".into(),payload:serde_json::json!({"id":"form_color","sessionID":worker.session_id(),"title":"Which color?","fields":[{"key":"color","type":"string","required":true,"options":[{"value":"blue","label":"Blue"},{"value":"red","label":"Red"}]}]})}]}).unwrap()[0].clone();
+        s.scheduler_tick().unwrap();
+        let prep = s
+            .pending(runner)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.kind == CommandKind::PrepareWorkspace)
+            .unwrap();
+        prepare(&s, &prep);
+        s.scheduler_tick().unwrap();
+        let eval = s
+            .pending(runner)
+            .unwrap()
+            .into_iter()
+            .find(|c| {
+                c.agent_spec
+                    .as_ref()
+                    .is_some_and(|a| a.role == "orchestrator-question")
+            })
+            .unwrap();
+        assert!(eval.agent_spec.as_ref().unwrap().read_only);
+        if human {
+            s.answer_question(
+                question.id,
+                AnswerQuestion {
+                    request_id: RequestId::new(),
+                    expected_revision: question.revision,
+                    answer: serde_json::json!({"color":"red"}),
+                },
+            )
+            .unwrap();
+        }
+        complete(
+            &s,
+            &eval,
+            CommandOutput::Agent {
+                agent: AgentProgress {
+                    session_id: eval.session_id(),
+                    message_id: agent_message_id(eval.id),
+                    phase: AgentPhase::Succeeded,
+                    summary: reply.into(),
+                },
+            },
+        );
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        s.scheduler_tick().unwrap();
+        let q = s.snapshot().unwrap().questions[0].clone();
+        assert_eq!(
+            q.answer.as_ref().and_then(|v| v["color"].as_str()),
+            expected
+        );
+        assert_eq!(
+            q.state,
+            if expected.is_some() {
+                QuestionState::AnswerQueued
+            } else {
+                QuestionState::Pending
+            }
+        );
+        assert!(!q.orchestration_note.is_empty());
+        let receipt = q.answer_request;
+        for _ in 0..3 {
+            s.scheduler_tick().unwrap();
+        }
+        let snap = s.snapshot().unwrap();
+        assert_eq!(snap.questions[0].answer_request, receipt);
+        assert_eq!(snap.commands.len(), 4);
+    }
+}
+
 fn complete(s: &Store, c: &RunnerCommand, result: CommandOutput) {
     s.acknowledge(
         c.runner_id,
@@ -104,6 +234,10 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
     let first = s.save_task(task("Build calculator", None)).unwrap();
     s.autostart_runner(runner).unwrap();
     route_new(&s, first.id);
+    let automatic = s.supervisor_policy(p.id).unwrap().unwrap();
+    assert!(automatic.enabled);
+    assert_eq!(automatic.remaining_evaluations, 12);
+    assert_eq!(automatic.interval_seconds, 300);
     let prep = s
         .pending(runner)
         .unwrap()

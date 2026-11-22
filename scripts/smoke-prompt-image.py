@@ -22,9 +22,10 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def inside(binaries):
-    registration = json.load(sys.stdin)
-    directory = Path(tempfile.mkdtemp(prefix="factory-image-", dir="/home/factory/workspace"))
+def inside(binaries, registration=None, followup=False):
+    local = registration is not None
+    registration = registration if local else json.load(sys.stdin)
+    directory = Path(tempfile.mkdtemp(prefix="factory-image-", dir="/tmp/opencode" if local else "/home/factory/workspace"))
     env = {**os.environ, "FACTORY_TOKEN": secrets.token_hex(32)}
     env.pop("FACTORY_TOKEN_FILE", None)
     processes = []
@@ -79,7 +80,7 @@ def inside(binaries):
             for c in commands:
                 assert c["state"] != "failed", c.get("result")
             for q in snapshot.get("questions", []):
-                if q["state"] == "pending" and q["external"]["kind"] == "permission":
+                if q["state"] == "pending" and q["external"]["kind"] == "permission" and q.get("orchestration_note", "").startswith("human:"):
                     raise AssertionError("Model requires a permission answer; inspect retained acceptance workspace")
             completed = [c for c in commands if c["kind"] == "run_agent" and c["state"] == "succeeded"]
             if completed:
@@ -93,6 +94,32 @@ def inside(binaries):
                 archive = api("GET", "/v1/commands/" + completed[0]["id"] + "/archive")
                 assert archive["status"]["final_scan_complete"]
                 print("PASS real model receives image, writes correct result and automatically publishes into the requested project folder", flush=True)
+                routing = [c for c in snapshot["commands"] if (c.get("agent_spec") or {}).get("role") == "orchestrator"]
+                assert routing and any(c["state"] == "succeeded" for c in routing), "No successful model routing evaluation"
+                print("PASS real orchestrator routes image task before work starts", flush=True)
+                if followup:
+                    root = completed[0]["id"]
+                    follow = api("POST", "/v1/tasks", {"request_id":str(uuid.uuid4()),"id":None,"expected_revision":0,
+                        "project_id":setup["project"]["id"],"requested_session":root,"images":[],
+                        "prompt":"Continue this project. Keep image-proof.txt unchanged. The requested color for a new answer-proof.txt is blue. Before writing it, you MUST use the question tool to ask 'Which color for answer-proof.txt?' with choices blue and red, and wait for the answer. Then write the answered color as one lowercase word into answer-proof.txt. Do not delegate."})
+                    follow_deadline = time.monotonic() + 240
+                    while time.monotonic() < follow_deadline:
+                        snapshot = api("GET", "/v1/snapshot")
+                        ticket = next(t for t in snapshot["tickets"] if t["id"] == follow["id"])
+                        command = next((c for c in snapshot["commands"] if c["id"] == ticket.get("execution_command") and c["kind"] == "run_agent"), None)
+                        if command:
+                            assert command["state"] != "failed", command.get("result")
+                            if command["state"] == "succeeded":
+                                assert command["agent_spec"]["continuation"]["root_command_id"] == root
+                                assert command["stream_id"] == completed[0]["stream_id"]
+                                questions=[q for q in snapshot["questions"] if q["command_id"] == command["id"]]
+                                assert questions and any(q["state"]=="answered" and q.get("orchestration_note", "").startswith("answer queued:") for q in questions), "No automatically answered question"
+                                assert (Path(source)/"answer-proof.txt").read_text().strip()=="blue"
+                                assert (Path(source)/"image-proof.txt").read_text().strip()=="red"
+                                print("PASS real fixed-session continuation, automatic question answer and follow-up publication",flush=True)
+                                return
+                        time.sleep(.3)
+                    raise AssertionError("Follow-up with orchestrated question timed out")
                 return
             time.sleep(.3)
         raise AssertionError("Image task did not finish within four minutes")
@@ -107,9 +134,14 @@ def inside(binaries):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inside", type=Path)
+    parser.add_argument("--local-registration", type=Path, help="Use an existing local service without starting/stopping it; retain separate Factory evidence under /tmp/opencode")
+    parser.add_argument("--followup", action="store_true", help="Also verify fixed-session continuation and an automatically answered real model question")
     args = parser.parse_args()
+    if args.local_registration:
+        inside(ROOT / "target/debug", json.loads(args.local_registration.read_text()), args.followup)
+        return
     if args.inside:
-        inside(args.inside)
+        inside(args.inside, followup=args.followup)
         return
     state = json.loads((ROOT / "spikes/opencode/.runtime/state.json").read_text())
     container = state["container"]
@@ -119,8 +151,8 @@ def main():
         for name in ["factoryd", "factory-runner"]:
             subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + target + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + target + "/test.py"], check=True, capture_output=True)
-        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target],
-            input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=300)
+        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target] + (["--followup"] if args.followup else []),
+            input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=600 if args.followup else 300)
         assert result.returncode == 0, "Real image-prompt acceptance failed"
     finally:
         subprocess.run(["docker", "exec", container, "rm", "-rf", target], check=True, capture_output=True)

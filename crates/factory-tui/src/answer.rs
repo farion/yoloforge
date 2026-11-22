@@ -658,6 +658,7 @@ mod tests {
     fn form(fields: Value) -> Question {
         let command_id = CommandId::new();
         Question {
+            orchestration_note: String::new(),
             id: QuestionId::new(),
             command_id,
             session_id: agent_session_id(command_id),

@@ -1,0 +1,118 @@
+//! Native SSH attachment. Credentials and host-key policy stay with the user's SSH setup.
+use anyhow::{ensure, Context, Result};
+use factory_core::{CommandId, RunnerId};
+use serde::Deserialize;
+use std::{collections::BTreeMap, path::PathBuf, process::Command};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Profile {
+    host: String,
+    server: String,
+    journal: String,
+    #[serde(default)]
+    opencode_registration: Option<String>,
+}
+pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
+    let path = std::env::var_os("YOLOFORGE_SSH_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+                })
+                .join("yoloforge/ssh.json")
+        });
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("SSH-Profil nicht lesbar"),
+    };
+    let profiles: BTreeMap<RunnerId, Profile> =
+        serde_json::from_slice(&bytes).context("Ungueltiges YoloForge-SSH-Profil")?;
+    profiles
+        .get(&runner)
+        .map(|p| command(p, runner, id))
+        .transpose()
+}
+fn quote(s: &str) -> Result<String> {
+    ensure!(
+        !s.is_empty() && !s.chars().any(|c| c.is_control()),
+        "Leeres oder ungueltiges SSH-Profilfeld"
+    );
+    Ok(format!("'{}'", s.replace('\'', "'\\''")))
+}
+fn command(p: &Profile, runner: RunnerId, id: CommandId) -> Result<Command> {
+    let url = reqwest::Url::parse(&p.server).context("Ungueltige Factory-URL im SSH-Profil")?;
+    ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "Factory-URL darf keine Zugangsdaten enthalten"
+    );
+    ensure!(
+        !p.host.starts_with('-')
+            && !p.host.is_empty()
+            && p.host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-@:[]".contains(&b)),
+        "SSH-Ziel muss ein Host oder SSH-Alias sein"
+    );
+    let mut args = vec![
+        "factory-runner".to_string(),
+        "--id".into(),
+        runner.to_string(),
+        "--name".into(),
+        "native-attach".into(),
+        "--server".into(),
+        p.server.clone(),
+        "--journal".into(),
+        p.journal.clone(),
+        "--open-session".into(),
+        id.to_string(),
+    ];
+    if let Some(path) = &p.opencode_registration {
+        args.extend(["--opencode-registration".into(), path.clone()]);
+    }
+    let remote = args
+        .iter()
+        .map(|s| quote(s))
+        .collect::<Result<Vec<_>>>()?
+        .join(" ");
+    let mut command = Command::new("ssh");
+    command
+        .args(["-t", "--", &p.host, &remote])
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TOKEN_FILE")
+        .env_remove("OPENCODE_PASSWORD");
+    Ok(command)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ssh_uses_exact_ids_and_quotes_remote_paths_without_passwords() {
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let mut p = Profile {
+            host: "user@runner".into(),
+            server: "http://127.0.0.1:7432".into(),
+            journal: "/home/user/a 'quoted' journal; echo ignored".into(),
+            opencode_registration: None,
+        };
+        let c = command(&p, runner, id).unwrap();
+        let args = c
+            .get_args()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(&args[..3], ["-t", "--", "user@runner"]);
+        assert!(args[3].contains(&id.to_string()));
+        assert!(args[3].contains("'\\''quoted'\\''"));
+        p.host = "-oProxyCommand=anything".into();
+        assert!(command(&p, runner, id).is_err());
+        assert!(quote("bad\npath").is_err());
+    }
+}

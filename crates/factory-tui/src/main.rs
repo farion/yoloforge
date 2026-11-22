@@ -23,6 +23,7 @@ mod harness;
 mod manage;
 mod recovery;
 mod session;
+mod ssh;
 mod stream;
 
 fn project_questions(snapshot: &Snapshot, index: usize) -> Vec<&Question> {
@@ -240,6 +241,12 @@ async fn main() -> Result<()> {
     let mut command_detail: Option<detail::Dialog> = None;
     let mut session_view: Option<session::View> = None;
     let mut native_request: Option<(StreamId, Option<CommandId>)> = None;
+    let mut project_native_request: Option<ProjectId> = None;
+    let mut readiness_view: Option<String> = None;
+    let mut readiness_scroll = 0u16;
+    let mut readiness_generation = 0u64;
+    let mut readiness_project = None;
+    let (readiness_tx, mut readiness_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, String)>();
     let mut native_notice = String::new();
     let mut device_dialog: Option<devices::Dialog> = None;
     let mut open_devices = false;
@@ -289,10 +296,22 @@ async fn main() -> Result<()> {
                 dialog.response(request, result);
             }
         }
-        if let Some((stream, selected)) = native_request.take() {
+        while let Ok((generation, report)) = readiness_rx.try_recv() {
+            if readiness_view.is_some() && generation == readiness_generation {
+                readiness_view = Some(report);
+            }
+        }
+        if native_request.is_some() || project_native_request.is_some() {
             let prepared = if let Some(snapshot) = &last {
-                attach::prepare(snapshot, stream, selected).await
+                if let Some(id) = project_native_request.take() {
+                    attach::project_terminal(snapshot, id).await
+                } else {
+                    let (stream, selected) = native_request.take().expect("native request");
+                    attach::prepare(snapshot, stream, selected).await
+                }
             } else {
+                native_request = None;
+                project_native_request = None;
                 Err(anyhow::anyhow!("Factory-Snapshot fehlt"))
             };
             native_notice = match prepared {
@@ -314,6 +333,7 @@ async fn main() -> Result<()> {
             }
         }
         terminal.draw(|frame| {
+            if let Some(report)=&readiness_view {frame.render_widget(Paragraph::new(report.as_str()).scroll((readiness_scroll,0)).wrap(ratatui::widgets::Wrap{trim:false}).block(Block::bordered().title(" Projektbereitschaft · ↑/↓: lesen · Esc: zurueck · o: OpenCode-Anmeldung ")),frame.area());return;}
             if let Some(dialog)=open_recovery.and_then(|id|recoveries.get_mut(&id)){dialog.draw(frame,online);return;}
             if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
             if let Some(dialog)=&mut command_detail {dialog.draw(frame,last.as_ref(),online);return;}
@@ -341,12 +361,12 @@ async fn main() -> Result<()> {
                     .map(|c| Row::new(vec![c.agent_spec.as_ref().filter(|a|!a.role.is_empty()).map(|a|a.role.clone()).unwrap_or_else(||format!("{:?}",c.kind)),c.agent_progress.as_ref().map(|a|format!("{:?}",a.phase)).unwrap_or_else(||format!("{:?}",c.state)),c.result.as_ref().map(command_output).or_else(||c.agent_progress.as_ref().map(|a|a.summary.clone())).unwrap_or_else(||"ausstehend".into()),c.id.to_string()])).collect()).unwrap_or_default()
             } else {
                 last.as_ref().map(|s|project_questions(s,selected_project).into_iter()
-                    .map(|q|Row::new(vec![q.external.payload["title"].as_str().or_else(||q.external.payload["action"].as_str()).unwrap_or("Frage").to_string(),format!("{:?}",q.state),format!("{:?} / r{}",q.external.kind,q.revision.0),q.id.to_string()])).collect()).unwrap_or_default()
+                    .map(|q|Row::new(vec![q.external.payload["title"].as_str().or_else(||q.external.payload["action"].as_str()).unwrap_or("Frage").to_string(),format!("{:?}",q.state),if q.orchestration_note.is_empty(){format!("{:?} / r{}",q.external.kind,q.revision.0)}else{q.orchestration_note.clone()},q.id.to_string()])).collect()).unwrap_or_default()
             };
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
-                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause/Fortsetzen | l: Sessionlimit | p: einrichten | Enter: Profil ".to_string()),
+                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | r: Bereitschaft | o: Anmeldung | p: einrichten ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
@@ -416,6 +436,43 @@ async fn main() -> Result<()> {
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     break;
+                }
+                if readiness_view.is_some() {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Esc => readiness_view = None,
+                            KeyCode::Up => readiness_scroll = readiness_scroll.saturating_sub(1),
+                            KeyCode::Down => {
+                                readiness_scroll = readiness_scroll.saturating_add(1).min(
+                                    readiness_view.as_ref().map_or(0, |s| {
+                                        s.lines().count().saturating_sub(1).min(u16::MAX as usize)
+                                            as u16
+                                    }),
+                                )
+                            }
+                            KeyCode::Home => readiness_scroll = 0,
+                            KeyCode::End => {
+                                readiness_scroll = readiness_view.as_ref().map_or(0, |s| {
+                                    s.lines()
+                                        .count()
+                                        .saturating_sub(
+                                            terminal
+                                                .size()
+                                                .map_or(20, |r| r.height.saturating_sub(2))
+                                                as usize,
+                                        )
+                                        .min(u16::MAX as usize)
+                                        as u16
+                                })
+                            }
+                            KeyCode::Char('o') => {
+                                project_native_request = readiness_project;
+                                readiness_view = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
                 }
                 if let Some(id) = open_recovery {
                     if key.kind == KeyEventKind::Press {
@@ -568,6 +625,37 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if key.kind == KeyEventKind::Press {
+                    if view == 1 && matches!(key.code, KeyCode::Char('r' | 'o')) {
+                        if let Some(snapshot) = &last {
+                            if let Some(project) = snapshot.projects.get(row_offset) {
+                                let id = project.id;
+                                if key.code == KeyCode::Char('o') {
+                                    project_native_request = Some(id);
+                                } else {
+                                    readiness_view = Some(
+                                        "Pruefe Projektmodell, Anmeldungen und MCP-Verbindungen …"
+                                            .into(),
+                                    );
+                                    readiness_scroll = 0;
+                                    readiness_generation = readiness_generation.wrapping_add(1);
+                                    let generation = readiness_generation;
+                                    readiness_project = Some(id);
+                                    let snapshot = snapshot.clone();
+                                    let tx = readiness_tx.clone();
+                                    tokio::spawn(async move {
+                                        let result = attach::readiness(&snapshot, id).await;
+                                        let _ = tx.send((
+                                            generation,
+                                            result.unwrap_or_else(|e| {
+                                                format!("Bereitschaft nicht ermittelbar: {e:#}")
+                                            }),
+                                        ));
+                                    });
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(snapshot) = &last {
                         let project = snapshot.projects.get(selected_project).map(|p| p.id);
                         if view == 2 && key.code == KeyCode::Enter {

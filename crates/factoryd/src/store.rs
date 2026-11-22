@@ -58,7 +58,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 25,
+            version <= 26,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -141,6 +141,9 @@ impl Store {
                 UPDATE projects SET data=json_set(data,'$.max_sessions',COALESCE((SELECT json_extract(s.data,'$.max_parallel') FROM scheduler_policies s WHERE s.project_id=projects.id),1)) WHERE json_extract(data,'$.max_sessions') IS NULL;
                 UPDATE tickets SET data=json_set(data,'$.execution_command',(SELECT COALESCE(r.agent_id,r.prepare_id) FROM scheduler_runs r WHERE r.ticket_id=tickets.id)) WHERE EXISTS(SELECT 1 FROM scheduler_runs r WHERE r.ticket_id=tickets.id);
                 PRAGMA user_version=25;")?;
+        }
+        if version < 26 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS question_evaluations(question_id TEXT PRIMARY KEY REFERENCES questions(id), data TEXT NOT NULL CHECK(json_valid(data))); PRAGMA user_version=26;")?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -462,6 +465,7 @@ mod controls;
 mod devices;
 mod excerpts;
 mod knowledge;
+mod question_orchestrator;
 mod questions;
 mod reviews;
 mod routing;

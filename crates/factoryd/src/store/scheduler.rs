@@ -339,6 +339,17 @@ impl Store {
                 continue;
             }
             let mut all = tickets(&tx, p.project_id)?;
+            tx.execute_batch("SAVEPOINT question_orchestration")?;
+            match super::question_orchestrator::tick(&tx, &p) {
+                Ok(()) => {}
+                Err(
+                    StoreError::WorkConflict
+                    | StoreError::Invalid(_)
+                    | StoreError::RevisionConflict(_),
+                ) => tx.execute_batch("ROLLBACK TO question_orchestration")?,
+                Err(error) => return Err(error),
+            }
+            tx.execute_batch("RELEASE question_orchestration")?;
             // Advance only our own prepared streams; never adopt a manual assignment.
             let mut stmt=tx.prepare("SELECT r.ticket_id,r.stream_id,r.prepare_id,r.prompt FROM scheduler_runs r JOIN tickets t ON t.id=r.ticket_id WHERE t.project_id=?1 AND r.agent_id IS NULL ORDER BY r.rowid")?;
             let preparing = stmt

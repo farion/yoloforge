@@ -12,7 +12,8 @@ Start stellen die YoloForge-Oberfläche wieder her und bleiben sichtbar.
 
 Der native Einstieg unterstützt derzeit Services und Arbeitsordner, die auf dem
 TUI-Rechner erreichbar sind (einschließlich einer lokalen Service-Registrierung).
-Ein nativer Tunnel zu entfernten Runnern ist noch nicht implementiert. Für diese
+Fuer SSH-Runner ist jetzt ein nativer SSH-Einstieg mit lokalen Profilen vorhanden
+(siehe `ssh-sessions.md`; separate Host-Abnahme steht aus). Für andere entfernte Runner
 und für die Factory-Historie bleibt `v` als synchronisierte Live-Ansicht verfügbar.
 `o` öffnet aus dieser Ansicht die jeweils ausgewählte Session im nativen OpenCode.
 Der technische Steuerungsdialog liegt hinter `c`.

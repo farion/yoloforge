@@ -177,6 +177,7 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
         owner
     };
     let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",[owner.id.to_string()],|r|r.get(0))?;
+    super::supervisor::ensure_automatic(tx, t.project_id, owner.id)?;
     if busy {
         note(tx, t, "Wartet auf laufenden Orchestrator")?;
         return Ok(Route::Pending);

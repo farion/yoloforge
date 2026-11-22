@@ -244,6 +244,7 @@ mod tests {
         let session = agent_session_id(command_id);
         let answer_request = RequestId::new();
         let question = Question {
+            orchestration_note: String::new(),
             id: QuestionId::new(),
             command_id,
             session_id: session.clone(),
@@ -272,6 +273,7 @@ mod tests {
         )
         .unwrap();
         let args = Args {
+            open_session: None,
             publish_result: None,
             review_image: None,
             review_docker_socket: "/var/run/docker.sock".into(),

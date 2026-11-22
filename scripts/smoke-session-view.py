@@ -24,6 +24,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--server", default="http://127.0.0.1:17432")
 parser.add_argument("--native", action="store_true", help="Open the original OpenCode terminal and verify return to YoloForge")
 parser.add_argument("--missing-cli", action="store_true", help="Verify terminal restoration if the local OpenCode executable is missing")
+parser.add_argument("--readiness", action="store_true", help="Read local project provider/MCP status without signing in or sending a prompt")
 args = parser.parse_args()
 if args.missing_cli:
     args.native = True
@@ -63,6 +64,15 @@ def read_until(expected, timeout=15):
 
 try:
     read_until(b"Sessions")
+    if args.readiness:
+        os.write(fd,b"2r")
+        read_until(b"Projektbereitschaft")
+        read_until(b"OpenCode-Service erreichbar",timeout=30)
+        os.write(fd,b"\x1b[F")
+        read_until(b"Status erneut mit r pruefen",timeout=30)
+        os.write(fd,b"\x1b")
+        read_until(b"Bereitschaft")
+        print("PASS project readiness reads model, integration and MCP status and returns to projects")
     os.write(fd, b"4")
     read_until(b"OpenCode oeffnen")
     if args.native:

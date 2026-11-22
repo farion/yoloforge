@@ -12,7 +12,19 @@ Projektlimit (`l`) und gekennzeichnete Orchestrator-Läufe in der Diagnose.
 Fortsetzungen behalten die Sessionwurzel und Aufgaben ihren eigenen
 Ausführungsbezug. Implementierungsumfang, Prüfungen und offene Punkte:
 [`task-routing.md`](task-routing.md). Die sieben Produktpakete sind noch nicht
-vollständig umgesetzt; insbesondere ist Rückfragenorchestrierung noch offen.
+vollständig umgesetzt.
+
+Erweiterung Schema 26: einmalige, revisionsgeschuetzte Rueckfragenauswertung mit
+Projektwissen, automatischer Antwort oder Eskalation; siehe
+[`question-orchestration.md`](question-orchestration.md). Tests fuer Neustart,
+menschliche Konkurrenzantwort und ungueltige Modellantworten bestanden.
+Lokaler Anmeldeeinstieg (`o`) und Bereitschaftsansicht (`r`) sind in der
+Projektliste verfuegbar; siehe [`project-readiness.md`](project-readiness.md).
+Native SSH-Sessions haben einen lesenden Runner-Helfer und lokale Profile;
+siehe [`ssh-sessions.md`](ssh-sessions.md). Separater SSH-Host und OAuth-Abnahme
+stehen noch aus. Echte Modellabnahme fuer Bildrouting, feste Sessionfortsetzung,
+automatische Frage und Folgepublikation bestanden
+(`smoke-prompt-image.py --local-registration ... --followup`).
 
 Ergebnisübernahme (Runner-Journal 9): erfolgreiche lokale Aufgaben werden automatisch
 in den angegebenen Projektordner übernommen und bilden die Basis für Folgeaufgaben.
@@ -24,7 +36,7 @@ Session-Einstieg: Enter auf einem Arbeitsbereich oder einer gestarteten Aufgabe
 öffnet die originale OpenCode-TUI im selben Terminal, gebunden an Service, Session
 und Arbeitsordner. Nach Beenden kehrt YoloForge zurück. Native PTY-Abnahme mit der
 Minesweeper-Session bestanden; fehlender CLI-Start wird sichtbar abgefangen.
-Für entfernte Runner fehlt noch der native Tunnel. Die bisherige synchronisierte
+Fuer SSH-Runner ist ein profilbasierter nativer Einstieg implementiert (Host-Abnahme offen). Die bisherige synchronisierte
 Live-Ansicht bleibt unter `v`, technische Steuerung unter `c` verfügbar; siehe
 `session-view.md`.
 
@@ -74,12 +86,12 @@ Tickets brauchen nach einem finalen Ergebnis kein manuelles Done.
 | 5 | Deployment, Backup/Restore, Updates | Container, Vorlagen und Backup/Restore lokal getestet; Zielinstallation durch Betreiber |
 | 6 | Echte Laptop-/Server-Abnahme | Erstinstallation v0.1.1 auf rs9tm lesend geprüft: Binary-Hash, Health/Auth, Portbindung und Persistenz passen. Runner-/Agentenbetrieb, Update und Rollback noch offen |
 | 7 | Gerätezugang, Rollen, Widerruf | API/CLI und TUI-Geräteverwaltung implementiert und lokal getestet: Rollen, einmalige Enrollment-Codes, Runner-Scope, Widerruf einschließlich laufender SSE-/Long-Polls |
-| 8 | OpenAI-/GitHub-/Forgejo-Zugangsverwaltung | Offen; lokale OpenCode-Anmeldung im Labor vorhanden |
+| 8 | OpenAI-/GitHub-/Forgejo-Zugangsverwaltung | Lokaler OpenCode-Anmeldeeinstieg und Modell-/Integrations-/MCP-Status aus der TUI implementiert; Bereitschaft lesend per PTY geprueft. OAuth-Refresh-Abnahme, Remote-Anmeldung und Hosting-Zugaenge offen |
 | 9 | Clone/Fetch und Repository-Einrichtung | CLI clone/register/fetch sowie TUI-Projektanlage ohne technische Eingaben: verwaltetes leeres Repository oder optionaler Clone, automatische Runner-/Service-Auswahl und native Standardmodellbindung. Strukturierter MCP-Editor und gemeinsame Projekt-Harness mit Runner-Zuordnungen implementiert. TUI-/Runner-Test mit synthetischem OpenCode-Health, lokale Imports und Neustarttests bestanden. Fetch im Assistenten, erweiterte Editoren und Login-Führung offen (`project-setup.md`) |
 | 10 | Checkpoints und Laptop-/Server-Übergabe | API/CLI/TUI/Runner: journalisierte Git-Checkpoints, Kontextpaket, Bundle-Transport über Factory, revisionsgeschützter Ownership-Wechsel und neue Epochen-Worktrees implementiert. Zwei unabhängige lokale Runner mit Neustart und Rückübergabe geprüft; Checkpoint nach Realmodell-Erfolg und Runtime-Cleanup geprüft. Getrennte Zielhosts und Realmodell-Übergabe offen. Siehe `checkpoints.md` |
 | 11 | Review und Integration | API/CLI/TUI/Runner: Merge-Kandidat gegen gepinnten Zielbranch, Docker-isolierte Tests, bestätigte Test-Runtime-Entfernung und lokale Git-CAS-Integration implementiert. Neustart ohne zweiten Testlauf, Testfehler und konkurrierende Zielbranchänderung lokal per Prozess-/Docker-Test geprüft. Hosting-Push/PR und Zielhost-Abnahme offen; siehe `review-integration.md` |
 | 12 | Projektgedächtnis und Kontextauswahl | Branch-/Ticketscope, budgetierte Prompt-Übernahme und atomare revisionsgeschützte Ablösung mit Provenienz implementiert; Supervisor-Beobachtungen bleiben branchlokal. Automatische semantische Widerspruchsauflösung und modellspezifischer Tokenizer offen |
-| 13 | Supervisor | Modellbasierter Session-Supervisor mit Entscheidungsjournal, Bewertungsbudget, Compaction, Sessionabschluss und gebundener Runtime-Beendigung implementiert. Abhängigkeitengesteuerte Ticketplanung mit Parallelitäts-/Startbudget per API/CLI/TUI implementiert und auf Konkurrenz/Neustart sowie Budget-Rebase geprüft (`scheduler.md`). Automatische Antworten und Zielhost-Abnahme offen |
+| 13 | Supervisor | Modellbasierter Session-Supervisor mit Entscheidungsjournal, Bewertungsbudget, Compaction, Sessionabschluss und gebundener Runtime-Beendigung implementiert. Mit dem Orchestrator automatisch aktiviert (12 Auswertungen, 5 Minuten Abstand, Vorrang fuer Aufgaben/Fragen). Prompt-Routing und einmalige automatische Rueckfragenauswertung mit Projektwissen implementiert; Konkurrenz-/Neustarttests bestanden. Echte autonome Lifecycle-/Zielhost-Abnahme offen |
 | 14 | Android und Push | Offen; reales Gerät/Push-Zugang für Abnahme nötig |
 | 15 | GitHub-Releases und Ansible-Vertrag | v0.1.1 veröffentlicht; Server-/Linux-TUI-Downloads lokal geprüft, Windows nativ in CI geprüft; Android-APK erst mit implementierter App |
 

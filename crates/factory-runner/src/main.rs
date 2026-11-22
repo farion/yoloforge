@@ -9,6 +9,7 @@ use factory_protocol::{
 use std::{path::PathBuf, time::Duration};
 mod agent;
 mod archive;
+mod attach;
 mod checkpoint;
 mod compaction;
 mod containment;
@@ -63,6 +64,9 @@ struct Args {
     /// Repair publication of an already successful task (requires an operator Factory token).
     #[arg(long)]
     publish_result: Option<CommandId>,
+    /// Open the recorded OpenCode session without registering another runner or requiring a Factory token.
+    #[arg(long, conflicts_with = "publish_result")]
+    open_session: Option<CommandId>,
 }
 
 async fn report(
@@ -471,6 +475,9 @@ async fn opencode_status(path: &Option<PathBuf>) -> OpenCodeStatus {
 }
 
 async fn run(mut args: Args) -> Result<()> {
+    if let Some(id) = args.open_session {
+        return attach::open(&args, id).await;
+    }
     let client = FactoryClient::from_env(&args.server)?;
     let path = args
         .journal

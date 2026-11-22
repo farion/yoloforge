@@ -338,6 +338,7 @@ mod tests {
         assert_eq!(view.command, Some(first));
         let q = QuestionId::new();
         snapshot.questions.push(Question {
+            orchestration_note: String::new(),
             id: q,
             command_id: third,
             session_id: "third".into(),

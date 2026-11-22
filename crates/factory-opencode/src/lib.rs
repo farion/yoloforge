@@ -21,6 +21,116 @@ pub struct OpenCodeClient {
 }
 
 impl OpenCodeClient {
+    /// A local, user-facing entry into OpenCode's provider and MCP sign-in UI.
+    pub async fn project_terminal_command(
+        &self,
+        directory: &Path,
+    ) -> Result<std::process::Command> {
+        ensure!(
+            matches!(self.status().await, OpenCodeStatus::Ready { .. }),
+            "OpenCode-Service nicht erreichbar oder inkompatibel"
+        );
+        let directory = fs::canonicalize(directory)?;
+        ensure!(directory.is_dir(), "Projektarbeitsordner fehlt");
+        let mut command = std::process::Command::new("opencode");
+        command
+            .args(["--server", self.registration.url.as_str()])
+            .arg(&directory)
+            .current_dir(directory)
+            .env("OPENCODE_PASSWORD", &self.registration.password)
+            .env_remove("FACTORY_TOKEN")
+            .env_remove("FACTORY_TOKEN_FILE");
+        Ok(command)
+    }
+    /// Read-only status, deliberately not a paid model probe or credential export.
+    pub async fn readiness(&self, directory: &str, provider: &str, model: &str) -> Result<String> {
+        ensure!(
+            matches!(self.status().await, OpenCodeStatus::Ready { .. }),
+            "OpenCode-Service nicht erreichbar oder inkompatibel"
+        );
+        let mut lines = vec!["OpenCode-Service erreichbar (2.0.27)".to_string()];
+        if provider.is_empty() && model.is_empty() {
+            match self.default_model(directory).await {
+                Ok((p,m))=>lines.push(format!("Standardmodell: {p}/{m}")),
+                Err(_)=>lines.push("Kein Standardmodell verfuegbar: OpenCode oeffnen und Provider anmelden/Modell waehlen".into()),
+            }
+        } else {
+            lines.push(format!("Projektmodell: {provider}/{model}"));
+        }
+        for (path, label) in [("/api/integration", "Anmeldungen"), ("/api/mcp", "MCP")] {
+            let value = self.location_get(path, directory).await?;
+            let items = value
+                .as_array()
+                .context("Invalid OpenCode status response")?;
+            if items.is_empty() {
+                lines.push(format!("{label}: keine Eintraege"));
+            }
+            for item in items {
+                if path == "/api/mcp" {
+                    let name = item["name"].as_str().unwrap_or("?");
+                    let status = item["status"]["status"].as_str().unwrap_or("unknown");
+                    lines.push(format!(
+                        "MCP {name}: {status}{}",
+                        if status == "needs_auth" {
+                            " — in OpenCode /mcps anmelden"
+                        } else {
+                            ""
+                        }
+                    ));
+                } else {
+                    let name = item["name"].as_str().unwrap_or("?");
+                    let count = item["connections"].as_array().map_or(0, Vec::len);
+                    let needs_auth = item["connections"]
+                        .as_array()
+                        .is_some_and(|a| a.iter().any(|c| c["status"]["status"] == "needs_auth"));
+                    lines.push(format!(
+                        "Anmeldung {name}: {}",
+                        if needs_auth {
+                            "Anmeldung abgelaufen oder erforderlich — OpenCode oeffnen"
+                        } else if count == 0 {
+                            "keine Verbindung hinterlegt"
+                        } else {
+                            "Verbindung hinterlegt (kein Modellaufruf getestet)"
+                        }
+                    ));
+                }
+            }
+        }
+        lines.push("\nOAuth/Provider und MCP-Anmeldung: Projektliste → o → OpenCode-Anmeldedialoge.\nStatus erneut mit r pruefen. Hinterlegte Verbindungen beweisen keine gueltigen Tokens oder Modellverfuegbarkeit.".into());
+        Ok(lines
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n')
+            .collect())
+    }
+    async fn location_get(&self, path: &str, directory: &str) -> Result<serde_json::Value> {
+        let response = self
+            .client
+            .get(format!(
+                "{}{}",
+                self.registration.url.trim_end_matches('/'),
+                path
+            ))
+            .basic_auth("opencode", Some(&self.registration.password))
+            .query(&[("location[directory]", directory)])
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("OpenCode-Verbindung nicht verfuegbar"))?;
+        ensure!(
+            response.status().is_success(),
+            "OpenCode-Status HTTP {}",
+            response.status().as_u16()
+        );
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .context("Invalid OpenCode status response")?;
+        ensure!(
+            value["location"]["directory"] == directory,
+            "OpenCode-Status gehoert zu anderem Projektordner"
+        );
+        Ok(value["data"].clone())
+    }
     pub async fn default_model(&self, directory: &str) -> Result<(String, String)> {
         let response = self
             .client

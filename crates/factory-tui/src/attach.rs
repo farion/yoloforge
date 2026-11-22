@@ -4,6 +4,73 @@ use factory_core::*;
 use factory_protocol::Snapshot;
 use std::path::PathBuf;
 
+pub fn project_connection(
+    snapshot: &Snapshot,
+    id: ProjectId,
+) -> Result<(factory_opencode::OpenCodeClient, PathBuf)> {
+    let prepared = snapshot
+        .commands
+        .iter()
+        .rev()
+        .find(|c| {
+            c.kind == CommandKind::PrepareWorkspace
+                && c.state == CommandState::Succeeded
+                && snapshot.streams.iter().any(|s| {
+                    s.id == c.stream_id
+                        && s.project_id == id
+                        && s.ownership_epoch == c.ownership_epoch
+                })
+        })
+        .context("Projektarbeitsordner wird noch vorbereitet; Diagnose zeigt den Fortschritt")?;
+    let Some(CommandOutput::Workspace { workspace }) = &prepared.result else {
+        anyhow::bail!("Bestaetigter Projektordner fehlt");
+    };
+    anyhow::ensure!(crate::ssh::configured(prepared.runner_id,prepared.id)?.is_none(),"Projekt liegt auf SSH-Runner; Anmeldung/Bereitschaft dort ausfuehren. SSH-Sessions lassen sich ueber Enter oeffnen");
+    let registration = prepared
+        .workspace_spec
+        .as_ref()
+        .and_then(|s| s.setup.as_ref())
+        .map(|s| s.service_registration.as_str())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_STATE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")
+                })
+                .join("opencode/service.json")
+        });
+    let directory = std::fs::canonicalize(&workspace.path)
+        .context("Projektarbeitsordner ist auf diesem TUI-Rechner nicht erreichbar")?;
+    Ok((
+        factory_opencode::OpenCodeClient::from_registration(&registration)
+            .context("Lokale OpenCode-Verbindung fehlt")?,
+        directory,
+    ))
+}
+
+pub async fn project_terminal(snapshot: &Snapshot, id: ProjectId) -> Result<std::process::Command> {
+    let (client, path) = project_connection(snapshot, id)?;
+    client.project_terminal_command(&path).await
+}
+
+pub async fn readiness(snapshot: &Snapshot, id: ProjectId) -> Result<String> {
+    let project = snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == id)
+        .context("Projekt fehlt")?;
+    let (client, path) = project_connection(snapshot, id)?;
+    client
+        .readiness(
+            path.to_str().context("Projektpfad ist nicht UTF-8")?,
+            &project.profile.provider_id,
+            &project.profile.model_id,
+        )
+        .await
+}
+
 pub async fn prepare(
     snapshot: &Snapshot,
     stream: StreamId,
@@ -19,6 +86,9 @@ pub async fn prepare(
                 && selected.is_none_or(|id| id == c.id)
         })
         .context("OpenCode-Session wird noch vorbereitet")?;
+    if let Some(remote) = crate::ssh::configured(command.runner_id, command.id)? {
+        return Ok(remote);
+    }
     let workspace = snapshot
         .commands
         .iter()
@@ -65,6 +135,66 @@ pub fn run(mut command: std::process::Command) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn readiness_reports_expired_auth_and_mcp_without_exposing_credentials() {
+        use serde_json::json;
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let location = dir.path().to_str().unwrap().to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let expected = location.clone();
+        let server = std::thread::spawn(move || {
+            for (path, body) in [
+                ("/api/info", json!({"version":"2.0.27"})),
+                (
+                    "/api/model/default",
+                    json!({"location":{"directory":expected},"data":{"providerID":"test","id":"model"}}),
+                ),
+                (
+                    "/api/integration",
+                    json!({"location":{"directory":expected},"data":[{"name":"Provider","connections":[{"status":{"status":"needs_auth","message":"secret-message","url":"secret-url"}}]}]}),
+                ),
+                (
+                    "/api/mcp",
+                    json!({"location":{"directory":expected},"data":[{"name":"Docs","status":{"status":"needs_auth","error":"secret-error"}}]}),
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let mut b = [0u8; 1024];
+                    let n = socket.read(&mut b).unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&b[..n]);
+                    assert!(request.len() < 8192);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with(&format!("GET {path}")));
+                if path != "/api/info" {
+                    assert!(request.contains("location%5Bdirectory%5D="));
+                }
+                let body = body.to_string();
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let registration = dir.path().join("service.json");
+        std::fs::write(
+            &registration,
+            json!({"url":format!("http://127.0.0.1:{port}"),"password":"test-secret"}).to_string(),
+        )
+        .unwrap();
+        let client = factory_opencode::OpenCodeClient::from_registration(&registration).unwrap();
+        let text = client.readiness(&location, "", "").await.unwrap();
+        server.join().unwrap();
+        assert!(text.contains("Standardmodell: test/model"));
+        assert!(text.contains("Anmeldung abgelaufen"));
+        assert!(text.contains("MCP Docs: needs_auth"));
+        assert!(!text.contains("secret"));
+    }
     async fn checked_command(missing: bool, wrong_location: bool) -> Result<std::process::Command> {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
