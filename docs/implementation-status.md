@@ -4,6 +4,25 @@ Quelle: Arbeitsauftrag des Betreibers, alle 15 offenen Punkte umzusetzen.
 Ein Eintrag gilt erst nach implementierter Funktion und dokumentierter Abnahme
 als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
+## Prompt-Aufgaben und Projektpause (Schema 23)
+
+TUI-Aufgaben erfassen nur Prompt und optionale Bilder (bis vier PNG/JPEG/GIF/WebP,
+zusammen 4 MiB; lokale Dateipfade). `/v1/tasks` speichert die Bilddaten dauerhaft;
+der Runner übergibt sie als Inline-Dateien an OpenCode und prüft beim Wiederanlauf
+den Bild-Digest der Prompt-Projektion. Alte Runner dürfen Bildaufträge nicht annehmen
+(`task-images-v1`). Binäranhänge aus Agentenantworten/Archiv-Backfill bleiben offen.
+
+Standardplanung entsteht automatisch beim Runner-Heartbeat, einschließlich
+verwaltetem Repository für bisher nicht eingerichtete Projekte mit Aufgaben.
+Kein Ready-Schritt und keine Aktivierung nötig. Projektpause hält neue Starts an;
+angenommene Arbeit läuft weiter. Nach finalem Prompt-Ergebnis kann die nächste
+Aufgabe starten, ohne manuelles Done. Store-Integrationstest prüft Prompt/Bilder,
+Pause vor Annahme, Neustart, Capability-Fencing und Folgeaufgabe. Der PTY-Test
+`scripts/smoke-project-setup.py --empty --tasks` prüft echte TUI/Factory/Runner,
+Prompt-/Bildpersistenz und Pause/Fortsetzen bis zur automatischen Einplanung.
+OpenCode-Erreichbarkeit nutzt dabei ein Fixture; Realmodell-Bildverarbeitung
+ist noch nicht abgenommen.
+
 | Nr. | Arbeitspaket | Stand / Abnahme |
 | --- | --- | --- |
 | 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg sowie dediziertes Container-Freeze/Thaw mit echtem Modell lokal geprüft: abgekoppelte Tools, Factory-/Runner-Neustart, gleiche Ausführung, genau ein Toolaufruf und finales Archiv. Zielhost-Abnahme, automatische Provisionierung und Fortsetzung nach nativem Interrupt offen |
@@ -36,4 +55,4 @@ Autonome Supervisor-Beendigungsanfragen mit atomarer Wissenssicherung sind
 implementiert und mit synthetischen Modellentscheidungen geprüft; Realmodell-
 Abnahme bleibt offen. Cleanup nach abgeschlossenem Erfolg bewahrt Ergebnis und
 Archiv und ist mit echtem Modell geprüft; Supervisor-Close fordert Cleanup atomar
-mit an. Details: `runtime-termination.md` (DB 22, Runner-Journal 8).
+mit an. Details: `runtime-termination.md` (DB 23, Runner-Journal 8).

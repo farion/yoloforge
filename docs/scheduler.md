@@ -1,8 +1,18 @@
 # Abhängigkeitengesteuerte Ticketplanung
 
-Der Factory-Dienst plant aktivierte Projekte automatisch. Voraussetzung ist ein
-konfiguriertes Provider-/Modellprofil. Nur Tickets im Status `ready`, deren
-Abhängigkeiten ausdrücklich `done` sind, werden berücksichtigt. `cancelled`
+Projekte sind standardmäßig aktiv. In der TUI unter `3` → `n` einen Prompt
+eingeben und mit `Ctrl-S` absenden; optional Bilder als lokale Dateipfade ergänzen.
+Titel, Priorität, Statuswahl und Scheduler-Aktivierung entfallen.
+Ein kompatibler Runner richtet die Standardplanung mit unbegrenzten Starts ein;
+ohne Modellvorgabe wird das OpenCode-Standardmodell verwendet. Neue Prompts
+aktivieren auch eine zuvor konfigurierte Legacy-Planung ohne Startbudget.
+Unter `2` → Projekt → Leertaste lässt sich das Projekt pausieren/fortsetzen.
+Die Pause verhindert neue Starts einschließlich noch nicht angenommener Aufträge;
+bereits angenommene Arbeit läuft weiter. Neue Prompts werden währenddessen gespeichert.
+
+Die folgenden API/CLI-Steuerungen bleiben für bestehende Tickets verfügbar.
+Tickets in `backlog` oder `ready`, deren Abhängigkeiten ausdrücklich `done` sind,
+werden berücksichtigt. `cancelled`
 erfüllt keine Abhängigkeit. Abhängigkeiten müssen im selben Projekt liegen;
 Zyklen und nachträgliche Änderungen bereits zugeordneter Tickets werden abgewiesen.
 
@@ -34,8 +44,11 @@ genau einmal als Agentenauftrag eingereiht. Serverneustarts und konkurrierende
 Ticks erzeugen keine zweite Zuweisung oder einen zweiten Start.
 
 Das Parallelitätslimit zählt auch manuelle Streams mit offenen Tickets und
-laufende Aufträge. Fehler, Fragen und Review bleiben belegt, bis der Betreiber
-die Tickets abschließt; Agentenerfolg markiert Tickets nicht als erledigt.
+laufende Aufträge. Bei Prompt-Aufgaben gibt ein finales Ergebnis den Planungsplatz
+frei, ohne manuelles Abschließen. Laufende Rückfragen belegen ihn weiterhin.
+Für alte Tickets bleiben Fehler und Review belegt, bis sie abgeschlossen werden.
+Agentenerfolg ist weiterhin kein Nachweis einer beendeten Runtime und integriert
+keine Änderungen automatisch.
 Offline-Runner behalten ihre persistente Queue; es gibt keine automatische
 Umverteilung oder Wiederholung fehlgeschlagener Ausführungen. Der Scheduler
 provisioniert keine Container und beantwortet keine Rückfragen. Dafür gelten

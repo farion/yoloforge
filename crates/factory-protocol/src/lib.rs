@@ -388,6 +388,23 @@ pub struct CreateTicket {
     pub acceptance_criteria: String,
     pub priority: u8,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveTask {
+    pub request_id: RequestId,
+    pub id: Option<TicketId>,
+    pub expected_revision: Revision,
+    pub project_id: ProjectId,
+    pub prompt: String,
+    pub images: Vec<PromptImage>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseProject {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub paused: bool,
+}
 
 /// Partial update; omitted fields retain their value. Empty strings clear text fields.
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -347,13 +347,32 @@ impl OpenCodeClient {
         Ok(())
     }
     pub async fn prompt(&self, session: &str, id: &str, text: &str) -> Result<()> {
+        self.prompt_with_images(session, id, text, &[]).await
+    }
+    pub async fn prompt_with_images(
+        &self,
+        session: &str,
+        id: &str,
+        text: &str,
+        images: &[factory_core::PromptImage],
+    ) -> Result<()> {
         safe_id(session)?;
         safe_id(id)?;
+        factory_core::validate_images(images).map_err(anyhow::Error::msg)?;
+        let mut body = serde_json::json!({"id":id,"text":text});
+        if !images.is_empty() {
+            body["files"] = serde_json::json!(images
+                .iter()
+                .map(|i| serde_json::json!({"uri":i.uri(),"name":i.name}))
+                .collect::<Vec<_>>());
+            body["metadata"] =
+                serde_json::json!({"factory_images":factory_core::image_digest(images)});
+        }
         let value = self
             .request(
                 Method::POST,
                 &format!("/api/session/{session}/prompt"),
-                Some(serde_json::json!({"id":id,"text":text})),
+                Some(body),
             )
             .await?;
         ensure!(

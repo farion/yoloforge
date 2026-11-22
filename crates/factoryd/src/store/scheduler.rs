@@ -24,6 +24,17 @@ fn save_policy(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
     tx.execute("INSERT INTO scheduler_policies(project_id,data) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET data=excluded.data",params![p.project_id.to_string(),serde_json::to_string(p)?])?;
     event(tx, "scheduler.policy", p.project_id.to_string(), p)
 }
+pub(super) fn activate_prompts(tx: &Transaction<'_>, id: ProjectId) -> Result<()> {
+    if let Some(mut p) = policy(tx, id)? {
+        if !p.enabled || p.remaining_starts != UNLIMITED_STARTS {
+            p.enabled = true;
+            p.remaining_starts = UNLIMITED_STARTS;
+            p.revision.0 += 1;
+            save_policy(tx, &p)?;
+        }
+    }
+    Ok(())
+}
 fn save_ticket(tx: &Transaction<'_>, t: &mut Ticket) -> Result<()> {
     t.revision.0 += 1;
     t.updated_unix_ms = super::super::unix_ms();
@@ -37,6 +48,76 @@ fn done(t: &Ticket) -> bool {
     matches!(t.status, TicketState::Done | TicketState::Cancelled)
 }
 impl Store {
+    pub fn autostart_runner(&self, runner: RunnerId) -> Result<()> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let projects:Vec<Project>=records(&tx,"SELECT p.data FROM projects p LEFT JOIN scheduler_policies s ON s.project_id=p.id WHERE s.project_id IS NULL ORDER BY p.rowid")?;
+        for mut p in projects {
+            let target = if let Some(setup) = &p.setup {
+                setup.runner_id
+            } else {
+                let tasks: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tickets WHERE project_id=?1)",
+                    [p.id.to_string()],
+                    |r| r.get(0),
+                )?;
+                let used: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM streams WHERE project_id=?1)",
+                    [p.id.to_string()],
+                    |r| r.get(0),
+                )?;
+                if !tasks || used {
+                    continue;
+                }
+                if !p.repository.contains("://")
+                    && !p.repository.starts_with('/')
+                    && !p.repository.contains('@')
+                {
+                    p.repository = "factory:managed".into();
+                }
+                p.setup = Some(ProjectSetup {
+                    runner_id: runner,
+                    repository_source: p.repository.clone(),
+                    repository_path: String::new(),
+                    service_registration: String::new(),
+                    harness: None,
+                });
+                p.runner_bindings.insert(
+                    runner,
+                    ProjectLocation {
+                        repository_path: String::new(),
+                        service_registration: String::new(),
+                    },
+                );
+                p.profile.provider_id.clear();
+                p.profile.model_id.clear();
+                p.revision.0 += 1;
+                tx.execute(
+                    "UPDATE projects SET data=?1 WHERE id=?2",
+                    params![serde_json::to_string(&p)?, p.id.to_string()],
+                )?;
+                event(&tx, "project.automatic_setup", p.id.to_string(), &p)?;
+                runner
+            };
+            // The selected host must actually be present before new work is assigned.
+            if target != runner {
+                continue;
+            }
+            save_policy(
+                &tx,
+                &SchedulerPolicy {
+                    project_id: p.id,
+                    revision: Revision(1),
+                    enabled: true,
+                    runner_ids: vec![runner],
+                    max_parallel: 1,
+                    remaining_starts: UNLIMITED_STARTS,
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     pub fn scheduler_policy(&self, id: ProjectId) -> Result<Option<SchedulerPolicy>> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction()?;
@@ -75,7 +156,7 @@ impl Store {
                     || b.runner_ids.len() > 16
                     || b.runner_ids.iter().collect::<BTreeSet<_>>().len() != b.runner_ids.len()
                     || !(1..=16).contains(&b.max_parallel)
-                    || b.start_budget > 1000
+                    || (b.start_budget > 1000 && b.start_budget != UNLIMITED_STARTS)
                 {
                     return Err(StoreError::Invalid(
                         "Scheduler needs 1..16 unique runners, parallelism 1..16, budget <=1000",
@@ -160,6 +241,14 @@ impl Store {
         for raw in rows {
             let mut p: SchedulerPolicy = serde_json::from_str(&raw)?;
             if !p.enabled {
+                continue;
+            }
+            let paused: bool = tx.query_row(
+                "SELECT COALESCE(json_extract(data,'$.paused'),0) FROM projects WHERE id=?1",
+                [p.project_id.to_string()],
+                |r| r.get(0),
+            )?;
+            if paused {
                 continue;
             }
             let mut all = tickets(&tx, p.project_id)?;
@@ -252,10 +341,12 @@ impl Store {
             let mut active = 0;
             for s in &streams {
                 let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",[s.id.to_string()],|r|r.get(0))?;
+                let finished:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs r JOIN commands c ON c.id=COALESCE(r.agent_id,r.prepare_id) WHERE r.stream_id=?1 AND (c.state IN ('failed','cancelled') OR (r.agent_id IS NOT NULL AND c.state='succeeded')))",[s.id.to_string()],|r|r.get(0))?;
                 if busy
-                    || s.ticket_ids
-                        .iter()
-                        .any(|id| all.get(id).is_some_and(|t| !done(t)))
+                    || s.ticket_ids.iter().any(|id| {
+                        all.get(id)
+                            .is_some_and(|t| !done(t) && !(t.prompt.is_some() && finished))
+                    })
                 {
                     active += 1;
                     *counts.entry(s.runner_id).or_default() += 1;
@@ -264,7 +355,7 @@ impl Store {
             let mut ready = all
                 .values()
                 .filter(|t| {
-                    t.status == TicketState::Ready
+                    matches!(t.status, TicketState::Backlog | TicketState::Ready)
                         && t.depends_on
                             .iter()
                             .all(|id| all.get(id).is_some_and(|t| t.status == TicketState::Done))
@@ -289,10 +380,15 @@ impl Store {
                     .iter()
                     .min_by_key(|r| (counts.get(r).copied().unwrap_or(0), **r))
                     .unwrap();
-                let prompt = format!(
-                    "Work on ticket {}: {}\nDescription:\n{}\nAcceptance criteria:\n{}",
-                    t.id, t.title, t.description, t.acceptance_criteria
-                );
+                let mut prompt = t.prompt.clone().unwrap_or_else(|| {
+                    format!(
+                        "Work on ticket {}: {}\nDescription:\n{}\nAcceptance criteria:\n{}",
+                        t.id, t.title, t.description, t.acceptance_criteria
+                    )
+                });
+                if prompt.trim().is_empty() && !t.images.is_empty() {
+                    prompt = "Bearbeite die Aufgabe in den angehaengten Bildern.".into();
+                }
                 if prompt.len() > 16384 {
                     t.status = TicketState::Blocked;
                     save_ticket(&tx, &mut t)?;
@@ -331,7 +427,9 @@ impl Store {
                 t.status = TicketState::InProgress;
                 save_ticket(&tx, &mut t)?;
                 all.insert(t.id, t.clone());
-                p.remaining_starts -= 1;
+                if p.remaining_starts != UNLIMITED_STARTS {
+                    p.remaining_starts -= 1;
+                }
                 p.revision.0 += 1;
                 active += 1;
                 *counts.entry(runner).or_default() += 1;

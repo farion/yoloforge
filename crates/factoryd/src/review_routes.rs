@@ -1,4 +1,31 @@
 use super::*;
+pub(super) async fn pause_project(
+    State(app): State<App>,
+    Path(id): Path<ProjectId>,
+    body: Result<Json<PauseProject>, JsonRejection>,
+) -> Response {
+    let Ok(Json(b)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid project pause",
+        );
+    };
+    db_call(b.request_id, move || app.store.pause_project(id, b)).await
+}
+pub(super) async fn task(
+    State(app): State<App>,
+    body: Result<Json<SaveTask>, JsonRejection>,
+) -> Response {
+    let Ok(Json(b)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid task prompt/images",
+        );
+    };
+    db_call(b.request_id, move || app.store.save_task(b)).await
+}
 pub(super) async fn setup(
     State(app): State<App>,
     body: Result<Json<SetupProject>, JsonRejection>,

@@ -15,6 +15,7 @@ use ratatui::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Target {
+    Pause(ProjectId),
     SetupProject(Option<ProjectId>),
     Scheduler(ProjectId),
     Dependencies(TicketId),
@@ -28,32 +29,38 @@ pub enum Target {
 
 #[derive(Clone)]
 pub enum Request {
+    Pause(ProjectId, PauseProject),
+    Task(SaveTask),
     SetupProject(Box<SetupProject>),
     Scheduler(ProjectId, SetScheduler),
     Dependencies(TicketId, SetDependencies),
     Project(CreateProject),
     UpdateProject(ProjectId, UpdateProject),
     Profile(ProjectId, UpdateProfile),
-    NewTicket(CreateTicket),
-    Ticket(TicketId, UpdateTicket),
     Stream(CreateStream),
 }
 impl Request {
     pub fn id(&self) -> RequestId {
         match self {
+            Self::Pause(_, b) => b.request_id,
+            Self::Task(b) => b.request_id,
             Self::SetupProject(b) => b.request_id,
             Self::Scheduler(_, b) => b.request_id,
             Self::Dependencies(_, b) => b.request_id,
             Self::Project(b) => b.request_id,
             Self::UpdateProject(_, b) => b.request_id,
             Self::Profile(_, b) => b.request_id,
-            Self::NewTicket(b) => b.request_id,
-            Self::Ticket(_, b) => b.request_id,
             Self::Stream(b) => b.request_id,
         }
     }
     pub async fn send(&self, client: &FactoryClient) -> Result<(), ClientError> {
         match self {
+            Self::Pause(id, b) => {
+                client.pause_project(*id, b).await?;
+            }
+            Self::Task(b) => {
+                client.save_task(b).await?;
+            }
             Self::SetupProject(b) => {
                 client.setup_project(b).await?;
             }
@@ -71,12 +78,6 @@ impl Request {
             }
             Self::Profile(id, b) => {
                 client.update_profile(*id, b).await?;
-            }
-            Self::NewTicket(b) => {
-                client.create_ticket(b).await?;
-            }
-            Self::Ticket(id, b) => {
-                client.update_ticket(*id, b).await?;
             }
             Self::Stream(b) => {
                 client.create_stream(b).await?;
@@ -137,6 +138,8 @@ enum State {
     Submitted,
 }
 pub struct Dialog {
+    task_project: Option<ProjectId>,
+    task_images: Vec<PromptImage>,
     setup_result: Option<ProjectSetupResult>,
     target: Target,
     title: String,
@@ -155,23 +158,23 @@ pub enum Action {
 
 impl Dialog {
     pub fn new(target: Target, snapshot: &Snapshot) -> Option<Self> {
-        let priority = || {
-            Field::select(
-                "Prioritaet",
-                "1",
-                (0..=3).map(|n| (n.to_string(), format!("P{n}"))).collect(),
-                false,
-            )
-        };
-        let ticket_fields = || {
-            vec![
-                Field::text("Titel", "", true, false),
-                Field::text("Beschreibung", "", false, true),
-                Field::text("Abnahmekriterien", "", false, true),
-                priority(),
-            ]
-        };
         let (title, revision, fields) = match target {
+            Target::Pause(id) => {
+                let p = snapshot.projects.iter().find(|p| p.id == id)?;
+                (
+                    format!("Projekt: {} | Pause haelt neue Starts an", p.name),
+                    p.revision,
+                    vec![Field::select(
+                        "Betrieb",
+                        if p.paused { "true" } else { "false" },
+                        vec![
+                            ("false".into(), "Aktiv".into()),
+                            ("true".into(), "Pausiert".into()),
+                        ],
+                        false,
+                    )],
+                )
+            }
             Target::SetupProject(id) => {
                 let p = id.and_then(|id| snapshot.projects.iter().find(|p| p.id == id));
                 if id.is_some() && p.is_none() {
@@ -371,48 +374,32 @@ impl Dialog {
             Target::NewTicket(id) => {
                 let p = snapshot.projects.iter().find(|p| p.id == id)?;
                 (
-                    format!("Ticket anlegen: {}", p.name),
+                    format!("Aufgabe: {}", p.name),
                     Revision(0),
-                    ticket_fields(),
+                    vec![
+                        Field::text("Prompt", "", false, true),
+                        Field::text(
+                            "Bilder (optional: ein Dateipfad pro Zeile)",
+                            "",
+                            false,
+                            true,
+                        ),
+                    ],
                 )
             }
             Target::Ticket(id) => {
                 let t = snapshot.tickets.iter().find(|t| t.id == id)?;
-                let mut fields = ticket_fields();
-                for (f, value) in fields.iter_mut().zip([
-                    t.title.clone(),
-                    t.description.clone(),
-                    t.acceptance_criteria.clone(),
-                    t.priority.to_string(),
-                ]) {
-                    f.choice = f
-                        .choices
-                        .iter()
-                        .position(|(id, _)| id == &value)
-                        .unwrap_or(0);
-                    f.cursor = value.len();
-                    f.base = value.clone();
-                    f.text = value;
-                }
-                let status = serde_json::to_value(t.status).ok()?.as_str()?.to_string();
-                fields.push(Field::select(
-                    "Status",
-                    &status,
-                    [
-                        "backlog",
-                        "ready",
-                        "in_progress",
-                        "blocked",
-                        "review",
-                        "done",
-                        "cancelled",
-                    ]
-                    .into_iter()
-                    .map(|s| (s.into(), s.into()))
-                    .collect(),
-                    false,
-                ));
-                ("Ticket bearbeiten".into(), t.revision, fields)
+                let text = t.prompt.clone().unwrap_or_else(|| {
+                    format!("{}\n{}\n{}", t.title, t.description, t.acceptance_criteria)
+                });
+                (
+                    "Aufgabe bearbeiten".into(),
+                    t.revision,
+                    vec![
+                        Field::text("Prompt", &text, false, true),
+                        Field::text("Weitere Bilder (ein Dateipfad pro Zeile)", "", false, true),
+                    ],
+                )
             }
             Target::NewStream(id) => {
                 let p = snapshot.projects.iter().find(|p| p.id == id)?;
@@ -460,6 +447,24 @@ impl Dialog {
             }
         };
         Some(Self {
+            task_project: match target {
+                Target::NewTicket(id) => Some(id),
+                Target::Ticket(id) => snapshot
+                    .tickets
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.project_id),
+                _ => None,
+            },
+            task_images: match target {
+                Target::Ticket(id) => snapshot
+                    .tickets
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.images.clone())
+                    .unwrap_or_default(),
+                _ => vec![],
+            },
             setup_result: None,
             target,
             title,
@@ -674,38 +679,48 @@ impl Dialog {
                     },
                 },
             ),
-            Target::NewTicket(project_id) => Request::NewTicket(CreateTicket {
-                request_id,
-                project_id,
-                title: value(0),
-                description: value(1),
-                acceptance_criteria: value(2),
-                priority: value(3).parse().map_err(|_| "Prioritaet ungueltig")?,
-            }),
-            Target::Ticket(id) => {
-                if self.fields.iter().all(|f| f.text == f.base) {
-                    return Err("Keine Aenderungen".into());
+            Target::Pause(id) => Request::Pause(
+                id,
+                PauseProject {
+                    request_id,
+                    expected_revision,
+                    paused: value(0) == "true",
+                },
+            ),
+            Target::NewTicket(_) | Target::Ticket(_) => {
+                let mut images = self.task_images.clone();
+                for path in value(1).lines().filter(|p| !p.trim().is_empty()) {
+                    use std::io::Read;
+                    let path = std::path::Path::new(path.trim());
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(path)
+                        .map_err(|e| e.to_string())?
+                        .take((IMAGE_BYTES + 1) as u64)
+                        .read_to_end(&mut bytes)
+                        .map_err(|e| e.to_string())?;
+                    images.push(PromptImage::from_bytes(
+                        path.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        &bytes,
+                    )?);
                 }
-                Request::Ticket(
-                    id,
-                    UpdateTicket {
-                        request_id,
-                        expected_revision,
-                        title: self.fields[0].changed(),
-                        description: self.fields[1].changed(),
-                        acceptance_criteria: self.fields[2].changed(),
-                        priority: self.fields[3]
-                            .changed()
-                            .map(|v| v.parse())
-                            .transpose()
-                            .map_err(|_| "Prioritaet ungueltig")?,
-                        status: self.fields[4]
-                            .changed()
-                            .map(|v| serde_json::from_value(serde_json::Value::String(v)))
-                            .transpose()
-                            .map_err(|_| "Status ungueltig")?,
+                validate_images(&images)?;
+                if value(0).trim().is_empty() && images.is_empty() {
+                    return Err("Text oder Bild eingeben".into());
+                }
+                Request::Task(SaveTask {
+                    request_id,
+                    expected_revision,
+                    project_id: self.task_project.ok_or("Projekt fehlt")?,
+                    id: match self.target {
+                        Target::Ticket(id) => Some(id),
+                        _ => None,
                     },
-                )
+                    prompt: value(0),
+                    images,
+                })
             }
             Target::NewStream(project_id) => Request::Stream(CreateStream {
                 request_id,
@@ -1104,6 +1119,7 @@ mod tests {
     #[test]
     fn conflict_rebase_retains_only_local_edits_and_uses_new_revision() {
         let mut snapshot = snapshot();
+        snapshot.tickets[0].prompt = Some("old".into());
         let target = Target::Ticket(snapshot.tickets[0].id);
         let mut d = Dialog::new(target, &snapshot).unwrap();
         d.insert(" changed");
@@ -1117,19 +1133,19 @@ mod tests {
             }),
         );
         assert!(matches!(control(&mut d, 's', &snapshot), Action::None));
-        snapshot.tickets[0].description = "other client".into();
+        snapshot.tickets[0].prompt = Some("other client".into());
         snapshot.tickets[0].revision = Revision(2);
         control(&mut d, 'r', &snapshot);
         assert_eq!(d.fields[0].text, "old changed");
-        assert_eq!(d.fields[1].text, "other client");
+        assert_eq!(d.fields[1].text, "");
         let second = send(&mut d, &snapshot);
         assert_ne!(first.id(), second.id());
-        let Request::Ticket(_, body) = second else {
+        let Request::Task(body) = second else {
             panic!()
         };
         assert_eq!(body.expected_revision, Revision(2));
-        assert_eq!(body.title, Some("old changed".into()));
-        assert_eq!(body.description, None);
+        assert_eq!(body.prompt, "old changed");
+        assert!(body.images.is_empty());
     }
     #[test]
     fn setup_wizard_defaults_work_without_technical_input_and_uncertain_edits_are_frozen() {

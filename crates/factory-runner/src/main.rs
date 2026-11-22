@@ -495,6 +495,7 @@ async fn run(mut args: Args) -> Result<()> {
                         CHECKPOINT_CAPABILITY.into(),
                         REVIEW_CAPABILITY.into(),
                         PROJECT_SETUP_CAPABILITY.into(),
+                        TASK_IMAGES_CAPABILITY.into(),
                     ],
                     id: args.id,
                     instance_id,
@@ -531,6 +532,12 @@ async fn run(mut args: Args) -> Result<()> {
                 }
                 if let Err(error) = command_result {
                     match error.downcast_ref::<ClientError>() {
+                        Some(ClientError::Http {
+                            code: Some(ErrorCode::WorkConflict),
+                            ..
+                        }) => {
+                            delay = Duration::from_secs(3);
+                        }
                         Some(ClientError::Transport) => {
                             was_connected = false;
                             delay = Duration::from_secs(3);

@@ -408,7 +408,13 @@ pub(super) async fn ack_command(
         .capabilities
         .iter()
         .any(|c| c == PROJECT_SETUP_CAPABILITY);
+    let images = guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == TASK_IMAGES_CAPABILITY);
     db_call(body.request_id, move || {
+        store.require_image_support(runner, id, body.ownership_epoch, images)?;
         store.require_setup_support(runner, id, body.ownership_epoch, setup)?;
         store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;
         store.require_review_support(runner, id, body.ownership_epoch, reviews)?;

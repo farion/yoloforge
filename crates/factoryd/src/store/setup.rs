@@ -1,5 +1,20 @@
 use super::*;
 impl Store {
+    pub fn require_image_support(
+        &self,
+        runner: RunnerId,
+        id: CommandId,
+        epoch: u64,
+        supported: bool,
+    ) -> Result<()> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        let c = super::work::command(&tx, id, runner, epoch)?;
+        if !supported && c.agent_spec.as_ref().is_some_and(|s| !s.images.is_empty()) {
+            return Err(StoreError::WorkConflict);
+        }
+        Ok(())
+    }
     pub fn require_setup_support(
         &self,
         runner: RunnerId,
@@ -40,7 +55,7 @@ impl Store {
                 p.name=b.name.clone();p.profile=b.profile.clone();p.setup=Some(b.setup.clone());p.revision.0+=1;p
             }else {
                 if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}
-                Project {runner_bindings:Default::default(),id:ProjectId::new(),revision:Revision(1),name:b.name.clone(),repository:b.repository.clone(),base_branch:b.base_branch.clone(),profile:b.profile.clone(),setup:Some(b.setup.clone()),created_unix_ms:super::super::unix_ms()}
+                Project {paused:false,runner_bindings:Default::default(),id:ProjectId::new(),revision:Revision(1),name:b.name.clone(),repository:b.repository.clone(),base_branch:b.base_branch.clone(),profile:b.profile.clone(),setup:Some(b.setup.clone()),created_unix_ms:super::super::unix_ms()}
             };
             project.runner_bindings.insert(b.setup.runner_id,ProjectLocation {repository_path:b.setup.repository_path.clone(),service_registration:b.setup.service_registration.clone()});
             tx.execute("INSERT INTO projects(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![project.id.to_string(),serde_json::to_string(&project)?])?;

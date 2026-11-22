@@ -399,7 +399,7 @@ async fn advance(
         record.agent.as_mut().unwrap().prompt_attempted = true;
         tokio::task::block_in_place(|| journal.save(record))?;
         client
-            .prompt(&session_id, &message_id, &spec.prompt)
+            .prompt_with_images(&session_id, &message_id, &spec.prompt, &spec.images)
             .await?;
         return Ok(progress(
             &command,
@@ -417,6 +417,11 @@ async fn advance(
             message["text"] == spec.prompt && message["type"] == "user",
             "Projected prompt differs"
         );
+        ensure!(
+            spec.images.is_empty()
+                || message["metadata"]["factory_images"] == image_digest(&spec.images),
+            "Projected image prompt differs"
+        );
         true
     } else {
         let inbox = client.session_items(&session_id, "inbox").await?;
@@ -429,6 +434,12 @@ async fn advance(
             ensure!(
                 pending["payload"]["text"] == spec.prompt,
                 "Inbox prompt differs"
+            );
+            ensure!(
+                spec.images.is_empty()
+                    || pending["payload"]["metadata"]["factory_images"]
+                        == image_digest(&spec.images),
+                "Inbox image prompt differs"
             );
         }
         false
@@ -623,6 +634,7 @@ mod tests {
                 base_branch: "main".into(),
             }),
             agent_spec: Some(AgentSpec {
+                images: vec![],
                 read_only: false,
                 continuation: None,
                 prompt: "Implement it".into(),

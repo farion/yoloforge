@@ -58,7 +58,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 22,
+            version <= 23,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -127,6 +127,9 @@ impl Store {
         if version < 22 {
             tx.execute_batch("PRAGMA user_version=22;")?;
         }
+        if version < 23 {
+            tx.execute_batch("PRAGMA user_version=23;")?;
+        }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
     }
@@ -175,6 +178,7 @@ impl Store {
         self.mutate(body.request_id, "project.create", &body, |tx| {
             project_fields(&body.name, &body.repository, &body.base_branch)?;
             let project = Project {
+                paused: false,
                 runner_bindings: Default::default(),
                 setup: None,
                 id: ProjectId::new(),
@@ -212,6 +216,8 @@ impl Store {
             }
             let now = super::unix_ms();
             let ticket = Ticket {
+                prompt: None,
+                images: vec![],
                 depends_on: vec![],
                 id: TicketId::new(),
                 project_id: body.project_id,
@@ -446,6 +452,7 @@ mod scheduler;
 mod sessions;
 mod setup;
 mod supervisor;
+mod tasks;
 mod termination;
 mod work;
 

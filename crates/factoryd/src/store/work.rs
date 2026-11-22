@@ -269,6 +269,14 @@ impl Store {
         supervised: bool,
     ) -> Result<RunnerCommand> {
         let mut owner = stream(tx, id)?;
+        let paused: bool = tx.query_row(
+            "SELECT COALESCE(json_extract(data,'$.paused'),0) FROM projects WHERE id=?1",
+            [owner.project_id.to_string()],
+            |r| r.get(0),
+        )?;
+        if paused {
+            return Err(StoreError::WorkConflict);
+        }
         if super::termination::active(tx, id)? {
             return Err(StoreError::WorkConflict);
         }
@@ -428,7 +436,19 @@ impl Store {
             } else {
                 prompt
             };
+            let mut images = Vec::new();
+            for ticket in &owner.ticket_ids {
+                let data: String = tx.query_row(
+                    "SELECT data FROM tickets WHERE id=?1",
+                    [ticket.to_string()],
+                    |r| r.get(0),
+                )?;
+                let t: Ticket = serde_json::from_str(&data)?;
+                images.extend(t.images);
+            }
+            validate_images(&images).map_err(StoreError::Invalid)?;
             Some(AgentSpec {
+                images,
                 read_only: supervised,
                 continuation,
                 prompt,
@@ -472,7 +492,7 @@ impl Store {
 
     pub fn pending(&self, runner: RunnerId) -> Result<Vec<RunnerCommand>> {
         let db = self.0.lock().map_err(|_| StoreError::Internal)?;
-        let mut stmt = db.prepare("SELECT data FROM commands WHERE runner_id=?1 AND state IN ('pending','accepted') ORDER BY rowid LIMIT 16")?;
+        let mut stmt = db.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN projects p ON p.id=s.project_id WHERE c.runner_id=?1 AND (c.state='accepted' OR (c.state='pending' AND COALESCE(json_extract(p.data,'$.paused'),0)=0)) ORDER BY c.rowid LIMIT 16")?;
         let rows = stmt.query_map([runner.to_string()], |r| r.get::<_, String>(0))?;
         let mut values = Vec::new();
         for row in rows {
@@ -494,6 +514,7 @@ impl Store {
             |tx| {
                 let mut value = command(tx, id, runner, body.ownership_epoch)?;
                 if value.state == CommandState::Pending {
+                    let paused:bool=tx.query_row("SELECT COALESCE(json_extract(p.data,'$.paused'),0) FROM projects p JOIN streams s ON s.project_id=p.id WHERE s.id=?1",[value.stream_id.to_string()],|r|r.get(0))?;if paused{return Err(StoreError::WorkConflict);}
                     value.state = CommandState::Accepted;
                     save_command(tx, &value, "accepted")?;
                     let mut owner = stream(tx, value.stream_id)?;

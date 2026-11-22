@@ -40,6 +40,30 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 impl FactoryClient {
+    pub async fn pause_project(
+        &self,
+        id: ProjectId,
+        b: &PauseProject,
+    ) -> Result<Project, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/projects/{id}/pause", self.base))
+                .json(b)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn save_task(&self, b: &SaveTask) -> Result<Ticket, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/tasks", self.base))
+                .json(b)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn setup_project(&self, b: &SetupProject) -> Result<ProjectSetupResult, ClientError> {
         Self::decode(
             self.http

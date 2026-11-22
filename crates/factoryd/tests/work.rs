@@ -177,6 +177,7 @@ fn migration_from_v1_preserves_projects_and_adds_work_tables() {
     db.execute_batch(include_str!("../migrations/001_initial.sql"))
         .unwrap();
     let p = Project {
+        paused: false,
         runner_bindings: Default::default(),
         setup: None,
         profile: ExecutionProfile::default(),

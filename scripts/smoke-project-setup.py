@@ -25,6 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--auto", action="store_true", help="Exercise native-service discovery/start with a fixture executable")
     parser.add_argument("--empty", action="store_true", help="Create a project with Ctrl-S only: no repository, path, model or config input")
+    parser.add_argument("--tasks", action="store_true", help="Also exercise prompt/image entry and project pause/resume")
     options = parser.parse_args()
     if options.empty:
         options.auto = True
@@ -124,6 +125,43 @@ def main():
             if options.auto:
                 assert (base / "starts").read_text() == "start\n"
             print("PASS zero-input project creates managed Git/worktree and verifies discovered OpenCode" if options.empty else "PASS TUI project and structured MCP editor preserve config; real runner prepares workspace and verifies OpenCode")
+            if options.tasks:
+                deadline = time.monotonic() + 20
+                while not snapshot()["scheduler_policies"]:
+                    pump(.2)
+                    assert time.monotonic() < deadline, "Automatic policy missing"
+                send("\x1b")
+                send("2 ")
+                send("\x1b[B")
+                send("\x13")
+                assert snapshot()["projects"][0]["paused"]
+                send("\x1b")
+                image = base / "example.png"
+                import base64
+                image.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3e0AAAAASUVORK5CYII="))
+                send("3n")
+                send("Build from this image\t" + str(image))
+                send("\x13")
+                state = snapshot()
+                assert len(state["tickets"]) == 1
+                task = state["tickets"][0]
+                assert task["prompt"] == "Build from this image"
+                assert base64.b64decode(task["images"][0]["data"]) == image.read_bytes()
+                pump(6)
+                assert len(snapshot()["commands"]) == 1, "Paused task was started"
+                worker.terminate()
+                worker.wait(timeout=10)
+                send("\x1b")
+                send("2 ")
+                send("\x1b[A")
+                send("\x13")
+                assert not snapshot()["projects"][0]["paused"]
+                deadline = time.monotonic() + 10
+                while len(snapshot()["commands"]) == 1:
+                    pump(.2)
+                    assert time.monotonic() < deadline, "Prompt was not scheduled after resume"
+                assert any(task["id"] in s["ticket_ids"] for s in snapshot()["streams"])
+                print("PASS TUI prompt and image persist without metadata; pause holds work and resume schedules automatically")
         finally:
             if pid:
                 os.kill(pid, signal.SIGTERM)

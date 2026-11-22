@@ -403,8 +403,10 @@ dependencies = [
 name = "factory-core"
 version = "0.1.2-dev"
 dependencies = [
+ "base64 0.22.1",
  "serde",
  "serde_json",
+ "sha2",
  "uuid",
 ]
 

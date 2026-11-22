@@ -220,11 +220,11 @@ async fn main() -> Result<()> {
                 Row::new(vec![r.name.clone(), format!("{:?}", r.location),
                     if online {format!("{:?}", r.connection)} else {"veraltet".into()}, opencode(&r.opencode)])
             }).collect()).unwrap_or_default() } else if view == 1 {
-                last.as_ref().map(|s| s.projects.iter().map(|p| Row::new(vec![p.name.clone(), p.base_branch.clone(),
+                last.as_ref().map(|s| s.projects.iter().map(|p| Row::new(vec![p.name.clone(), if p.paused {"Pausiert".into()} else {"Aktiv".into()},
                     s.tickets.iter().filter(|t| t.project_id == p.id).count().to_string(), p.id.to_string()])).collect()).unwrap_or_default()
             } else if view == 2 {
                 last.as_ref().map(|s| s.tickets.iter().filter(|t| s.projects.get(selected_project).is_some_and(|p| p.id == t.project_id))
-                    .map(|t| Row::new(vec![t.title.clone(), format!("{:?}",t.status), format!("P{} / r{}",t.priority,t.revision.0),t.id.to_string()])).collect()).unwrap_or_default()
+                    .map(|t| Row::new(vec![t.prompt.as_deref().unwrap_or(&t.title).lines().next().unwrap_or("Bildaufgabe").to_string(), format!("{:?}",t.status), t.images.len().to_string(),String::new()])).collect()).unwrap_or_default()
             } else if view == 3 {
                 last.as_ref().map(|s| s.streams.iter().filter(|t| s.projects.get(selected_project).is_some_and(|p| p.id == t.project_id))
                     .map(|t| Row::new(vec![t.goal.clone(),format!("{:?}",t.status),format!("r{} / {} Tickets",t.revision.0,t.ticket_ids.len()),t.id.to_string()])).collect()).unwrap_or_default()
@@ -238,8 +238,8 @@ async fn main() -> Result<()> {
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
-                1 => (["Projekt", "Branch", "Tickets", "ID"], " Projekte | n: Assistent | p: einrichten | e: Metadaten | s: Planung | Enter: Profil ".to_string()),
-                2 => (["Ticket", "Status", "Prioritaet / Revision", "ID"], format!(" Tickets: {project_name} | n: neu | d: Abhaengigkeiten | Enter: bearbeiten ")),
+                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause/Fortsetzen | p: einrichten | Enter: Profil ".to_string()),
+                2 => (["Prompt", "Fortschritt", "Bilder", ""], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: bearbeiten ")),
                 3 => (["Stream", "Status", "Revision / Tickets", "ID"], format!(" Streams: {project_name} | n: neu | Enter: steuern | r: Recovery ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
@@ -248,7 +248,7 @@ async fn main() -> Result<()> {
             frame.render_widget(Table::new(rows.into_iter().skip(row_offset).enumerate().map(|(i,row)|if matches!(view,1..=5) && i==0 {row.style(Style::default().bg(Color::DarkGray))} else {row}), [Constraint::Percentage(30), Constraint::Percentage(15), Constraint::Percentage(20), Constraint::Percentage(35)])
                 .header(Row::new(header).style(Style::default().fg(Color::Cyan)))
                 .block(Block::bordered().title(title)), chunks[1]);
-            frame.render_widget(Paragraph::new("1 Runner | 2 Projekte | 3 Tickets | 4 Streams | 5 Auftraege | 6 Fragen | 7 Geraete | ←/→ Projekt | q")
+            frame.render_widget(Paragraph::new("1 Runner | 2 Projekte | 3 Aufgaben | 4 Streams | 5 Auftraege | 6 Fragen | 7 Geraete | ←/→ Projekt | q")
                 .block(Block::bordered()), chunks[2]);
         })?;
         while let Ok((id, result)) = stream_rx.try_recv() {
@@ -425,6 +425,10 @@ async fn main() -> Result<()> {
                                 .map(|p| manage::Target::Project(p.id)),
                             (1, KeyCode::Char('n')) => Some(manage::Target::SetupProject(None)),
                             (1, KeyCode::Char('N')) => Some(manage::Target::NewProject),
+                            (1, KeyCode::Char(' ')) => snapshot
+                                .projects
+                                .get(row_offset)
+                                .map(|p| manage::Target::Pause(p.id)),
                             (1, KeyCode::Char('p')) => snapshot
                                 .projects
                                 .get(row_offset)

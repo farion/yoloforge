@@ -2,6 +2,10 @@
 use serde::{Deserialize, Serialize};
 use std::{fmt, time::Duration};
 use uuid::Uuid;
+mod images;
+pub use images::*;
+pub const TASK_IMAGES_CAPABILITY: &str = "task-images-v1";
+pub const UNLIMITED_STARTS: u32 = u32::MAX;
 
 macro_rules! id {
     ($name:ident) => {
@@ -417,6 +421,8 @@ pub struct ExecutionProfile {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -606,6 +612,8 @@ pub struct Revision(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub paused: bool,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub runner_bindings: std::collections::BTreeMap<RunnerId, ProjectLocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,6 +648,10 @@ pub struct ProjectLocation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<TicketId>,
     pub id: TicketId,

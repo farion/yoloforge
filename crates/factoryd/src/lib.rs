@@ -140,6 +140,14 @@ pub fn router_with_shutdown(
         .route("/v1/streams/{id}/control", post(set_control))
         .route("/v1/projects/setup", post(review_routes::setup))
         .route(
+            "/v1/projects/{id}/pause",
+            post(review_routes::pause_project),
+        )
+        .route(
+            "/v1/tasks",
+            post(review_routes::task).layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)),
+        )
+        .route(
             "/v1/projects/{id}/scheduler",
             get(scheduler_routes::read).post(scheduler_routes::configure),
         )
@@ -382,6 +390,20 @@ async fn register(
             );
         }
     }
+    if body
+        .capabilities
+        .iter()
+        .any(|c| c == TASK_IMAGES_CAPABILITY)
+    {
+        let store = app.store.clone();
+        let runner = body.id;
+        if !matches!(
+            tokio::task::spawn_blocking(move || store.autostart_runner(runner)).await,
+            Ok(Ok(()))
+        ) {
+            return db_error(StoreError::Internal, RequestId::new());
+        }
+    }
     registry.entries.insert(
         body.id,
         Entry {
@@ -431,6 +453,20 @@ async fn heartbeat(
     entry.seen = Instant::now();
     entry.unix_ms = unix_ms();
     entry.input.opencode = body.opencode;
+    if entry
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == TASK_IMAGES_CAPABILITY)
+    {
+        let store = app.store.clone();
+        if !matches!(
+            tokio::task::spawn_blocking(move || store.autostart_runner(id)).await,
+            Ok(Ok(()))
+        ) {
+            return db_error(StoreError::Internal, RequestId::new());
+        }
+    }
     registry.revision.0 += 1;
     registration(&app, body.registration_id).into_response()
 }
