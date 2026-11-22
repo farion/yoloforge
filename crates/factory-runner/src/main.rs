@@ -470,6 +470,7 @@ async fn run(mut args: Args) -> Result<()> {
     let instance_id = InstanceId::new();
     let mut registration: Option<Registration> = None;
     let mut was_connected = false;
+    let mut waiting_for_registration = false;
     let mut next_command = 0;
     let mut next_cleanup = 0;
     loop {
@@ -510,6 +511,7 @@ async fn run(mut args: Args) -> Result<()> {
         let mut delay = HEARTBEAT_INTERVAL;
         match result {
             Ok(current) => {
+                waiting_for_registration = false;
                 if !was_connected {
                     println!("Runner {} connected; boot {}", args.id, current.boot_id);
                 }
@@ -548,6 +550,18 @@ async fn run(mut args: Args) -> Result<()> {
                         _ => return Err(error),
                     }
                 }
+            }
+            Err(ClientError::Http {
+                code: Some(ErrorCode::RunnerConflict),
+                ..
+            }) => {
+                if !waiting_for_registration {
+                    eprintln!("Runner ID still registered by another instance; waiting for its heartbeat lease to expire and retrying automatically (normally up to 60 seconds after shutdown)");
+                }
+                waiting_for_registration = true;
+                registration = None;
+                was_connected = false;
+                delay = Duration::from_secs(3);
             }
             Err(ClientError::Http {
                 code: Some(ErrorCode::NotFound),

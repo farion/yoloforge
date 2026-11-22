@@ -9,6 +9,9 @@ Zyklen und nachträgliche Änderungen bereits zugeordneter Tickets werden abgewi
 TUI: `2` → Projekt → `s` für Aktivierung, Runner-Auswahl, Parallelität und
 Startbudget; `3` → Ticket → `d` für Abhängigkeiten. Ein Konflikt beim Budgetverbrauch
 verlangt `Ctrl-R`; unveränderte Felder übernehmen den aktuellen Serverstand.
+Ein einzelner Projekt-Runner wird automatisch vorbelegt; ohne Projektbindung
+gilt das auch für einen einzigen registrierten Runner. Bei mehreren Kandidaten
+erfolgt die Auswahl mit Leertaste. Fehler benennen das konkret ungültige Feld.
 
 ```sh
 yoloforge ticket dependencies TICKET --expected-revision REV \

@@ -35,6 +35,11 @@ globale Runner-Verbindung; projektspezifische Verbindungen werden im Auftrag gep
 Bei direktem `cargo run --bin factory` werden Server und Token nicht automatisch
 angelegt. Dafür den manuellen Startablauf weiter unten verwenden.
 
+Nach schnellem Runner-Neustart kann die vorherige Registrierung noch bis zu
+60 Sekunden nach ihrem letzten Heartbeat belegt sein. Der Runner wartet bei
+`RunnerConflict` und versucht die Anmeldung automatisch alle drei Sekunden
+erneut. Solange die Registrierung fehlt, startet er keine Aufträge.
+
 ## Auftragsdetails und Factory-Verlauf
 
 `5` → Auftrag auswählen → `Enter` öffnet die schreibgeschützte Detailansicht.

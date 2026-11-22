@@ -213,6 +213,17 @@ impl Dialog {
             }
             Target::Scheduler(id) => {
                 let project = snapshot.projects.iter().find(|p| p.id == id)?;
+                let default_runner = if project.runner_bindings.len() == 1 {
+                    project
+                        .runner_bindings
+                        .keys()
+                        .next()
+                        .map(ToString::to_string)
+                } else if project.setup.is_none() && snapshot.runners.len() == 1 {
+                    Some(snapshot.runners[0].id.to_string())
+                } else {
+                    None
+                };
                 let policy = snapshot
                     .scheduler_policies
                     .iter()
@@ -227,6 +238,11 @@ impl Dialog {
                         if !runners.iter().any(|(value, _)| value == &id.to_string()) {
                             runners.push((id.to_string(), format!("{id} (nicht verbunden)")));
                         }
+                    }
+                }
+                for id in project.runner_bindings.keys() {
+                    if !runners.iter().any(|(value, _)| value == &id.to_string()) {
+                        runners.push((id.to_string(), format!("{id} (Projekt-Runner, offline)")));
                     }
                 }
                 (
@@ -256,7 +272,7 @@ impl Dialog {
                                         .collect::<Vec<_>>()
                                         .join(",")
                                 })
-                                .unwrap_or_default(),
+                                .unwrap_or_else(|| default_runner.unwrap_or_default()),
                             runners,
                             true,
                         ),
@@ -586,15 +602,17 @@ impl Dialog {
                 let start_budget = value(3)
                     .parse::<u32>()
                     .map_err(|_| "Startbudget: 0..1000")?;
-                if runner_ids.is_empty()
-                    || runner_ids.len() > 16
-                    || !(1..=16).contains(&max_parallel)
-                    || start_budget > 1000
-                {
-                    return Err(
-                        "1..16 Runner, Parallelitaet 1..16, Startbudget 0..1000 erforderlich"
-                            .into(),
-                    );
+                if runner_ids.is_empty() {
+                    return Err("Kein Runner ausgewaehlt: zum Runner-Feld wechseln und mit Leertaste markieren".into());
+                }
+                if runner_ids.len() > 16 {
+                    return Err("Hoechstens 16 Runner auswaehlen".into());
+                }
+                if !(1..=16).contains(&max_parallel) {
+                    return Err("Maximal parallele Streams muss zwischen 1 und 16 liegen".into());
+                }
+                if start_budget > 1000 {
+                    return Err("Startbudget muss zwischen 0 und 1000 liegen".into());
                 }
                 Request::Scheduler(
                     id,
@@ -1204,6 +1222,36 @@ mod tests {
         assert_eq!(b.max_parallel, 3);
         assert_eq!(b.start_budget, 9);
         assert_eq!(b.expected_revision, Revision(2));
+    }
+    #[test]
+    fn scheduler_preselects_single_runner_and_identifies_the_invalid_field() {
+        let mut s = snapshot();
+        let runner = RunnerId::new();
+        let id = s.projects[0].id;
+        s.runners.push(RunnerView {
+            id: runner,
+            name: "Local-Test".into(),
+            location: RunnerLocation::Local,
+            version: "test".into(),
+            connection: ConnectionState::Online,
+            last_seen_unix_ms: 1,
+            opencode: OpenCodeStatus::NotConfigured,
+        });
+        let mut d = Dialog::new(Target::Scheduler(id), &s).unwrap();
+        let Request::Scheduler(_, b) = d.build().unwrap() else {
+            panic!()
+        };
+        assert_eq!(b.runner_ids, vec![runner]);
+        assert_eq!(b.max_parallel, 1);
+        assert_eq!(b.start_budget, 10);
+        d.fields[1].text.clear();
+        assert!(matches!(d.build(),Err(e) if e.contains("Kein Runner")));
+        d.fields[1].text = runner.to_string();
+        d.fields[2].text = "0".into();
+        assert!(matches!(d.build(),Err(e) if e.contains("Streams")));
+        d.fields[2].text = "1".into();
+        d.fields[3].text = "1001".into();
+        assert!(matches!(d.build(),Err(e) if e.contains("Startbudget")));
     }
     #[test]
     fn changing_setup_host_loads_its_paths_without_changing_project_harness() {
