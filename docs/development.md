@@ -27,8 +27,8 @@ Ohne OpenCode-Konfiguration meldet der Runner `not_configured`; Projekte,
 Tickets und Oberfläche funktionieren bereits. `2` → `n` öffnet jetzt den
 Projekt-Assistenten; vorhandene Projekte werden über `2` → `p` eingerichtet.
 Ohne technische Eingaben reicht `2` → `n` → `Ctrl-S`: Repository und Speicherort
-werden automatisch verwaltet, Runner und OpenCode-Standardmodell automatisch
-gewählt. Der Assistent zeigt den Vorbereitungsstatus. Siehe [Projektanlage](project-setup.md), einschließlich
+werden automatisch verwaltet und der Runner automatisch gewählt. Fuer Agentstarts
+muessen Provider-/Modell-ID explizit im Projekt konfiguriert sein. Der Assistent zeigt den Vorbereitungsstatus. Siehe [Projektanlage](project-setup.md), einschließlich
 der noch offenen Provider-Anmeldung. Die Runner-Übersicht zeigt weiterhin die
 globale Runner-Verbindung; projektspezifische Verbindungen werden im Auftrag geprüft.
 

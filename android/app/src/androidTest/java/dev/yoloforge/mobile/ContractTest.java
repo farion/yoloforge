@@ -56,4 +56,25 @@ public final class ContractTest {
         try{new Outbox(vault).send(new Api("https://second.example","token"));fail("Retargeted immutable request");}catch(Exception expected){}
         assertEquals("https://first.example",vault.get("pending").getString("base"));vault.put("pending",null);
     }
+    @Test public void testRejectedPromptRestoresEncryptedDraftAndFixedSession()throws Exception{
+        Vault vault=new Vault(getInstrumentation().getTargetContext());vault.put("pending",null);
+        try(ServerSocket server=new ServerSocket(0)){
+            var executor=Executors.newSingleThreadExecutor();
+            Future<?> responder=executor.submit(()->{try(var socket=server.accept()){
+                socket.setSoTimeout(10000);BufferedReader input=new BufferedReader(new InputStreamReader(socket.getInputStream(),StandardCharsets.UTF_8));
+                String line;int length=0;while(!(line=input.readLine()).isEmpty())if(line.toLowerCase(Locale.ROOT).startsWith("content-length:"))length=Integer.parseInt(line.substring(15).trim());
+                for(int i=0;i<length;i++)if(input.read()<0)throw new EOFException();
+                socket.getOutputStream().write("HTTP/1.1 422 Unprocessable Content\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".getBytes(StandardCharsets.UTF_8));socket.getOutputStream().flush();
+            }catch(Exception error){throw new RuntimeException(error);}});
+            try{
+                Api api=new Api("http://127.0.0.1:"+server.getLocalPort(),"fixture-token");
+                JSONObject body=new JSONObject().put("request_id",UUID.randomUUID().toString()).put("project_id","project").put("prompt","Keep this draft").put("requested_session","fixed-session");
+                new Outbox(vault).prepare(api,"/v1/tasks",body);
+                try{new Outbox(vault).send(api);fail("Expected rejection");}catch(Api.HttpFailure expected){assertEquals(422,expected.status);}
+                responder.get(20,TimeUnit.SECONDS);assertNull(vault.get("pending"));
+                String key="draft:"+api.base+":project";JSONObject draft=new Vault(getInstrumentation().getTargetContext()).get(key);
+                assertEquals("Keep this draft",draft.getString("prompt"));assertEquals("fixed-session",draft.getString("requested_session"));vault.put(key,null);
+            }finally{executor.shutdownNow();}
+        }
+    }
 }

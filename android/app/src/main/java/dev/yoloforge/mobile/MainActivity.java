@@ -25,6 +25,17 @@ public final class MainActivity extends Activity {
     private TextView imageLabel;
     private String deepQuestion;
     private int generation;
+    private boolean composing;
+    private Spinner composeSessions;
+    private ArrayList<String> composeRoots;
+
+    private String draftKey()throws Exception{return "draft:"+api().base+":"+projectId;}
+    private void saveDraft()throws Exception {
+        if(!composing || prompt==null || composeSessions==null)return;
+        String root=composeRoots.get(composeSessions.getSelectedItemPosition());
+        vault.put(draftKey(),new JSONObject().put("prompt",prompt.getText().toString()).put("images",new JSONArray(images)).put("requested_session",root==null?JSONObject.NULL:root));
+    }
+    @Override public void onPause(){try{saveDraft();}catch(Exception e){message("Entwurf konnte nicht gespeichert werden");}super.onPause();}
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved); vault = new Vault(this); deepQuestion = getIntent().getStringExtra("question");
@@ -33,6 +44,8 @@ public final class MainActivity extends Activity {
     @Override public void onNewIntent(Intent intent) { super.onNewIntent(intent); deepQuestion = intent.getStringExtra("question"); refresh(); }
     @Override public void onDestroy() { worker.shutdown(); super.onDestroy(); }
     private void screen(String title) {
+        try{saveDraft();}catch(Exception e){android.widget.Toast.makeText(this,"Entwurf konnte nicht gespeichert werden",android.widget.Toast.LENGTH_LONG).show();}
+        composing=false;
         generation++;
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(24,24,24,24);
@@ -112,7 +125,9 @@ public final class MainActivity extends Activity {
     }
     private void compose() {
         images.clear(); screen("Prompt");button("Zurueck",this::project);
-        prompt=input("Was soll bearbeitet werden?","",InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);prompt.setMinLines(5);
+        JSONObject draft=null;try{draft=vault.get(draftKey());}catch(Exception e){message("Gespeicherter Entwurf nicht lesbar");}
+        prompt=input("Was soll bearbeitet werden?",draft==null?"":draft.optString("prompt"),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);prompt.setMinLines(5);
+        if(draft!=null && draft.optJSONArray("images")!=null){JSONArray saved=draft.optJSONArray("images");for(int i=0;i<saved.length();i++)images.add(saved.optJSONObject(i));}
         ArrayList<String> labels=new ArrayList<>(),roots=new ArrayList<>();labels.add("Orchestrator entscheidet");roots.add(null);
         HashSet<String> seen=new HashSet<>();JSONArray commands=array("commands");
         for(int i=commands.length()-1;i>=0;i--){JSONObject c=commands.optJSONObject(i);if(c==null || !c.optString("kind").equals("run_agent"))continue;
@@ -120,8 +135,11 @@ public final class MainActivity extends Activity {
             JSONObject continuation=spec.optJSONObject("continuation");String root=continuation==null?c.optString("id"):continuation.optString("root_command_id");
             if(seen.add(root)){labels.add(s.optString("goal")+" · "+root.substring(0,8));roots.add(root);}
         }
-        Spinner sessions=new Spinner(this);sessions.setContentDescription("Feste Session oder Orchestrator");sessions.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,labels));page.addView(sessions);
-        imageLabel=new TextView(this);page.addView(imageLabel);
+        String savedRoot=draft==null || draft.isNull("requested_session")?null:draft.optString("requested_session",null);
+        if(savedRoot!=null && !roots.contains(savedRoot)){roots.add(savedRoot);labels.add("Gespeicherte feste Session · "+savedRoot);}
+        Spinner sessions=new Spinner(this);sessions.setContentDescription("Feste Session oder Orchestrator");sessions.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,labels));sessions.setSelection(Math.max(0,roots.indexOf(savedRoot)));page.addView(sessions);
+        composeSessions=sessions;composeRoots=roots;composing=true;
+        imageLabel=new TextView(this);imageLabel.setText(getString(R.string.attached_images,images.size()));page.addView(imageLabel);
         button("Bild anhaengen",()->{Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(pick,11);});
         button("Bilder entfernen",()->{images.clear();imageLabel.setText("");});
         button("Senden",()->{try{
@@ -179,7 +197,9 @@ public final class MainActivity extends Activity {
     private void sendAnswer(JSONObject q,JSONObject answer)throws Exception{write("/v1/questions/"+q.getString("id")+"/answer",new JSONObject().put("request_id",UUID.randomUUID().toString()).put("expected_revision",q.getLong("revision")).put("answer",answer));}
     private void write(String path,JSONObject body)throws Exception {
         if(vault.get("pending")!=null){pendingScreen();return;}
-        new Outbox(vault).prepare(api(),path,body);pendingScreen();retry();
+        new Outbox(vault).prepare(api(),path,body);
+        if(composing){vault.put(draftKey(),null);composing=false;}
+        pendingScreen();retry();
     }
     private void pendingScreen(){screen("Auftrag gespeichert");text("Bei Verbindungsabbruch bleibt der identische Auftrag mit derselben Request-ID gespeichert. Erneutes Senden erzeugt keinen zweiten Auftrag.");button("Erneut senden",this::retry);button("Neu anmelden",this::login);}
     private void retry(){message("Sende gespeicherten Auftrag …");background(()->{

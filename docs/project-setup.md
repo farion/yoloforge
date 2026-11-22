@@ -19,16 +19,16 @@ Für neue Projekte: `2` → `n`. Für ein vorhandenes Projekt: `2` → Projekt �
 **Ohne technische Eingaben:** `2` → `n` → `Ctrl-S`. Ein registrierter Runner
 wird vorbelegt (vorzugsweise online), ein leeres Git-Repository mit Initialcommit
 und ein Worktree werden automatisch erstellt. Auch der Projektname ist vorbelegt
-und kann später geändert werden. Repository, lokale Pfade, Provider/Modell und
+und kann später geändert werden. Repository, lokale Pfade und
 Harness-Dateien müssen nicht angegeben werden. Bei mehreren Runnern kann die
 automatische Auswahl im Assistenten geändert werden.
 
-Provider und Modell bleiben standardmäßig leer. Vor der ersten Session liest der
-Runner OpenCodes Standardmodell für den Worktree und speichert die konkreten IDs
-in seinem Journal. Konfigurationsänderungen und Neustarts führen dadurch nicht
-zum unbemerkten Modellwechsel. Fortsetzungen übernehmen das Modell ihres
-Vorgängers. Fehlt ein nutzbares Standardmodell, wird das vor Session-/Prompt-Anlage
-als eigener Status gemeldet; die Provider-Anmeldung ist weiterhin Voraussetzung.
+Provider und Modell muessen vor einer Agent-Ausfuehrung explizit konfiguriert sein.
+Technische IDs verwenden, beispielsweise `openai` und `gpt-6.2-sol`, keine
+Anzeigenamen. Fehlende Werte blockieren die Ausfuehrung; es gibt keinen Rueckfall
+auf ein Standard- oder kostenloses Modell. Das Projektprofil wird unveraenderlich
+im Auftrag festgehalten. Fortsetzungen erfordern ein kompatibles Profil.
+Provider-Anmeldung und gueltiger Zugang bleiben Voraussetzung.
 
 Der Assistent fragt der Reihe nach:
 

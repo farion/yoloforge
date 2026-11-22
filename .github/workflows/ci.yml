@@ -16,6 +16,21 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
         working-directory: android
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - run: cargo build --locked -p factoryd
+      - name: Enable emulator acceleration
+        run: sudo chmod 666 /dev/kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            ./android/gradlew -p android :app:connectedDebugAndroidTest
+            python3 scripts/smoke-android.py --serial emulator-5554
       - uses: actions/upload-artifact@v4
         with:
           name: yoloforge-android-development

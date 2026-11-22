@@ -9,7 +9,7 @@ Ctrl-S bleibt als Sende-Kürzel verfügbar. Nach bestätigtem Versand schließt 
 Editor automatisch; bei unklarem Versand bleibt der unveränderliche Entwurf erhalten.
 Titel, Priorität, Statuswahl und Scheduler-Aktivierung entfallen.
 Ein kompatibler Runner richtet die Standardplanung mit unbegrenzten Starts ein;
-ohne Modellvorgabe wird das OpenCode-Standardmodell verwendet. Neue Prompts
+ohne explizite Provider-/Modell-ID wird kein Agent gestartet. Neue Prompts
 aktivieren auch eine zuvor konfigurierte Legacy-Planung ohne Startbudget.
 Unter `2` → Projekt → Leertaste lässt sich das Projekt pausieren/fortsetzen.
 Die Pause verhindert neue Starts einschließlich noch nicht angenommener Aufträge;
