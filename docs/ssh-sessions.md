@@ -62,6 +62,12 @@ Vor der ersten Agent-Session ist Remote-Projektbereitschaft noch nicht verfuegba
   fuer mehrere Runner und begrenzte, bereinigte SSH-Ausgabe sind bestanden.
 - Der Bereitschaftshelfer wurde lokal gegen die echte OpenAI-Session ohne
   Factory-Token bei laufendem Runner geprueft.
+- Vor der ersten Agent-Session verwendet die TUI jetzt den bestaetigten
+  PrepareWorkspace-Auftrag: derselbe lesende Journalhelfer oeffnet den nativen
+  OpenCode-Projekt-Anmeldeeinstieg oder liest Bereitschaft. `--inspect-model`
+  uebergibt ausschliesslich das explizite aktuelle Projektmodell fuer die Diagnose,
+  ohne Profil-/Sessionaenderung. Ein Test prueft die GET-Aufrufe ohne Agentzustand,
+  Factory-Token oder Runner-Prozesslock.
 - `scripts/smoke-ssh-readiness.py` prueft zusaetzlich den echten SSH-Hop ueber
   einen temporaeren Loopback-sshd mit eigenem Client-/Hostschluessel, festem
   lesenden Helferkommando und gepinntem known_hosts-Eintrag. Bestanden; kein

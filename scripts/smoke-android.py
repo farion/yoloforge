@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Android UI against isolated Rust Factory: enrollment, notifications, answer and prompt. No models."""
 import argparse
+import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +41,9 @@ try:
     command=api("POST","/v1/streams/"+stream["id"]+"/commands",{"request_id":rid(),"expected_revision":4,"kind":"run_agent","prompt":"Synthetic question; no model execution"})
     api("POST",prefix+command["id"]+"/ack",{"request_id":rid(),"ownership_epoch":1},registration)
     session="ses_factory_"+command["id"].replace("-","")
+    data=b"\x00\xffAndroid archive proof"
+    attachment={"uri":"file:///unused/proof.bin","name":"proof.bin","mime":"application/octet-stream","status":"captured","sha256":hashlib.sha256(data).hexdigest(),"data":base64.b64encode(data).decode()}
+    api("PUT",prefix+command["id"]+"/archive",{"ownership_epoch":1,"batch":{"session_id":session,"revision":1,"captured_unix_ms":1,"final_scan_complete":False,"messages":[{"id":"msg_android_archive","text":"Android archive proof","__yoloforge_files_v1":[attachment]}]}},registration)
     api("POST",prefix+command["id"]+"/questions",{"ownership_epoch":1,"questions":[{"external_id":"android_name","kind":"form","payload":{"id":"android_name","sessionID":session,"title":"Name eingeben","fields":[{"key":"name","type":"string","required":True}]}}]},registration)
     code=api("POST","/v1/devices/enrollment",{"role":"operator","runner_id":None,"ttl_seconds":300})["code"]
     for apk in ["debug/app-debug.apk","androidTest/debug/app-debug-androidTest.apk"]:

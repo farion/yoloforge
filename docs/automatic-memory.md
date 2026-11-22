@@ -10,15 +10,26 @@ Ergebnis, nicht das vollständige Archiv. Er liefert maximal 3500 UTF-8-Bytes
 Beobachtungen oder einen leeren String. Ungültige/fehlgeschlagene Ergebnisse
 werden protokolliert und nicht endlos erneut angefordert. Gespeicherte Notizen
 sind branchlokal, Priorität 1, ausdrücklich modellabgeleitet und verweisen auf
-Quellauftrag/Archiv sowie Auswertungsauftrag. Sie ersetzen keine bestehenden
-Notizen. Routing berücksichtigt kurze Ausschnitte passenden Wissens.
+Quellauftrag/Archiv sowie Auswertungsauftrag. Routing berücksichtigt kurze
+Ausschnitte passenden Wissens.
+
+Bei einer klaren Korrektur/Widerspruch kann die Auswertung eine fruehere
+modellabgeleitete Branch-Notiz abloesen. Angeboten werden maximal acht aktive
+Notizen derselben Branch ohne Ticketscope, Prioritaet 1, mit nachgewiesener
+Memory-Auswertung als Quelle. Die angebotenen IDs/Revisionen werden vor dem
+Modellaufruf journalisiert. Das Modell muss eine Korrektur begruenden und weiter
+gueltige Beobachtungen erhalten. Die Speicherung prueft Angebot, Revision, Scope
+und Aktivitaet erneut und ersetzt atomar mit beidseitiger Provenienz. Eine
+konkurrierende menschliche Ablösung/Stilllegung gewinnt; ungeeignete Ergebnisse
+werden einmalig verworfen. Manuelle und projektweite Notizen sind nicht angeboten.
 
 Neustart, einmalige Speicherung, leere/ungültige Ergebnisse und Branchfilter sind
 getestet. Realmodell-Abnahme mit Bildtask, fester Fortsetzung, automatischer
 Frageantwort, Veröffentlichung und Wissen bestanden:
 `scripts/smoke-prompt-image.py --local-registration PATH --memory`.
-Semantische Widerspruchsauflösung, eigener Kostenhaushalt und modellspezifischer
-Tokenizer sind weiter offen.
+Branchlokale Widerspruchskorrektur samt Restart, unangebotener ID und menschlichem
+Revisionsrennen ist synthetisch getestet. Ihre Realmodell-Abnahme, ein eigener
+Kostenhaushalt und modellspezifischer Tokenizer sind weiter offen.
 
 ## Historische Archive
 
@@ -28,5 +39,5 @@ Fehlerzahl und Retry-Zeit werden journalisiert. Fehler führen zu begrenztem
 exponentiellem Zeitabstand, nicht zur erneuten Agent-Ausführung. Bereits fertige
 Archive bleiben unberührt. Der Test prüft Antwortverlust, Neustart und identisches
 Batch-Replay. Nicht mehr erreichbare Sessions, verlorene Journale oder serverseitig
-gesperrte/terminierte Quellen können so nicht rekonstruiert werden; Binäranhänge
-sind noch nicht separat archiviert.
+gesperrte/terminierte Quellen können so nicht rekonstruiert werden. Begrenzte
+Binärsnapshots und Export sind unter [archive-files.md](archive-files.md) beschrieben.

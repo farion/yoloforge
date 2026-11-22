@@ -53,6 +53,12 @@ public final class AppFlowTest {
             click("Zurueck");click("Neuer Prompt");
             EditText restored=(EditText)waitView("Was soll bearbeitet werden?",true);
             instrument.runOnMainSync(()->{assertEquals("Prompt from Android UI",restored.getText().toString());assertEquals(1,spinner(activity.getWindow().getDecorView()).getSelectedItemPosition());});
+            android.app.Instrumentation.ActivityMonitor monitor=instrument.addMonitor(MainActivity.class.getName(),null,false);
+            instrument.runOnMainSync(()->activity.recreate());
+            Activity replacement=instrument.waitForMonitorWithTimeout(monitor,10000);instrument.removeMonitor(monitor);
+            assertNotNull("Activity must be recreated",replacement);activity=replacement;
+            EditText rotated=(EditText)waitView("Was soll bearbeitet werden?",true);
+            instrument.runOnMainSync(()->{assertEquals("Prompt from Android UI",rotated.getText().toString());assertEquals(1,spinner(activity.getWindow().getDecorView()).getSelectedItemPosition());});
             click("Senden");
             waitView("Neuer Prompt",false);
             JSONObject credential=vault.get("credentials");Api api=new Api(credential.getString("base"),credential.getString("token"));JSONObject snapshot=api.request("GET","/v1/snapshot",null);
@@ -60,6 +66,8 @@ public final class AppFlowTest {
             for(int i=0;i<snapshot.getJSONArray("questions").length();i++){JSONObject q=snapshot.getJSONArray("questions").getJSONObject(i);if(q.optJSONObject("answer")!=null && "Android UI proof".equals(q.getJSONObject("answer").optString("name")))answered=true;}
             for(int i=0;i<snapshot.getJSONArray("tickets").length();i++){JSONObject t=snapshot.getJSONArray("tickets").getJSONObject(i);if("Prompt from Android UI".equals(t.optString("prompt"))){created=true;assertFalse("Fixed session must survive saved draft",t.isNull("requested_session"));}}
             assertTrue("Question answer must reach real Factory API",answered);assertTrue("Prompt must reach real Factory API",created);assertNull(vault.get("pending"));
+            click("Session: Android UI acceptance");click("Vollstaendiges Archiv");
+            waitView("Anhang speichern: proof.bin",false);click("Naechste Seite");waitView("Zum Anfang",false);click("Zum Anfang");waitView("Anhang speichern: proof.bin",false);
         } finally {context.stopService(new Intent(context,EventService.class));instrument.runOnMainSync(()->activity.finish());}
     }
 }

@@ -106,8 +106,53 @@ jobs:
         with:
           name: server-image
           path: server-image.json
+  android:
+    if: vars.ANDROID_RELEASE_SIGNING == 'enabled'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Verify release version
+        run: python3 -c 'import os,tomllib; assert os.environ["RELEASE_TAG"] == "v" + tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"]'
+      - name: Materialize private signing inputs
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          python3 - <<'PY'
+          import base64,json,os
+          from pathlib import Path
+          os.umask(0o077)
+          directory=Path(os.environ['RUNNER_TEMP'])/'yoloforge-signing'
+          directory.mkdir()
+          for key in ['KEYSTORE_BASE64','STORE_PASSWORD','KEY_ALIAS']:
+              assert os.environ.get(key), 'Android signing secret missing: '+key
+          (directory/'release.p12').write_bytes(base64.b64decode(os.environ['KEYSTORE_BASE64'],validate=True))
+          (directory/'password').write_text(os.environ['STORE_PASSWORD'])
+          (directory/'signing.json').write_text(json.dumps({'alias':os.environ['KEY_ALIAS'],'keystore':'release.p12','password_file':'password'}))
+          PY
+      - name: Build and verify pinned Android release signature
+        run: python3 scripts/android-release.py --signing-dir "$RUNNER_TEMP/yoloforge-signing"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-release
+          path: |
+            dist/*.apk
+            dist/*.apk.sha256
+      - name: Remove ephemeral signing material
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/yoloforge-signing"
   publish:
-    needs: [binaries, windows-tui, image]
+    needs: [binaries, windows-tui, image, android]
+    if: always() && needs.binaries.result == 'success' && needs.windows-tui.result == 'success' && needs.image.result == 'success' && (needs.android.result == 'success' || needs.android.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -125,6 +170,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: windows-tui
+          path: release
+      - uses: actions/download-artifact@v4
+        if: needs.android.result == 'success'
+        with:
+          name: android-release
           path: release
       - name: Publish only the complete release
         env:

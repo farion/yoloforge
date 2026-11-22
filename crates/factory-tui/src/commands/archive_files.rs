@@ -6,7 +6,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-pub(super) struct Export {
+pub(crate) struct Export {
     directory: PathBuf,
     manifest: File,
     seen: BTreeSet<String>,

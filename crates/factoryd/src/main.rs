@@ -15,11 +15,19 @@ struct Args {
     /// Permit a container interface bind. Publish its port on host loopback only.
     #[arg(long)]
     allow_container_network: bool,
+    /// Optional private ntfy configuration for durable background question notifications.
+    #[arg(long)]
+    push_config: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let push_config = args
+        .push_config
+        .as_deref()
+        .map(factoryd::push::Config::load)
+        .transpose()?;
     let token = match (env::var("FACTORY_TOKEN"), env::var_os("FACTORY_TOKEN_FILE")) {
         (Ok(_), Some(_)) => anyhow::bail!("Set only FACTORY_TOKEN or FACTORY_TOKEN_FILE"),
         (Ok(token), None) => token,
@@ -56,6 +64,8 @@ async fn main() -> Result<()> {
         listener.local_addr()?
     );
     let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let push = push_config
+        .map(|config| tokio::spawn(factoryd::push::run(store.clone(), config, stopping.clone())));
     let supervisor_store = store.clone();
     let supervisor_stopping = stopping.clone();
     let supervisor = tokio::spawn(async move {
@@ -95,5 +105,8 @@ async fn main() -> Result<()> {
     })
     .await?;
     supervisor.abort();
+    if let Some(push) = push {
+        push.abort();
+    }
     Ok(())
 }

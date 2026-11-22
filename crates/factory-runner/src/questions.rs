@@ -275,6 +275,7 @@ mod tests {
         let args = Args {
             open_session: None,
             session_readiness: false,
+            inspect_model: None,
             publish_review: None,
             hosting_config: None,
             publish_result: None,

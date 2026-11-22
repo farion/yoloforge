@@ -34,4 +34,9 @@ Dateien. Unvollständige Exporte bleiben als solche ohne Abschlussbeleg erkennba
 Abnahme: Escape-Symlinks/HTTP werden nicht gelesen; Byteintegrität geprüft;
 `scripts/smoke-archive-files.py` prüft echte Factory-HTTP-Persistenz, identischen
 Replay, Serverneustart, Löschung der Ursprungsdatei und CLI-Export. Kein Modellaufruf.
-Anhang-Download direkt aus TUI/Android und große externe Binärobjekte bleiben offen.
+In der TUI exportiert `e` die Anhaenge der geladenen Nachrichtenversion in ein
+neues privates `yoloforge-attachments-...`-Verzeichnis im aktuellen Arbeitsordner,
+einschliesslich Manifest. Vorhandene Verzeichnisse/Dateien werden nicht ersetzt.
+Android bietet inzwischen Archivnavigation und SHA256-geprueften Export ueber
+den System-Dateidialog; die Byte-/UI-Tests bestehen, die Dateidialog-Abnahme auf
+einem echten Geraet fehlt noch. Große externe Binärobjekte bleiben offen.

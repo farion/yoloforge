@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use factory_core::*;
 use factory_protocol::{client::FactoryClient, *};
-mod archive_files;
+pub(crate) mod archive_files;
 mod repository;
 
 #[derive(Subcommand)]

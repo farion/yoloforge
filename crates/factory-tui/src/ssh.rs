@@ -33,6 +33,35 @@ pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
 pub fn readiness(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
     configured_mode(runner, id, true)
 }
+pub fn project_readiness(
+    runner: RunnerId,
+    id: CommandId,
+    provider: &str,
+    model: &str,
+) -> Result<Option<Command>> {
+    let Some(mut command) = readiness(runner, id)? else {
+        return Ok(None);
+    };
+    let mut args = command
+        .get_args()
+        .map(|s| s.to_os_string())
+        .collect::<Vec<_>>();
+    let remote = args.pop().context("SSH remote command missing")?;
+    let remote = format!(
+        "{} '--inspect-model' {}",
+        remote.to_string_lossy(),
+        quote(&format!("{provider}/{model}"))?
+    );
+    // Rebuild the command because std::process::Command cannot replace an argument.
+    command = Command::new("ssh");
+    command
+        .args(args)
+        .arg(remote)
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TOKEN_FILE")
+        .env_remove("OPENCODE_PASSWORD");
+    Ok(Some(command))
+}
 fn configured_mode(runner: RunnerId, id: CommandId, readiness: bool) -> Result<Option<Command>> {
     let path = config_path();
     let bytes = match std::fs::read(&path) {

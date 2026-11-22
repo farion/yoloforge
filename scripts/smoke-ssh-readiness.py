@@ -16,6 +16,7 @@ parser.add_argument("--runner",required=True)
 parser.add_argument("--journal",type=Path,required=True)
 parser.add_argument("--server",required=True)
 parser.add_argument("--command",required=True)
+parser.add_argument("--model",help="Optional explicit provider/model for read-only readiness")
 args=parser.parse_args()
 directory=Path(tempfile.mkdtemp(prefix="yf-ssh-lab-",dir="/tmp/opencode"))
 for name in ["host","client"]:
@@ -24,6 +25,7 @@ for name in ["host","client"]:
 with socket.socket() as listener:
     listener.bind(("127.0.0.1",0));port=listener.getsockname()[1]
 helper=[str(root/"target/debug/factory-runner"),"--id",args.runner,"--name","ssh-readiness-test","--server",args.server,"--journal",str(args.journal.resolve()),"--open-session",args.command,"--session-readiness"]
+if args.model:helper.extend(["--inspect-model",args.model])
 # Only this fixed, read-only helper is allowed through the temporary SSH listener.
 config=directory/"sshd_config"
 # The private 0700 lab lives below /tmp, whose parent permissions StrictModes rejects.
@@ -43,7 +45,7 @@ try:
     command=["ssh","-T","-F","/dev/null","-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+str(known),"-i",str(directory/"client"),"-p",str(port),getpass.getuser()+"@127.0.0.1",shlex.join(helper)]
     result=subprocess.run(command,env=env,capture_output=True,text=True,timeout=40)
     assert result.returncode==0,result.stderr
-    assert "Recorded execution: "+args.command in result.stdout
+    assert any(prefix+args.command in result.stdout for prefix in ["Recorded execution: ","Recorded workspace: "])
     assert "OpenCode-Service erreichbar" in result.stdout
     (directory/"readiness.txt").write_text(result.stdout)
     print("PASS real SSH traversal, pinned host key and runner/session identity; no Factory token or runner restart")

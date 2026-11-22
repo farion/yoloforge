@@ -15,6 +15,37 @@ import org.json.JSONObject;
 
 @RunWith(AndroidJUnit4.class)
 public final class ContractTest {
+    @Test public void updateTransportAndChecksumRejectForeignAssets()throws Exception {
+        String hash=Updates.digest(new byte[]{0,1,2});assertEquals(hash,Updates.checksum(hash+"  yoloforge.apk\n","yoloforge.apk"));
+        try{Updates.checksum(hash+"  other.apk","yoloforge.apk");fail("Foreign checksum filename");}catch(Exception expected){}
+        for(String url:List.of("http://github.com/file","https://user:token@github.com/file","https://evil.example/file","file:///data/private")){
+            try{Updates.download(url,1024);fail("Untrusted update transport");}catch(Exception expected){}
+        }
+        var context=getInstrumentation().getTargetContext();
+        try{Updates.verify(context,new File(context.getApplicationInfo().sourceDir));fail("Installed version accepted as upgrade");}catch(Exception expected){}
+    }
+    @Test public void conditionalMultiChoiceFormPreservesTypesAndDrafts()throws Exception {
+        Throwable[] failure={null};getInstrumentation().runOnMainSync(()->{try{
+            var context=getInstrumentation().getTargetContext();var page=new android.widget.LinearLayout(context);
+            var schema=new org.json.JSONArray("[{\"key\":\"count\",\"type\":\"integer\",\"default\":3},{\"key\":\"features\",\"type\":\"multiselect\",\"minItems\":1,\"options\":[{\"value\":\"mouse\",\"label\":\"Maussteuerung\"}],\"default\":[\"mouse\"]},{\"key\":\"hidden\",\"type\":\"string\",\"required\":true,\"when\":[{\"key\":\"count\",\"op\":\"eq\",\"value\":9}]},{\"key\":\"visible\",\"type\":\"string\",\"default\":\"retained\",\"when\":[{\"key\":\"count\",\"op\":\"eq\",\"value\":3}]}]");
+            FormEditor editor=new FormEditor(context,page,schema,null);JSONObject answer=editor.answer();
+            assertTrue("Integer must not become a JSON double",answer.get("count") instanceof Long);assertEquals("mouse",answer.getJSONArray("features").getString(0));assertFalse(answer.has("hidden"));assertEquals("retained",answer.getString("visible"));
+            JSONObject draft=editor.draft();var restored=new FormEditor(context,new android.widget.LinearLayout(context),schema,draft);assertEquals(answer.toString(),restored.answer().toString());
+            draft.put("count","9");var changed=new FormEditor(context,new android.widget.LinearLayout(context),schema,draft);try{changed.answer();fail("Conditional required field ignored");}catch(Exception expected){}
+        }catch(Throwable e){failure[0]=e;}});if(failure[0]!=null)throw new AssertionError(failure[0]);
+    }
+    @Test public void archiveBinaryIntegrityAndInlineExtraction()throws Exception {
+        JSONObject inline=new JSONObject("{\"mime\":\"application/octet-stream\",\"name\":\"../../proof.bin\",\"uri\":\"data:application/octet-stream;base64,AP9QREY=\"}");
+        JSONObject message=new JSONObject().put("id","msg_test").put("text","Ungekuerzter Text").put("file",inline);
+        var files=ArchiveContent.files(message);assertEquals(1,files.size());
+        assertArrayEquals(new byte[]{0,(byte)255,80,68,70},ArchiveContent.bytes(files.get(0)));
+        assertTrue(ArchiveContent.render(message).contains("Ungekuerzter Text"));assertFalse(ArchiveContent.render(message).contains("AP9QREY="));
+        assertFalse(ArchiveContent.safeName("../../proof.bin").contains("/"));
+        files.get(0).put("sha256","0".repeat(64));
+        try{ArchiveContent.bytes(files.get(0));fail("Corrupt attachment exported");}catch(Exception expected){}
+        JSONObject nested=new JSONObject().put(ArchiveContent.KEY,new org.json.JSONArray().put(files.get(0)));
+        assertEquals("Snapshot metadata must not be decoded twice",1,ArchiveContent.files(nested).size());
+    }
     private Instrumentation getInstrumentation(){return InstrumentationRegistry.getInstrumentation();}
     @Test
     public void testVaultAndEndpointPolicy()throws Exception{

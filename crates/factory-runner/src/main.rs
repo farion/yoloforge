@@ -72,6 +72,9 @@ struct Args {
     /// Print recorded session readiness without starting a terminal (usable over SSH).
     #[arg(long, requires = "open_session")]
     session_readiness: bool,
+    /// Explicit current project model for read-only readiness (provider/model technical IDs).
+    #[arg(long, requires = "session_readiness")]
+    inspect_model: Option<String>,
     /// Push a verified review candidate and create/reconcile its hosting pull request.
     #[arg(long, conflicts_with_all = ["open_session", "publish_result"], requires = "hosting_config")]
     publish_review: Option<CommandId>,

@@ -25,6 +25,7 @@ struct Field {
     schema: Value,
     text: String,
     cursor: usize,
+    option_cursor: usize,
 }
 pub enum Action {
     None,
@@ -66,10 +67,17 @@ impl Dialog {
                             v.to_string()
                         }
                     })
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        if schema["type"] == "multiselect" {
+                            "[]".into()
+                        } else {
+                            String::new()
+                        }
+                    });
                 Field {
                     schema: schema.clone(),
                     cursor: text.len(),
+                    option_cursor: 0,
                     text,
                 }
             })
@@ -375,6 +383,40 @@ impl Dialog {
                 };
                 let field = &mut self.fields[index];
                 match key.code {
+                    KeyCode::Up | KeyCode::Down if field.schema["type"] == "multiselect" => {
+                        let count = field.schema["options"].as_array().map_or(0, Vec::len);
+                        if count > 0 {
+                            field.option_cursor = if key.code == KeyCode::Up {
+                                (field.option_cursor + count - 1) % count
+                            } else {
+                                (field.option_cursor + 1) % count
+                            };
+                        }
+                    }
+                    KeyCode::Char(' ')
+                        if field.schema["type"] == "multiselect"
+                            && field.schema["options"].is_array() =>
+                    {
+                        if let Some(option) = field.schema["options"]
+                            .as_array()
+                            .and_then(|v| v.get(field.option_cursor))
+                        {
+                            let Ok(mut values) = serde_json::from_str::<Vec<Value>>(&field.text)
+                            else {
+                                self.message =
+                                    "Mehrfachauswahl zuerst als gueltige Liste korrigieren".into();
+                                return Action::None;
+                            };
+                            if values.contains(&option["value"]) {
+                                values.retain(|v| *v != option["value"]);
+                            } else {
+                                values.push(option["value"].clone());
+                            }
+                            field.text =
+                                serde_json::to_string(&values).unwrap_or_else(|_| "[]".into());
+                            field.cursor = field.text.len();
+                        }
+                    }
                     KeyCode::Up | KeyCode::Down
                         if field.schema["options"].is_array()
                             && field.schema["type"] == "string" =>
@@ -531,6 +573,8 @@ impl Dialog {
                     format!("Ausgewaehlt: {}", one_line(label)),
                     Style::default().fg(Color::Cyan),
                 ))
+            } else if f.schema["type"] == "multiselect" {
+                Line::from(format!("Ausgewaehlt: {}", multi_labels(f)))
             } else if f.schema["type"] == "boolean" {
                 Line::from(format!(
                     "Auswahl: {}",
@@ -556,7 +600,7 @@ impl Dialog {
                     Line::from(match f.schema["type"].as_str() {
                         Some("boolean") => "Leertaste: Ja/Nein",
                         Some("multiselect") => {
-                            "JSON-Liste eingeben, z.B. [\"option1\",\"option2\"]"
+                            "↑/↓: Option | Leertaste: an/aus | Eigene Werte: JSON-Liste, falls erlaubt"
                         }
                         Some("string") if f.schema["options"].is_array() => {
                             "↑/↓: Antwort auswaehlen | Eigene Antwort: direkt tippen, falls erlaubt"
@@ -624,14 +668,27 @@ impl Dialog {
                     lines.push(one_line(description));
                 }
                 if let Some(options) = schema["options"].as_array() {
-                    for option in options {
+                    for (option_index, option) in options.iter().enumerate() {
                         let label = option["label"]
                             .as_str()
                             .or_else(|| option["value"].as_str())
                             .unwrap_or("Option");
-                        let selected = option["value"].as_str().is_some_and(|v| v == field.text);
+                        let selected = if schema["type"] == "multiselect" {
+                            serde_json::from_str::<Vec<Value>>(&field.text)
+                                .is_ok_and(|v| v.contains(&option["value"]))
+                        } else {
+                            option["value"].as_str().is_some_and(|v| v == field.text)
+                        };
                         lines.push(format!(
-                            "  {} {}",
+                            "{} {} {}",
+                            if schema["type"] == "multiselect"
+                                && self.active() == Some(*index)
+                                && option_index == field.option_cursor
+                            {
+                                " ›"
+                            } else {
+                                "  "
+                            },
                             if selected { "●" } else { "○" },
                             one_line(label)
                         ));
@@ -648,7 +705,9 @@ impl Dialog {
                         .as_array()
                         .is_some_and(|options| options.iter().any(|o| o["value"] == field.text))
                 {
+                    let multi = multi_labels(field);
                     let answer = match field.text.as_str() {
+                        _ if schema["type"] == "multiselect" => &multi,
                         "true" if schema["type"] == "boolean" => "Ja",
                         "false" if schema["type"] == "boolean" => "Nein",
                         value => value,
@@ -683,11 +742,26 @@ fn next(text: &str, cursor: usize) -> usize {
         .map_or(cursor, |c| cursor + c.len_utf8())
 }
 fn fixed_options(field: &Field) -> bool {
-    field.schema["type"] == "string"
+    (field.schema["type"] == "string" || field.schema["type"] == "multiselect")
         && field.schema["options"]
             .as_array()
             .is_some_and(|v| !v.is_empty())
         && field.schema["custom"] != true
+}
+fn multi_labels(field: &Field) -> String {
+    serde_json::from_str::<Vec<Value>>(&field.text)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|value| {
+            field.schema["options"]
+                .as_array()
+                .and_then(|options| options.iter().find(|o| o["value"] == *value))
+                .and_then(|o| o["label"].as_str())
+                .or_else(|| value.as_str())
+                .map(one_line)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 fn parse(field: &Field) -> Result<Value, String> {
     match field.schema["type"].as_str() {
@@ -760,6 +834,23 @@ fn validate(field: &Field, value: &Value) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn multiselect_is_labeled_keyboard_operated_and_serializes_values() {
+        let mut dialog = Dialog::new(form(
+            json!([{"key":"targets","title":"Bereiche","type":"multiselect","minItems":1,"options":[{"value":"board","label":"Spielfeld"},{"value":"menus","label":"Menues"}]}]),
+        ));
+        press(&mut dialog, KeyCode::Char(' '));
+        press(&mut dialog, KeyCode::Down);
+        press(&mut dialog, KeyCode::Char(' '));
+        let readable = dialog.readable_question();
+        assert!(readable.contains("● Spielfeld"));
+        assert!(readable.contains("● Menues"));
+        assert!(!readable.contains("[\"board\""));
+        let Action::Send(request) = control(&mut dialog, 's') else {
+            panic!("Expected answer")
+        };
+        assert_eq!(request.answer["targets"], json!(["board", "menus"]));
+    }
     fn form(fields: Value) -> Question {
         let command_id = CommandId::new();
         Question {

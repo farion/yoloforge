@@ -61,12 +61,28 @@ pub async fn project_terminal(snapshot: &Snapshot, id: ProjectId) -> Result<std:
 }
 
 fn remote_execution(snapshot: &Snapshot, id: ProjectId) -> Option<&RunnerCommand> {
-    snapshot.commands.iter().rev().find(|c| {
-        c.kind == CommandKind::RunAgent
-            && snapshot.streams.iter().any(|s| {
-                s.id == c.stream_id && s.project_id == id && s.ownership_epoch == c.ownership_epoch
+    let belongs = |c: &&RunnerCommand| {
+        matches!(
+            c.kind,
+            CommandKind::RunAgent | CommandKind::PrepareWorkspace
+        ) && snapshot.streams.iter().any(|s| {
+            s.id == c.stream_id
+                && s.project_id == id
+                && s.ownership_epoch == c.ownership_epoch
+                && s.runner_id == c.runner_id
+        })
+    };
+    snapshot
+        .commands
+        .iter()
+        .rev()
+        .filter(belongs)
+        .find(|c| c.kind == CommandKind::RunAgent)
+        .or_else(|| {
+            snapshot.commands.iter().rev().filter(belongs).find(|c| {
+                c.kind == CommandKind::PrepareWorkspace && c.state == CommandState::Succeeded
             })
-    })
+        })
 }
 
 async fn remote_report(command: std::process::Command) -> Result<String> {
@@ -101,9 +117,26 @@ pub async fn readiness(snapshot: &Snapshot, id: ProjectId) -> Result<String> {
         .find(|p| p.id == id)
         .context("Projekt fehlt")?;
     if let Some(command) = remote_execution(snapshot, id) {
-        if let Some(remote) = crate::ssh::readiness(command.runner_id, command.id)? {
+        if let Some(remote) = crate::ssh::project_readiness(
+            command.runner_id,
+            command.id,
+            &project.profile.provider_id,
+            &project.profile.model_id,
+        )? {
             let report = remote_report(remote).await?;
-            return Ok(format!("Aktuelles Projektmodell: {}/{}\nSSH-Runner {} (Status der aufgezeichneten Ausfuehrung)\n{}", project.profile.provider_id, project.profile.model_id, command.runner_id, report));
+            let scope = if command.kind == CommandKind::PrepareWorkspace {
+                "Vorbereiteter Projektordner; noch keine Agent-Session"
+            } else {
+                "Aufgezeichnete Ausfuehrung, aktuelles Projektmodell"
+            };
+            return Ok(format!(
+                "Aktuelles Projektmodell: {}/{}\nSSH-Runner {} ({})\n{}",
+                project.profile.provider_id,
+                project.profile.model_id,
+                command.runner_id,
+                scope,
+                report
+            ));
         }
     }
     let (client, path) = project_connection(snapshot, id)?;

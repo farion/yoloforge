@@ -238,6 +238,34 @@ impl Browser {
     }
     pub fn key(&mut self, code: KeyCode) {
         self.poll();
+        if code == KeyCode::Char('e') {
+            if let Some(entry) = &self.state.entry {
+                let result = (|| -> anyhow::Result<String> {
+                    let path = std::env::current_dir()?.join(format!(
+                        "yoloforge-attachments-{}-{}-{}",
+                        self.command,
+                        entry.sequence,
+                        RequestId::new()
+                    ));
+                    let mut export = crate::commands::archive_files::Export::new(&path)?;
+                    export.entry(entry)?;
+                    export.finish()?;
+                    Ok(format!(
+                        "{} Dateien, {} nicht verfuegbar: {}",
+                        export.count,
+                        export.unavailable,
+                        path.display()
+                    ))
+                })();
+                self.state.message = match result {
+                    Ok(message) => message,
+                    Err(error) => format!("Dateiexport fehlgeschlagen: {error}"),
+                };
+            } else {
+                self.state.message = "Keine Nachricht fuer den Dateiexport geladen".into();
+            }
+            return;
+        }
         if code == KeyCode::Char('p') && self.state.position == 0 && self.state.first_position > 0 {
             self.state.message =
                 "Ruecksprungfenster erreicht (1024 Versionen). r: Archiv erneut ab Anfang lesen"
@@ -328,7 +356,7 @@ impl Browser {
             areas[1],
         );
         s.scroll = scroll;
-        frame.render_widget(Paragraph::new("n/p: naechste/vorherige Version | [/]: vorheriger/naechster JSON-Teil | r: neuer Stand\nPfeile hoch/runter: scrollen | Tab/links/rechts: Detailseite | Esc: Liste").wrap(Wrap {trim:false}).block(Block::bordered()),areas[2]);
+        frame.render_widget(Paragraph::new("n/p: naechste/vorherige Version | [/]: JSON-Teil | r: neuer Stand | e: Anhaenge lokal exportieren\nPfeile hoch/runter: scrollen | Tab/links/rechts: Detailseite | Esc: Liste").wrap(Wrap {trim:false}).block(Block::bordered()),areas[2]);
     }
 }
 

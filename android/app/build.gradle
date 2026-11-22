@@ -13,8 +13,10 @@ android {
         versionCode androidVersionCode
         versionName cargoVersion
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        buildConfigField 'String', 'RELEASE_CERTIFICATE', '"' + rootProject.file('release-certificate.sha256').text.trim() + '"'
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    buildFeatures { buildConfig true }
     signingConfigs {
         if (signingPath) {
             release {

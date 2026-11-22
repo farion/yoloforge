@@ -3,7 +3,7 @@
 Native Java-App unter `android/`, Android 8/API 26 oder neuer. Enthalten:
 Enrollment per einmaligem Operator-Code, Projekt-/Aufgabenansicht, Prompt mit
 bis zu vier Bildern (zusammen 4 MiB), feste Sessionwahl, Pause/Fortsetzen,
-Sessionauszug und einfache Frage-/Berechtigungsantworten.
+Sessionauszug, paginiertes Sessionarchiv mit Dateiexport und Frage-/Berechtigungsantworten.
 
 Zugangsdaten und der einzelne ausstehende Schreibauftrag werden mit einem
 Android-Keystore-Schluessel AES-GCM-verschluesselt gespeichert. Ein unsicherer
@@ -25,13 +25,15 @@ Debug-APK: `android/app/build/outputs/apk/debug/app-debug.apk`. CI baut dieses
 APK als Entwicklungsartefakt. Für lokal signierte Release-Builds siehe unten.
 Gradle Wrapper 9.4.1 ist mit Distributions-SHA256 gepinnt.
 
-Lokal bestanden: Build, Lint und vier Instrumentierungstests im isolierten
+Lokal bestanden: Build, Lint und Instrumentierungstests im isolierten
 Android-17-Emulator: Keystore/Endpoint-Regeln, identischer Replay nach verlorener
 HTTP-Antwort, Verhinderung eines Factory-Wechsels fuer ausstehende Aufträge sowie
 Wiederherstellung eines abgelehnten Prompts als verschluesselter Entwurf.
 Zusaetzlich bestanden: echte Android-UI gegen einen isolierten Rust-Server:
 Enrollment, Fragenbenachrichtigung, Formularantwort, Promptanlage und Erhalt einer
-festen Sessionwahl beim Speichern/Wiedereroeffnen eines Entwurfs. Ausfuehren mit
+festen Sessionwahl beim Speichern/Wiedereroeffnen sowie nach Activity-Neustart,
+Archivnavigation und Anhangangebot. Weitere Vertragstests pruefen Binärintegrität,
+bedingte Mehrfachauswahl, Integer-Typen und Update-Transportregeln. Ausfuehren mit
 `python3 scripts/smoke-android.py --serial EMULATOR_SERIAL` nach dem APK-/Test-APK-
 Build; nur einen dedizierten Testemulator verwenden (App-Testdaten werden benutzt).
 Der Test startet keinen Runner und fuehrt keine Modellaufrufe aus. CI fuehrt
@@ -42,6 +44,21 @@ des Editors bzw. beim Hintergrundwechsel im verschluesselten Vault gespeichert,
 getrennt je Factory und Projekt. Nach einer endgueltigen HTTP-Ablehnung wird der
 Prompt wieder als Entwurf bereitgestellt. Nicht mehr aufgelistete feste Sessions
 werden im Entwurf bewahrt und nicht automatisch umgebunden.
+Nach Rotation/Activity-Neustart werden Projekt und geoeffneter Prompteditor
+wiederhergestellt. Der Bundle enthaelt nur Navigation; Prompt/Bilder bleiben im
+verschluesselten Vault. Antwortentwuerfe sind nach Factory, Frage und Revision
+getrennt und werden beim Wiedereroeffnen oder nach Rotation geladen.
+
+Formulare unterstuetzen beschriftete Auswahl mit Beschreibungen, Mehrfachauswahl,
+eigene Werte, Boolean, Integer, Number sowie `eq`/`neq`-Bedingungen und versteckte
+Felder. Inaktive Felder werden nicht gesendet. Pflichtfelder, Laengen, Wertebereiche
+und Auswahlanzahl werden lokal geprueft; die API bleibt massgeblich. Externe
+Anmeldefelder werden weiterhin in OpenCode beantwortet.
+
+Der Archivbrowser haelt die Revision beim Blaettern fest. Lokale/inline
+Binaersnapshots werden vor dem Export mit SHA256 geprueft; der Android-Dateidialog
+bestimmt das Ausgabeziel. Fremde Dateinamen werden nicht als Pfade verwendet.
+Ein ausstehender Dateiexport wird verschluesselt gespeichert und uebersteht Rotation.
 
 ## Benachrichtigungen und Grenzen
 
@@ -49,14 +66,26 @@ Explizit einschaltbarer Foreground-Service empfängt Factory-SSE direkt, meldet
 offene Fragen per Android-Notification und öffnet die Frage beim Antippen.
 Reconnect liest einen Snapshot samt Eventcursor; Frage-ID/Revision deduplizieren
 Benachrichtigungen. Texte auf dem Sperrbildschirm enthalten keinen Prompt.
-Es gibt keinen FCM-/UnifiedPush-Dienst. Android begrenzt die Laufzeit des
-`dataSync`-Foreground-Service; bei Timeout wird er beendet. Das ist **noch kein
-dauerhafter Push bei geschlossener App**. Doze, Netzwechsel, Widerruf, Deep-Link-
-Rennen und echtes Gerät sind noch abzunehmen.
+Android begrenzt die Laufzeit des `dataSync`-Foreground-Service; bei Timeout wird
+er beendet. Fuer Push bei geschlossener App gibt es jetzt optional eine
+**ntfy-Begleitapp** mit dauerhafter Server-Outbox, Wiederholung nach Fehlern und
+Deep-Link auf die aktuellen Fragen. Einrichtung: [background-push.md](background-push.md).
+YoloForge selbst enthaelt keinen FCM-/UnifiedPush-Connector. Doze, Netzwechsel,
+ntfy-Zustellung auf einem echten Geraet und Android-Dateidialog-Abnahme bleiben offen.
 
-Erweiterte/bedingte Frageformulare verweisen auf den Desktop. Vollständiger
-Archivbrowser, automatische Wiedereroeffnung des Editors nach Rotation und
-automatische APK-Updates bleiben offen.
+## APK-Updates
+
+`App-Updates` prueft das neueste stabile GitHub-Release. Nach Auswahl werden
+APK und SHA256-Datei nur von den vorgesehenen GitHub-Hosts geladen. Pruefsumme,
+Paketname, hoehere Version sowie der gepinnte Release-Schluessel und die Signatur
+der installierten App muessen passen. Erst dann startet die Android-Systeminstallation;
+ihre Berechtigung und Bestaetigung bleiben beim Nutzer. Kein stilles Installieren.
+Factory-Zugangsdaten werden niemals an GitHub weitergegeben. Debug-Installationen
+koennen nicht mit dem anders signierten Release-APK aktualisiert werden.
+Die reale Updateinstallation wartet auf ein neueres veroeffentlichtes Android-Asset.
+Lokal zusaetzlich geprueft: Installation des stabil signierten Release-APK,
+erneute Installation mit demselben Schluessel und Aufruf des Fragen-Deep-Links
+bis zur Anmeldung im dedizierten Emulator.
 
 ## Stabile Release-Signierung
 
@@ -79,5 +108,11 @@ Android-VersionCode werden aus der Cargo-Workspace-Version abgeleitet.
 Vorhandene abweichende Ausgabeartefakte werden nicht überschrieben.
 `--init-signing` ist nur für die einmalige Einrichtung eines bislang nicht
 vorhandenen Schlüsselverzeichnisses gedacht; es ersetzt niemals einen Schlüssel.
-CI-Signierung/automatische Veröffentlichung des APK ist noch nicht eingerichtet;
-die privaten Schlüsseldaten wurden nicht auf GitHub hochgeladen.
+Der Release-Workflow besitzt einen opt-in Android-Signierjob: Repositoryvariable
+`ANDROID_RELEASE_SIGNING=enabled` sowie Secrets `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_STORE_PASSWORD` und `ANDROID_KEY_ALIAS` (PKCS12, gleicher Key-/Store-Passwortwert).
+Er prueft den gepinnten Zertifikatsfingerprint, laedt ausschliesslich APK/Pruefsumme
+als Release-Artefakte hoch und entfernt die temporaeren Schluesseldateien.
+Bei aktiviertem Job blockiert ein Signierfehler die Gesamtveroeffentlichung.
+Die Secrets/Variable wurden hier nicht auf GitHub eingerichtet; der private
+Schluessel bleibt lokal. Ohne Aktivierung bleiben die anderen Release-Ziele nutzbar.

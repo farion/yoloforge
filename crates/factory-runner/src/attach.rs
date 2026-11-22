@@ -12,6 +12,40 @@ pub async fn open(args: &Args, id: CommandId) -> Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!(".factory-data/runner-{}.sqlite3", args.id)));
     let record = read_record(&path, &args.server, args.id, id)?;
+    if record.command.kind == CommandKind::PrepareWorkspace {
+        let Some(CommandOutput::Workspace { workspace }) = &record.result else {
+            anyhow::bail!("Project workspace has not been prepared successfully");
+        };
+        let effective = crate::setup::effective(args, &record.command)?;
+        let registration = effective
+            .opencode_registration
+            .context("OpenCode registration missing")?;
+        let client = OpenCodeClient::from_registration(&registration)?;
+        if args.session_readiness {
+            let (provider, model) = args
+                .inspect_model
+                .as_deref()
+                .map(|s| {
+                    s.split_once('/')
+                        .context("Expected provider/model technical IDs")
+                })
+                .transpose()?
+                .unwrap_or(("", ""));
+            println!("Recorded workspace: {}", record.command.id);
+            println!(
+                "{}",
+                client.readiness(&workspace.path, provider, model).await?
+            );
+            return Ok(());
+        }
+        let status = client
+            .project_terminal_command(std::path::Path::new(&workspace.path))
+            .await?
+            .status()
+            .context("Could not launch OpenCode project terminal on runner")?;
+        ensure!(status.success(), "OpenCode terminal exited with {status}");
+        return Ok(());
+    }
     let execution = record
         .agent
         .as_ref()
@@ -38,15 +72,20 @@ pub async fn open(args: &Args, id: CommandId) -> Result<()> {
             .as_ref()
             .context("Session model profile missing")?
             .profile;
+        let (provider, model) = args
+            .inspect_model
+            .as_deref()
+            .map(|s| {
+                s.split_once('/')
+                    .context("Expected provider/model technical IDs")
+            })
+            .transpose()?
+            .unwrap_or((&profile.provider_id, &profile.model_id));
         println!("Recorded execution: {}", record.command.id);
         println!(
             "{}",
             client
-                .readiness(
-                    &execution.workspace.path,
-                    &profile.provider_id,
-                    &profile.model_id
-                )
+                .readiness(&execution.workspace.path, provider, model)
                 .await?
         );
         return Ok(());
@@ -93,7 +132,9 @@ pub(crate) fn read_record(
             && record.command.runner_id == runner
             && matches!(
                 record.command.kind,
-                CommandKind::RunAgent | CommandKind::ReviewCheckpoint
+                CommandKind::RunAgent
+                    | CommandKind::ReviewCheckpoint
+                    | CommandKind::PrepareWorkspace
             ),
         "Journal command identity mismatch"
     );
@@ -104,6 +145,69 @@ pub(crate) fn read_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn prepared_project_readiness_needs_no_agent_or_factory_token() {
+        use axum::{routing::get, Json, Router};
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let reg = dir.path().join("service.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let location = dir.path().to_str().unwrap().to_string();
+        let integrations = serde_json::json!({"location":{"directory":location},"data":[]});
+        let mcp = integrations.clone();
+        let app = Router::new()
+            .route(
+                "/api/info",
+                get(|| async { Json(serde_json::json!({"version":"2.0.27"})) }),
+            )
+            .route(
+                "/api/integration",
+                get(move || async move { Json(integrations) }),
+            )
+            .route("/api/mcp", get(move || async move { Json(mcp) }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        std::fs::write(
+            &reg,
+            serde_json::json!({"url":endpoint,"password":"fixture"}).to_string(),
+        )
+        .unwrap();
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let journal =
+            crate::journal::Journal::open(&path, "http://factory.invalid", runner).unwrap();
+        let command:RunnerCommand=serde_json::from_value(serde_json::json!({"id":id,"stream_id":StreamId::new(),"runner_id":runner,"ownership_epoch":1,"kind":"prepare_workspace","state":"pending","created_unix_ms":1})).unwrap();
+        let mut record = journal.receive(command).unwrap();
+        record.result = Some(CommandOutput::Workspace {
+            workspace: Workspace {
+                path: location,
+                branch: "main".into(),
+                base_commit: "a".repeat(40),
+            },
+        });
+        journal.save(&record).unwrap();
+        let args = Args::try_parse_from([
+            "factory-runner",
+            "--id",
+            &runner.to_string(),
+            "--name",
+            "test",
+            "--server",
+            "http://factory.invalid",
+            "--journal",
+            path.to_str().unwrap(),
+            "--opencode-registration",
+            reg.to_str().unwrap(),
+            "--open-session",
+            &id.to_string(),
+            "--session-readiness",
+        ])
+        .unwrap();
+        open(&args, id).await.unwrap();
+        assert!(journal.record(id).unwrap().unwrap().agent.is_none());
+        server.abort();
+    }
     #[test]
     fn inspection_does_not_take_runner_lock_or_create_missing_journal() {
         let dir = tempfile::tempdir().unwrap();
@@ -124,5 +228,11 @@ mod tests {
         );
         assert!(read_record(&path, "http://other", runner, id).is_err());
         assert!(read_record(&path, "http://factory", RunnerId::new(), id).is_err());
+        let prepared = CommandId::new();
+        let command:RunnerCommand=serde_json::from_value(serde_json::json!({"id":prepared,"stream_id":StreamId::new(),"runner_id":runner,"ownership_epoch":1,"kind":"prepare_workspace","state":"pending","created_unix_ms":1})).unwrap();
+        journal.receive(command).unwrap();
+        let record = read_record(&path, "http://factory", runner, prepared).unwrap();
+        assert_eq!(record.command.kind, CommandKind::PrepareWorkspace);
+        assert!(record.agent.is_none());
     }
 }

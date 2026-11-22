@@ -81,7 +81,9 @@ fn automatic_setup_preserves_user_model_and_missing_model_blocks_agents() {
 fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
     for output in [
         r#"{"memory":"The task reported a calculator implementation; test success is an agent claim."}"#,
+        r#"{"memory":"Racing calculator implementation observation."}"#,
         r#"{"memory":""}"#,
+        r#"{"memory":"Replace an unoffered note","supersedes":"00000000-0000-4000-8000-000000000001"}"#,
         "invalid",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -199,6 +201,100 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
             assert!(notes.is_empty());
         }
         assert_eq!(s.snapshot().unwrap().commands.len(), 4);
+        if output.contains("calculator implementation") {
+            let old = notes[0].clone();
+            s.save_task(SaveTask {
+                request_id: RequestId::new(),
+                id: None,
+                expected_revision: Revision(0),
+                project_id: p.id,
+                prompt: "Correct the calculator tests".into(),
+                images: vec![],
+                requested_session: Some(work.id),
+            })
+            .unwrap();
+            s.scheduler_tick().unwrap();
+            let follow = s
+                .pending(runner)
+                .unwrap()
+                .into_iter()
+                .find(|c| {
+                    c.kind == CommandKind::RunAgent && !c.agent_spec.as_ref().unwrap().read_only
+                })
+                .unwrap();
+            complete(
+                &s,
+                &follow,
+                CommandOutput::Agent {
+                    agent: AgentProgress {
+                        session_id: follow.session_id(),
+                        message_id: agent_message_id(follow.id),
+                        phase: AgentPhase::Succeeded,
+                        summary: "Earlier tests were incomplete; now added negative-number cases"
+                            .into(),
+                    },
+                },
+            );
+            s.report_archive(
+                runner,
+                follow.id,
+                ReportArchive {
+                    ownership_epoch: 1,
+                    batch: ArchiveBatch {
+                        session_id: follow.session_id(),
+                        revision: 1,
+                        captured_unix_ms: 2,
+                        final_scan_complete: true,
+                        messages: vec![],
+                    },
+                },
+            )
+            .unwrap();
+            s.scheduler_tick().unwrap();
+            let evaluation = s
+                .pending(runner)
+                .unwrap()
+                .into_iter()
+                .find(|c| {
+                    c.agent_spec
+                        .as_ref()
+                        .is_some_and(|a| a.role == "orchestrator-memory")
+                })
+                .unwrap();
+            assert!(evaluation
+                .agent_spec
+                .as_ref()
+                .unwrap()
+                .prompt
+                .contains(&old.id.to_string()));
+            let racing = output.contains("Racing");
+            if racing {
+                s.retire_knowledge(
+                    old.id,
+                    RetireKnowledge {
+                        request_id: RequestId::new(),
+                        expected_revision: old.revision,
+                    },
+                )
+                .unwrap();
+            }
+            complete(&s,&evaluation,CommandOutput::Agent{agent:AgentProgress{session_id:evaluation.session_id(),message_id:agent_message_id(evaluation.id),phase:AgentPhase::Succeeded,summary:serde_json::json!({"memory":"Correction: earlier tests incomplete; negative-number tests now reported; calculator implementation retained.","supersedes":old.id}).to_string()}});
+            drop(s);
+            let s = Store::open(&path).unwrap();
+            s.scheduler_tick().unwrap();
+            s.scheduler_tick().unwrap();
+            let previous = s.knowledge_note(old.id).unwrap();
+            assert!(previous.retired);
+            if racing {
+                assert!(previous.superseded_by.is_none());
+            } else {
+                let replacement = s.knowledge_note(previous.superseded_by.unwrap()).unwrap();
+                assert_eq!(replacement.supersedes, Some(old.id));
+                assert_eq!(replacement.source_command, Some(follow.id));
+                assert_eq!(replacement.branch, old.branch);
+                assert!(replacement.content.contains("Correction"));
+            }
+        }
     }
 }
 
