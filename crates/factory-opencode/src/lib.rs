@@ -314,6 +314,41 @@ impl OpenCodeClient {
             .await?
             .map(|v| v["data"].clone()))
     }
+    /// Open the original terminal client on an existing, location-checked session.
+    /// Credentials are inherited through the child environment, never command-line arguments.
+    pub async fn terminal_command(
+        &self,
+        id: &str,
+        directory: &Path,
+    ) -> Result<std::process::Command> {
+        ensure!(
+            matches!(self.status().await, OpenCodeStatus::Ready { .. }),
+            "OpenCode-Service nicht erreichbar oder inkompatibel"
+        );
+        let session = self.session(id).await?.context(
+            "Session existiert in diesem OpenCode-Service nicht; keine neue Session angelegt",
+        )?;
+        ensure!(
+            session["id"].as_str() == Some(id),
+            "OpenCode returned a different session"
+        );
+        let actual = session["location"]["directory"]
+            .as_str()
+            .context("Session location missing")?;
+        ensure!(
+            fs::canonicalize(actual)? == fs::canonicalize(directory)?,
+            "Session und Arbeitsordner stimmen nicht ueberein"
+        );
+        let mut command = std::process::Command::new("opencode");
+        command
+            .args(["--server", self.registration.url.as_str(), "--session", id])
+            .arg(directory)
+            .current_dir(directory)
+            .env("OPENCODE_PASSWORD", &self.registration.password)
+            .env_remove("FACTORY_TOKEN")
+            .env_remove("FACTORY_TOKEN_FILE");
+        Ok(command)
+    }
     pub async fn create_session(
         &self,
         id: &str,

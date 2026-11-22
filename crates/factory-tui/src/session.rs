@@ -10,6 +10,7 @@ use ratatui::{
 use tokio::{sync::watch, task::JoinHandle};
 
 pub enum Action {
+    Native(CommandId),
     None,
     Close,
     Controls,
@@ -17,6 +18,7 @@ pub enum Action {
 }
 
 pub struct View {
+    pub notice: String,
     pub stream: StreamId,
     client: FactoryClient,
     command: Option<CommandId>,
@@ -71,6 +73,7 @@ impl View {
     pub fn new(stream: StreamId, client: FactoryClient) -> Self {
         let (_, excerpt) = watch::channel((None, String::new()));
         Self {
+            notice: String::new(),
             stream,
             client,
             command: None,
@@ -146,6 +149,11 @@ impl View {
         }
         match key {
             KeyCode::Esc => return Action::Close,
+            KeyCode::Char('o') => {
+                if let Some(id) = self.command {
+                    return Action::Native(id);
+                }
+            }
             KeyCode::Char('c') => return Action::Controls,
             KeyCode::Char('f') => {
                 if let Some(id) = s.and_then(|s| self.question(s)) {
@@ -298,7 +306,7 @@ impl View {
                 .block(Block::bordered().title(" Unterhaltung und Werkzeuge ")),
             areas[1],
         );
-        frame.render_widget(Paragraph::new(format!("{}\n{}\n↑/↓: lesen · Ende: live folgen · f: Rueckfrage · a: vollstaendiges Archiv\n[/]: Session wechseln · l: neueste · c: Steuerung · Esc: zurueck",view.1,clean(&question_hint))).wrap(Wrap{trim:false}),areas[2]);
+        frame.render_widget(Paragraph::new(format!("{}\n{}\n↑/↓: lesen · Ende: live folgen · f: Rueckfrage · a: Archiv · o: OpenCode oeffnen\n[/]: Session wechseln · l: neueste · c: Steuerung · Esc: zurueck",if self.notice.is_empty(){view.1.as_str()}else{self.notice.as_str()},clean(&question_hint))).wrap(Wrap{trim:false}),areas[2]);
     }
 }
 

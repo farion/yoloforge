@@ -563,6 +563,7 @@ dependencies = [
  "clap",
  "crossterm",
  "factory-core",
+ "factory-opencode",
  "factory-protocol",
  "image",
  "ratatui",

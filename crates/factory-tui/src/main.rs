@@ -14,6 +14,7 @@ use ratatui::{
 use std::{collections::BTreeMap, time::Duration};
 mod answer;
 mod archive;
+mod attach;
 mod clipboard;
 mod commands;
 mod detail;
@@ -233,6 +234,8 @@ async fn main() -> Result<()> {
     let mut open_question: Option<QuestionId> = None;
     let mut command_detail: Option<detail::Dialog> = None;
     let mut session_view: Option<session::View> = None;
+    let mut native_request: Option<(StreamId, Option<CommandId>)> = None;
+    let mut native_notice = String::new();
     let mut device_dialog: Option<devices::Dialog> = None;
     let mut open_devices = false;
     let mut stream_dialogs: BTreeMap<StreamId, stream::Dialog> = BTreeMap::new();
@@ -281,6 +284,30 @@ async fn main() -> Result<()> {
                 dialog.response(request, result);
             }
         }
+        if let Some((stream, selected)) = native_request.take() {
+            let prepared = if let Some(snapshot) = &last {
+                attach::prepare(snapshot, stream, selected).await
+            } else {
+                Err(anyhow::anyhow!("Factory-Snapshot fehlt"))
+            };
+            native_notice = match prepared {
+                Ok(command) => {
+                    let result = tokio::task::spawn_blocking(move || attach::run(command)).await;
+                    terminal = ratatui::init();
+                    crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste)?;
+                    terminal.clear()?;
+                    match result {
+                        Ok(Ok(message)) => message,
+                        Ok(Err(error)) => format!("{error:#}"),
+                        Err(error) => format!("OpenCode-Terminal beendet: {error}"),
+                    }
+                }
+                Err(error) => format!("OpenCode konnte nicht geoeffnet werden: {error:#}"),
+            };
+            if let Some(view) = &mut session_view {
+                view.notice = native_notice.clone();
+            }
+        }
         terminal.draw(|frame| {
             if let Some(dialog)=open_recovery.and_then(|id|recoveries.get_mut(&id)){dialog.draw(frame,online);return;}
             if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
@@ -290,7 +317,7 @@ async fn main() -> Result<()> {
             if let Some(dialog)=open_question.and_then(|id|dialogs.get(&id)) {dialog.draw(frame,online);return;}
             if let Some(dialog)=&mut session_view {dialog.draw(frame,last.as_ref(),online);return;}
             let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(4), Constraint::Length(3)]).split(frame.area());
-            frame.render_widget(Paragraph::new(status.as_str()).block(Block::bordered().title(" YoloForge "))
+            frame.render_widget(Paragraph::new(if native_notice.is_empty(){status.as_str()}else{native_notice.as_str()}).block(Block::bordered().title(" YoloForge "))
                 .style(Style::default().fg(if online { Color::Green } else { Color::Yellow })), chunks[0]);
             let rows: Vec<Row> = if view == 0 { last.as_ref().map(|s| s.runners.iter().map(|r| {
                 Row::new(vec![r.name.clone(), format!("{:?}", r.location),
@@ -316,7 +343,7 @@ async fn main() -> Result<()> {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status ".to_string()),
                 1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause/Fortsetzen | p: einrichten | Enter: Profil ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
-                3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode-Session | c: Steuerung ")),
+                3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
                 _ => (["Frage", "Status", "Art / Revision", "ID"],format!(" Fragen: {project_name} | Enter: ansehen / antworten ")),
             };
@@ -491,6 +518,9 @@ async fn main() -> Result<()> {
                     if key.kind == KeyEventKind::Press {
                         match dialog.key(key.code, last.as_ref()) {
                             session::Action::Close => session_view = None,
+                            session::Action::Native(id) => {
+                                native_request = Some((dialog.stream, Some(id)))
+                            }
                             session::Action::Question(id) => {
                                 if let Some(q) = last
                                     .as_ref()
@@ -543,8 +573,7 @@ async fn main() -> Result<()> {
                                 .nth(row_offset)
                                 .and_then(|t| task_command(snapshot, t))
                             {
-                                session_view =
-                                    Some(session::View::new(command.stream_id, client.clone()));
+                                native_request = Some((command.stream_id, None));
                                 continue;
                             }
                         }
@@ -651,7 +680,7 @@ async fn main() -> Result<()> {
                                 command_detail = Some(detail::Dialog::new(command, client.clone()));
                             }
                         }
-                        KeyCode::Enter | KeyCode::Char('c') if view == 3 => {
+                        KeyCode::Enter | KeyCode::Char('c' | 'v') if view == 3 => {
                             if let Some(current) = last
                                 .as_ref()
                                 .and_then(|s| {
@@ -667,6 +696,10 @@ async fn main() -> Result<()> {
                                 .cloned()
                             {
                                 if key.code == KeyCode::Enter {
+                                    native_request = Some((current.id, None));
+                                    continue;
+                                }
+                                if key.code == KeyCode::Char('v') {
                                     session_view =
                                         Some(session::View::new(current.id, client.clone()));
                                     continue;

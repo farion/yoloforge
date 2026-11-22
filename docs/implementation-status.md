@@ -13,10 +13,12 @@ Fast-forward und CAS schützen Ausführungsindex und Benutzeränderungen. Konfli
 bleiben mit konkreter Ursache sichtbar; siehe `result-publication.md`.
 
 Session-Einstieg: Enter auf einem Arbeitsbereich oder einer gestarteten Aufgabe
-öffnet die live synchronisierte OpenCode-Unterhaltung mit Werkzeugausgaben und
-Rückfragen; technische Steuerung liegt hinter `c`. Vollständiges Archiv, frühere
-Sessions und Rückkehr zur Live-Ansicht sind erreichbar. Unit- und lesender PTY-Test
-gegen die lokale Minesweeper-Session bestanden; siehe `session-view.md`.
+öffnet die originale OpenCode-TUI im selben Terminal, gebunden an Service, Session
+und Arbeitsordner. Nach Beenden kehrt YoloForge zurück. Native PTY-Abnahme mit der
+Minesweeper-Session bestanden; fehlender CLI-Start wird sichtbar abgefangen.
+Für entfernte Runner fehlt noch der native Tunnel. Die bisherige synchronisierte
+Live-Ansicht bleibt unter `v`, technische Steuerung unter `c` verfügbar; siehe
+`session-view.md`.
 
 TUI-Aufgaben erfassen nur Prompt und optionale Bilder (bis vier PNG/JPEG/GIF/WebP,
 zusammen 4 MiB). Ein einzelner Prompt-Editor ersetzt die schrittweise Erfassung:
