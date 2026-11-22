@@ -16,6 +16,7 @@ root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--serial",required=True,help="Dedicated Android emulator/device; app test storage is reset")
 args=parser.parse_args()
+Path("/tmp/opencode").mkdir(mode=0o700,parents=True,exist_ok=True)
 directory=Path(tempfile.mkdtemp(prefix="yf-android-api-",dir="/tmp/opencode"))
 env={**os.environ,"FACTORY_TOKEN":uuid.uuid4().hex*2};env.pop("FACTORY_TOKEN_FILE",None)
 server=subprocess.Popen([str(root/"target/debug/factoryd"),"--listen","127.0.0.1:0","--database",str(directory/"db")],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
