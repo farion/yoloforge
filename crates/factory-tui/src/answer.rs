@@ -437,10 +437,14 @@ impl Dialog {
         );
         frame.render_widget(
             Paragraph::new(format!(
-                "{title} | Revision {} | {:?}\n{}",
-                self.question.revision.0,
-                self.current.as_ref().map(|q| q.state),
-                self.question.id
+                "{title}\n{}",
+                match self.current.as_ref().map(|q| q.state) {
+                    Some(QuestionState::Pending) => "Wartet auf deine Antwort",
+                    Some(QuestionState::AnswerQueued) => "Antwort wird zugestellt",
+                    Some(QuestionState::Answered) => "Beantwortet",
+                    Some(QuestionState::Rejected) => "Antwort abgelehnt – bitte korrigieren",
+                    _ => "Status wird abgeglichen",
+                }
             ))
             .block(Block::bordered().title(if online {
                 " Frage beantworten "
@@ -449,36 +453,39 @@ impl Dialog {
             })),
             areas[0],
         );
-        let details = format!(
-            "Command: {}\nSession: {}\n{}",
-            self.question.command_id,
-            self.question.session_id,
-            serde_json::to_string_pretty(&self.question.external.payload).unwrap_or_default()
-        );
+        let details = self.readable_question();
         frame.render_widget(
             Paragraph::new(details)
                 .wrap(Wrap { trim: false })
                 .scroll((self.scroll, 0))
-                .block(Block::bordered().title(" Inhalt / Schema | Bild auf/ab: scrollen ")),
+                .block(
+                    Block::bordered()
+                        .title(" Frage und Antwortmoeglichkeiten | Bild auf/ab: scrollen "),
+                ),
             areas[1],
         );
         let (label, lines) = if self.question.external.kind == QuestionKind::Permission {
             (
                 "Entscheidung".to_string(),
                 vec![
-                    Line::from("1: einmal erlauben (once)"),
-                    Line::from("2: dauerhaft erlauben (always)"),
-                    Line::from("3: ablehnen (reject)"),
+                    Line::from("1: einmal erlauben"),
+                    Line::from("2: dauerhaft erlauben"),
+                    Line::from("3: ablehnen"),
                     Line::from(format!(
                         "Auswahl: {}",
-                        self.decision.as_deref().unwrap_or("keine")
+                        match self.decision.as_deref() {
+                            Some("once") => "Einmal erlauben",
+                            Some("always") => "Dauerhaft erlauben",
+                            Some("reject") => "Ablehnen",
+                            _ => "keine",
+                        }
                     )),
                 ],
             )
         } else if let Some(index) = self.active() {
             let f = &self.fields[index];
             let label = format!(
-                "Feld {}/{}: {} ({})",
+                "Antwort {}/{}: {}",
                 self.focus + 1,
                 self.visible().len(),
                 one_line(
@@ -486,8 +493,7 @@ impl Dialog {
                         .as_str()
                         .or_else(|| f.schema["key"].as_str())
                         .unwrap_or("?")
-                ),
-                f.schema["type"].as_str().unwrap_or("?")
+                )
             );
             let limit = (frame.area().width.saturating_sub(8) as usize / 4).max(1);
             let before = f.text[..f.cursor]
@@ -516,6 +522,27 @@ impl Dialog {
                     }
                 )),
             ]);
+            let input = if let Some(label) = f.schema["options"]
+                .as_array()
+                .and_then(|options| options.iter().find(|o| o["value"] == f.text))
+                .and_then(|o| o["label"].as_str())
+            {
+                Line::from(Span::styled(
+                    format!("Ausgewaehlt: {}", one_line(label)),
+                    Style::default().fg(Color::Cyan),
+                ))
+            } else if f.schema["type"] == "boolean" {
+                Line::from(format!(
+                    "Auswahl: {}",
+                    match f.text.as_str() {
+                        "true" => "Ja",
+                        "false" => "Nein",
+                        _ => "noch keine",
+                    }
+                ))
+            } else {
+                input
+            };
             (
                 label,
                 vec![
@@ -527,12 +554,12 @@ impl Dialog {
                     ),
                     input,
                     Line::from(match f.schema["type"].as_str() {
-                        Some("boolean") => "Leertaste: true/false",
+                        Some("boolean") => "Leertaste: Ja/Nein",
                         Some("multiselect") => {
                             "JSON-Liste eingeben, z.B. [\"option1\",\"option2\"]"
                         }
                         Some("string") if f.schema["options"].is_array() => {
-                            "Hoch/runter: Auswahl | Optionen siehe Schema"
+                            "↑/↓: Antwort auswaehlen | Eigene Antwort: direkt tippen, falls erlaubt"
                         }
                         _ => "Text eingeben | Tab: naechstes Feld | Shift-Tab: vorheriges Feld",
                     }),
@@ -556,6 +583,84 @@ impl Dialog {
             .map(|r| format!(" | Request {}", r.request_id))
             .unwrap_or_default();
         frame.render_widget(Paragraph::new(format!("Ctrl-S: senden/wiederholen | Ctrl-R: neu laden | Esc: Liste (Entwurf bleibt)\n{}{request}",self.message)).wrap(Wrap {trim:false}).block(Block::bordered().title(format!(" {:?} ",self.state))),areas[3]);
+    }
+    fn readable_question(&self) -> String {
+        let mut lines = Vec::new();
+        let payload = &self.question.external.payload;
+        if let Some(description) = payload["description"].as_str() {
+            lines.push(one_line(description));
+            lines.push(String::new());
+        }
+        if self.question.external.kind == QuestionKind::Permission {
+            if let Some(resources) = payload["resources"].as_array() {
+                lines.push("Betroffene Ressourcen:".into());
+                for resource in resources.iter().filter_map(Value::as_str) {
+                    lines.push(format!("  • {}", one_line(resource)));
+                }
+            }
+        } else {
+            for (position, index) in self.visible().iter().enumerate() {
+                let field = &self.fields[*index];
+                let schema = &field.schema;
+                let title = schema["title"]
+                    .as_str()
+                    .or_else(|| schema["key"].as_str())
+                    .unwrap_or("Antwort");
+                lines.push(format!(
+                    "{} {}{}",
+                    if self.active() == Some(*index) {
+                        "▶"
+                    } else {
+                        " "
+                    },
+                    one_line(title),
+                    if schema["required"] == true {
+                        " (Pflichtangabe)"
+                    } else {
+                        ""
+                    }
+                ));
+                if let Some(description) = schema["description"].as_str() {
+                    lines.push(one_line(description));
+                }
+                if let Some(options) = schema["options"].as_array() {
+                    for option in options {
+                        let label = option["label"]
+                            .as_str()
+                            .or_else(|| option["value"].as_str())
+                            .unwrap_or("Option");
+                        let selected = option["value"].as_str().is_some_and(|v| v == field.text);
+                        lines.push(format!(
+                            "  {} {}",
+                            if selected { "●" } else { "○" },
+                            one_line(label)
+                        ));
+                        if let Some(description) = option["description"].as_str() {
+                            lines.push(format!("      {}", one_line(description)));
+                        }
+                    }
+                    if schema["custom"] == true {
+                        lines.push("  Eigene Antwort ist ebenfalls moeglich.".into());
+                    }
+                }
+                if !field.text.is_empty()
+                    && !schema["options"]
+                        .as_array()
+                        .is_some_and(|options| options.iter().any(|o| o["value"] == field.text))
+                {
+                    let answer = match field.text.as_str() {
+                        "true" if schema["type"] == "boolean" => "Ja",
+                        "false" if schema["type"] == "boolean" => "Nein",
+                        value => value,
+                    };
+                    lines.push(format!("  Deine Antwort: {}", one_line(answer)));
+                }
+                if position + 1 < self.visible().len() {
+                    lines.push(String::new());
+                }
+            }
+        }
+        lines.join("\n")
     }
 }
 fn one_line(text: &str) -> String {
@@ -711,6 +816,24 @@ mod tests {
         tiny.draw(|f| dialog.draw(f, false)).unwrap();
     }
 
+    #[test]
+    fn question_shows_human_labels_descriptions_and_selection_without_schema_json() {
+        let mut dialog = Dialog::new(form(json!([{
+            "key":"q0", "title":"Umfang der Mausbedienung", "type":"string", "custom":true,
+            "description":"Soll die Maus nur das Spielfeld oder auch die Menues bedienen?",
+            "options":[{"value":"board","label":"Nur Spielfeld","description":"Menues bleiben bei der Tastatur."},
+                       {"value":"all","label":"Spielfeld und Menues","description":"Auch Neustart und Beenden anklicken."}]
+        }])));
+        let text = dialog.readable_question();
+        assert!(text.contains("Umfang der Mausbedienung"));
+        assert!(text.contains("○ Nur Spielfeld"));
+        assert!(text.contains("Menues bleiben bei der Tastatur."));
+        assert!(!text.contains("\"fields\""));
+        assert!(!text.contains("\"options\""));
+        dialog.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), true);
+        assert!(dialog.readable_question().contains("● Nur Spielfeld"));
+        assert_eq!(dialog.payload().unwrap()["q0"], "board");
+    }
     #[test]
     fn unicode_editing_and_typed_conditional_fields_produce_correct_answer() {
         let mut dialog = Dialog::new(form(json!([
