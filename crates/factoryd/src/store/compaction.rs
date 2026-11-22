@@ -47,6 +47,11 @@ impl Store {
             .optional()?;
         let command: RunnerCommand = serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
         let mut stream = super::work::stream(tx, command.stream_id)?;
+        super::token_budgets::admit(
+            tx,
+            stream.project_id,
+            command.agent_spec.as_ref().map_or("", |a| a.role.as_str()),
+        )?;
         if stream.revision != body.expected_stream_revision {
             return Err(StoreError::RevisionConflict(stream.revision));
         }

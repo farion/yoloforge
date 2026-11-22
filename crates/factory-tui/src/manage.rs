@@ -15,6 +15,7 @@ use ratatui::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Target {
+    TokenBudget(ProjectId),
     SessionLimit(ProjectId),
     Pause(ProjectId),
     SetupProject(Option<ProjectId>),
@@ -30,6 +31,7 @@ pub enum Target {
 
 #[derive(Clone)]
 pub enum Request {
+    TokenBudget(ProjectId, SetTokenBudget),
     SessionLimit(ProjectId, SetSessionLimit),
     Pause(ProjectId, PauseProject),
     Task(SaveTask),
@@ -44,6 +46,7 @@ pub enum Request {
 impl Request {
     pub fn id(&self) -> RequestId {
         match self {
+            Self::TokenBudget(_, b) => b.request_id,
             Self::SessionLimit(_, b) => b.request_id,
             Self::Pause(_, b) => b.request_id,
             Self::Task(b) => b.request_id,
@@ -58,6 +61,9 @@ impl Request {
     }
     pub async fn send(&self, client: &FactoryClient) -> Result<(), ClientError> {
         match self {
+            Self::TokenBudget(id, b) => {
+                client.set_token_budget(*id, b).await?;
+            }
             Self::SessionLimit(id, b) => {
                 client.set_session_limit(*id, b).await?;
             }
@@ -287,6 +293,31 @@ impl Dialog {
     }
     pub fn new(target: Target, snapshot: &Snapshot) -> Option<Self> {
         let (title, revision, fields) = match target {
+            Target::TokenBudget(id) => {
+                let project = snapshot.projects.iter().find(|p| p.id == id)?;
+                let budget = snapshot.token_budgets.iter().find(|b| b.project_id == id);
+                let limits = budget.map(|b| b.limits.clone()).unwrap_or_default();
+                let field = |name, limit: Option<u64>| {
+                    Field::text(
+                        name,
+                        &limit.map_or_else(|| "unlimited".into(), |v| v.to_string()),
+                        true,
+                        false,
+                    )
+                };
+                (
+                    format!(
+                        "Tokenlimits: {} | kumulativ Input + Output; 0 = gesperrt",
+                        project.name
+                    ),
+                    budget.map_or(Revision(0), |b| b.revision),
+                    vec![
+                        field("Arbeit (Zahl oder unlimited)", limits.work),
+                        field("Orchestrierung (Zahl oder unlimited)", limits.orchestration),
+                        field("Gedaechtnis (Zahl oder unlimited)", limits.memory),
+                    ],
+                )
+            }
             Target::SessionLimit(id) => {
                 let p = snapshot.projects.iter().find(|p| p.id == id)?;
                 (
@@ -738,6 +769,25 @@ impl Dialog {
         let request_id = RequestId::new();
         let expected_revision = self.revision;
         Ok(match self.target {
+            Target::TokenBudget(id) => {
+                let limit = |i| {
+                    crate::commands::token_limit(&value(i)).map_err(|_| {
+                        "Tokenlimit: nichtnegative Ganzzahl oder unlimited eingeben".to_string()
+                    })
+                };
+                Request::TokenBudget(
+                    id,
+                    SetTokenBudget {
+                        request_id,
+                        expected_revision,
+                        limits: TokenLimits {
+                            work: limit(0)?,
+                            orchestration: limit(1)?,
+                            memory: limit(2)?,
+                        },
+                    },
+                )
+            }
             Target::SessionLimit(id) => Request::SessionLimit(
                 id,
                 SetSessionLimit {
@@ -1383,6 +1433,42 @@ mod tests {
         assert_eq!(id, s.projects[0].id);
         assert_eq!(b.expected_revision, s.projects[0].revision);
         assert_eq!(b.max_sessions, 1);
+    }
+    #[test]
+    fn token_budget_form_keeps_exact_request_when_delivery_is_uncertain() {
+        let mut s = snapshot();
+        let id = s.projects[0].id;
+        s.token_budgets.push(TokenBudget {
+            project_id: id,
+            revision: Revision(4),
+            limits: TokenLimits {
+                work: Some(1000),
+                memory: Some(0),
+                orchestration: None,
+            },
+        });
+        let mut dialog = Dialog::new(Target::TokenBudget(id), &s).unwrap();
+        assert_eq!(dialog.fields[1].text, "unlimited");
+        dialog.fields[0].text = "2000".into();
+        let request = send(&mut dialog, &s);
+        let Request::TokenBudget(project, body) = &request else {
+            panic!()
+        };
+        assert_eq!(*project, id);
+        assert_eq!(body.expected_revision, Revision(4));
+        assert_eq!(body.limits.work, Some(2000));
+        assert_eq!(body.limits.memory, Some(0));
+        dialog.state = State::Uncertain;
+        dialog.paste("9");
+        let replay = send(&mut dialog, &s);
+        let Request::TokenBudget(_, replayed) = replay else {
+            panic!()
+        };
+        assert_eq!(replayed.request_id, body.request_id);
+        assert_eq!(replayed.limits, body.limits);
+        let mut invalid = Dialog::new(Target::TokenBudget(id), &s).unwrap();
+        invalid.fields[0].text = "-1".into();
+        assert!(matches!(control(&mut invalid, 's', &s), Action::None));
     }
     #[test]
     fn prompt_editor_pastes_images_inline_and_freezes_uncertain_submission() {

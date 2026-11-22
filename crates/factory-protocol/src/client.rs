@@ -631,6 +631,29 @@ impl FactoryClient {
         )
         .await
     }
+    pub async fn token_budget(&self, id: ProjectId) -> Result<TokenBudget, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/projects/{id}/token-budget", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn set_token_budget(
+        &self,
+        id: ProjectId,
+        body: &SetTokenBudget,
+    ) -> Result<TokenBudget, ClientError> {
+        Self::decode(
+            self.http
+                .put(format!("{}/v1/projects/{id}/token-budget", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn knowledge_context(
         &self,
         id: ProjectId,

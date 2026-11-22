@@ -1,4 +1,24 @@
 use super::*;
+pub(super) async fn budget(State(app): State<App>, Path(id): Path<ProjectId>) -> Response {
+    db_call(RequestId::new(), move || app.store.token_budget(id)).await
+}
+pub(super) async fn set_budget(
+    State(app): State<App>,
+    Path(id): Path<ProjectId>,
+    body: Result<Json<SetTokenBudget>, JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid token budget",
+        );
+    };
+    db_call(body.request_id, move || {
+        app.store.set_token_budget(id, body)
+    })
+    .await
+}
 pub(super) async fn usage(State(app): State<App>, Path(id): Path<ProjectId>) -> Response {
     db_call(RequestId::new(), move || app.store.project_usage(id)).await
 }

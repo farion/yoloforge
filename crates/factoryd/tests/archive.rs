@@ -1184,6 +1184,49 @@ fn usage_deduplicates_continuation_snapshots_and_preserves_unknown_coverage() {
             },
         )
         .unwrap();
+    let budget_request = SetTokenBudget {
+        request_id: RequestId::new(),
+        expected_revision: Revision(0),
+        limits: TokenLimits {
+            work: Some(17),
+            orchestration: None,
+            memory: None,
+        },
+    };
+    let budget = store
+        .set_token_budget(project, budget_request.clone())
+        .unwrap();
+    assert_eq!(
+        store.set_token_budget(project, budget_request).unwrap(),
+        budget
+    );
+    assert!(
+        store
+            .acknowledge_supported(
+                next.runner_id,
+                next.id,
+                AckCommand {
+                    request_id: RequestId::new(),
+                    ownership_epoch: 1
+                },
+                true
+            )
+            .is_err(),
+        "Pending starts must recheck the latest budget"
+    );
+    store
+        .set_token_budget(
+            project,
+            SetTokenBudget {
+                request_id: RequestId::new(),
+                expected_revision: budget.revision,
+                limits: TokenLimits {
+                    work: Some(18),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
     store
         .acknowledge_supported(
             next.runner_id,
@@ -1199,6 +1242,40 @@ fn usage_deduplicates_continuation_snapshots_and_preserves_unknown_coverage() {
         "id":"msg_unknown_usage","type":"assistant","model":{"providerID":"openai","id":"test"},"tokens":-1,"cost":"unknown"
     })],false)).unwrap();
     let report = store.project_usage(project).unwrap();
+    let budget = store.token_budget(project).unwrap();
+    store
+        .set_token_budget(
+            project,
+            SetTokenBudget {
+                request_id: RequestId::new(),
+                expected_revision: budget.revision,
+                limits: TokenLimits {
+                    work: Some(0),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .acknowledge_supported(
+                next.runner_id,
+                next.id,
+                AckCommand {
+                    request_id: RequestId::new(),
+                    ownership_epoch: 1
+                },
+                true
+            )
+            .unwrap()
+            .state,
+        CommandState::Accepted,
+        "Lowering limits must not revoke an accepted command"
+    );
+    let report = ProjectUsage {
+        token_budget: Some(store.token_budget(project).unwrap()),
+        ..report
+    };
     assert_eq!(report.groups.len(), 1);
     let group = &report.groups[0];
     assert_eq!(group.assistant_messages, 2);

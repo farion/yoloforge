@@ -155,6 +155,8 @@ pub struct RunnerView {
 pub struct Snapshot {
     #[serde(default)]
     pub scheduler_policies: Vec<SchedulerPolicy>,
+    #[serde(default)]
+    pub token_budgets: Vec<TokenBudget>,
     pub protocol_version: u16,
     pub server_version: String,
     pub boot_id: BootId,
@@ -413,6 +415,13 @@ pub struct ReportHostedReview {
     pub request_id: RequestId,
     pub ownership_epoch: u64,
     pub result: HostedReview,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetTokenBudget {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub limits: TokenLimits,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

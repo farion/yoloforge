@@ -109,6 +109,10 @@ pub fn router_with_shutdown(
         .route("/v1/knowledge/{id}/retire", post(knowledge_routes::retire))
         .route("/v1/projects/{id}/knowledge", get(knowledge_routes::list))
         .route("/v1/projects/{id}/usage", get(knowledge_routes::usage))
+        .route(
+            "/v1/projects/{id}/token-budget",
+            get(knowledge_routes::budget).put(knowledge_routes::set_budget),
+        )
         .route("/v1/projects/{id}/context", get(knowledge_routes::context))
         .route("/healthz", get(health))
         .route(
@@ -509,6 +513,7 @@ async fn snapshot(State(app): State<App>) -> Response {
     let registry = app.registry.read().await;
     Json(Snapshot {
         scheduler_policies: durable.scheduler_policies,
+        token_budgets: durable.token_budgets,
         protocol_version: PROTOCOL_VERSION,
         server_version: env!("CARGO_PKG_VERSION").into(),
         boot_id: app.boot_id,

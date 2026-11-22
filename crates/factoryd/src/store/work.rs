@@ -268,7 +268,26 @@ impl Store {
         previous: Option<CommandId>,
         supervised: bool,
     ) -> Result<RunnerCommand> {
+        Self::enqueue_role(
+            tx,
+            id,
+            body,
+            previous,
+            if supervised { "supervisor" } else { "" },
+        )
+    }
+    pub(super) fn enqueue_role(
+        tx: &Transaction<'_>,
+        id: StreamId,
+        body: &EnqueueCommand,
+        previous: Option<CommandId>,
+        role: &str,
+    ) -> Result<RunnerCommand> {
+        let supervised = !role.is_empty();
         let mut owner = stream(tx, id)?;
+        if body.kind == CommandKind::RunAgent {
+            super::token_budgets::admit(tx, owner.project_id, role)?;
+        }
         let paused: bool = tx.query_row(
             "SELECT COALESCE(json_extract(data,'$.paused'),0) FROM projects WHERE id=?1",
             [owner.project_id.to_string()],
@@ -445,11 +464,7 @@ impl Store {
             }
             validate_images(&images).map_err(StoreError::Invalid)?;
             Some(AgentSpec {
-                role: if supervised {
-                    "supervisor".into()
-                } else {
-                    String::new()
-                },
+                role: role.into(),
                 images,
                 read_only: supervised,
                 continuation,
@@ -516,6 +531,11 @@ impl Store {
             |tx| {
                 let mut value = command(tx, id, runner, body.ownership_epoch)?;
                 if value.state == CommandState::Pending {
+                    if value.kind == CommandKind::RunAgent {
+                        let owner=stream(tx,value.stream_id)?;
+                        super::token_budgets::admit(tx,owner.project_id,value.agent_spec.as_ref().map_or("",|a|a.role.as_str()))
+                            .map_err(|e| match e { StoreError::Invalid(_) => StoreError::WorkConflict, other => other })?;
+                    }
                     let paused:bool=tx.query_row("SELECT COALESCE(json_extract(p.data,'$.paused'),0) FROM projects p JOIN streams s ON s.project_id=p.id WHERE s.id=?1",[value.stream_id.to_string()],|r|r.get(0))?;if paused{return Err(StoreError::WorkConflict);}
                     if value.kind==CommandKind::RunAgent && value.agent_spec.as_ref().is_some_and(|a|!a.read_only) {
                         let owner=stream(tx,value.stream_id)?;

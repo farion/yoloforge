@@ -54,6 +54,7 @@ jobs:
       - run: python3 -u scripts/smoke-backup.py
       - run: python3 -u scripts/smoke-archive-files.py
       - run: python3 -u scripts/smoke-push.py
+      - run: python3 -u scripts/smoke-token-budgets.py
   windows-tui:
     runs-on: windows-2025
     steps:

@@ -117,6 +117,11 @@ pub enum Command {
     Usage {
         project: ProjectId,
     },
+    /// Optional cumulative project token limits (input + output).
+    TokenBudget {
+        #[command(subcommand)]
+        command: TokenBudgetCommand,
+    },
     /// Project knowledge with provenance and bounded context selection.
     Knowledge {
         #[command(subcommand)]
@@ -158,6 +163,33 @@ pub enum Command {
         #[arg(long, default_value_t = 0)]
         after: u64,
     },
+}
+#[derive(Subcommand)]
+pub enum TokenBudgetCommand {
+    Show {
+        project: ProjectId,
+    },
+    Set {
+        project: ProjectId,
+        #[arg(long)]
+        expected_revision: u64,
+        /// Nonnegative integer or "unlimited". Zero blocks new starts.
+        #[arg(long)]
+        work: String,
+        #[arg(long)]
+        orchestration: String,
+        #[arg(long)]
+        memory: String,
+        #[arg(long)]
+        request_id: Option<RequestId>,
+    },
+}
+pub(crate) fn token_limit(value: &str) -> anyhow::Result<Option<u64>> {
+    if value.trim() == "unlimited" {
+        Ok(None)
+    } else {
+        Ok(Some(value.trim().parse()?))
+    }
 }
 #[derive(Subcommand)]
 pub enum KnowledgeCommand {
@@ -807,6 +839,28 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             )
         }
         Command::Usage { project } => print(&client.project_usage(project).await?),
+        Command::TokenBudget { command } => match command {
+            TokenBudgetCommand::Show { project } => print(&client.token_budget(project).await?),
+            TokenBudgetCommand::Set {
+                project,
+                expected_revision,
+                work,
+                orchestration,
+                memory,
+                request_id,
+            } => {
+                let body = SetTokenBudget {
+                    request_id: request_id.unwrap_or_default(),
+                    expected_revision: Revision(expected_revision),
+                    limits: TokenLimits {
+                        work: token_limit(&work)?,
+                        orchestration: token_limit(&orchestration)?,
+                        memory: token_limit(&memory)?,
+                    },
+                };
+                print(&client.set_token_budget(project, &body).await?)
+            }
+        },
         Command::Knowledge { command } => match command {
             KnowledgeCommand::Show { id } => print(&client.knowledge_note(id).await?),
             KnowledgeCommand::Add {

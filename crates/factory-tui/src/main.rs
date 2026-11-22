@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status | s: SSH-Verbindung bearbeiten ".to_string()),
-                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | r: Bereitschaft | u: Verbrauch | o: Anmeldung | p: einrichten ".to_string()),
+                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | b: Tokenlimits | r: Bereitschaft | u: Verbrauch | o: Anmeldung | p: einrichten ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
@@ -720,6 +720,10 @@ async fn main() -> Result<()> {
                             }
                         }
                         let target = match (view, key.code) {
+                            (1, KeyCode::Char('b')) => snapshot
+                                .projects
+                                .get(row_offset)
+                                .map(|p| manage::Target::TokenBudget(p.id)),
                             (1, KeyCode::Char('l')) => snapshot
                                 .projects
                                 .get(row_offset)

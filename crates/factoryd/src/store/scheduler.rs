@@ -418,6 +418,13 @@ impl Store {
                         )?;
                         event(&tx, "scheduler.started", tid.to_string(), &c)?;
                     }
+                    Err(StoreError::Invalid(reason))
+                        if super::token_budgets::budget_reason(reason) =>
+                    {
+                        tx.execute_batch("ROLLBACK TO scheduled_start")?;
+                        let mut ticket = t.clone();
+                        super::routing::note(&tx,&mut ticket,"Tokenbudget blockiert: Limit erreicht oder Verbrauch unvollstaendig. Projektverbrauch (u) und Tokenlimits (b) pruefen.")?;
+                    }
                     Err(
                         StoreError::WorkConflict
                         | StoreError::Invalid(_)
@@ -510,6 +517,14 @@ impl Store {
                 tx.execute_batch("SAVEPOINT routing_evaluation")?;
                 let routed = match super::routing::route(&tx, &p, &mut t) {
                     Ok(route) => route,
+                    Err(StoreError::Invalid(reason))
+                        if super::token_budgets::budget_reason(reason) =>
+                    {
+                        tx.execute_batch("ROLLBACK TO routing_evaluation")?;
+                        t = all.get(&t.id).ok_or(StoreError::Internal)?.clone();
+                        super::routing::note(&tx,&mut t,"Orchestrierungs-Tokenbudget blockiert: Projektverbrauch (u) und Tokenlimits (b) pruefen.")?;
+                        super::routing::Route::Pending
+                    }
                     Err(
                         StoreError::WorkConflict
                         | StoreError::Invalid(_)

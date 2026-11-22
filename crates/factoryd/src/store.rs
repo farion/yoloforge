@@ -35,6 +35,7 @@ impl From<serde_json::Error> for StoreError {
 pub struct Store(Arc<Mutex<Connection>>);
 
 pub struct DurableSnapshot {
+    pub token_budgets: Vec<TokenBudget>,
     pub scheduler_policies: Vec<SchedulerPolicy>,
     pub projects: Vec<Project>,
     pub tickets: Vec<Ticket>,
@@ -58,7 +59,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 29,
+            version <= 30,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -153,6 +154,9 @@ impl Store {
         }
         if version < 29 {
             tx.execute_batch("CREATE TABLE IF NOT EXISTS push_delivery(id INTEGER PRIMARY KEY CHECK(id=1), destination TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_attempt INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS events_question_push ON events(kind,sequence); PRAGMA user_version=29;")?;
+        }
+        if version < 30 {
+            tx.execute_batch(include_str!("../migrations/030_token_budgets.sql"))?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -420,8 +424,10 @@ impl Store {
         let controls = records(&tx, "SELECT data FROM controls ORDER BY rowid")?;
         let scheduler_policies =
             records(&tx, "SELECT data FROM scheduler_policies ORDER BY rowid")?;
+        let token_budgets = records(&tx, "SELECT data FROM token_budgets ORDER BY rowid")?;
         tx.commit()?;
         Ok(DurableSnapshot {
+            token_budgets,
             scheduler_policies,
             projects,
             tickets,
@@ -486,6 +492,7 @@ mod setup;
 mod supervisor;
 mod tasks;
 mod termination;
+mod token_budgets;
 mod usage;
 mod work;
 
