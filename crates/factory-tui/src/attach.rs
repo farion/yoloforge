@@ -86,6 +86,9 @@ fn remote_execution(snapshot: &Snapshot, id: ProjectId) -> Option<&RunnerCommand
 }
 
 async fn remote_report(command: std::process::Command) -> Result<String> {
+    remote_report_timeout(command, 30).await
+}
+async fn remote_report_timeout(command: std::process::Command, seconds: u64) -> Result<String> {
     use tokio::io::AsyncReadExt;
     let mut command = tokio::process::Command::from(command);
     let mut child = command
@@ -96,7 +99,7 @@ async fn remote_report(command: std::process::Command) -> Result<String> {
         .spawn()
         .context("SSH konnte nicht gestartet werden")?;
     let output = child.stdout.take().context("SSH-Ausgabe fehlt")?;
-    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(seconds), async {
         let mut bytes = Vec::new();
         output.take(65537).read_to_end(&mut bytes).await?;
         anyhow::ensure!(bytes.len() <= 65536, "SSH-Bereitschaftsausgabe ist zu gross");
@@ -108,6 +111,47 @@ async fn remote_report(command: std::process::Command) -> Result<String> {
         let _ = child.kill().await;
     }
     result
+}
+
+pub async fn fetch_repository(snapshot: &Snapshot, id: ProjectId) -> Result<String> {
+    snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == id)
+        .context("Projekt fehlt")?;
+    let prepared = snapshot
+        .commands
+        .iter()
+        .rev()
+        .find(|c| {
+            c.kind == CommandKind::PrepareWorkspace
+                && c.state == CommandState::Succeeded
+                && snapshot.streams.iter().any(|s| {
+                    s.id == c.stream_id
+                        && s.project_id == id
+                        && s.runner_id == c.runner_id
+                        && s.ownership_epoch == c.ownership_epoch
+                })
+        })
+        .context("Zuerst einen bestaetigten Projektarbeitsbereich vorbereiten")?;
+    if let Some(command) = crate::ssh::fetch_repository(prepared.runner_id, prepared.id)? {
+        return remote_report_timeout(command, 120).await;
+    }
+    let Some(CommandOutput::Workspace { workspace }) = &prepared.result else {
+        anyhow::bail!("Bestaetigter Arbeitsbereich fehlt");
+    };
+    let path = PathBuf::from(&workspace.path);
+    let branch = workspace.branch.clone();
+    let path = tokio::task::spawn_blocking(move || {
+        crate::commands::repository::fetch_workspace(&path, &branch)
+    })
+    .await??;
+    let path = path
+        .to_string_lossy()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>();
+    Ok(format!("Origin-Referenzen aktualisiert: {path}\nArbeitsdateien, Index und lokale Branches bleiben erhalten."))
 }
 
 pub async fn readiness(snapshot: &Snapshot, id: ProjectId) -> Result<String> {

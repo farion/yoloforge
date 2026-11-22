@@ -100,6 +100,33 @@ fn checkout(path: &Path, branch: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub(crate) fn fetch_checkout(path: &Path, branch: &str) -> Result<PathBuf> {
+    // Ignore configured fetch mappings; update remote-tracking refs only.
+    let path = checkout(path, branch)?;
+    git(
+        Some(&path),
+        &[
+            "fetch",
+            "--no-prune",
+            "--no-prune-tags",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    )?;
+    Ok(path)
+}
+pub(crate) fn fetch_workspace(path: &Path, branch: &str) -> Result<PathBuf> {
+    ensure!(
+        git(Some(path), &["symbolic-ref", "--short", "HEAD"])? == branch,
+        "Recorded workspace branch changed"
+    );
+    fetch_checkout(path, branch)
+}
+
 fn setup(command: RepositoryCommand, source: &str, branch: &str) -> Result<PathBuf> {
     let (id, mapping) = match &command {
         RepositoryCommand::Clone {
@@ -181,23 +208,7 @@ fn setup(command: RepositoryCommand, source: &str, branch: &str) -> Result<PathB
             let path = entries
                 .get(&id)
                 .context("Project has no local repository mapping")?;
-            let path = checkout(path, branch)?;
-            // Explicit destination refspec ignores configured fetch mappings into local branches.
-            // Do not import tags, prune, recurse into submodules or change FETCH_HEAD.
-            git(
-                Some(&path),
-                &[
-                    "fetch",
-                    "--no-prune",
-                    "--no-prune-tags",
-                    "--no-tags",
-                    "--no-recurse-submodules",
-                    "--no-write-fetch-head",
-                    "origin",
-                    "+refs/heads/*:refs/remotes/origin/*",
-                ],
-            )?;
-            return Ok(path);
+            return fetch_checkout(path, branch);
         }
     };
     if let Some(existing) = entries.get(&id) {
@@ -313,6 +324,15 @@ mod tests {
         )
         .unwrap();
         fs::write(dest.join("dirty"), "keep me").unwrap();
+        git(
+            Some(&dest),
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ],
+        )
+        .unwrap();
         let head = git(Some(&dest), &["rev-parse", "HEAD"]).unwrap();
         git(
             Some(&source),

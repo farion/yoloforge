@@ -6,6 +6,64 @@ use factory_opencode::OpenCodeClient;
 use rusqlite::{Connection, OpenFlags};
 use std::path::PathBuf;
 
+pub async fn fetch_repository(args: &Args, id: CommandId) -> Result<()> {
+    let path = args
+        .journal
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!(".factory-data/runner-{}.sqlite3", args.id)));
+    let record = read_record(&path, &args.server, args.id, id)?;
+    ensure!(
+        record.command.kind == CommandKind::PrepareWorkspace,
+        "Fetch requires a confirmed workspace preparation"
+    );
+    let Some(CommandOutput::Workspace { workspace }) = &record.result else {
+        anyhow::bail!("Workspace preparation is not complete");
+    };
+    let directory = std::fs::canonicalize(&workspace.path)?;
+    async fn git(path: &std::path::Path, args: &[&str]) -> Result<String> {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            tokio::process::Command::new("git")
+                .current_dir(path)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args(args)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .context("Git fetch timed out; inspect remote refs before retrying")??;
+        ensure!(output.status.success(),"Git operation failed; check repository origin and runner Git authentication (output withheld)");
+        Ok(String::from_utf8(output.stdout)?.trim().into())
+    }
+    let root =
+        PathBuf::from(git(&directory, &["rev-parse", "--show-toplevel"]).await?).canonicalize()?;
+    ensure!(
+        root == directory,
+        "Recorded workspace is not a repository root"
+    );
+    ensure!(
+        git(&directory, &["symbolic-ref", "--short", "HEAD"]).await? == workspace.branch,
+        "Recorded workspace branch changed"
+    );
+    git(
+        &directory,
+        &[
+            "fetch",
+            "--no-prune",
+            "--no-prune-tags",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    )
+    .await?;
+    println!("Origin remote-tracking refs fetched for prepared command {id}. Worktree and local branches retained.");
+    Ok(())
+}
+
 pub async fn open(args: &Args, id: CommandId) -> Result<()> {
     let path = args
         .journal
@@ -234,5 +292,96 @@ mod tests {
         let record = read_record(&path, "http://factory", runner, prepared).unwrap();
         assert_eq!(record.command.kind, CommandKind::PrepareWorkspace);
         assert!(record.agent.is_none());
+    }
+    #[tokio::test]
+    async fn fetch_uses_recorded_workspace_and_preserves_dirty_index_and_branch() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        fn git(path: &std::path::Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .current_dir(path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().into()
+        }
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-b", "main"]);
+        git(
+            &source,
+            &["config", "user.email", "fixture@example.invalid"],
+        );
+        git(&source, &["config", "user.name", "Fixture"]);
+        std::fs::write(source.join("file"), "base").unwrap();
+        git(&source, &["add", "file"]);
+        git(&source, &["commit", "-m", "base"]);
+        let work = dir.path().join("work");
+        git(
+            dir.path(),
+            &["clone", source.to_str().unwrap(), work.to_str().unwrap()],
+        );
+        let head = git(&work, &["rev-parse", "HEAD"]);
+        git(
+            &work,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ],
+        );
+        std::fs::write(work.join("file"), "staged").unwrap();
+        git(&work, &["add", "file"]);
+        std::fs::write(work.join("file"), "dirty").unwrap();
+        let index = std::fs::read(work.join(".git/index")).unwrap();
+        std::fs::write(source.join("file"), "upstream").unwrap();
+        git(&source, &["commit", "-am", "advance"]);
+        let upstream = git(&source, &["rev-parse", "HEAD"]);
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let path = dir.path().join("journal");
+        let journal =
+            crate::journal::Journal::open(&path, "http://factory.invalid", runner).unwrap();
+        let command:RunnerCommand=serde_json::from_value(serde_json::json!({"id":id,"stream_id":StreamId::new(),"runner_id":runner,"ownership_epoch":1,"kind":"prepare_workspace","state":"accepted","created_unix_ms":1})).unwrap();
+        let mut record = journal.receive(command).unwrap();
+        record.result = Some(CommandOutput::Workspace {
+            workspace: Workspace {
+                path: work.to_str().unwrap().into(),
+                branch: "main".into(),
+                base_commit: head.clone(),
+            },
+        });
+        journal.save(&record).unwrap();
+        let args = Args::try_parse_from([
+            "factory-runner",
+            "--id",
+            &runner.to_string(),
+            "--name",
+            "test",
+            "--server",
+            "http://factory.invalid",
+            "--journal",
+            path.to_str().unwrap(),
+            "--fetch-repository",
+            &id.to_string(),
+        ])
+        .unwrap();
+        for _ in 0..2 {
+            fetch_repository(&args, id).await.unwrap();
+        }
+        assert_eq!(
+            git(&work, &["rev-parse", "refs/remotes/origin/main"]),
+            upstream
+        );
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]), head);
+        assert_eq!(std::fs::read(work.join(".git/index")).unwrap(), index);
+        assert_eq!(std::fs::read_to_string(work.join("file")).unwrap(), "dirty");
+        git(&work, &["symbolic-ref", "HEAD", "refs/heads/changed"]);
+        assert!(fetch_repository(&args, id).await.is_err());
     }
 }

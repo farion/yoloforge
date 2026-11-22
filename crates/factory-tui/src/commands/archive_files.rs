@@ -15,12 +15,14 @@ pub(crate) struct Export {
 }
 impl Export {
     pub fn new(directory: &Path) -> Result<Self> {
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
             builder.mode(0o700);
-        }
+            builder
+        };
         builder
             .create(directory)
             .context("Attachment export directory must not already exist")?;

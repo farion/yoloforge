@@ -17,6 +17,7 @@ parser.add_argument("--journal",type=Path,required=True)
 parser.add_argument("--server",required=True)
 parser.add_argument("--command",required=True)
 parser.add_argument("--model",help="Optional explicit provider/model for read-only readiness")
+parser.add_argument("--fetch",action="store_true",help="Explicitly fetch origin tracking refs in the journal-confirmed prepared workspace instead of checking readiness")
 args=parser.parse_args()
 directory=Path(tempfile.mkdtemp(prefix="yf-ssh-lab-",dir="/tmp/opencode"))
 for name in ["host","client"]:
@@ -25,8 +26,11 @@ for name in ["host","client"]:
 with socket.socket() as listener:
     listener.bind(("127.0.0.1",0));port=listener.getsockname()[1]
 helper=[str(root/"target/debug/factory-runner"),"--id",args.runner,"--name","ssh-readiness-test","--server",args.server,"--journal",str(args.journal.resolve()),"--open-session",args.command,"--session-readiness"]
+if args.fetch:
+    if args.model:parser.error("--model is not used for repository fetch")
+    helper=helper[:-3]+["--fetch-repository",args.command]
 if args.model:helper.extend(["--inspect-model",args.model])
-# Only this fixed, read-only helper is allowed through the temporary SSH listener.
+# Only the explicitly selected fixed helper is allowed through this SSH listener.
 config=directory/"sshd_config"
 # The private 0700 lab lives below /tmp, whose parent permissions StrictModes rejects.
 config.write_text(f"Port {port}\nListenAddress 127.0.0.1\nHostKey {directory}/host\nPidFile {directory}/pid\nAuthorizedKeysFile {directory}/authorized_keys\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nPubkeyAuthentication yes\nAuthenticationMethods publickey\nAllowUsers {getpass.getuser()}\nStrictModes no\nDisableForwarding yes\nPermitTTY no\nPrintMotd no\nForceCommand {shlex.join(helper)}\n")
@@ -43,10 +47,13 @@ try:
         except OSError:
             assert time.monotonic()<deadline,"SSH server did not start";time.sleep(.05)
     command=["ssh","-T","-F","/dev/null","-o","BatchMode=yes","-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=yes","-o","UserKnownHostsFile="+str(known),"-i",str(directory/"client"),"-p",str(port),getpass.getuser()+"@127.0.0.1",shlex.join(helper)]
-    result=subprocess.run(command,env=env,capture_output=True,text=True,timeout=40)
+    result=subprocess.run(command,env=env,capture_output=True,text=True,timeout=120 if args.fetch else 40)
     assert result.returncode==0,result.stderr
-    assert any(prefix+args.command in result.stdout for prefix in ["Recorded execution: ","Recorded workspace: "])
-    assert "OpenCode-Service erreichbar" in result.stdout
+    if args.fetch:
+        assert "Origin remote-tracking refs fetched for prepared command "+args.command in result.stdout
+    else:
+        assert any(prefix+args.command in result.stdout for prefix in ["Recorded execution: ","Recorded workspace: "])
+        assert "OpenCode-Service erreichbar" in result.stdout
     (directory/"readiness.txt").write_text(result.stdout)
     print("PASS real SSH traversal, pinned host key and runner/session identity; no Factory token or runner restart")
     print("Evidence:",directory)

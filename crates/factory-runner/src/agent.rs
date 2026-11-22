@@ -735,6 +735,7 @@ mod tests {
         let mut record = journal.receive(command).unwrap();
         let args = Args {
             open_session: None,
+            fetch_repository: None,
             session_readiness: false,
             inspect_model: None,
             publish_review: None,

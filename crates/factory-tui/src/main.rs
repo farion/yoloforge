@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
         FactoryClient::from_env(&args.server)?
     };
     if let Some(command) = args.command {
-        return commands::execute(&client, command).await;
+        return Box::pin(commands::execute(&client, command)).await;
     }
     if args.snapshot {
         println!(
@@ -195,6 +195,10 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    Box::pin(run_tui(client)).await
+}
+
+async fn run_tui(client: FactoryClient) -> Result<()> {
     let (tx, mut rx) = tokio::sync::watch::channel::<Option<Result<Snapshot, String>>>(None);
     let snapshot_client = client.clone();
     let event_client = client.clone();
@@ -335,7 +339,7 @@ async fn main() -> Result<()> {
         }
         terminal.draw(|frame| {
             if let Some(dialog)=&ssh_dialog {dialog.draw(frame);return;}
-            if let Some(report)=&readiness_view {frame.render_widget(Paragraph::new(report.as_str()).scroll((readiness_scroll,0)).wrap(ratatui::widgets::Wrap{trim:false}).block(Block::bordered().title(if readiness_project.is_some() {" Projektbereitschaft · ↑/↓: lesen · Esc: zurueck · o: OpenCode-Anmeldung "} else {" Projektverbrauch · ↑/↓: lesen · Esc: zurueck "})),frame.area());return;}
+            if let Some(report)=&readiness_view {frame.render_widget(Paragraph::new(report.as_str()).scroll((readiness_scroll,0)).wrap(ratatui::widgets::Wrap{trim:false}).block(Block::bordered().title(if readiness_project.is_some() {" Projektbereitschaft · ↑/↓: lesen · Esc: zurueck · o: OpenCode-Anmeldung "} else {" Projektinformationen · ↑/↓: lesen · Esc: zurueck "})),frame.area());return;}
             if let Some(dialog)=open_recovery.and_then(|id|recoveries.get_mut(&id)){dialog.draw(frame,online);return;}
             if open_devices {if let Some(dialog)=&mut device_dialog {dialog.draw(frame);return;}}
             if let Some(dialog)=&mut command_detail {dialog.draw(frame,last.as_ref(),online);return;}
@@ -368,7 +372,7 @@ async fn main() -> Result<()> {
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {
                 0 => (["Runner", "Ort", "Verbindung", "OpenCode"], " Runner / Live-Status | s: SSH-Verbindung bearbeiten ".to_string()),
-                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | b: Tokenlimits | r: Bereitschaft | u: Verbrauch | o: Anmeldung | p: einrichten ".to_string()),
+                1 => (["Projekt", "Betrieb", "Aufgaben", "ID"], " Projekte | n: neu | Leertaste: Pause | l: Sessionlimit | b: Tokenlimits | f: Fetch | r: Bereitschaft | u: Verbrauch | o: Anmeldung | p: einrichten ".to_string()),
                 2 => (["Prompt", "Fortschritt", "Bilder", "Ergebnis / Ursache"], format!(" Aufgaben: {project_name} | n: Prompt eingeben | Enter: ansehen ")),
                 3 => (["Arbeitsbereich", "Fortschritt", "Aufgaben", "ID"], format!(" Sessions: {project_name} | Enter: OpenCode oeffnen | v: Live-Auszug | c: Steuerung ")),
                 4 => (["Auftrag", "Status", "Ergebnis", "ID"], format!(" Auftraege: {project_name} | Enter: Details / Verlauf ")),
@@ -671,29 +675,34 @@ async fn main() -> Result<()> {
                         }
                         continue;
                     }
-                    if view == 1 && matches!(key.code, KeyCode::Char('r' | 'o')) {
+                    if view == 1 && matches!(key.code, KeyCode::Char('r' | 'o' | 'f')) {
                         if let Some(snapshot) = &last {
                             if let Some(project) = snapshot.projects.get(row_offset) {
                                 let id = project.id;
                                 if key.code == KeyCode::Char('o') {
                                     project_native_request = Some(id);
                                 } else {
+                                    let fetch = key.code == KeyCode::Char('f');
                                     readiness_view = Some(
-                                        "Pruefe Projektmodell, Anmeldungen und MCP-Verbindungen …"
+                                        if fetch {"Hole Origin-Referenzen im vorbereiteten Repository …"} else {"Pruefe Projektmodell, Anmeldungen und MCP-Verbindungen …"}
                                             .into(),
                                     );
                                     readiness_scroll = 0;
                                     readiness_generation = readiness_generation.wrapping_add(1);
                                     let generation = readiness_generation;
-                                    readiness_project = Some(id);
+                                    readiness_project = if fetch { None } else { Some(id) };
                                     let snapshot = snapshot.clone();
                                     let tx = readiness_tx.clone();
                                     tokio::spawn(async move {
-                                        let result = attach::readiness(&snapshot, id).await;
+                                        let result = if fetch {
+                                            attach::fetch_repository(&snapshot, id).await
+                                        } else {
+                                            attach::readiness(&snapshot, id).await
+                                        };
                                         let _ = tx.send((
                                             generation,
                                             result.unwrap_or_else(|e| {
-                                                format!("Bereitschaft nicht ermittelbar: {e:#}")
+                                                format!("Projektaktion nicht abgeschlossen: {e:#}")
                                             }),
                                         ));
                                     });

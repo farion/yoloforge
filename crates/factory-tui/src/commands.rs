@@ -3,7 +3,7 @@ use clap::Subcommand;
 use factory_core::*;
 use factory_protocol::{client::FactoryClient, *};
 pub(crate) mod archive_files;
-mod repository;
+pub(crate) mod repository;
 
 #[derive(Subcommand)]
 pub enum Command {

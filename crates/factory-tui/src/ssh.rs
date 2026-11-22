@@ -33,6 +33,9 @@ pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
 pub fn readiness(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
     configured_mode(runner, id, true)
 }
+pub fn fetch_repository(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
+    configured_operation(runner, id, true, true)
+}
 pub fn project_readiness(
     runner: RunnerId,
     id: CommandId,
@@ -63,6 +66,14 @@ pub fn project_readiness(
     Ok(Some(command))
 }
 fn configured_mode(runner: RunnerId, id: CommandId, readiness: bool) -> Result<Option<Command>> {
+    configured_operation(runner, id, readiness, false)
+}
+fn configured_operation(
+    runner: RunnerId,
+    id: CommandId,
+    readiness: bool,
+    fetch: bool,
+) -> Result<Option<Command>> {
     let path = config_path();
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -73,7 +84,7 @@ fn configured_mode(runner: RunnerId, id: CommandId, readiness: bool) -> Result<O
         serde_json::from_slice(&bytes).context("Ungueltiges YoloForge-SSH-Profil")?;
     profiles
         .get(&runner)
-        .map(|p| command_mode(p, runner, id, readiness))
+        .map(|p| command_operation(p, runner, id, readiness, fetch))
         .transpose()
 }
 fn quote(s: &str) -> Result<String> {
@@ -87,6 +98,15 @@ fn command(p: &Profile, runner: RunnerId, id: CommandId) -> Result<Command> {
     command_mode(p, runner, id, false)
 }
 fn command_mode(p: &Profile, runner: RunnerId, id: CommandId, readiness: bool) -> Result<Command> {
+    command_operation(p, runner, id, readiness, false)
+}
+fn command_operation(
+    p: &Profile,
+    runner: RunnerId,
+    id: CommandId,
+    readiness: bool,
+    fetch: bool,
+) -> Result<Command> {
     let url = reqwest::Url::parse(&p.server).context("Ungueltige Factory-URL im SSH-Profil")?;
     ensure!(
         matches!(url.scheme(), "http" | "https")
@@ -114,13 +134,17 @@ fn command_mode(p: &Profile, runner: RunnerId, id: CommandId, readiness: bool) -
         p.server.clone(),
         "--journal".into(),
         p.journal.clone(),
-        "--open-session".into(),
+        if fetch {
+            "--fetch-repository".into()
+        } else {
+            "--open-session".into()
+        },
         id.to_string(),
     ];
     if let Some(path) = &p.opencode_registration {
         args.extend(["--opencode-registration".into(), path.clone()]);
     }
-    if readiness {
+    if readiness && !fetch {
         args.push("--session-readiness".into());
     }
     let remote = args
@@ -144,6 +168,28 @@ fn command_mode(p: &Profile, runner: RunnerId, id: CommandId, readiness: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fetch_is_noninteractive_and_pins_the_prepared_command() {
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let p = Profile {
+            host: "user@runner".into(),
+            server: "http://127.0.0.1:7432".into(),
+            journal: "/private/runner journal".into(),
+            opencode_registration: None,
+        };
+        let c = command_operation(&p, runner, id, true, true).unwrap();
+        let args = c
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args[0], "-T");
+        let remote = args.last().unwrap();
+        assert!(remote.contains(&format!("'--fetch-repository' '{}'", id)));
+        assert!(!remote.contains("--open-session"));
+        assert!(!remote.contains("--session-readiness"));
+        assert!(remote.contains("'/private/runner journal'"));
+    }
     #[test]
     fn ssh_uses_exact_ids_and_quotes_remote_paths_without_passwords() {
         let runner = RunnerId::new();

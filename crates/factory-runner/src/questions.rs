@@ -274,6 +274,7 @@ mod tests {
         .unwrap();
         let args = Args {
             open_session: None,
+            fetch_repository: None,
             session_readiness: false,
             inspect_model: None,
             publish_review: None,

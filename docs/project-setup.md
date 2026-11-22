@@ -151,3 +151,23 @@ OpenCode-Service als eigener Prozessfall abgenommen.
 Repository, Pfad, Modell oder Konfiguration. Der normale Test prüft zusätzlich
 den strukturierten MCP-Editor. Runner-Tests prüfen lokale Imports, verwaltete leere
 Projekte, Pfadkonflikte und die Modellbindung über Neustarts.
+## Repository-Fetch aus der TUI
+
+In der Projektliste holt **f** die Origin-Referenzen für den zuletzt bestätigten
+Projektarbeitsbereich. Ein konfiguriertes SSH-Profil verwendet den zugehörigen
+Runner mit `--fetch-repository PREPARE_COMMAND_ID`; sonst läuft Git lokal.
+Die Zuordnung wird aus einer erfolgreichen Workspace-Vorbereitung mit aktueller
+Ownership ermittelt. Es werden keine Provider-Anmeldung und kein Modell benötigt.
+
+Fetch aktualisiert ausschließlich `refs/remotes/origin/*`. Ein expliziter
+Refspec zusammen mit `--refmap=` ignoriert abweichende konfigurierte Fetch-Ziele.
+Lokale Branches, Arbeitsdateien, Index, Tags und `FETCH_HEAD` bleiben erhalten;
+es erfolgen weder Prune noch Submodule-Fetch, Checkout oder Merge. Ein geänderter
+Workspace-Branch wird abgewiesen. Git-Zugangsdaten bleiben bei der vorhandenen
+Git-/SSH-Konfiguration des ausführenden Rechners; Fehlerausgaben von Git werden
+nicht ungefiltert angezeigt.
+
+Lokal per PTY und über einen echten isolierten Loopback-SSH-Hop abgenommen:
+`/tmp/opencode/yf-tui-fetch-wicz8spc`, `/tmp/opencode/yf-ssh-lab-o7ytmf_o`.
+Runner-/TUI-Tests prüfen auch veränderte Fetch-Refspecs und erhaltene
+gestagte/ungestagte Änderungen.
