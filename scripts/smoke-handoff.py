@@ -19,7 +19,9 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--review",action="store_true",help="Also test Docker-contained review and CAS integration")
     parser.add_argument("--review-image",default="yoloforge-freezer-test:development")
+    parser.add_argument("--github-acceptance",action="store_true",help="Explicit real writes to the private farion/yoloforge-acceptance repository")
     options=parser.parse_args()
+    if options.github_acceptance:options.review=True
     with tempfile.TemporaryDirectory(prefix="handoff-", dir="/tmp/opencode") as tmp:
         base = Path(tmp)
         env = {k: v for k, v in os.environ.items() if k != "FACTORY_TOKEN_FILE"}
@@ -97,6 +99,11 @@ def main():
                 (repo / "file").write_text("base-" + name)
                 git(repo, "add", ".")
                 git(repo, "commit", "-m", "initial")
+                if name=="a" and options.github_acceptance:
+                    remote="https://github.com/farion/yoloforge-acceptance.git"
+                    if git(repo,"ls-remote","--heads",remote,"refs/heads/main"):
+                        git(repo,"fetch",remote,"main");git(repo,"reset","--hard","FETCH_HEAD")
+                    else:git(repo,"push",remote,"main:refs/heads/main")
                 (base / f"{name}.json").write_text(json.dumps({project["id"]: str(repo)}))
             a, b = runner("a"), runner("b")
             wait(lambda: len(snapshot()["runners"]) == 2)
@@ -167,6 +174,26 @@ def main():
                 assert tested["state"]=="succeeded",tested
                 evidence=tested["result"]["review"]
                 assert Path(evidence["log_path"]).read_text().count("review-once")==1
+                if options.github_acceptance:
+                    credential=subprocess.run(["git","credential","fill"],input="protocol=https\nhost=github.com\n\n",capture_output=True,text=True,timeout=15)
+                    assert credential.returncode==0,"GitHub credential helper unavailable"
+                    secret=dict(line.split("=",1) for line in credential.stdout.splitlines() if "=" in line)["password"]
+                    token_path=base/"hosting.token";token_path.touch(mode=0o600);token_path.write_text(secret)
+                    config=base/"hosting.json";config.write_text(json.dumps({"provider":"github","api_url":"https://api.github.com","repository":"farion/yoloforge-acceptance","git_remote":remote,"token_file":str(token_path)}))
+                    def publish(review_id):
+                        return subprocess.run([str(ROOT/"target/debug/factory-runner"),"--server",url,"--id",ids["a"],"--name","hosting-acceptance","--journal",str(base/"a.sqlite3"),"--publish-review",review_id,"--hosting-config",str(config)],env=env,capture_output=True,text=True,timeout=120)
+                    published=publish(reviewed["id"]);assert published.returncode==0,published.stderr
+                    pr_url=published.stdout.strip();assert pr_url.startswith("https://github.com/farion/yoloforge-acceptance/pull/")
+                    assert publish(reviewed["id"]).stdout.strip()==pr_url,"Publication replay differs"
+                    import sqlite3
+                    with sqlite3.connect(base/"factory.sqlite3") as db:assert db.execute("SELECT COUNT(*) FROM hosted_reviews").fetchone()[0]==1
+                    pr_path="https://api.github.com/repos/farion/yoloforge-acceptance/pulls/"+pr_url.rsplit("/",1)[1]
+                    def github(method,body=None):
+                        req=urllib.request.Request(pr_path,method=method,data=None if body is None else json.dumps(body).encode(),headers={"Authorization":"Bearer "+secret,"Accept":"application/vnd.github+json","Content-Type":"application/json"})
+                        with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
+                    pull=github("GET");assert pull["head"]["sha"]==evidence["candidate_commit"] and pull["base"]["ref"]=="main"
+                    github("PATCH",{"state":"closed"})
+                    print("PASS real GitHub push/PR, exact candidate, immutable replay and central receipt:",pr_url)
                 integrated=cli("stream","integrate",stream_id,"--expected-revision",stream()["revision"],"--review",reviewed["id"])
                 applied=wait(lambda:finished(integrated["id"]))
                 assert applied["state"]=="succeeded",applied
@@ -179,6 +206,13 @@ def main():
                 assert git(repo,"rev-parse","main")==target_before
                 configure("python3 -c \"print('ok')\"")
                 valid=review();assert wait(lambda:finished(valid["id"]))["state"]=="succeeded"
+                if options.github_acceptance:
+                    reserved="refs/heads/yoloforge/review-"+valid["id"]
+                    foreign=git(repo,"commit-tree",git(repo,"rev-parse","main^{tree}"),"-p",git(repo,"rev-parse","main"),"-m","foreign publication writer")
+                    git(repo,"push",remote,foreign+":"+reserved)
+                    blocked=publish(valid["id"]);assert blocked.returncode!=0,"Foreign publication branch was accepted"
+                    assert git(repo,"ls-remote","--refs",remote,reserved).split()[0]==foreign
+                    print("PASS real foreign publication branch is not overwritten")
                 changed=git(repo,"commit-tree",git(repo,"rev-parse","main^{tree}"),"-p",target_before,"-m","concurrent target change")
                 git(repo,"update-ref","refs/heads/main",changed,target_before)
                 attempted=cli("stream","integrate",stream_id,"--expected-revision",stream()["revision"],"--review",valid["id"])

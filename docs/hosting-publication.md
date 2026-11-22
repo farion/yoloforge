@@ -50,7 +50,13 @@ Antwortbodies mit möglichen Zugangsdaten aus.
 
 Tests: lokales Bare-Git für Push/Replay/konkurrierenden Writer; synthetische
 GitHub-/Forgejo-API mit verlorener POST-Antwort; zentrale Erfolgsbindung,
-Retarget-Schutz und Replay nach DB-Neustart. Reale Hosting-Zugänge und ein
-vom Betreiber bestimmtes Testrepository sind noch nicht abgenommen.
+Retarget-Schutz und Replay nach DB-Neustart. Nach ausdruecklicher Freigabe wurde
+das private Repository `farion/yoloforge-acceptance` angelegt. Die echte GitHub-
+Abnahme mit `python3 scripts/smoke-handoff.py --github-acceptance` besteht:
+gepruefter Kandidat gepusht, PR erstellt, identischer Replay ohne zweiten PR,
+zentraler Beleg und fremder Publikationsbranch nicht ueberschrieben.
+Test-PR `https://github.com/farion/yoloforge-acceptance/pull/1` wurde anschliessend
+geschlossen; synthetische Testbranches bleiben zur Nachvollziehbarkeit erhalten.
+Echte Forgejo-Abnahme steht noch aus.
 Der Helfer ist über CLI nutzbar; ein vollständiger TUI-Hosting-Assistent und
 automatische Einplanung dieses Schritts bleiben offen.

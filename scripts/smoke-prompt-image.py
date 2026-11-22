@@ -22,7 +22,7 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def inside(binaries, registration=None, followup=False, memory=False):
+def inside(binaries, provider, model, registration=None, followup=False, memory=False):
     local = registration is not None
     registration = registration if local else json.load(sys.stdin)
     directory = Path(tempfile.mkdtemp(prefix="factory-image-", dir="/tmp/opencode" if local else "/home/factory/workspace"))
@@ -61,7 +61,7 @@ def inside(binaries, registration=None, followup=False, memory=False):
         setup = api("POST", "/v1/projects/setup", {
             "request_id": str(uuid.uuid4()), "project_id": None, "expected_revision": 0,
             "name": "Image prompt acceptance", "repository": source, "base_branch": "main",
-            "profile": {"provider_id": "openai", "model_id": "gpt-6-astra", "toolchain": "", "start_command": "", "test_command": ""},
+            "profile": {"provider_id": provider, "model_id": model, "toolchain": "", "start_command": "", "test_command": ""},
             "setup": {"runner_id": runner, "repository_source": source, "repository_path": "",
                        "service_registration": str(reg), "harness": None}})
         def verify_memory(command):
@@ -152,6 +152,8 @@ def inside(binaries, registration=None, followup=False, memory=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inside", type=Path)
+    parser.add_argument("--provider", required=True, help="Explicit provider technical ID")
+    parser.add_argument("--model", required=True, help="Explicit model technical ID; no default or fallback")
     parser.add_argument("--local-registration", type=Path, help="Use an existing local service without starting/stopping it; retain separate Factory evidence under /tmp/opencode")
     parser.add_argument("--followup", action="store_true", help="Also verify fixed-session continuation and an automatically answered real model question")
     parser.add_argument("--memory", action="store_true", help="Verify automatic branch-scoped knowledge extraction after the follow-up")
@@ -159,10 +161,10 @@ def main():
     if args.memory:
         args.followup=True
     if args.local_registration:
-        inside(ROOT / "target/debug", json.loads(args.local_registration.read_text()), args.followup, args.memory)
+        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory)
         return
     if args.inside:
-        inside(args.inside, followup=args.followup, memory=args.memory)
+        inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory)
         return
     state = json.loads((ROOT / "spikes/opencode/.runtime/state.json").read_text())
     container = state["container"]
@@ -172,7 +174,7 @@ def main():
         for name in ["factoryd", "factory-runner"]:
             subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + target + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + target + "/test.py"], check=True, capture_output=True)
-        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []),
+        result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []),
             input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=900 if args.memory else 600 if args.followup else 300)
         assert result.returncode == 0, "Real image-prompt acceptance failed"
     finally:

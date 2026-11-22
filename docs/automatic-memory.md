@@ -26,7 +26,7 @@ werden einmalig verworfen. Manuelle und projektweite Notizen sind nicht angebote
 Neustart, einmalige Speicherung, leere/ungültige Ergebnisse und Branchfilter sind
 getestet. Realmodell-Abnahme mit Bildtask, fester Fortsetzung, automatischer
 Frageantwort, Veröffentlichung und Wissen bestanden:
-`scripts/smoke-prompt-image.py --local-registration PATH --memory`.
+`scripts/smoke-prompt-image.py --local-registration PATH --provider PROVIDER_ID --model MODEL_ID --memory`.
 Branchlokale Widerspruchskorrektur samt Restart, unangebotener ID und menschlichem
 Revisionsrennen ist synthetisch getestet. Ihre Realmodell-Abnahme, ein eigener
 Kostenhaushalt und modellspezifischer Tokenizer sind weiter offen.

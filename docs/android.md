@@ -114,5 +114,7 @@ Der Release-Workflow besitzt einen opt-in Android-Signierjob: Repositoryvariable
 Er prueft den gepinnten Zertifikatsfingerprint, laedt ausschliesslich APK/Pruefsumme
 als Release-Artefakte hoch und entfernt die temporaeren Schluesseldateien.
 Bei aktiviertem Job blockiert ein Signierfehler die Gesamtveroeffentlichung.
-Die Secrets/Variable wurden hier nicht auf GitHub eingerichtet; der private
-Schluessel bleibt lokal. Ohne Aktivierung bleiben die anderen Release-Ziele nutzbar.
+Secrets und Variable wurden nach ausdruecklicher Freigabe fuer
+`farion/yoloforge` eingerichtet; der lokale Schluessel bleibt fuer Sicherung und
+lokale Builds erhalten. Die CI-Ausfuehrung dieses Signierpfads muss beim naechsten
+Release noch bestaetigt werden. Ohne Aktivierung bleiben die anderen Release-Ziele nutzbar.

@@ -76,9 +76,9 @@ denselben Request. Offline wird nicht gesendet.
    ausgecheckter Zielbranch wird nicht überschrieben. Nach unklarer Bestätigung
    wird der bereits gesetzte Kandidatencommit wiedererkannt.
 
-Integration erfolgt **lokal im zugeordneten Repository**. Push/PR/Merge-Request
-zum Hosting-Anbieter ist ein eigener noch offener Ablauf. Tickets werden nicht
-automatisch als erledigt markiert. Checkpoint-, Review- und Testartefakte bleiben
+Integration erfolgt **lokal im zugeordneten Repository**. Push/PR zum Hosting-
+Anbieter ist unter [hosting-publication.md](hosting-publication.md) implementiert
+und fuer GitHub real geprueft. Checkpoint-, Review- und Testartefakte bleiben
 für die Nachvollziehbarkeit erhalten.
 
 ## Abnahme

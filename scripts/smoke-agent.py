@@ -37,7 +37,7 @@ def wait(predicate, seconds=180):
     raise RuntimeError("agent smoke deadline exceeded")
 
 
-def inside(bin_dir):
+def inside(bin_dir, provider, model):
     registration = json.load(sys.stdin)
     directory = Path(tempfile.mkdtemp(prefix="factory-agent-", dir="/home/factory/workspace"))
     processes = []
@@ -109,7 +109,7 @@ def inside(bin_dir):
         endpoint = "http://" + address
         project = cli("project", "create", "--name", "Agent smoke", "--repository", str(repo))
         cli("project", "configure", project["id"], "--expected-revision", "1", "--toolchain", "Python 3",
-            "--provider", "openai", "--model", "gpt-6-astra", "--test-command", "python3 -m py_compile proof.py")
+             "--provider", provider, "--model", model, "--test-command", "python3 -m py_compile proof.py")
         mapping = directory / "repositories.json"
         mapping.write_text(json.dumps({project["id"]: str(repo)}))
         runners = []
@@ -298,9 +298,11 @@ def inside(bin_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inside", type=Path)
+    parser.add_argument("--provider", required=True, help="Explicit provider technical ID")
+    parser.add_argument("--model", required=True, help="Explicit model technical ID; no default or fallback")
     args = parser.parse_args()
     if args.inside:
-        inside(args.inside)
+        inside(args.inside, args.provider, args.model)
         return
     state = json.loads((ROOT / "spikes/opencode/.runtime/state.json").read_text())
     container = state["container"]
@@ -310,7 +312,7 @@ def main():
         for name in ["factoryd", "factory-runner", "factory"]:
             subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + directory + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + directory + "/smoke-agent.py"], check=True, capture_output=True)
-        result = subprocess.run(["docker", "exec", "-i", container, "python3", directory + "/smoke-agent.py", "--inside", directory],
+        result = subprocess.run(["docker", "exec", "-i", container, "python3", directory + "/smoke-agent.py", "--inside", directory,"--provider",args.provider,"--model",args.model],
                                 input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=600)
         check(result.returncode == 0, "real agent integration failed")
     finally:

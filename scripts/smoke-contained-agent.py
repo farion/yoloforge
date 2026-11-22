@@ -64,7 +64,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--credential-source", type=Path, default=ROOT / "spikes/opencode/.runtime/registration.json")
     parser.add_argument("--image", default="yoloforge-contained-opencode:2.0.27")
-    parser.add_argument("--model", default="gpt-6-astra")
+    parser.add_argument("--model", required=True, help="Explicit OpenAI model ID; no default or fallback")
     args = parser.parse_args()
     check(os.getuid() != 0, "Run acceptance as a non-root host user")
     source = json.loads(args.credential_source.read_text())
