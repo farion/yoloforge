@@ -760,7 +760,7 @@ fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
 
 #[test]
 fn supervisor_followup_is_once_in_same_session_and_yields_to_budget_and_interview() {
-    for mode in ["continue", "budget", "interview"] {
+    for mode in ["continue", "conflict", "budget", "interview"] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
         let store = Store::open(&path).unwrap();
@@ -781,7 +781,11 @@ fn supervisor_followup_is_once_in_same_session_and_yields_to_budget_and_intervie
         finish_agent(
             &store,
             &target,
-            "Implementation present but requested tests were not run".into(),
+            if mode == "conflict" {
+                format!("{PUBLICATION_CONFLICT_PREFIX}\nresult.txt overlaps with another result")
+            } else {
+                "Implementation present but requested tests were not run".into()
+            },
         );
         let policy = supervisor(&store, &target);
         let evaluation = store
@@ -822,7 +826,7 @@ fn supervisor_followup_is_once_in_same_session_and_yields_to_budget_and_intervie
             .unwrap()
             .pop()
             .unwrap();
-        if mode == "continue" {
+        if matches!(mode, "continue" | "conflict") {
             assert_eq!(resolved.outcome, "applied");
             let id = resolved.followup_command_id.unwrap();
             let next = store
@@ -873,6 +877,50 @@ fn supervisor_followup_is_once_in_same_session_and_yields_to_budget_and_intervie
             assert!(resolved.followup_command_id.is_none() && resolved.knowledge_id.is_none());
         }
     }
+}
+
+#[test]
+fn supervisor_cannot_close_a_session_with_an_unpublished_parallel_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let target = command(&store);
+    finish_agent(
+        &store,
+        &target,
+        format!("{PUBLICATION_CONFLICT_PREFIX}\nresult.txt needs resolution"),
+    );
+    let policy = supervisor(&store, &target);
+    let evaluation = store
+        .supervisor_evaluations(policy.project_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    let worker = store
+        .acknowledge(
+            target.runner_id,
+            evaluation.command_id,
+            AckCommand {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+            },
+        )
+        .unwrap();
+    assert!(worker
+        .agent_spec
+        .as_ref()
+        .unwrap()
+        .prompt
+        .contains("do not close"));
+    finish_agent(&store,&worker,json!({"action":"close","reason":"Model overlooked the conflict","memory":"Claimed complete"}).to_string());
+    store.supervisor_tick(policy.next_unix_ms + 1).unwrap();
+    let result = store
+        .supervisor_evaluations(policy.project_id)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(result.outcome, "publication_conflict_preserves_session");
+    assert!(result.knowledge_id.is_none());
+    assert!(store.session_closure(target.id).unwrap().is_none());
 }
 
 #[test]

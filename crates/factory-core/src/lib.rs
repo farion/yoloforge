@@ -355,6 +355,9 @@ pub enum CommandKind {
     IntegrateReview,
 }
 pub const REVIEW_CAPABILITY: &str = "git-review-v1";
+/// Runner-generated status prefix; preserves a blocked publication in the
+/// supervisor's bounded evidence rather than burying it after the model summary.
+pub const PUBLICATION_CONFLICT_PREFIX: &str = "[yoloforge:publication-conflict]";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReviewJob {

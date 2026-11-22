@@ -14,8 +14,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Debug)]
+pub(crate) struct PublicationConflict(pub String);
+impl std::fmt::Display for PublicationConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for PublicationConflict {}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Plan {
+    /// Original execution snapshot, distinct from the combined publication commit.
+    /// Older journals used commit for both.
+    #[serde(default)]
+    snapshot: Option<String>,
     stream: StreamId,
     epoch: u64,
     target: PathBuf,
@@ -89,13 +102,10 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
         }
         plan
     } else {
-        let previous:Option<String>=j.db.query_row("SELECT json_extract(data,'$.commit') FROM publications WHERE json_extract(data,'$.stream')=?1 AND json_extract(data,'$.epoch')=?2 AND json_extract(data,'$.published')=1 ORDER BY rowid DESC LIMIT 1",params![r.command.stream_id.to_string(),r.command.ownership_epoch],|row|row.get(0)).optional()?;
+        let previous:Option<String>=j.db.query_row("SELECT COALESCE(json_extract(data,'$.snapshot'),json_extract(data,'$.commit')) FROM publications WHERE json_extract(data,'$.stream')=?1 AND json_extract(data,'$.epoch')=?2 AND json_extract(data,'$.published')=1 ORDER BY rowid DESC LIMIT 1",params![r.command.stream_id.to_string(),r.command.ownership_epoch],|row|row.get(0)).optional()?;
         let parent = previous.unwrap_or_else(|| workspace.base_commit.clone());
-        unchanged_target(&target, &spec.base_branch, &parent)?;
-        ensure!(
-            git(&repository, &["rev-parse", &spec.base_branch])? == parent,
-            "Projektbasis wurde inzwischen geaendert"
-        );
+        let current = git(&target, &["rev-parse", "HEAD"])?;
+        unchanged_target(&target, &spec.base_branch, &current)?;
         let work = Path::new(&workspace.path);
         ensure!(
             git(work, &["ls-files", "--unmerged"])?.is_empty(),
@@ -114,16 +124,21 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
             "Verschachtelte Repositories/Submodule werden nicht automatisch uebernommen"
         );
         let tree = git_env(work, &["write-tree"], &env)?;
+        let head = git(work, &["rev-parse", "HEAD"])?;
+        // A targeted follow-up may have merged the observed target into its
+        // execution branch and committed a real resolution. Preserve that
+        // ancestry so Git need not rediscover the already resolved conflict.
+        let mut parents = vec!["-p", parent.as_str()];
+        if head != parent && git(work, &["merge-base", "--is-ancestor", &current, &head]).is_ok() {
+            parents.extend(["-p", head.as_str()]);
+        }
+        let mut commit_args = vec!["commit-tree", tree.as_str()];
+        commit_args.extend(parents);
+        let message = format!("YoloForge task {}", r.command.id);
+        commit_args.extend(["-m", message.as_str()]);
         let commit = git_env(
             work,
-            &[
-                "commit-tree",
-                &tree,
-                "-p",
-                &parent,
-                "-m",
-                &format!("YoloForge task {}", r.command.id),
-            ],
+            &commit_args,
             &[
                 ("GIT_AUTHOR_NAME", "YoloForge"),
                 ("GIT_AUTHOR_EMAIL", "factory@yoloforge.invalid"),
@@ -132,6 +147,7 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
             ],
         )?;
         let plan = Plan {
+            snapshot: Some(commit.clone()),
             stream: r.command.stream_id,
             epoch: r.command.ownership_epoch,
             target: target.clone(),
@@ -144,6 +160,91 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
         save(j, r.command.id, &plan)?;
         plan
     };
+    if let Some(snapshot) = &plan.snapshot {
+        // Retain the immutable source even if combining it reports conflicts.
+        let reference = format!("refs/yoloforge/publication-snapshots/{}", r.command.id);
+        let existing = git(
+            &repository,
+            &["for-each-ref", "--format=%(objectname)", &reference],
+        )?;
+        if existing.is_empty() {
+            git(
+                &repository,
+                &[
+                    "update-ref",
+                    &reference,
+                    snapshot,
+                    &"0".repeat(snapshot.len()),
+                ],
+            )?;
+        } else {
+            ensure!(existing == *snapshot, "Publication snapshot ref changed");
+        }
+        let current = git(&target, &["rev-parse", "HEAD"])?;
+        if current != plan.parent && current != plan.commit {
+            ensure!(
+                plan.commit == *snapshot,
+                "Projektstand nach gepinnter Zusammenfuehrung geaendert; Ergebnis erhalten"
+            );
+            unchanged_target(&target, &plan.branch, &current)?;
+            git(
+                &repository,
+                &[
+                    "fetch",
+                    "--refmap=",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--no-auto-maintenance",
+                    target.to_str().context("Non-UTF8 target")?,
+                    &current,
+                ],
+            )?;
+            git(
+                &repository,
+                &[
+                    "merge-base",
+                    "--is-ancestor",
+                    &workspace.base_commit,
+                    &current,
+                ],
+            )
+            .context("Projektgeschichte ist abgezweigt; keine automatische Zusammenfuehrung")?;
+            let base = git(&repository, &["merge-base", snapshot, &current])?;
+            let (clean, output) = workspace::merge_tree(&repository, &base, &current, snapshot)?;
+            if !clean {
+                let details = output.lines().skip(1).collect::<Vec<_>>().join("\n");
+                let details = details
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\n')
+                    .take(4096)
+                    .collect::<String>();
+                return Err(PublicationConflict(format!("Paralleler Ergebniskonflikt. Ziel: {}; Basis: {}; Zielcommit: {}; Ergebnissnapshot: {}. Betroffene Dateien / Git-Diagnose:\n{}\nNacharbeit in derselben Session: Zielcommit in den Ausfuehrungsbranch mergen, Konflikte dort loesen und die Aufloesung committen; beide Ergebnisse bewahren und Tests ausfuehren. Nicht den Projektordner bearbeiten. Danach neuer Folgeauftrag statt Aenderung des gepinnten Snapshots.", target.display(), base, current, snapshot, details)).into());
+            }
+            let tree = output.lines().next().context("Merge tree missing")?;
+            let commit = git_env(
+                &repository,
+                &[
+                    "commit-tree",
+                    tree,
+                    "-p",
+                    &current,
+                    "-p",
+                    snapshot,
+                    "-m",
+                    &format!("YoloForge combined task {}", r.command.id),
+                ],
+                &[
+                    ("GIT_AUTHOR_NAME", "YoloForge"),
+                    ("GIT_AUTHOR_EMAIL", "factory@yoloforge.invalid"),
+                    ("GIT_COMMITTER_NAME", "YoloForge"),
+                    ("GIT_COMMITTER_EMAIL", "factory@yoloforge.invalid"),
+                ],
+            )?;
+            plan.parent = current;
+            plan.commit = commit;
+            save(j, r.command.id, &plan)?;
+        }
+    }
     let reference = format!("refs/yoloforge/publications/{}", r.command.id);
     let existing = git(
         &repository,
@@ -170,6 +271,7 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
             &[
                 "fetch",
                 "--no-tags",
+                "--refmap=",
                 "--no-write-fetch-head",
                 "--no-auto-maintenance",
                 repository.to_str().context("Non-UTF8 repository path")?,
@@ -199,13 +301,16 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
     let current = git(&repository, &["rev-parse", &base])?;
     if current != plan.commit {
         ensure!(
-            current == plan.parent,
+            current == plan.parent
+                || (plan.snapshot.is_some()
+                    && git(
+                        &repository,
+                        &["merge-base", "--is-ancestor", &current, &plan.parent]
+                    )
+                    .is_ok()),
             "Managed project base changed during publication"
         );
-        git(
-            &repository,
-            &["update-ref", &base, &plan.commit, &plan.parent],
-        )?;
+        git(&repository, &["update-ref", &base, &plan.commit, &current])?;
     }
     plan.published = true;
     save(j, r.command.id, &plan)?;
@@ -267,6 +372,209 @@ mod tests {
             work,
             target,
         }
+    }
+    fn parallel(f: &Fixture) -> (Record, PathBuf) {
+        let mut command = f.record.command.clone();
+        command.id = CommandId::new();
+        command.stream_id = StreamId::new();
+        command.workspace_spec.as_mut().unwrap().branch = format!("factory/{}", command.stream_id);
+        let record = f.journal.receive(command).unwrap();
+        let CommandOutput::Workspace { workspace } = workspace::prepare(
+            &f.journal,
+            &record.command,
+            None,
+            f.args.workspace_root.as_deref().unwrap(),
+        ) else {
+            panic!("parallel workspace failed")
+        };
+        (record, PathBuf::from(workspace.path))
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_disjoint_results_combine_and_continuations_do_not_erase_other_work() {
+        let f = fixture().await;
+        let (mut second, work) = parallel(&f);
+        fs::write(work.join("other.txt"), "second result").unwrap();
+        let head = git(&work, &["rev-parse", "HEAD"]).unwrap();
+        let index = git(&work, &["ls-files", "--stage"]).unwrap();
+        publish(&f.journal, &f.record, &f.args).unwrap();
+        publish(&f.journal, &second, &f.args).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.target.join("result.txt")).unwrap(),
+            "result"
+        );
+        assert_eq!(
+            fs::read_to_string(f.target.join("other.txt")).unwrap(),
+            "second result"
+        );
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]).unwrap(), head);
+        assert_eq!(git(&work, &["ls-files", "--stage"]).unwrap(), index);
+        let combined = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        publish(&f.journal, &second, &f.args).unwrap();
+        assert_eq!(git(&f.target, &["rev-parse", "HEAD"]).unwrap(), combined);
+        second.command.id = CommandId::new();
+        fs::write(work.join("other.txt"), "second followup").unwrap();
+        publish(&f.journal, &second, &f.args).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.target.join("result.txt")).unwrap(),
+            "result"
+        );
+        assert_eq!(
+            fs::read_to_string(f.target.join("other.txt")).unwrap(),
+            "second followup"
+        );
+        let mut first = f.record.clone();
+        first.command.id = CommandId::new();
+        fs::write(f.work.join("result.txt"), "first followup").unwrap();
+        publish(&f.journal, &first, &f.args).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.target.join("result.txt")).unwrap(),
+            "first followup"
+        );
+        assert_eq!(
+            fs::read_to_string(f.target.join("other.txt")).unwrap(),
+            "second followup"
+        );
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn automatic_merge_never_executes_repository_merge_drivers() {
+        let f = fixture().await;
+        let (second, work) = parallel(&f);
+        let marker = f._dir.path().join("driver-ran");
+        // Concurrent add/add uses the custom driver if it is not overridden.
+        fs::write(f.work.join(".gitattributes"), "result.txt merge=hostile\n").unwrap();
+        fs::write(work.join(".gitattributes"), "result.txt merge=hostile\n").unwrap();
+        fs::write(work.join("result.txt"), "other").unwrap();
+        git(
+            &work,
+            &[
+                "config",
+                "merge.hostile.driver",
+                &format!("touch {}; true", marker.display()),
+            ],
+        )
+        .unwrap();
+        publish(&f.journal, &f.record, &f.args).unwrap();
+        assert!(publish(&f.journal, &second, &f.args).is_err());
+        assert!(!marker.exists());
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_file_nonoverlapping_changes_merge_but_delete_modify_conflicts() {
+        for deletion in [false, true] {
+            let mut f = fixture().await;
+            let original = "first\nsecond\nthird\nfourth\nfifth\nsixth\nlast\n";
+            fs::write(f.work.join("result.txt"), original).unwrap();
+            publish(&f.journal, &f.record, &f.args).unwrap();
+            let (second, work) = parallel(&f);
+            fs::write(
+                work.join("result.txt"),
+                original.replace("last", "last changed"),
+            )
+            .unwrap();
+            f.record.command.id = CommandId::new();
+            if deletion {
+                fs::remove_file(f.work.join("result.txt")).unwrap();
+            } else {
+                fs::write(
+                    f.work.join("result.txt"),
+                    original.replace("first", "first changed"),
+                )
+                .unwrap();
+            }
+            publish(&f.journal, &f.record, &f.args).unwrap();
+            if deletion {
+                let error = publish(&f.journal, &second, &f.args).unwrap_err();
+                assert!(error.downcast_ref::<PublicationConflict>().is_some());
+                assert!(error.to_string().contains("result.txt"));
+                assert!(!f.target.join("result.txt").exists());
+            } else {
+                publish(&f.journal, &second, &f.args).unwrap();
+                assert_eq!(
+                    fs::read_to_string(f.target.join("result.txt")).unwrap(),
+                    original
+                        .replace("first", "first changed")
+                        .replace("last", "last changed")
+                );
+            }
+        }
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_conflict_retains_snapshot_and_explicit_followup_can_resolve_it() {
+        let f = fixture().await;
+        let (mut second, work) = parallel(&f);
+        fs::write(work.join("result.txt"), "competing result").unwrap();
+        publish(&f.journal, &f.record, &f.args).unwrap();
+        let target = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        let error = publish(&f.journal, &second, &f.args)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Paralleler Ergebniskonflikt") && error.contains("result.txt"),
+            "{error}"
+        );
+        assert_eq!(git(&f.target, &["rev-parse", "HEAD"]).unwrap(), target);
+        assert_eq!(
+            fs::read_to_string(work.join("result.txt")).unwrap(),
+            "competing result"
+        );
+        // Restart cannot silently replace the original candidate with later edits.
+        fs::write(work.join("result.txt"), "later edits").unwrap();
+        let args = f.args.clone();
+        let journal_path = args.journal.as_ref().unwrap().clone();
+        drop(f.journal);
+        let journal = Journal::open(&journal_path, &args.server, args.id).unwrap();
+        assert!(publish(&journal, &second, &args)
+            .unwrap_err()
+            .to_string()
+            .contains("Paralleler Ergebniskonflikt"));
+        // Targeted follow-up combines both histories in its own execution branch.
+        git(&work, &["add", "--all"]).unwrap();
+        git(
+            &work,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "retain second result",
+            ],
+        )
+        .unwrap();
+        assert!(git(
+            &work,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "merge",
+                "--no-edit",
+                &target
+            ]
+        )
+        .is_err());
+        fs::write(work.join("result.txt"), "result plus competing result").unwrap();
+        git(&work, &["add", "--all"]).unwrap();
+        git(
+            &work,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "resolve both results",
+            ],
+        )
+        .unwrap();
+        second.command.id = CommandId::new();
+        publish(&journal, &second, &args).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.target.join("result.txt")).unwrap(),
+            "result plus competing result"
+        );
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn publishes_ignored_aware_snapshot_and_next_task_sees_result_without_mutating_execution_index(

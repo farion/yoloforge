@@ -401,6 +401,12 @@ async fn commands(
                     match tokio::task::block_in_place(||publication::publish(journal,&record,args)) {
                         Ok(Some(path))=>progress.summary.push_str(&format!("\n\nErgebnis automatisch im Projektordner bereitgestellt: {}",path.display())),
                         Ok(None)=>{},
+                        Err(e) if e.downcast_ref::<publication::PublicationConflict>().is_some()=> {
+                            progress.summary=format!("{PUBLICATION_CONFLICT_PREFIX}\n{e}\n\nAgentenergebnis:\n{}",progress.summary);
+                            let mut end=progress.summary.len().min(32768);
+                            while !progress.summary.is_char_boundary(end) {end-=1;}
+                            progress.summary.truncate(end);
+                        },
                         Err(e)=>progress.summary.push_str(&format!("\n\nErgebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert: {e}")),
                     }
                 }

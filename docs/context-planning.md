@@ -1,5 +1,9 @@
 # Tokenisierte Kontextauswahl
 
+Eine eigene Gesamtkontextplanung ist gestrichen. Dieses vorhandene Feature
+begrenzt ausschliesslich injiziertes Wissen; die Sessionhistorie und ihre
+Compaction verwaltet weiterhin OpenCode.
+
 Das versionierte Projektprofil kann einen Tokenizer fuer das explizit gewaehlte
 Projektmodell binden. Es gibt keine Modell-/Provider-Ausweichwahl und keine
 geratene Tokenizer-Zuordnung fuer unbekannte Modellnamen.

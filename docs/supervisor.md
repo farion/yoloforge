@@ -2,6 +2,15 @@
 
 ## Nacharbeit und Neuverteilung (0.1.3-dev)
 
+Parallele Publikationskonflikte erscheinen am Anfang der Runner-Zusammenfassung
+mit `[yoloforge:publication-conflict]`, damit sie im begrenzten Supervisor-Kontext
+sichtbar bleiben. Ein `close` wird dann serverseitig verworfen. Der Supervisor kann
+gezielte Nacharbeit per `continue` anfordern: aktuellen Zielcommit in den eigenen
+Ausführungsbranch mergen, beide beabsichtigten Ergebnisse erhalten, Konfliktlösung
+committen und Tests ausführen. Der Projektordner wird dabei nicht direkt bearbeitet.
+Nacharbeit bleibt eine Modellentscheidung innerhalb der bestehenden Budgets und
+Schutzregeln, keine Garantie einer automatischen semantisch richtigen Konfliktlösung.
+
 `continue` erzeugt fuer konkret unerfuellte Originalanforderungen nach Erfolg
 einen neuen Schreibauftrag in derselben Session. Die Entscheidung enthaelt dazu
 `followup`; finales Archiv, unveraendertes Profil, Ownership, Projektpause und

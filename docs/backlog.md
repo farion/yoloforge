@@ -1,5 +1,9 @@
 # Umsetzungsplan
 
+Historischer Entwicklungsplan. Der aktuelle Softwarestand und die verbleibenden
+Aufgaben stehen in `implementation-status.md`. Separate Abnahmen sind gestrichen;
+historische Testbefunde begründen keine neuen Abnahmeaufgaben.
+
 F-001/F-002 sind teilweise verifiziert, F-101/F-102/F-105 sind umgesetzt,
 F-104/F-106 sind teilweise umgesetzt; die übrigen Tickets
 sind offen. Reihenfolge folgt Abhängigkeiten; Aufwandsschätzungen
@@ -29,8 +33,6 @@ Neustarts und parallele Prompt-Wiederholungen sind im isolierten Docker-Labor ge
 - Form und Permission getrennt beantworten; Interrupt inklusive Tools prüfen.
 - Event-Reconnect und Wiederabfrage offener Eingaben testen.
 - Ergebnis: ausführbares Experiment und dokumentierte Einschränkungen.
-- Abnahme: Eine reale Aufgabe kann gestartet, beobachtet, unterbrochen und nach
-  einer Rückfrage fortgesetzt werden; unklare Interrupt-Semantik ist explizit erfasst.
 
 ### F-002: Server-Deployment und SSH-Pfad erproben
 
@@ -45,8 +47,6 @@ Remote-SSH und Factory-Prozesszuschnitt bleiben offen.
   ermöglicht anschließend die verbleibenden Login- und Lifecycle-Prüfungen aus F-001.
 - Docker-Deployment auf Ubuntu 24.04, persistente Daten und definierter Lifecycle.
 - API ausschließlich über Host-Loopback und SSH-Tunnel ansprechen.
-- Abnahme: SSH/TUI schließen beendet keinen Agentenlauf; Container-Neustart
-  erhält Daten und führt zu einem nachvollziehbaren Wiederanlaufzustand.
 
 ### F-003: Lokalen Runner und Checkpoint-Transport erproben
 
@@ -54,8 +54,6 @@ Remote-SSH und Factory-Prozesszuschnitt bleiben offen.
 - OpenCode lokal auf Ubuntu 26.04 im eigenen Worktree ausführen.
 - Rust-Beispiel lokal bauen, testen und starten.
 - Internes Bare-Repository und SSH-Git-Transport zum Container prüfen.
-- Abnahme: Derselbe Commit ist lokal und remote verfügbar und dort baubar;
-  Build-Artefakte werden nicht übertragen.
 
 ### F-004: Spike auswerten und Verträge festziehen
 
@@ -63,7 +61,6 @@ Remote-SSH und Factory-Prozesszuschnitt bleiben offen.
 - Containerzuschnitt, API-Version, Rust-Adapter und Git-Transport festlegen.
 - Verhalten bei Prompt-Zustellung mit unklarem Ausgang dokumentieren.
 - Session-Export/-Import optional separat prüfen; kein Blocker für Etappe 1.
-- Abnahme: Befunde, reproduzierbare Befehle und verbleibende Lücken sind dokumentiert.
 
 ## Etappe 1 – Persönliche Factory mit zwei Runnern
 
@@ -83,7 +80,6 @@ der Adapter führt im Grundgerüst nur lesende Statusabfragen aus.
 - Crates: `factory-core`, `factory-protocol`, `factory-opencode`, `factoryd`,
   `factory-runner`, `factory-tui`.
 - Typisierte IDs, Revisionen, Zustände, Fehler und API-Versionierung.
-- Abnahme: Alle Binärziele bauen; Protokollserialisierung ist überprüfbar.
 
 ### F-102: Persistenz und konkurrierende Client-Befehle
 
@@ -98,15 +94,12 @@ v1→v2, Registrierungsschutz und Wiederanlauf werden ebenfalls getestet.
 - Voraussetzung: F-101.
 - SQLite-Migrationen, Projekte, Tickets, Streams, Commands und Eventlog.
 - Transaktionale Mutationen, Request-Deduplizierung, Revisionskonflikte.
-- Abnahme: Wiederholter Request erzeugt nur eine Mutation; zwei Änderungen mit
-  gleicher Revision können nicht beide unbemerkt erfolgreich sein.
 
 ### F-103: Gerätezugang, Snapshots und Eventstream
 
 - Voraussetzung: F-102.
 - Geräte-Tokens, Snapshot mit Cursor, SSE-Replay und Ablauf alter Cursor.
 - SSH-Konfiguration und unabhängige Runner-Verbindung.
-- Abnahme: Zwei Clients konvergieren nach Verbindungsunterbrechung auf denselben Zustand.
 
 ### F-104: Runner-Journal und Wiederanlauf
 
@@ -123,8 +116,6 @@ implementiert. Offen: Bedienabläufe für dauerhaft unauflösbare `unknown`-Zust
 
 - Voraussetzungen: F-101, F-102.
 - Registrierung, Heartbeats, Long-Poll, Command-Journal und Event-Outbox.
-- Abnahme: Doppelte Zustellung startet keinen zweiten Lauf; unklarer externer
-  Ausgang wird als `unknown` abgeglichen und nicht blind wiederholt.
 
 ### F-105: Projekt- und Worktree-Verwaltung
 
@@ -141,8 +132,6 @@ Automatisches Clone/Fetch über verwaltete Hosting-Verbindungen bleibt eine Erwe
 - Voraussetzungen: F-102, F-104.
 - Repository registrieren, Branch/Worktree je Stream anlegen, Pfade zuordnen.
 - Projektbezogene Toolchain- und Start-/Testbefehle erfassen.
-- Abnahme: Zwei Streams ändern getrennte Worktrees; bestehende lokale Dateien
-  werden nicht überschrieben; Fehler bei Workspace-Anlage bleiben wiederherstellbar.
 
 ### F-106: OpenCode-Ausführung über beide Runner
 
@@ -166,8 +155,6 @@ verifizierte Pause/Resume laufender Prozesse und Fortsetzung nach Interrupt.
 - Voraussetzungen: F-104, F-105.
 - Adapter implementieren: Start, Prompt, Verlauf, Events, Pause, Rückfragen,
   Permissions und Wiederabgleich.
-- Abnahme: Je ein lokaler und serverseitiger Stream läuft gleichzeitig;
-  bestätigte Pause wird erst nach überprüfter Stilllegung gemeldet.
 
 ### F-107: Ratatui-MVP
 
@@ -206,17 +193,12 @@ nach einem Interrupt.
 - Stream starten, Aufgabe zuordnen, pausieren/fortsetzen, Fragen beantworten.
 - Lokalen Workspace-Pfad sowie Start-/Testbefehle anzeigen.
 - Verbindung, ausstehende Befehle und Versionskonflikte sichtbar machen.
-- Abnahme: Zwei TUIs bedienen dasselbe Projekt; eine doppelte Antwort wird
-  verständlich aufgelöst; TUI-Schließen beendet keine Runner-Arbeit.
 
-### F-108: Installation und Ende-zu-Ende-Abnahme
+### F-108: Installationspakete und Dokumentation
 
 - Voraussetzungen: F-107.
 - Docker-/Compose-Konfiguration, Volumes, lokale systemd-User-Unit und Anleitung.
 - Daten-/Konfigurationssicherung und Wiederherstellung dokumentieren.
-- Abnahme: Die folgenden Szenarien funktionieren auf Laptop und Server.
-
-## Verbindliche MVP-Abnahmeszenarien
 
 ### Ergänzende Umsetzungstickets
 
@@ -226,8 +208,6 @@ nach einem Interrupt.
 - OpenSSH-Konfiguration/Agent, Hostprüfung, Bootstrap und einmaliges Enrollment.
 - TUI-/Runner-Rollen trennen, Widerruf einschließlich aktiver API-Verbindungen.
 - SSH-Schlüsselfreischaltung bleibt beim Betreiber.
-- Abnahme: Gültiger SSH-Key allein reicht nicht für die API; abgelaufene oder
-  wiederverwendete Enrollment-Codes werden abgewiesen.
 
 #### F-110: Verbindungsverwaltung und Projektassistent
 
@@ -236,30 +216,12 @@ nach einem Interrupt.
 - Bestehende GitHub-/Forgejo-Repositories verbinden; Git- und API-Rechte unterscheiden.
 - Vorhandene Verbindungen wiederverwenden, fehlende Rechte gezielt nachfordern.
 - Secret-Eingaben aus Logs, Commands und Wissensarchiv ausschließen.
-- Abnahme: Zwei Projekte teilen eine Verbindung; nur fehlender Remote-Zugang
-  fordert Einrichtung an. Repository-Erstellung ist eine optionale Folgefunktion.
 
 #### F-111: GitHub-Release-Artefakte und Ansible-Vertrag
 
 - Voraussetzungen: F-108, F-109, F-110.
 - GHCR-Image, Linux-Binaries, Prüfsummen, Compose-Beispiel und Konfigurationsreferenz.
 - Versionen/Architekturen pinnen, Health-/Readiness-Verhalten und Migrationen dokumentieren.
-- Installation/Update mit persistentem Zustand erproben; Restore-Weg prüfen.
-- Abnahme: Betreiber kann eine konkrete Release-Version mit seinem Ansible
-  installieren; Credentials bleiben bei Neustart erhalten.
-
-### Szenarien
-
-1. Zwei Projekte, je mehrere Streams; ein lokaler und ein Remote-Agent arbeiten parallel.
-2. Zwei TUIs zeigen dasselbe Projekt und synchronisieren Änderungen ohne Neustart.
-3. Lokaler Rust-Stream lässt sich auf dem Laptop bauen und ausführen.
-4. Alle TUIs schließen; Runner arbeiten weiter; erneut geöffnete TUI zeigt den Zustand.
-5. Netzwerk unterbrechen: kein Ersatzschreiber, sichtbarer Verbindungszustand,
-   nach Wiederverbindung korrekter Session- und Fragenabgleich.
-6. Runner während eines Befehls neu starten: kein blind duplizierter Prompt.
-7. Zwei Clients beantworten dieselbe Frage: genau ein gültiger Abschluss.
-8. Factory-Dienst neu starten: Tickets, Zuordnungen und Ereignisse bleiben erhalten.
-9. Agent beenden lassen: Stream geht ins Review; Integration wird nicht behauptet.
 
 ## Folgeetappen
 
@@ -273,10 +235,6 @@ nach einem Interrupt.
 - Budgetierte Kontextauswahl aus Projektkern und relevanten Erkenntnissen;
   gezieltes Nachladen von Details und Originalquellen.
 - Korrigieren, Anheften und Löschen ermöglichen; Secrets von der Extraktion ausschließen.
-- Abnahme: Eine neue Session nutzt eine relevante frühere Entscheidung mit
-  Quellenbezug, ohne den gesamten Verlauf zu laden. Wachsende Wissensbestände
-  überschreiten das konfigurierte Kontextbudget nicht. Ersetzte oder nur auf
-  einem anderen Branch gültige Aussagen werden nicht als verbindlich injiziert.
 
 ### Etappe 2 – Übergabe und Integration
 
@@ -315,14 +273,9 @@ laufender Sessions bleiben offen.
   Neuaufteilung. Beenden erhält Archiv/Provenienz; es löscht keine Sessiondaten.
   Ein Interrupt allein bestätigt keine Prozessruhe und gibt keinen Stream frei.
   Kontext-/Checkpoint-Übergabe an eine neue Session bleibt nachvollziehbar.
-- Abnahme: Operator fordert selbst eine Compaction an und beendet selbst einen
-  obsoleten Lauf; Neustart oder verlorene Antwort erzeugt weder doppelte Compaction
-  noch einen zweiten Schreiber. Archiv, Entscheidungen und offene Arbeit bleiben
-  nach beiden Aktionen erhalten.
 
 ### Etappe 4 – Android
 
 - Geräteanmeldung, SSH-Verbindung und mobile API-Bedienung.
 - Projektstatus, Tickets, Rückfragen und Pause/Fortsetzung.
 - Push-Transport wählen, Benachrichtigungen deduplizieren, Deep Links zur Inbox.
-- Abnahme auf realem Gerät inklusive Hintergrund-/Energiesparverhalten.

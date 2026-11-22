@@ -39,6 +39,60 @@ fn git_with_timeout(
     env: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<String> {
+    let (_, output) = git_status(repository, args, env, timeout, false)?;
+    Ok(output)
+}
+
+/// An ordinary merge-tree conflict exits 1 and carries useful file diagnostics.
+pub(crate) fn merge_tree(
+    repository: &Path,
+    base: &str,
+    target: &str,
+    source: &str,
+) -> Result<(bool, String)> {
+    // A repository's custom merge drivers are arbitrary programs. Automatic
+    // publication must never execute them; report those merges as conflicts.
+    let config = git(repository, &["config", "--list", "--name-only"])?;
+    let mut args = vec![
+        "-c".to_string(),
+        "merge.renames=false".to_string(),
+        "-c".to_string(),
+        "merge.renormalize=false".to_string(),
+    ];
+    for key in config
+        .lines()
+        .filter(|k| k.starts_with("merge.") && k.ends_with(".driver"))
+    {
+        args.extend(["-c".into(), format!("{key}=false")]);
+    }
+    args.extend(
+        [
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--merge-base",
+            base,
+            target,
+            source,
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    git_status(
+        repository,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+        &[],
+        Duration::from_secs(30),
+        true,
+    )
+}
+fn git_status(
+    repository: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    timeout: Duration,
+    allow_conflict: bool,
+) -> Result<(bool, String)> {
     let out = tempfile::tempfile()?;
     let mut command = Command::new("git");
     for (key, _) in std::env::vars_os() {
@@ -58,13 +112,13 @@ fn git_with_timeout(
         .stderr(Stdio::null())
         .spawn()?;
     let deadline = Instant::now() + timeout;
-    loop {
+    let success = loop {
         if let Some(status) = child.try_wait()? {
             ensure!(
-                status.success(),
+                status.success() || (allow_conflict && status.code() == Some(1)),
                 "Git operation failed; inspect repository/worktree before retrying"
             );
-            break;
+            break status.success();
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -72,7 +126,7 @@ fn git_with_timeout(
             bail!("Git operation timed out; inspect repository/worktree before retrying");
         }
         std::thread::sleep(Duration::from_millis(10));
-    }
+    };
     use std::io::{Read, Seek, SeekFrom};
     let mut out = out;
     out.seek(SeekFrom::Start(0))?;
@@ -82,7 +136,7 @@ fn git_with_timeout(
         text.len() <= 1_048_576,
         "Git output exceeds inspection limit"
     );
-    Ok(text.trim().to_string())
+    Ok((success, text.trim().to_string()))
 }
 
 fn common_dir(repository: &Path) -> Result<PathBuf> {
