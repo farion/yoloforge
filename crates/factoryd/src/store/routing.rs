@@ -70,19 +70,62 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
         return Ok(Route::New);
     }
     let available = candidates(tx, t.project_id)?;
+    let project_data: String = tx.query_row(
+        "SELECT data FROM projects WHERE id=?1",
+        [t.project_id.to_string()],
+        |r| r.get(0),
+    )?;
+    let project: Project = serde_json::from_str(&project_data)?;
     let mut catalog = Vec::new();
     let mut offered = Vec::new();
     for c in available.iter().take(16) {
+        if c.agent_spec
+            .as_ref()
+            .is_none_or(|a| a.profile != project.profile)
+        {
+            continue;
+        }
         let owner = super::work::stream(tx, c.stream_id)?;
         if super::sessions::closed(tx, c.session_root())? {
             continue;
         }
+        let knowledge = Store::select_knowledge(
+            tx,
+            t.project_id,
+            &owner.ticket_ids,
+            Some(&owner.branch),
+            4096,
+        )?;
+        let knowledge = knowledge
+            .notes
+            .iter()
+            .take(2)
+            .map(|n| serde_json::json!({"note_id":n.id,"content_prefix":clip(&n.content,350)}))
+            .collect::<Vec<_>>();
+        let summary = c
+            .agent_progress
+            .as_ref()
+            .map(|a| a.summary.as_str())
+            .or(match &c.result {
+                Some(CommandOutput::Agent { agent }) => Some(agent.summary.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        catalog.push(serde_json::json!({"session_id":c.session_root(),"state":c.state,"goal":clip(&owner.goal,180),"summary":clip(summary,300),"scoped_knowledge":knowledge}));
+        if serde_json::to_vec(&catalog)?.len() > 6000 {
+            catalog.pop();
+            break;
+        }
         offered.push(c.session_root());
-        catalog.push(serde_json::json!({"session_id":c.session_root(),"state":c.state,"goal":clip(&owner.goal,180),"summary":clip(c.agent_progress.as_ref().map(|a|a.summary.as_str()).unwrap_or(""),300)}));
     }
     let input = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&(&t.prompt, &t.description, &t.images))?)
+        Sha256::digest(serde_json::to_vec(&(
+            &t.prompt,
+            &t.description,
+            &t.images,
+            &project.profile
+        ))?)
     );
     let context = serde_json::to_string(&(&catalog, p.max_parallel))?;
     let now = super::super::unix_ms();

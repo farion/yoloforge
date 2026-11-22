@@ -161,8 +161,6 @@ impl Store {
                         service_registration: String::new(),
                     },
                 );
-                p.profile.provider_id.clear();
-                p.profile.model_id.clear();
                 p.revision.0 += 1;
                 tx.execute(
                     "UPDATE projects SET data=?1 WHERE id=?2",
@@ -585,6 +583,17 @@ impl Store {
                 )?;
                 save_policy(&tx, &p)?;
             }
+            tx.execute_batch("SAVEPOINT memory_extraction")?;
+            match super::memory::tick(&tx, &p) {
+                Ok(()) => {}
+                Err(
+                    StoreError::WorkConflict
+                    | StoreError::Invalid(_)
+                    | StoreError::RevisionConflict(_),
+                ) => tx.execute_batch("ROLLBACK TO memory_extraction")?,
+                Err(error) => return Err(error),
+            }
+            tx.execute_batch("RELEASE memory_extraction")?;
         }
         tx.commit()?;
         Ok(())

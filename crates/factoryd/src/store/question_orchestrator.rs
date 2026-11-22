@@ -47,7 +47,22 @@ pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     drop(stmt);
     for (raw, previous) in rows {
-        let q: Question = serde_json::from_str(&raw)?;
+        let mut q: Question = serde_json::from_str(&raw)?;
+        if q.state == QuestionState::Pending && q.external.kind == QuestionKind::Form {
+            let target = command(tx, q.command_id)?;
+            if target
+                .agent_spec
+                .as_ref()
+                .is_some_and(|a| requests_interview(&a.prompt))
+            {
+                let note = "human: explicit user interview requested; automatic answers disabled";
+                if q.orchestration_note != note {
+                    q.orchestration_note = note.into();
+                    super::questions::save(tx, &mut q)?;
+                }
+                continue;
+            }
+        }
         if let Some(raw) = previous {
             let mut e: Evaluation = serde_json::from_str(&raw)?;
             if e.outcome != "pending" {
@@ -169,6 +184,16 @@ pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
 fn valid_reason(reason: &str) -> bool {
     !reason.trim().is_empty() && reason.len() <= 512 && !reason.chars().any(|c| c.is_control())
 }
+fn requests_interview(prompt: &str) -> bool {
+    let prompt = prompt
+        .split("\n\nProject execution profile:")
+        .next()
+        .unwrap_or(prompt)
+        .to_lowercase();
+    ["grill me", "interview me", "interview mich", "befrage mich"]
+        .iter()
+        .any(|phrase| prompt.contains(phrase))
+}
 fn clip(s: &str, max: usize) -> String {
     let mut end = max.min(s.len());
     while !s.is_char_boundary(end) {
@@ -177,7 +202,7 @@ fn clip(s: &str, max: usize) -> String {
     s[..end].into()
 }
 
-fn controller(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<Option<Workstream>> {
+pub(super) fn controller(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<Option<Workstream>> {
     let id: Option<String> = tx
         .query_row(
             "SELECT stream_id FROM orchestrators WHERE project_id=?1",

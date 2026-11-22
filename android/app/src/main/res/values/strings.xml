@@ -1,0 +1,4 @@
+<resources>
+    <string name="page_title">YoloForge · %1$s</string>
+    <string name="attached_images">%1$d Bilder angehaengt</string>
+</resources>

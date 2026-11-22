@@ -462,6 +462,9 @@ async fn commands(
         }
         report(client, journal, registration, record, args).await?;
     }
+    if !had_command {
+        archive::backfill(client, journal, args, registration).await?;
+    }
     Ok(had_command)
 }
 async fn opencode_status(path: &Option<PathBuf>) -> OpenCodeStatus {

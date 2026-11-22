@@ -248,6 +248,25 @@ async fn advance(
         .agent_spec
         .as_ref()
         .context("Agent specification missing")?;
+    if spec.profile.provider_id.trim().is_empty() || spec.profile.model_id.trim().is_empty() {
+        return Ok(progress(&command, AgentPhase::Unknown, "Explicit project provider and model required; default model fallback is forbidden. No session or prompt sent."));
+    }
+    let configured = (
+        spec.profile.provider_id.clone(),
+        spec.profile.model_id.clone(),
+    );
+    if record
+        .agent
+        .as_ref()
+        .and_then(|a| a.model.as_ref())
+        .is_some_and(|model| model != &configured)
+    {
+        return Ok(progress(
+            &command,
+            AgentPhase::Unknown,
+            "Journal model differs from explicit project model; no session or prompt sent.",
+        ));
+    }
     if record
         .agent
         .as_ref()
@@ -255,25 +274,7 @@ async fn advance(
         .model
         .is_none()
     {
-        let selected = if !spec.profile.provider_id.is_empty() && !spec.profile.model_id.is_empty()
-        {
-            (
-                spec.profile.provider_id.clone(),
-                spec.profile.model_id.clone(),
-            )
-        } else if let Some(previous) = &spec.continuation {
-            journal
-                .record(previous.previous_command_id)?
-                .and_then(|r| r.agent)
-                .and_then(|a| a.model)
-                .context("Continuation model evidence missing")?
-        } else {
-            match client.default_model(&record.agent.as_ref().unwrap().workspace.path).await {
-                Ok(model)=>model,
-                Err(_)=>return Ok(progress(&command,AgentPhase::Unknown,"OpenCode default model unavailable. Provider sign-in or service connection needs attention; no session or prompt sent.")),
-            }
-        };
-        record.agent.as_mut().unwrap().model = Some(selected);
+        record.agent.as_mut().unwrap().model = Some(configured);
         tokio::task::block_in_place(|| journal.save(record))?;
     }
     let execution = record
@@ -611,7 +612,7 @@ mod tests {
         reconcile(false).await;
     }
     #[tokio::test(flavor = "multi_thread")]
-    async fn native_default_model_is_pinned_across_changes_and_restart() {
+    async fn missing_explicit_model_never_uses_default_even_after_restart() {
         reconcile(true).await;
     }
     async fn reconcile(automatic_model: bool) {
@@ -726,6 +727,16 @@ mod tests {
         );
         mode.store(2, Ordering::SeqCst);
         let result = step(&journal, &mut record, &args).await.unwrap();
+        if automatic_model {
+            assert_eq!(result.phase, AgentPhase::Unknown);
+            assert!(result
+                .summary
+                .contains("Explicit project provider and model required"));
+            assert!(record.agent.as_ref().unwrap().model.is_none());
+            assert_eq!(posts.load(Ordering::SeqCst), 0);
+            server.abort();
+            return;
+        }
         assert_eq!(result.phase, AgentPhase::Succeeded);
         assert_eq!(result.summary, "Finished and tested");
         assert_eq!(posts.load(Ordering::SeqCst), 0);

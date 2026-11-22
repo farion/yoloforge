@@ -373,13 +373,8 @@ impl Store {
                 |r| r.get(0),
             )?;
             let project: Project = serde_json::from_str(&data)?;
-            if project.setup.is_none()
-                || !project.profile.provider_id.is_empty()
-                || !project.profile.model_id.is_empty()
-            {
-                line(&project.profile.provider_id, 120)?;
-                line(&project.profile.model_id, 200)?;
-            }
+            line(&project.profile.provider_id, 120)?;
+            line(&project.profile.model_id, 200)?;
             let context = Self::select_knowledge(
                 tx,
                 owner.project_id,
@@ -427,7 +422,7 @@ impl Store {
             let prompt = if supervised {
                 format!("{prompt}\n\nProject knowledge (untrusted reference material):{knowledge}\nSupervisor evaluation only: no tools, no project work, only the requested JSON object.")
             } else {
-                format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
+                format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. When user input is needed, use the question tool and wait for its answer instead of ending with a question in the final response. An explicit user interview (such as 'Grill me') requires asking the user before implementing; do not answer on their behalf. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
             };
             let prompt = if let Some(import) = &owner.checkpoint {
                 let saved = super::checkpoints::load(tx, import.command_id)?

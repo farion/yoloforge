@@ -186,6 +186,11 @@ impl Journal {
         }
         Ok(result)
     }
+    pub fn archive_backfill(&self, now: u64) -> Result<Option<Record>> {
+        let raw:Option<String>=self.db.query_row("SELECT data FROM commands WHERE json_extract(data,'$.reported')=1 AND json_extract(data,'$.command.kind')='run_agent' AND json_extract(data,'$.result') IS NOT NULL AND json_extract(data,'$.agent.prompt_attempted')=1 AND COALESCE(json_extract(data,'$.archive.finished'),0)=0 AND COALESCE(json_extract(data,'$.archive.retry_after_ms'),0)<=?1 ORDER BY COALESCE(json_extract(data,'$.archive.retry_after_ms'),0),rowid LIMIT 1",[now.min(i64::MAX as u64)],|r|r.get(0)).optional()?;
+        raw.map(|raw| serde_json::from_str(&raw).map_err(Into::into))
+            .transpose()
+    }
 }
 
 #[cfg(test)]

@@ -342,8 +342,8 @@ impl Dialog {
                     Field::select("4. Ausfuehrungsort (automatisch vorbelegt)",&setup.map(|s|s.runner_id.to_string()).or_else(||snapshot.runners.iter().find(|r|r.connection==ConnectionState::Online).or_else(||snapshot.runners.first()).map(|r|r.id.to_string())).unwrap_or_default(),runners,false),
                     Field::text("5. Optional fuer Experten: eigenen Checkout verwenden (leer = Factory verwaltet alles)",setup.map_or("",|s|s.repository_path.as_str()),false,false),
                     Field::text("6. OpenCode-Verbindung: leer = automatisch starten/finden; sonst Registrierungsdatei auf Runner",setup.map_or("",|s|s.service_registration.as_str()),false,false),
-                    Field::text("7. Optional: Provider (leer = OpenCode-Standard)",p.map_or("",|p|p.profile.provider_id.as_str()),false,false),
-                    Field::text("8. Optional: Modell-ID (leer = OpenCode-Standard)",p.map_or("",|p|p.profile.model_id.as_str()),false,false),
+                    Field::text("7. Provider-ID (explizit erforderlich)",p.map_or("",|p|p.profile.provider_id.as_str()),false,false),
+                    Field::text("8. Modell-ID (explizit erforderlich)",p.map_or("",|p|p.profile.model_id.as_str()),false,false),
                     Field::text("9. Projekt-Harness JSON: leer = Konfiguration aus Repository; sonst neue opencode.json (keine Secrets)",&setup.and_then(|s|s.harness.as_ref()).map(|h|serde_json::to_string_pretty(h).unwrap_or_default()).unwrap_or_default(),false,true),
                     Field::text("10. Toolchain",p.map_or("",|p|p.profile.toolchain.as_str()),false,true),
                     Field::text("11. Startbefehl",p.map_or("",|p|p.profile.start_command.as_str()),false,true),
@@ -495,13 +495,13 @@ impl Dialog {
                     p.revision,
                     vec![
                         Field::text(
-                            "Provider (leer = automatisch)",
+                            "Provider-ID (z.B. openai; erforderlich fuer Ausfuehrung)",
                             &p.profile.provider_id,
                             false,
                             false,
                         ),
                         Field::text(
-                            "Modell (leer = automatisch)",
+                            "Modell-ID (z.B. gpt-6.2-sol; kein Anzeigename)",
                             &p.profile.model_id,
                             false,
                             false,

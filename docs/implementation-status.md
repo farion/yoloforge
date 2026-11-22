@@ -81,7 +81,7 @@ Tickets brauchen nach einem finalen Ergebnis kein manuelles Done.
 | --- | --- | --- |
 | 1 | Bestätigte Pause und Session-Fortsetzung | Fortsetzung nach Erfolg sowie dediziertes Container-Freeze/Thaw mit echtem Modell lokal geprüft: abgekoppelte Tools, Factory-/Runner-Neustart, gleiche Ausführung, genau ein Toolaufruf und finales Archiv. Zielhost-Abnahme, automatische Provisionierung und Fortsetzung nach nativem Interrupt offen |
 | 2 | Recovery ungeklärter Aufträge | Expliziter API/CLI/TUI-Neuversuch unklarer Container-Freeze/Thaw-Steuerungen mit Instanzbindung, Revisionsschutz und Retry-Provenienz implementiert; TUI mit gebundenem Nachweis, unveränderlichem Replay und Offline-Entwurf lokal per PTY geprüft. Recovery ohne Nachweis, bei Container-/Journalverlust und für native Interrupts/Prompts offen |
-| 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen, CLI-Export und TUI-Archivbrowser mit eingefrorenem Revisionsstand implementiert; Binäranhänge und historischer Backfill offen |
+| 3 | Vollständiges Sessionarchiv | Ungekürzte paginierte Message-Projektionen, CLI-Export und TUI-Archivbrowser mit eingefrorenem Revisionsstand implementiert; historischer Backfill aus erhaltenen Runner-Journalen mit Retry/Neustarttest implementiert. Binäranhänge und Rekonstruktion verlorener Quellen offen (`automatic-memory.md`) |
 | 4 | SSE und Runner-Long-Poll | Implementiert und lokal getestet; TUI nutzt SSE, Runner Long-Poll |
 | 5 | Deployment, Backup/Restore, Updates | Container, Vorlagen und Backup/Restore lokal getestet; Zielinstallation durch Betreiber |
 | 6 | Echte Laptop-/Server-Abnahme | Erstinstallation v0.1.1 auf rs9tm lesend geprüft: Binary-Hash, Health/Auth, Portbindung und Persistenz passen. Runner-/Agentenbetrieb, Update und Rollback noch offen |
@@ -90,13 +90,21 @@ Tickets brauchen nach einem finalen Ergebnis kein manuelles Done.
 | 9 | Clone/Fetch und Repository-Einrichtung | CLI clone/register/fetch sowie TUI-Projektanlage ohne technische Eingaben: verwaltetes leeres Repository oder optionaler Clone, automatische Runner-/Service-Auswahl und native Standardmodellbindung. Strukturierter MCP-Editor und gemeinsame Projekt-Harness mit Runner-Zuordnungen implementiert. TUI-/Runner-Test mit synthetischem OpenCode-Health, lokale Imports und Neustarttests bestanden. Fetch im Assistenten, erweiterte Editoren und Login-Führung offen (`project-setup.md`) |
 | 10 | Checkpoints und Laptop-/Server-Übergabe | API/CLI/TUI/Runner: journalisierte Git-Checkpoints, Kontextpaket, Bundle-Transport über Factory, revisionsgeschützter Ownership-Wechsel und neue Epochen-Worktrees implementiert. Zwei unabhängige lokale Runner mit Neustart und Rückübergabe geprüft; Checkpoint nach Realmodell-Erfolg und Runtime-Cleanup geprüft. Getrennte Zielhosts und Realmodell-Übergabe offen. Siehe `checkpoints.md` |
 | 11 | Review und Integration | API/CLI/TUI/Runner: Merge-Kandidat gegen gepinnten Zielbranch, Docker-isolierte Tests, bestätigte Test-Runtime-Entfernung und lokale Git-CAS-Integration implementiert. Neustart ohne zweiten Testlauf, Testfehler und konkurrierende Zielbranchänderung lokal per Prozess-/Docker-Test geprüft. Hosting-Push/PR und Zielhost-Abnahme offen; siehe `review-integration.md` |
-| 12 | Projektgedächtnis und Kontextauswahl | Branch-/Ticketscope, budgetierte Prompt-Übernahme und atomare revisionsgeschützte Ablösung mit Provenienz implementiert; Supervisor-Beobachtungen bleiben branchlokal. Automatische semantische Widerspruchsauflösung und modellspezifischer Tokenizer offen |
+| 12 | Projektgedächtnis und Kontextauswahl | Branch-/Ticketscope, budgetierte Prompt-Übernahme und atomare revisionsgeschützte Ablösung mit Provenienz implementiert; automatische einmalige branchlokale Erkenntnisextraktion aus finalisierten Erfolgen mit echtem Modell geprüft (Schema 27). Routing nutzt Wissensausschnitte. Automatische semantische Widerspruchsauflösung und modellspezifischer Tokenizer offen (`automatic-memory.md`) |
 | 13 | Supervisor | Modellbasierter Session-Supervisor mit Entscheidungsjournal, Bewertungsbudget, Compaction, Sessionabschluss und gebundener Runtime-Beendigung implementiert. Mit dem Orchestrator automatisch aktiviert (12 Auswertungen, 5 Minuten Abstand, Vorrang fuer Aufgaben/Fragen). Prompt-Routing und einmalige automatische Rueckfragenauswertung mit Projektwissen implementiert; Konkurrenz-/Neustarttests bestanden. Echte autonome Lifecycle-/Zielhost-Abnahme offen |
-| 14 | Android und Push | Offen; reales Gerät/Push-Zugang für Abnahme nötig |
+| 14 | Android und Push | Native Entwicklungs-App mit Enrollment, Prompts/Bildern, Sessionwahl, einfachen Antworten und direktem SSE-Notification-Service implementiert. APK-Build/Lint und drei Emulator-Vertragstests bestanden. Mobile UI-End-to-End, dauerhaftes Hintergrund-Push, Release-Signierung und reales Gerät offen (`android.md`) |
 | 15 | GitHub-Releases und Ansible-Vertrag | v0.1.1 veröffentlicht; Server-/Linux-TUI-Downloads lokal geprüft, Windows nativ in CI geprüft; Android-APK erst mit implementierter App |
 
 Siehe `backlog.md` für Akzeptanzkriterien und `development.md` für bereits
 implementierte Bedienabläufe. Zugangsdaten nicht in dieses Dokument eintragen.
+
+Modellbindung korrigiert: Automatische Legacy-Projekteinrichtung bewahrt das
+explizite Projektprofil. Ohne Provider-/Modell-ID werden keine Agentaufträge
+gestartet; der Runner verwendet keinen OpenCode-Standard als Ersatz und blockiert
+abweichende Journalmodelle. Routing bietet nur profilkompatible Sessions an und
+verwirft alte Bewertungen bei Profilwechsel. Explizite Interviews wie „Grill me“
+lassen Formularfragen beim Nutzer; Agentanweisungen verlangen das Fragewerkzeug.
+Regressionstests für Profilbewahrung, fehlendes Modell und Interviewfragen bestehen.
 
 Ergänzung zu 2/13: Bestätigte Entfernung einer gebundenen dedizierten Runtime
 über API/CLI und Runner implementiert; reale Docker-Abnahme mit abgekoppelten

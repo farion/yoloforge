@@ -46,3 +46,16 @@ externer Antworten ohne zweiten POST. Echte Modellabnahme mit Folgeprompt in
 derselben Session, Frage nach einer vorgegebenen Farbe, automatischer Antwort
 und veroeffentlichtem Folgeergebnis bestanden. OAuth- und autonome
 Compaction-/Termination-Abnahme sind davon nicht abgedeckt.
+# Explizite Interviews
+
+Bei „Grill me“, „interview me“, „interview mich“ oder „befrage mich“ im
+Aufgabenprompt bleiben Formularfragen beim Nutzer. Das gilt auch bei einer schon
+laufenden automatischen Auswertung; deren Antwort wird nicht angewendet.
+Die Agentanweisung verlangt bei erforderlicher Nutzereingabe das native
+OpenCode-`question`-Werkzeug statt einer Frage nur im finalen Chattext.
+TUI: `6` (Fragen), Frage auswählen, Enter; Antwortzustellung nutzt weiterhin den
+revisionsgeschützten, journalisierten Weg zum OpenCode-Formular.
+
+Realmodell-Abnahme mit `openai/gpt-6.2-sol`: Die Mausbedienungs-Session stellte
+„Nur Spielfeld“/„Spielfeld und Menüs“ als Toolformular. Die Factory empfing es
+und beließ es mit Interviewhinweis unbeantwortet für den Nutzer.

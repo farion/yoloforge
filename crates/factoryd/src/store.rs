@@ -58,7 +58,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 26,
+            version <= 27,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -144,6 +144,9 @@ impl Store {
         }
         if version < 26 {
             tx.execute_batch("CREATE TABLE IF NOT EXISTS question_evaluations(question_id TEXT PRIMARY KEY REFERENCES questions(id), data TEXT NOT NULL CHECK(json_valid(data))); PRAGMA user_version=26;")?;
+        }
+        if version < 27 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS memory_evaluations(source_command_id TEXT PRIMARY KEY REFERENCES commands(id),data TEXT NOT NULL CHECK(json_valid(data))); PRAGMA user_version=27;")?;
         }
         tx.commit()?;
         Ok(Self(Arc::new(Mutex::new(db))))
@@ -465,6 +468,7 @@ mod controls;
 mod devices;
 mod excerpts;
 mod knowledge;
+mod memory;
 mod question_orchestrator;
 mod questions;
 mod reviews;

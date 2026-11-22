@@ -2,6 +2,206 @@ use factory_core::*;
 use factory_protocol::*;
 use factoryd::store::Store;
 
+fn configure_models(s: &Store) {
+    for p in s.snapshot().unwrap().projects {
+        if p.profile.provider_id.is_empty() {
+            s.update_profile(
+                p.id,
+                UpdateProfile {
+                    request_id: RequestId::new(),
+                    expected_revision: p.revision,
+                    profile: ExecutionProfile {
+                        provider_id: "openai".into(),
+                        model_id: "test-configured".into(),
+                        ..p.profile
+                    },
+                },
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn automatic_setup_preserves_user_model_and_missing_model_blocks_agents() {
+    for configured in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let s = Store::open(&path).unwrap();
+        let p = s
+            .create_project(CreateProject {
+                request_id: RequestId::new(),
+                name: "Pinned".into(),
+                repository: "factory:managed".into(),
+                base_branch: "main".into(),
+            })
+            .unwrap();
+        if configured {
+            configure_models(&s);
+        }
+        let before = s.snapshot().unwrap().projects[0].profile.clone();
+        s.create_ticket(CreateTicket {
+            request_id: RequestId::new(),
+            project_id: p.id,
+            title: "Work".into(),
+            description: "Work".into(),
+            acceptance_criteria: String::new(),
+            priority: 1,
+        })
+        .unwrap();
+        let runner = RunnerId::new();
+        s.autostart_runner(runner).unwrap();
+        assert_eq!(s.snapshot().unwrap().projects[0].profile, before);
+        s.scheduler_tick().unwrap();
+        for command in s.pending(runner).unwrap() {
+            prepare(&s, &command);
+        }
+        s.scheduler_tick().unwrap();
+        let snapshot = s.snapshot().unwrap();
+        let agents: Vec<_> = snapshot
+            .commands
+            .iter()
+            .filter(|c| c.kind == CommandKind::RunAgent)
+            .collect();
+        if configured {
+            assert_eq!(agents.len(), 1);
+            assert_eq!(agents[0].agent_spec.as_ref().unwrap().profile, before);
+        } else {
+            assert!(agents.is_empty());
+        }
+        drop(s);
+        assert_eq!(
+            Store::open(&path).unwrap().snapshot().unwrap().projects[0].profile,
+            before
+        );
+    }
+}
+
+#[test]
+fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
+    for output in [
+        r#"{"memory":"The task reported a calculator implementation; test success is an agent claim."}"#,
+        r#"{"memory":""}"#,
+        "invalid",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let s = Store::open(&path).unwrap();
+        let p = s
+            .create_project(CreateProject {
+                request_id: RequestId::new(),
+                name: "Memory".into(),
+                repository: "factory:managed".into(),
+                base_branch: "main".into(),
+            })
+            .unwrap();
+        s.create_ticket(CreateTicket {
+            request_id: RequestId::new(),
+            project_id: p.id,
+            title: "Calculator".into(),
+            description: "Build calculator".into(),
+            acceptance_criteria: String::new(),
+            priority: 1,
+        })
+        .unwrap();
+        let runner = RunnerId::new();
+        configure_models(&s);
+        s.autostart_runner(runner).unwrap();
+        s.scheduler_tick().unwrap();
+        prepare(&s, &s.pending(runner).unwrap()[0]);
+        s.scheduler_tick().unwrap();
+        let work = s.pending(runner).unwrap()[0].clone();
+        complete(
+            &s,
+            &work,
+            CommandOutput::Agent {
+                agent: AgentProgress {
+                    session_id: work.session_id(),
+                    message_id: agent_message_id(work.id),
+                    phase: AgentPhase::Succeeded,
+                    summary: "Implemented calculator; tests pass".into(),
+                },
+            },
+        );
+        s.scheduler_tick().unwrap();
+        assert!(
+            s.pending(runner).unwrap().is_empty(),
+            "Memory must wait for final archive"
+        );
+        s.report_archive(
+            runner,
+            work.id,
+            ReportArchive {
+                ownership_epoch: 1,
+                batch: ArchiveBatch {
+                    session_id: work.session_id(),
+                    revision: 1,
+                    captured_unix_ms: 1,
+                    final_scan_complete: true,
+                    messages: vec![],
+                },
+            },
+        )
+        .unwrap();
+        s.scheduler_tick().unwrap();
+        prepare(&s, &s.pending(runner).unwrap()[0]);
+        s.scheduler_tick().unwrap();
+        let eval = s.pending(runner).unwrap()[0].clone();
+        assert_eq!(
+            eval.agent_spec.as_ref().unwrap().role,
+            "orchestrator-memory"
+        );
+        assert!(eval.agent_spec.as_ref().unwrap().read_only);
+        complete(
+            &s,
+            &eval,
+            CommandOutput::Agent {
+                agent: AgentProgress {
+                    session_id: eval.session_id(),
+                    message_id: agent_message_id(eval.id),
+                    phase: AgentPhase::Succeeded,
+                    summary: output.into(),
+                },
+            },
+        );
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        for _ in 0..3 {
+            s.scheduler_tick().unwrap();
+        }
+        let notes = s.knowledge(p.id).unwrap();
+        if output.contains("calculator implementation") {
+            assert_eq!(notes.len(), 1);
+            let note = &notes[0];
+            assert_eq!(note.source_command, Some(work.id));
+            assert!(note.source.contains(&eval.id.to_string()));
+            let branch = s
+                .snapshot()
+                .unwrap()
+                .streams
+                .iter()
+                .find(|stream| stream.id == work.stream_id)
+                .unwrap()
+                .branch
+                .clone();
+            assert_eq!(note.branch.as_deref(), Some(branch.as_str()));
+            assert!(s
+                .knowledge_context_for_branch(p.id, None, Some(&branch), 4096)
+                .unwrap()
+                .text
+                .contains("calculator implementation"));
+            assert!(!s
+                .knowledge_context_for_branch(p.id, None, Some("main"), 4096)
+                .unwrap()
+                .text
+                .contains("calculator implementation"));
+        } else {
+            assert!(notes.is_empty());
+        }
+        assert_eq!(s.snapshot().unwrap().commands.len(), 4);
+    }
+}
+
 #[test]
 fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
     for (human, reply, expected) in [
@@ -25,6 +225,7 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
             r#"{"action":"answer","answer":{"color":"invalid"},"reason":"Unsupported choice"}"#,
             None,
         ),
+        (false, "interview", None),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
@@ -41,12 +242,18 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
             request_id: RequestId::new(),
             project_id: p.id,
             title: "Build blue UI".into(),
-            description: "Use blue".into(),
+            description: if reply == "interview" {
+                "Use blue. Grill me"
+            } else {
+                "Use blue"
+            }
+            .into(),
             acceptance_criteria: String::new(),
             priority: 1,
         })
         .unwrap();
         let runner = RunnerId::new();
+        configure_models(&s);
         s.autostart_runner(runner).unwrap();
         s.scheduler_tick().unwrap();
         prepare(&s, &s.pending(runner).unwrap()[0]);
@@ -63,6 +270,24 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
         .unwrap();
         let question=s.sync_questions(runner,worker.id,QuestionSnapshot{ownership_epoch:1,questions:vec![ExternalQuestion{kind:QuestionKind::Form,external_id:"form_color".into(),payload:serde_json::json!({"id":"form_color","sessionID":worker.session_id(),"title":"Which color?","fields":[{"key":"color","type":"string","required":true,"options":[{"value":"blue","label":"Blue"},{"value":"red","label":"Red"}]}]})}]}).unwrap()[0].clone();
         s.scheduler_tick().unwrap();
+        if reply == "interview" {
+            drop(s);
+            let s = Store::open(&path).unwrap();
+            for _ in 0..3 {
+                s.scheduler_tick().unwrap();
+            }
+            let snapshot = s.snapshot().unwrap();
+            assert_eq!(snapshot.questions[0].state, QuestionState::Pending);
+            assert!(snapshot.questions[0].answer.is_none());
+            assert!(snapshot.questions[0]
+                .orchestration_note
+                .contains("explicit user interview"));
+            assert!(!snapshot.commands.iter().any(|c| c
+                .agent_spec
+                .as_ref()
+                .is_some_and(|a| a.role == "orchestrator-question")));
+            continue;
+        }
         let prep = s
             .pending(runner)
             .unwrap()
@@ -221,6 +446,7 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
         })
         .unwrap();
     let runner = RunnerId::new();
+    configure_models(&s);
     s.autostart_runner(runner).unwrap();
     let task = |text: &str, session| SaveTask {
         request_id: RequestId::new(),
@@ -232,6 +458,7 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
         requested_session: session,
     };
     let first = s.save_task(task("Build calculator", None)).unwrap();
+    configure_models(&s);
     s.autostart_runner(runner).unwrap();
     route_new(&s, first.id);
     let automatic = s.supervisor_policy(p.id).unwrap().unwrap();
@@ -446,6 +673,7 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
             })
             .unwrap();
         let runner = RunnerId::new();
+        configure_models(&s);
         s.autostart_runner(runner).unwrap();
         let t = s
             .save_task(SaveTask {
@@ -458,6 +686,7 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
                 requested_session: None,
             })
             .unwrap();
+        configure_models(&s);
         s.autostart_runner(runner).unwrap();
         s.scheduler_tick().unwrap();
         prepare(&s, &s.pending(runner).unwrap()[0]);
@@ -500,6 +729,7 @@ fn legacy_missing_folder_failure_gets_one_fenced_replacement_and_scheduler_conti
     })
     .unwrap();
     let runner = RunnerId::new();
+    configure_models(&s);
     s.autostart_runner(runner).unwrap();
     s.scheduler_tick().unwrap();
     let old = s.snapshot().unwrap().commands[0].clone();
@@ -675,6 +905,7 @@ fn prompt_images_autostart_pause_restart_and_capability_fencing() {
         )
         .unwrap();
     let runner = RunnerId::new();
+    configure_models(&s);
     s.autostart_runner(runner).unwrap();
     s.scheduler_tick().unwrap();
     assert!(s.snapshot().unwrap().commands.is_empty());
