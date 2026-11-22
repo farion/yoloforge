@@ -53,8 +53,9 @@ laufende Aufträge. Bei Prompt-Aufgaben gibt ein finales Ergebnis den Planungspl
 frei, ohne manuelles Abschließen. Laufende Rückfragen belegen ihn weiterhin.
 Das gilt auch für alte automatisch eingeplante Tickets; manuelles Done ist zum
 Freigeben des Planungsplatzes nicht erforderlich.
-Agentenerfolg ist weiterhin kein Nachweis einer beendeten Runtime und integriert
-keine Änderungen automatisch.
+Agentenerfolg ist weiterhin kein Nachweis einer beendeten Runtime. Bei lokalen
+Projektordnern uebernimmt der Runner erfolgreiche Ergebnisse automatisch, sofern
+der Zielstand unveraendert und sauber ist (`result-publication.md`).
 Offline-Runner behalten ihre persistente Queue; es gibt keine automatische
 Umverteilung oder Wiederholung fehlgeschlagener Ausführungen. Der Scheduler
 provisioniert keine Container und beantwortet keine Rückfragen. Dafür gelten

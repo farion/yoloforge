@@ -6,6 +6,12 @@ als abgeschlossen. Laborprüfungen ersetzen keine Abnahme auf dem Zielhost.
 
 ## Prompt-Aufgaben und Projektpause (Schema 24)
 
+Ergebnisübernahme (Runner-Journal 9): erfolgreiche lokale Aufgaben werden automatisch
+in den angegebenen Projektordner übernommen und bilden die Basis für Folgeaufgaben.
+Unabhängiger Snapshot-Index, journalisierter Commit, sauberer unveränderter Zielstand,
+Fast-forward und CAS schützen Ausführungsindex und Benutzeränderungen. Konflikte
+bleiben mit konkreter Ursache sichtbar; siehe `result-publication.md`.
+
 Session-Einstieg: Enter auf einem Arbeitsbereich oder einer gestarteten Aufgabe
 öffnet die live synchronisierte OpenCode-Unterhaltung mit Werkzeugausgaben und
 Rückfragen; technische Steuerung liegt hinter `c`. Vollständiges Archiv, frühere
@@ -81,4 +87,4 @@ Autonome Supervisor-Beendigungsanfragen mit atomarer Wissenssicherung sind
 implementiert und mit synthetischen Modellentscheidungen geprüft; Realmodell-
 Abnahme bleibt offen. Cleanup nach abgeschlossenem Erfolg bewahrt Ergebnis und
 Archiv und ist mit echtem Modell geprüft; Supervisor-Close fordert Cleanup atomar
-mit an. Details: `runtime-termination.md` (DB 24, Runner-Journal 8).
+mit an. Details: `runtime-termination.md` (DB 24, Runner-Journal 9).

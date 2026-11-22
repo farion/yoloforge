@@ -272,6 +272,7 @@ mod tests {
         )
         .unwrap();
         let args = Args {
+            publish_result: None,
             review_image: None,
             review_docker_socket: "/var/run/docker.sock".into(),
             containment: None,

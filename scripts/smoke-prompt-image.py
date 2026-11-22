@@ -88,9 +88,11 @@ def inside(binaries):
                 work = Path(prepared["result"]["workspace"]["path"])
                 assert (work / "image-proof.txt").read_text().strip().lower() == "red"
                 assert (Path(source) / ".git").is_dir()
+                assert (Path(source) / "image-proof.txt").read_text().strip().lower() == "red", "Result was not published to the requested project folder"
+                assert not subprocess.check_output(["git", "-C", source, "status", "--porcelain"], text=True).strip()
                 archive = api("GET", "/v1/commands/" + completed[0]["id"] + "/archive")
                 assert archive["status"]["final_scan_complete"]
-                print("PASS real model receives inline image and writes correct colour after automatic new-folder setup", flush=True)
+                print("PASS real model receives image, writes correct result and automatically publishes into the requested project folder", flush=True)
                 return
             time.sleep(.3)
         raise AssertionError("Image task did not finish within four minutes")

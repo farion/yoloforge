@@ -14,6 +14,7 @@ mod compaction;
 mod containment;
 mod journal;
 mod managed;
+mod publication;
 mod questions;
 mod review;
 mod setup;
@@ -59,6 +60,9 @@ struct Args {
     /// Managed worktrees; defaults to a runner-specific directory beside the journal.
     #[arg(long)]
     workspace_root: Option<PathBuf>,
+    /// Repair publication of an already successful task (requires an operator Factory token).
+    #[arg(long)]
+    publish_result: Option<CommandId>,
 }
 
 async fn report(
@@ -295,7 +299,7 @@ async fn commands(
                     .await?;
                 return Ok(true);
             }
-            let progress = agent::step(journal, &mut record, args).await?;
+            let mut progress = agent::step(journal, &mut record, args).await?;
             let allow_compaction = matches!(
                 progress.phase,
                 AgentPhase::Running | AgentPhase::WaitingInput
@@ -325,6 +329,13 @@ async fn commands(
                 questions::process(client, journal, &mut record, args, registration).await?;
             }
             if matches!(progress.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
+                if progress.phase == AgentPhase::Succeeded {
+                    match tokio::task::block_in_place(||publication::publish(journal,&record,args)) {
+                        Ok(Some(path))=>progress.summary.push_str(&format!("\n\nErgebnis automatisch im Projektordner bereitgestellt: {}",path.display())),
+                        Ok(None)=>{},
+                        Err(e)=>progress.summary.push_str(&format!("\n\nErgebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert: {e}")),
+                    }
+                }
                 record.result = Some(CommandOutput::Agent { agent: progress });
                 tokio::task::block_in_place(|| journal.save(&record))?;
                 report(client, journal, registration, record, args).await?;
@@ -466,6 +477,57 @@ async fn run(mut args: Args) -> Result<()> {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join(format!("workspaces-{}", args.id)),
         );
+    }
+    if let Some(id) = args.publish_result {
+        let snapshot = client.snapshot().await?;
+        let record = journal
+            .record(id)?
+            .ok_or_else(|| anyhow::anyhow!("Command missing from local journal"))?;
+        let current = snapshot
+            .commands
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| anyhow::anyhow!("Command missing from Factory"))?;
+        anyhow::ensure!(
+            current.kind == CommandKind::RunAgent
+                && current.state == CommandState::Succeeded
+                && record.command.id == id
+                && matches!(&record.result,Some(CommandOutput::Agent{agent}) if agent.phase==AgentPhase::Succeeded),
+            "Only successful agent results can be published"
+        );
+        let owner = snapshot
+            .streams
+            .iter()
+            .find(|s| s.id == current.stream_id)
+            .ok_or_else(|| anyhow::anyhow!("Stream missing"))?;
+        anyhow::ensure!(
+            owner.runner_id == args.id
+                && owner.ownership_epoch == current.ownership_epoch
+                && record.command.ownership_epoch == current.ownership_epoch,
+            "Stream ownership changed"
+        );
+        anyhow::ensure!(
+            !snapshot.commands.iter().any(|c| snapshot
+                .streams
+                .iter()
+                .any(|s| s.id == c.stream_id && s.project_id == owner.project_id)
+                && matches!(c.state, CommandState::Pending | CommandState::Accepted)),
+            "Project has unfinished work; publication deferred"
+        );
+        anyhow::ensure!(
+            snapshot
+                .commands
+                .iter()
+                .rev()
+                .find(|c| c.stream_id == owner.id && c.kind == CommandKind::RunAgent)
+                .is_some_and(|c| c.id == id),
+            "A newer execution exists"
+        );
+        let target =
+            tokio::task::block_in_place(|| publication::publish(&journal, &record, &args))?
+                .ok_or_else(|| anyhow::anyhow!("Project has no local output folder"))?;
+        println!("Ergebnis bereitgestellt: {}", target.display());
+        return Ok(());
     }
     let instance_id = InstanceId::new();
     let mut registration: Option<Registration> = None;
