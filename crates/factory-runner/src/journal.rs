@@ -23,6 +23,8 @@ impl Drop for Journal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     #[serde(default)]
+    pub repository: Option<crate::managed::Plan>,
+    #[serde(default)]
     pub review: Option<crate::review::Plan>,
     #[serde(default)]
     pub checkpoint: Option<crate::checkpoint::Plan>,
@@ -67,7 +69,7 @@ impl Journal {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         let tx = db.transaction()?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 7, "runner journal schema is too new");
+        ensure!(version <= 8, "runner journal schema is too new");
         if version == 0 {
             tx.execute_batch("CREATE TABLE identity(id INTEGER PRIMARY KEY CHECK(id=1),server TEXT NOT NULL,runner TEXT NOT NULL);
                 CREATE TABLE commands(id TEXT PRIMARY KEY NOT NULL,data TEXT NOT NULL CHECK(json_valid(data)));
@@ -94,6 +96,9 @@ impl Journal {
         }
         if version < 7 {
             tx.execute_batch("PRAGMA user_version=7;")?;
+        }
+        if version < 8 {
+            tx.execute_batch("PRAGMA user_version=8;")?;
         }
         let (saved_server, saved_runner): (String, String) =
             tx.query_row("SELECT server,runner FROM identity WHERE id=1", [], |r| {
@@ -131,6 +136,7 @@ impl Journal {
             return Ok(record);
         }
         let record = Record {
+            repository: None,
             review: None,
             checkpoint: None,
             runtime_published: false,

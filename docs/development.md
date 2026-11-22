@@ -26,8 +26,9 @@ Ein JSON-Verbindungstest ist `bash scripts/dev-local.sh snapshot`.
 Ohne OpenCode-Konfiguration meldet der Runner `not_configured`; Projekte,
 Tickets und Oberfläche funktionieren bereits. `2` → `n` öffnet jetzt den
 Projekt-Assistenten; vorhandene Projekte werden über `2` → `p` eingerichtet.
-Er erfasst Runner, Repository-Pfad, Service-Verbindung und Projekt-Harness und
-zeigt den Vorbereitungsstatus. Siehe [Projektanlage](project-setup.md), einschließlich
+Ohne technische Eingaben reicht `2` → `n` → `Ctrl-S`: Repository und Speicherort
+werden automatisch verwaltet, Runner und OpenCode-Standardmodell automatisch
+gewählt. Der Assistent zeigt den Vorbereitungsstatus. Siehe [Projektanlage](project-setup.md), einschließlich
 der noch offenen Provider-Anmeldung. Die Runner-Übersicht zeigt weiterhin die
 globale Runner-Verbindung; projektspezifische Verbindungen werden im Auftrag geprüft.
 
@@ -102,8 +103,8 @@ Serverwert geänderter Felder wird zur Prüfung angezeigt. Erst erneutes `Ctrl-S
 sendet mit der neuen Revision. Ticketupdates enthalten nur geänderte Felder.
 
 Die reine Projektanlage über `N` registriert nur Metadaten; der Assistent `n`/`p`
-übernimmt zusätzlich die Runner-Zuordnung vorhandener Repositories. Repository-
-Klonen bleibt separat. Bestehende Metadaten lassen sich
+übernimmt zusätzlich die Runner-Zuordnung, legt standardmäßig ein leeres Repository
+an und kann optional eine Quelle klonen. Bestehende Metadaten lassen sich
 mit `e` bearbeiten. Sobald das Projekt Streams besitzt, sind Repository und
 Basisbranch festgeschrieben; eine Änderung wird als Arbeitskonflikt abgewiesen.
 Der Name bleibt bearbeitbar. Das vermeidet das unbeabsichtigte Umleiten bestehender

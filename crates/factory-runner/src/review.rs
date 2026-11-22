@@ -59,7 +59,13 @@ fn repository(r: &Record, args: &Args) -> Result<PathBuf> {
         .workspace_spec
         .as_ref()
         .context("Workspace spec missing")?;
-    crate::workspace::repository(spec, args.repositories.as_deref())
+    crate::workspace::repository(
+        spec,
+        args.repositories.as_deref(),
+        args.workspace_root
+            .as_deref()
+            .context("Workspace root missing")?,
+    )
 }
 fn head(repo: &std::path::Path, branch: &str) -> Result<String> {
     git(

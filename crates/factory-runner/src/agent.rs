@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Execution {
     #[serde(default)]
+    model: Option<(String, String)>,
+    #[serde(default)]
     pub(crate) runtime: Option<crate::containment::Identity>,
     pub(crate) workspace: Workspace,
     pub(crate) endpoint: String,
@@ -105,6 +107,7 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
             }
         };
         record.agent = Some(Execution {
+            model: None,
             runtime,
             workspace,
             endpoint: client.endpoint().into(),
@@ -245,6 +248,34 @@ async fn advance(
         .agent_spec
         .as_ref()
         .context("Agent specification missing")?;
+    if record
+        .agent
+        .as_ref()
+        .context("Agent journal missing")?
+        .model
+        .is_none()
+    {
+        let selected = if !spec.profile.provider_id.is_empty() && !spec.profile.model_id.is_empty()
+        {
+            (
+                spec.profile.provider_id.clone(),
+                spec.profile.model_id.clone(),
+            )
+        } else if let Some(previous) = &spec.continuation {
+            journal
+                .record(previous.previous_command_id)?
+                .and_then(|r| r.agent)
+                .and_then(|a| a.model)
+                .context("Continuation model evidence missing")?
+        } else {
+            match client.default_model(&record.agent.as_ref().unwrap().workspace.path).await {
+                Ok(model)=>model,
+                Err(_)=>return Ok(progress(&command,AgentPhase::Unknown,"OpenCode default model unavailable. Provider sign-in or service connection needs attention; no session or prompt sent.")),
+            }
+        };
+        record.agent.as_mut().unwrap().model = Some(selected);
+        tokio::task::block_in_place(|| journal.save(record))?;
+    }
     let execution = record
         .agent
         .as_ref()
@@ -255,6 +286,7 @@ async fn advance(
         "OpenCode endpoint changed"
     );
     let session_id = command.session_id();
+    let (provider, model) = execution.model.as_ref().context("Selected model missing")?;
     let message_id = agent_message_id(command.id);
     let session = client.session(&session_id).await?;
     let Some(session) = session else {
@@ -276,8 +308,8 @@ async fn advance(
                 &session_id,
                 &execution.workspace.path,
                 &command.id.to_string(),
-                &spec.profile.provider_id,
-                &spec.profile.model_id,
+                provider,
+                model,
                 spec.read_only,
             )
             .await?;
@@ -291,8 +323,8 @@ async fn advance(
         session["id"] == session_id
             && session["metadata"]["factory_command"] == command.session_root().to_string()
             && session["location"]["directory"] == execution.workspace.path
-            && session["model"]["providerID"] == spec.profile.provider_id
-            && session["model"]["id"] == spec.profile.model_id,
+            && session["model"]["providerID"] == *provider
+            && session["model"]["id"] == *model,
         "Session identity changed"
     );
     if !execution.prompt_attempted {
@@ -537,6 +569,8 @@ mod tests {
         let mode = fake.mode.load(Ordering::SeqCst);
         let value = if path == "/api/info" {
             json!({"version":"2.0.27"})
+        } else if path == "/api/model/default" {
+            json!({"location":{"directory":"/prepared"},"data":{"providerID":"openai","id":if mode==0 {"test"}else{"changed-default"}}})
         } else if path == "/api/session/active" {
             json!({"data":{}})
         } else if path == format!("/api/session/{id}") {
@@ -563,10 +597,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn restart_reconciles_uncertain_session_and_prompt_without_reposting() {
+        reconcile(false).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_default_model_is_pinned_across_changes_and_restart() {
+        reconcile(true).await;
+    }
+    async fn reconcile(automatic_model: bool) {
         let dir = tempfile::tempdir().unwrap();
         let runner = RunnerId::new();
         let stream = StreamId::new();
-        let command = RunnerCommand {
+        let mut command = RunnerCommand {
             id: CommandId::new(),
             stream_id: stream,
             runner_id: runner,
@@ -611,10 +652,16 @@ mod tests {
         )
         .unwrap();
         let path = dir.path().join("journal.db");
+        if automatic_model {
+            let profile = &mut command.agent_spec.as_mut().unwrap().profile;
+            profile.provider_id.clear();
+            profile.model_id.clear();
+        }
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command.clone()).unwrap();
         record.agent = Some(Execution {
             runtime: None,
+            model: None,
             previous_assistant: None,
             workspace: Workspace {
                 path: "/prepared".into(),

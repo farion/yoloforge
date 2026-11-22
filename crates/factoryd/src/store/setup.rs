@@ -15,22 +15,28 @@ impl Store {
         }
         Ok(())
     }
-    pub fn setup_project(&self, b: SetupProject) -> Result<ProjectSetupResult> {
+    pub fn setup_project(&self, mut b: SetupProject) -> Result<ProjectSetupResult> {
+        if b.repository.trim().is_empty() {
+            b.repository = "factory:managed".into();
+        }
+        b.setup.repository_source = b.repository.clone();
         self.mutate(b.request_id,"project.setup",&b,|tx| {
             project_fields(&b.name,&b.repository,&b.base_branch)?;
-            line(&b.profile.provider_id,120)?;line(&b.profile.model_id,200)?;
+            if !b.profile.provider_id.is_empty() || !b.profile.model_id.is_empty(){line(&b.profile.provider_id,120)?;line(&b.profile.model_id,200)?;}
             for text in [&b.profile.toolchain,&b.profile.start_command,&b.profile.test_command] {if text.len()>2048 || text.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\t')){return Err(StoreError::Invalid("Invalid execution profile text"));}}
             for path in [&b.setup.repository_path,&b.setup.service_registration] {
                 if (!path.is_empty() && !path.starts_with('/')) || path.len()>4096 || path.chars().any(char::is_control){return Err(StoreError::Invalid("Setup paths must be absolute paths on the selected runner"));}
             }
-            if b.setup.repository_path.is_empty(){return Err(StoreError::Invalid("Repository path required"));}
             if let Some(config)=&b.setup.harness {if !config.is_object() || serde_json::to_vec(config)?.len()>32768 {return Err(StoreError::Invalid("Harness must be a JSON object up to 32 KiB"));}}
             let mut project=if let Some(id)=b.project_id {
                 let data:Option<String>=tx.query_row("SELECT data FROM projects WHERE id=?1",[id.to_string()],|r|r.get(0)).optional()?;
                 let mut p:Project=serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
                 if p.revision!=b.expected_revision{return Err(StoreError::RevisionConflict(p.revision));}
                 // Existing stream plans stay pinned; project setup applies to new preparations.
-                if p.repository!=b.repository || p.base_branch!=b.base_branch {return Err(StoreError::WorkConflict);}
+                if p.repository!=b.repository || p.base_branch!=b.base_branch {
+                    let used:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM streams WHERE project_id=?1)",[id.to_string()],|r|r.get(0))?;
+                    if used {return Err(StoreError::WorkConflict);}p.repository=b.repository.clone();p.base_branch=b.base_branch.clone();
+                }
                 p.name=b.name.clone();p.profile=b.profile.clone();p.setup=Some(b.setup.clone());p.revision.0+=1;p
             }else {
                 if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}

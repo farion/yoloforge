@@ -622,6 +622,8 @@ pub struct Project {
 /// Project harness settings and the selected execution-host binding. No credentials.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSetup {
+    #[serde(default)]
+    pub repository_source: String,
     pub runner_id: RunnerId,
     pub repository_path: String,
     /// Empty means discover/start the runner user's native OpenCode service.
@@ -629,7 +631,7 @@ pub struct ProjectSetup {
     /// None preserves the repository's native OpenCode config; Some creates a new config.
     pub harness: Option<serde_json::Value>,
 }
-pub const PROJECT_SETUP_CAPABILITY: &str = "project-setup-v1";
+pub const PROJECT_SETUP_CAPABILITY: &str = "project-setup-v2";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProjectLocation {
     pub repository_path: String,

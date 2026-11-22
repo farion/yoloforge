@@ -191,19 +191,24 @@ impl Dialog {
                         ));
                     }
                 }
-                ("Projekt-Assistent | Tab: naechster Schritt | Ctrl-S: einrichten".into(),p.map_or(Revision(0),|p|p.revision),vec![
-                    Field::text("1. Projektname",p.map_or("",|p|p.name.as_str()),true,false),
-                    Field::text("2. Repository (Metadaten: URL oder Pfad)",p.map_or("",|p|p.repository.as_str()),true,false),
+                ("Neues Projekt: Ctrl-S genuegt | alle technischen Felder optional | Ctrl-L/A: MCP".into(),p.map_or(Revision(0),|p|p.revision),vec![
+                    Field::text("1. Projektname",p.map_or("Neues Projekt",|p|p.name.as_str()),true,false),
+                    Field::text("2. Optional: vorhandenes Repository importieren (leer = neues Projekt)",p.filter(|p|p.repository!="factory:managed").map_or("",|p|p.repository.as_str()),false,false),
                     Field::text("3. Basisbranch",p.map_or("main",|p|p.base_branch.as_str()),true,false),
-                    Field::select("4. Ausfuehrungsort / Runner (Space)",&setup.map(|s|s.runner_id.to_string()).unwrap_or_default(),runners,false),
-                    Field::text("5. Vorhandenes Git-Repository: absoluter Pfad AUF DEM RUNNER",setup.map_or("",|s|s.repository_path.as_str()),true,false),
+                    Field::select("4. Ausfuehrungsort (automatisch vorbelegt)",&setup.map(|s|s.runner_id.to_string()).or_else(||snapshot.runners.iter().find(|r|r.connection==ConnectionState::Online).or_else(||snapshot.runners.first()).map(|r|r.id.to_string())).unwrap_or_default(),runners,false),
+                    Field::text("5. Optional fuer Experten: eigenen Checkout verwenden (leer = Factory verwaltet alles)",setup.map_or("",|s|s.repository_path.as_str()),false,false),
                     Field::text("6. OpenCode-Verbindung: leer = automatisch starten/finden; sonst Registrierungsdatei auf Runner",setup.map_or("",|s|s.service_registration.as_str()),false,false),
-                    Field::text("7. Provider",p.map_or("openai",|p|p.profile.provider_id.as_str()),true,false),
-                    Field::text("8. Modell-ID",p.map_or("",|p|p.profile.model_id.as_str()),true,false),
+                    Field::text("7. Optional: Provider (leer = OpenCode-Standard)",p.map_or("",|p|p.profile.provider_id.as_str()),false,false),
+                    Field::text("8. Optional: Modell-ID (leer = OpenCode-Standard)",p.map_or("",|p|p.profile.model_id.as_str()),false,false),
                     Field::text("9. Projekt-Harness JSON: leer = Konfiguration aus Repository; sonst neue opencode.json (keine Secrets)",&setup.and_then(|s|s.harness.as_ref()).map(|h|serde_json::to_string_pretty(h).unwrap_or_default()).unwrap_or_default(),false,true),
                     Field::text("10. Toolchain",p.map_or("",|p|p.profile.toolchain.as_str()),false,true),
                     Field::text("11. Startbefehl",p.map_or("",|p|p.profile.start_command.as_str()),false,true),
                     Field::text("12. Testbefehl",p.map_or("",|p|p.profile.test_command.as_str()),false,true),
+                    Field::text(&format!("13. MCP-Name (Ctrl-L: laden). Vorhanden: {}",setup.and_then(|s|s.harness.as_ref()).and_then(|h|h["mcp"]["servers"].as_object()).map(|m|m.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()),"",false,false),
+                    Field::select("14. MCP-Aktion (Space/Pfeile)","keep",[("keep","Keine MCP-Aenderung"),("local","Lokalen MCP anlegen/bearbeiten"),("remote","Entfernten MCP anlegen/bearbeiten"),("disable","MCP deaktivieren"),("enable","MCP aktivieren"),("remove","MCP entfernen")].into_iter().map(|(id,label)|(id.into(),label.into())).collect(),false),
+                    Field::text("15. Programm (lokal) oder HTTP(S)-URL (entfernt)","",false,false),
+                    Field::text("16. Lokale Argumente: ein Argument je Zeile, keine Shell-Quotes", "",false,true),
+                    Field::text("17. Regeldateien/Globs/URLs hinzufuegen: ein Eintrag je Zeile", "",false,true),
                 ])
             }
             Target::Scheduler(id) => {
@@ -329,8 +334,18 @@ impl Dialog {
                     format!("Projektprofil: {}", p.name),
                     p.revision,
                     vec![
-                        Field::text("Provider", &p.profile.provider_id, true, false),
-                        Field::text("Modell", &p.profile.model_id, true, false),
+                        Field::text(
+                            "Provider (leer = automatisch)",
+                            &p.profile.provider_id,
+                            false,
+                            false,
+                        ),
+                        Field::text(
+                            "Modell (leer = automatisch)",
+                            &p.profile.model_id,
+                            false,
+                            false,
+                        ),
                         Field::text("Toolchain", &p.profile.toolchain, false, true),
                         Field::text("Startbefehl", &p.profile.start_command, false, true),
                         Field::text("Testbefehl", &p.profile.test_command, false, true),
@@ -526,23 +541,17 @@ impl Dialog {
         let expected_revision = self.revision;
         Ok(match self.target {
             Target::SetupProject(project_id) => {
+                if value(6).is_empty() != value(7).is_empty() {
+                    return Err("Provider und Modell gemeinsam angeben oder beide fuer automatische Auswahl leer lassen".into());
+                }
                 let repository_path = value(4);
                 let service_registration = value(5);
-                if !repository_path.starts_with('/')
+                if (!repository_path.is_empty() && !repository_path.starts_with('/'))
                     || (!service_registration.is_empty() && !service_registration.starts_with('/'))
                 {
                     return Err("Runner-Pfade muessen absolut sein".into());
                 }
-                let harness = if value(8).trim().is_empty() {
-                    None
-                } else {
-                    let config: serde_json::Value = serde_json::from_str(&value(8))
-                        .map_err(|_| "Harness: gueltiges JSON-Objekt erforderlich")?;
-                    if !config.is_object() {
-                        return Err("Harness muss ein JSON-Objekt sein".into());
-                    }
-                    Some(config)
-                };
+                let harness = self.harness_edit()?;
                 Request::SetupProject(Box::new(SetupProject {
                     request_id,
                     project_id,
@@ -558,6 +567,7 @@ impl Dialog {
                         test_command: value(11),
                     },
                     setup: ProjectSetup {
+                        repository_source: String::new(),
                         runner_id: value(3).parse().map_err(|_| "Runner auswaehlen")?,
                         repository_path,
                         service_registration,
@@ -720,12 +730,88 @@ impl Dialog {
             }
         }
     }
+    fn load_mcp(&mut self) -> Result<(), String> {
+        let config: serde_json::Value = serde_json::from_str(&self.fields[8].text)
+            .map_err(|_| "Keine gueltige Projekt-Harness im Entwurf")?;
+        let server = config["mcp"]["servers"]
+            .get(&self.fields[12].text)
+            .ok_or("MCP-Name nicht im Projektentwurf vorhanden")?;
+        let (action, endpoint, arguments) = match server["type"].as_str() {
+            Some("remote") => (
+                "remote",
+                server["url"].as_str().ok_or("MCP-URL fehlt")?.to_string(),
+                String::new(),
+            ),
+            Some("local") => {
+                let command = server["command"].as_array().ok_or("MCP-Kommando fehlt")?;
+                let strings = command
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .filter(|s| !s.contains(['\n', '\r']))
+                            .ok_or("Kommando nicht als Zeilen editierbar; Harness-JSON verwenden")
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                (
+                    "local",
+                    strings.first().ok_or("Leeres MCP-Kommando")?.to_string(),
+                    strings[1..].join("\n"),
+                )
+            }
+            _ => return Err("Unbekannter MCP-Typ; Harness-JSON verwenden".into()),
+        };
+        for (i, text) in [(13, action.to_string()), (14, endpoint), (15, arguments)] {
+            self.fields[i].cursor = text.len();
+            self.fields[i].text = text;
+        }
+        self.fields[13].choice = self.fields[13]
+            .choices
+            .iter()
+            .position(|(id, _)| id == action)
+            .unwrap();
+        Ok(())
+    }
+    fn harness_edit(&self) -> Result<Option<serde_json::Value>, String> {
+        let base = if self.fields[8].text.trim().is_empty() {
+            None
+        } else {
+            let value: serde_json::Value = serde_json::from_str(&self.fields[8].text)
+                .map_err(|_| "Harness: gueltiges JSON-Objekt erforderlich")?;
+            if !value.is_object() {
+                return Err("Harness muss ein JSON-Objekt sein".into());
+            }
+            Some(value)
+        };
+        crate::harness::apply(
+            base,
+            crate::harness::Edit {
+                name: &self.fields[12].text,
+                action: &self.fields[13].text,
+                endpoint: &self.fields[14].text,
+                arguments: &self.fields[15].text,
+                instructions: &self.fields[16].text,
+            },
+        )
+    }
     pub fn key(&mut self, key: KeyEvent, online: bool, snapshot: Option<&Snapshot>) -> Action {
         if key.code == KeyCode::Esc {
             return Action::Close;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
+                KeyCode::Char('l') if matches!(self.target,Target::SetupProject(_)) && self.state==State::Editing=>{
+                    match self.load_mcp(){Ok(())=>self.message="MCP in die Formularfelder geladen. Bearbeiten, dann Ctrl-A oder Ctrl-S.".into(),Err(e)=>self.message=e}
+                },
+                KeyCode::Char('a') if matches!(self.target,Target::SetupProject(_)) && self.state==State::Editing=>{
+                    match self.harness_edit(){
+                        Ok(config)=>{
+                            let names=config.as_ref().and_then(|v|v["mcp"]["servers"].as_object()).map(|m|m.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                            let text=config.map(|v|serde_json::to_string_pretty(&v).unwrap()).unwrap_or_default();self.fields[8].cursor=text.len();self.fields[8].text=text;
+                            for i in 12..=16 {self.fields[i].text=if i==13{"keep".into()}else{String::new()};self.fields[i].cursor=self.fields[i].text.len();self.fields[i].choice=0;}
+                            self.message=format!("Nur im Entwurf uebernommen. MCPs: {names}. Weitere MCPs bearbeiten oder Ctrl-S zur Einrichtung.");
+                        },Err(e)=>self.message=e,
+                    }
+                },
                 KeyCode::Char('r') if online => {
                     if let Some(s) = snapshot {
                         self.reload(s);
@@ -1028,7 +1114,7 @@ mod tests {
         assert_eq!(body.description, None);
     }
     #[test]
-    fn setup_wizard_requires_host_and_freezes_project_config_after_uncertain_delivery() {
+    fn setup_wizard_defaults_work_without_technical_input_and_uncertain_edits_are_frozen() {
         let mut s = snapshot();
         let runner = RunnerId::new();
         s.runners.push(RunnerView {
@@ -1041,18 +1127,26 @@ mod tests {
             opencode: OpenCodeStatus::NotConfigured,
         });
         let mut d = Dialog::new(Target::SetupProject(None), &s).unwrap();
+        let Request::SetupProject(defaults) = d.build().unwrap() else {
+            panic!()
+        };
+        assert!(defaults.repository.is_empty());
+        assert!(defaults.setup.repository_path.is_empty());
+        assert!(defaults.profile.provider_id.is_empty());
+        assert!(defaults.profile.model_id.is_empty());
+        assert_eq!(defaults.setup.runner_id, runner);
         for (i, text) in [
             (0, "Project"),
             (1, "/repo"),
             (4, "/repo"),
+            (6, "openai"),
             (7, "test"),
             (8, "{\"mcp\":{\"servers\":{}}}"),
         ] {
             d.focus = i;
             d.insert(text);
         }
-        assert!(d.build().is_err());
-        d.fields[3].text = runner.to_string();
+        assert_eq!(d.fields[3].text, runner.to_string());
         let first = send(&mut d, &s);
         d.response(
             first.id(),
@@ -1130,6 +1224,7 @@ mod tests {
         let project = &mut s.projects[0];
         let id = project.id;
         project.setup = Some(ProjectSetup {
+            repository_source: String::new(),
             runner_id: first,
             repository_path: "/first".into(),
             service_registration: "/first/service.json".into(),

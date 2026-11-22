@@ -80,8 +80,10 @@ impl Store {
                         return Err(StoreError::Invalid("Invalid execution profile text"));
                     }
                 }
-                line(&body.profile.provider_id, 120)?;
-                line(&body.profile.model_id, 200)?;
+                if !body.profile.provider_id.is_empty() || !body.profile.model_id.is_empty() {
+                    line(&body.profile.provider_id, 120)?;
+                    line(&body.profile.model_id, 200)?;
+                }
                 let data: Option<String> = tx
                     .query_row(
                         "SELECT data FROM projects WHERE id=?1",
@@ -363,8 +365,13 @@ impl Store {
                 |r| r.get(0),
             )?;
             let project: Project = serde_json::from_str(&data)?;
-            line(&project.profile.provider_id, 120)?;
-            line(&project.profile.model_id, 200)?;
+            if project.setup.is_none()
+                || !project.profile.provider_id.is_empty()
+                || !project.profile.model_id.is_empty()
+            {
+                line(&project.profile.provider_id, 120)?;
+                line(&project.profile.model_id, 200)?;
+            }
             let context = Self::select_knowledge(
                 tx,
                 owner.project_id,

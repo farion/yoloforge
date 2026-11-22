@@ -7,7 +7,7 @@ bestätigter Runtime-Entfernung kann integriert werden.
 
 ## Einrichtung
 
-- Server, Runner und Clients aktualisieren: DB **21**, Runner-Journal **7**,
+- Server, Runner und Clients aktualisieren: DB **22**, Runner-Journal **8**,
   Runner-Capability `git-review-v1`.
 - Im Projektprofil einen Testbefehl konfigurieren, beispielsweise `cargo test --offline`.
 - Runner mit `--review-image IMAGE` starten. Das Image muss lokal installiert sein

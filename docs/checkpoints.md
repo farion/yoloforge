@@ -7,8 +7,8 @@ nicht erforderlich.
 
 ## Voraussetzungen
 
-- Server, Clients und beide Runner aktualisieren: DB-Schema **21**, Runner-Journal
-  **7**, Capability `git-checkpoint-v1`. Erst Server aktualisieren, dann Runner und
+- Server, Clients und beide Runner aktualisieren: DB-Schema **22**, Runner-Journal
+  **8**, Capability `git-checkpoint-v1`. Erst Server aktualisieren, dann Runner und
   Clients; anschließend neue Funktionen verwenden.
 - Beide Runner benötigen eine lokale Repository-Zuordnung für dasselbe Projekt.
 - Der Quell-Worktree muss vorbereitet sein. Alle Agenten-Runtimes der aktuellen

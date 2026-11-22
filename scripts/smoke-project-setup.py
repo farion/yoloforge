@@ -24,7 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--auto", action="store_true", help="Exercise native-service discovery/start with a fixture executable")
+    parser.add_argument("--empty", action="store_true", help="Create a project with Ctrl-S only: no repository, path, model or config input")
     options = parser.parse_args()
+    if options.empty:
+        options.auto = True
     class Health(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             assert self.path == "/api/info"
@@ -89,9 +92,14 @@ def main():
                 pump()
             pump(1.5)
             send("2n")
-            send("Wizard Project\t" + str(repo) + "\t\t \t" + str(repo) + "\t" + ("" if options.auto else str(registration)) + "\t\ttest\t")
             config = {"$schema": "https://opencode.ai/config.json", "mcp": {"servers": {}}, "instructions": ["AGENTS.md"]}
-            send("\x1b[200~" + json.dumps(config) + "\x1b[201~")
+            if not options.empty:
+                send(" Wizard Project\t" + str(repo) + "\t\t \t" + str(repo) + "\t" + ("" if options.auto else str(registration)) + "\topenai\ttest\t")
+                send("\x1b[200~" + json.dumps(config) + "\x1b[201~")
+                send("\t\t\t\tmcp-fixture\t\x1b[B\tmcp-program\t")
+                send("\x1b[200~argument with spaces\n--flag\x1b[201~\tRULES.md\x01")
+                config["mcp"]["servers"]["mcp-fixture"] = {"type": "local", "command": ["mcp-program", "argument with spaces", "--flag"]}
+                config["instructions"].append("RULES.md")
             send("\x13")
             deadline = time.monotonic() + 40
             while True:
@@ -103,13 +111,19 @@ def main():
             command = state["commands"][0]
             assert command["state"] == "succeeded", command.get("result")
             work = Path(command["result"]["workspace"]["path"])
-            assert json.loads((work / "opencode.json").read_text()) == config
+            if options.empty:
+                assert not (work / "opencode.json").exists()
+                assert state["projects"][0]["repository"] == "factory:managed"
+                assert state["projects"][0]["profile"]["model_id"] == ""
+                assert state["projects"][0]["setup"]["repository_path"] == ""
+            else:
+                assert json.loads((work / "opencode.json").read_text()) == config
             assert not (repo / "opencode.json").exists()
             assert len(state["projects"]) == len(state["streams"]) == 1
             assert state["projects"][0]["setup"]["runner_id"] == runner
             if options.auto:
                 assert (base / "starts").read_text() == "start\n"
-            print("PASS TUI wizard configures project/runner, prepares worktree, writes project harness and verifies OpenCode without runner flags or mapping files")
+            print("PASS zero-input project creates managed Git/worktree and verifies discovered OpenCode" if options.empty else "PASS TUI project and structured MCP editor preserve config; real runner prepares workspace and verifies OpenCode")
         finally:
             if pid:
                 os.kill(pid, signal.SIGTERM)

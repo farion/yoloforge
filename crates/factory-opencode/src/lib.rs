@@ -21,6 +21,37 @@ pub struct OpenCodeClient {
 }
 
 impl OpenCodeClient {
+    pub async fn default_model(&self, directory: &str) -> Result<(String, String)> {
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/model/default",
+                self.registration.url.trim_end_matches('/')
+            ))
+            .basic_auth("opencode", Some(&self.registration.password))
+            .query(&[("location[directory]", directory)])
+            .send()
+            .await?;
+        ensure!(
+            response.status().is_success(),
+            "OpenCode default model unavailable"
+        );
+        let value: serde_json::Value = response.json().await?;
+        ensure!(
+            value["location"]["directory"] == directory,
+            "Default model belongs to another location"
+        );
+        let model = &value["data"];
+        let provider = model["providerID"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .context("No default provider; OpenCode sign-in required")?;
+        let id = model["id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .context("No default model; OpenCode sign-in required")?;
+        Ok((provider.into(), id.into()))
+    }
     pub async fn compact(&self, session: &str, id: &str) -> Result<factory_core::CompactionState> {
         use factory_core::CompactionState;
         safe_id(session)?;

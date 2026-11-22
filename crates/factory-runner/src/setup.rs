@@ -51,7 +51,17 @@ fn harness(path: &Path, value: &serde_json::Value) -> Result<()> {
     fs::File::open(path)?.sync_all()?;
     Ok(())
 }
-pub async fn prepare(j: &Journal, c: &RunnerCommand, args: &Args) -> CommandOutput {
+pub async fn prepare(
+    j: &Journal,
+    record: &mut crate::journal::Record,
+    args: &Args,
+) -> CommandOutput {
+    if let Err(e) = crate::managed::ensure_repository(j, record, args).await {
+        return CommandOutput::WorkspaceError {
+            workspace_error: e.to_string().chars().take(240).collect(),
+        };
+    }
+    let c = &record.command;
     let output = tokio::task::block_in_place(|| {
         workspace::prepare(
             j,
@@ -73,7 +83,7 @@ pub async fn prepare(j: &Journal, c: &RunnerCommand, args: &Args) -> CommandOutp
             tokio::task::block_in_place(|| harness(Path::new(&workspace.path), config))?;
         } else {
             for relative in ["opencode.json","opencode.jsonc",".opencode"] {
-                if fs::symlink_metadata(Path::new(&s.repository_path).join(relative)).is_ok() {
+                if !s.repository_path.is_empty() && fs::symlink_metadata(Path::new(&s.repository_path).join(relative)).is_ok() {
                     ensure!(fs::symlink_metadata(Path::new(&workspace.path).join(relative)).is_ok(),"Project harness is absent from the checkout; commit its config or provide harness JSON in the wizard");
                 }
             }

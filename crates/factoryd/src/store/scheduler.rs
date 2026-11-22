@@ -63,8 +63,13 @@ impl Store {
                         |r| r.get(0),
                     )?;
                     let project: Project = serde_json::from_str(&data)?;
-                    line(&project.profile.provider_id, 120)?;
-                    line(&project.profile.model_id, 200)?;
+                    if project.setup.is_none()
+                        || !project.profile.provider_id.is_empty()
+                        || !project.profile.model_id.is_empty()
+                    {
+                        line(&project.profile.provider_id, 120)?;
+                        line(&project.profile.model_id, 200)?;
+                    }
                 }
                 if b.runner_ids.is_empty()
                     || b.runner_ids.len() > 16

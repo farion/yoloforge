@@ -130,7 +130,7 @@ fn prepare_inner(
             },
         "Unexpected stream branch"
     );
-    let repository = repository(spec, mapping)?;
+    let repository = repository(spec, mapping, root)?;
     let common = common_dir(&repository).context("Mapped path is not a Git repository")?;
     fs::create_dir_all(root).context("Cannot create workspace root")?;
     let root = fs::canonicalize(root)?;
@@ -266,8 +266,15 @@ fn prepare_inner(
     })
 }
 
-pub(crate) fn repository(spec: &WorkspaceSpec, mapping: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn repository(
+    spec: &WorkspaceSpec,
+    mapping: Option<&Path>,
+    root: &Path,
+) -> Result<PathBuf> {
     if let Some(setup) = &spec.setup {
+        if setup.repository_path.is_empty() {
+            return crate::managed::resolve(spec, root);
+        }
         return fs::canonicalize(&setup.repository_path)
             .context("Project repository path does not exist on this runner");
     }

@@ -13,6 +13,7 @@ mod checkpoint;
 mod compaction;
 mod containment;
 mod journal;
+mod managed;
 mod questions;
 mod review;
 mod setup;
@@ -429,9 +430,7 @@ async fn commands(
                 CommandKind::CheckOpenCode => {
                     opencode_status(&args.opencode_registration).await.into()
                 }
-                CommandKind::PrepareWorkspace => {
-                    setup::prepare(journal, &record.command, args).await
-                }
+                CommandKind::PrepareWorkspace => setup::prepare(journal, &mut record, args).await,
                 CommandKind::RunAgent => unreachable!("agent execution handled above"),
                 CommandKind::Checkpoint => unreachable!("checkpoint execution handled above"),
                 CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview => {

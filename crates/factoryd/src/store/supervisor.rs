@@ -33,7 +33,7 @@ impl Store {
             let stream=super::work::stream(tx,body.stream_id)?;
             let data:String=tx.query_row("SELECT data FROM projects WHERE id=?1",[id.to_string()],|r|r.get(0))?;
             let project:Project=serde_json::from_str(&data)?;
-            if body.enabled {line(&project.profile.provider_id,120)?;line(&project.profile.model_id,200)?;}
+            if body.enabled && (project.setup.is_none() || !project.profile.provider_id.is_empty() || !project.profile.model_id.is_empty()) {line(&project.profile.provider_id,120)?;line(&project.profile.model_id,200)?;}
             if stream.project_id!=id || !stream.ticket_ids.is_empty() || body.evaluation_budget>100 || !(30..=86400).contains(&body.interval_seconds) {return Err(StoreError::Invalid("Supervisor needs a dedicated project stream, budget <=100 and interval 30..86400 seconds"));}
             let old=policy(tx,id)?;let revision=old.as_ref().map_or(Revision(0),|p|p.revision);
             if revision!=body.expected_revision {return Err(StoreError::RevisionConflict(revision));}

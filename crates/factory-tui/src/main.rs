@@ -17,6 +17,7 @@ mod archive;
 mod commands;
 mod detail;
 mod devices;
+mod harness;
 mod manage;
 mod recovery;
 mod stream;

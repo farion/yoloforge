@@ -470,6 +470,7 @@ dependencies = [
  "factory-core",
  "factory-protocol",
  "ratatui",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

@@ -19,6 +19,7 @@ fn project_setup_is_atomic_replayable_and_pins_host_and_harness() {
             ..Default::default()
         },
         setup: ProjectSetup {
+            repository_source: "/repo".into(),
             runner_id: RunnerId::new(),
             repository_path: "/repo".into(),
             service_registration: "".into(),
