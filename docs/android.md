@@ -1,9 +1,27 @@
-# Android-Client (Entwicklungsstand)
+# Android-Client
 
 Native Java-App unter `android/`, Android 8/API 26 oder neuer. Enthalten:
 Enrollment per einmaligem Operator-Code, Projekt-/Aufgabenansicht, Prompt mit
 bis zu vier Bildern (zusammen 4 MiB), feste Sessionwahl, Pause/Fortsetzen,
 Sessionauszug, paginiertes Sessionarchiv mit Dateiexport und Frage-/Berechtigungsantworten.
+
+## Systemdialog-Abnahme im Emulator
+
+`scripts/smoke-android-device.py --serial emulator-5580` prueft mit dem
+installierten APK und einem isolierten echten Rust-Server Enrollment, Bildauswahl
+ueber DocumentsUI, unveraenderten Bild-Upload sowie SAF-Dateiexport mit
+bytegenauem Vergleich. Die Abnahme setzt die App-Daten auf dem ausdruecklich
+ausgewaehlten Emulator zurueck; nicht fuer ein persoenliches Geraet verwenden.
+Bild- und Exportpfad sind bestanden. Dies ersetzt keine reale Geraete-/Doze-Abnahme.
+
+Mit `--upgrade-to 0.1.2` wird zusaetzlich der eingebaute GitHub-Updater aus einer
+aelteren installierten Version gestartet. Der Test erlaubt die angebotene
+Play-Protect-Pruefung, wartet auf die tatsaechlich installierte neuere Version
+und prueft anschliessend den Zugriff mit der erhaltenen Factory-Anmeldung.
+Diese Upgrade-Abnahme von `0.1.2-dev` auf das veroeffentlichte `0.1.2` ist
+bestanden, einschliesslich Play-Protect-Pruefung und Android-Installer.
+Beleg fuer Bildimport, SAF-Export und Upgrade:
+`/tmp/opencode/yf-android-device-tb7yossq`.
 
 Zugangsdaten und der einzelne ausstehende Schreibauftrag werden mit einem
 Android-Keystore-Schluessel AES-GCM-verschluesselt gespeichert. Ein unsicherer
@@ -118,5 +136,8 @@ Secrets und Variable wurden nach ausdruecklicher Freigabe fuer
 `farion/yoloforge` eingerichtet; der lokale Schluessel bleibt fuer Sicherung und
 lokale Builds erhalten. Der eigenstaendige CI-Signierlauf
 `45036459858` hat den signierten Entwicklungsbuild erfolgreich erzeugt.
-Der versionierte Releasepfad bleibt beim naechsten Release zu pruefen.
+Der versionierte Releasepfad wurde mit v0.1.2 geprueft (CI `45042304226`):
+veroeffentlichtes APK heruntergeladen, SHA256 mit Release-Pruefsumme verglichen
+und Signatur mit `apksigner verify --print-certs` bestaetigt. Der Signer entspricht
+weiterhin `android/release-certificate.sha256`.
 Ohne Aktivierung bleiben die anderen Release-Ziele nutzbar.

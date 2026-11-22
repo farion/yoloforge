@@ -97,3 +97,19 @@ Ratatui-Dialog oder die noch ausstehende Android-App.
   Die Supervisor-Session hatte ausschließlich `deny`-Toolberechtigungen und keine
   Toolaufrufe. Derselbe Test prüft native Compaction und anschließende Fortsetzung
   einer Arbeitssession mit erhaltenem vorherigem Kontext.
+# Realmodell-Abnahme und Bildbelege
+
+Ab Entwicklungsstand **0.1.3-dev** erhaelt der Supervisor auch die bereits
+validierten Bilder des bewerteten Auftrags. Ohne diese Vorlage konnte er ein
+bildabhaengiges Ziel trotz erfolgreicher Ausfuehrung nicht bestaetigen; drei
+Auswertungen blieben nachvollziehbar bei `wait`. Die Bilder bleiben untrusted
+Aufgabenbelege und erweitern keine Toolberechtigungen.
+
+Mit explizitem `openai/gpt-6.2-sol` wurde der autonome Abschluss nach der
+15-Minuten-Folgepromptfrist und Factory-/Runner-Neustart erfolgreich geprueft:
+einmaliger Abschluss, erhaltenes finales Archiv und quellverknuepfte Notiz.
+Beleg: `/tmp/opencode/factory-image-2gy6j6xr/supervisor-acceptance.json`.
+Regressionstest prueft Bilduebergabe bei Compact/Close/Terminate samt
+journalisiertem Budget und einmaliger Anwendung. Reproduzierbarer Vollablauf:
+`scripts/smoke-prompt-image.py --local-registration PATH --provider openai --model gpt-6.2-sol --supervisor`.
+Die Bildkorrektur ist noch nicht Bestandteil des veroeffentlichten v0.1.2.

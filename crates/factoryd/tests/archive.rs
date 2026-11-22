@@ -567,6 +567,22 @@ fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
         let path = dir.path().join("db");
         let store = Store::open(&path).unwrap();
         let target = command(&store);
+        let image =
+            PromptImage::from_bytes("evidence.png".into(), b"\x89PNG\r\n\x1a\nfixture").unwrap();
+        // Seed the persisted target as an image-bearing task; exercise the actual
+        // supervisor transaction and subsequent runner acknowledgement.
+        let mut persisted_target = target.clone();
+        persisted_target.agent_spec.as_mut().unwrap().images = vec![image.clone()];
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE commands SET data=?1 WHERE id=?2",
+                rusqlite::params![
+                    serde_json::to_string(&persisted_target).unwrap(),
+                    target.id.to_string()
+                ],
+            )
+            .unwrap();
         if matches!(action, "terminate" | "close") {
             store
                 .report_runtime_binding(
@@ -624,6 +640,7 @@ fn autonomous_supervisor_applies_once_with_memory_and_durable_budget() {
             )
             .unwrap();
         assert!(worker.agent_spec.as_ref().unwrap().read_only);
+        assert_eq!(worker.agent_spec.as_ref().unwrap().images, vec![image]);
         finish_agent(&store,&worker,json!({"action":action,"reason":"Context and goal assessed","memory":"Unverified observation: tests reported passing; retain the source archive."}).to_string());
         drop(store);
         let store = Store::open(&path).unwrap();
