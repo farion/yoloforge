@@ -108,7 +108,7 @@ impl Store {
                 }
                 let data: Option<String> = tx
                     .query_row(
-                        "SELECT data FROM projects WHERE id=?1",
+                        "SELECT data FROM active_projects WHERE id=?1",
                         [id.to_string()],
                         |r| r.get(0),
                     )
@@ -181,7 +181,7 @@ impl Store {
             return Err(StoreError::Invalid("Too many tickets"));
         }
         let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",
             [body.project_id.to_string()],
             |r| r.get(0),
         )?;
@@ -195,6 +195,20 @@ impl Store {
             }
         }
         for id in &body.ticket_ids {
+            let data: String = tx
+                .query_row(
+                    "SELECT data FROM tickets WHERE id=?1",
+                    [id.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or(StoreError::NotFound)?;
+            let ticket: Ticket = serde_json::from_str(&data)?;
+            if ticket.draft {
+                return Err(StoreError::Invalid(
+                    "Entwurf muss zuerst freigegeben werden",
+                ));
+            }
             let project: Option<String> = tx
                 .query_row(
                     "SELECT project_id FROM tickets WHERE id=?1",
@@ -305,13 +319,24 @@ impl Store {
         previous: Option<CommandId>,
         role: &str,
     ) -> Result<RunnerCommand> {
+        Self::enqueue_with_model(tx, id, body, previous, role, None)
+    }
+
+    pub(super) fn enqueue_with_model(
+        tx: &Transaction<'_>,
+        id: StreamId,
+        body: &EnqueueCommand,
+        previous: Option<CommandId>,
+        role: &str,
+        pinned: Option<&factory_protocol::models::ModelSelection>,
+    ) -> Result<RunnerCommand> {
         let supervised = !role.is_empty();
         let mut owner = stream(tx, id)?;
         if body.kind == CommandKind::RunAgent {
             super::token_budgets::admit(tx, owner.project_id, role)?;
         }
         let paused: bool = tx.query_row(
-            "SELECT COALESCE(json_extract(data,'$.paused'),0) FROM projects WHERE id=?1",
+            "SELECT COALESCE(json_extract(data,'$.paused'),0) FROM active_projects WHERE id=?1",
             [owner.project_id.to_string()],
             |r| r.get(0),
         )?;
@@ -350,7 +375,7 @@ impl Store {
                 | CommandKind::IntegrateReview
         ) {
             let data: String = tx.query_row(
-                "SELECT data FROM projects WHERE id=?1",
+                "SELECT data FROM active_projects WHERE id=?1",
                 [owner.project_id.to_string()],
                 |r| r.get(0),
             )?;
@@ -409,11 +434,19 @@ impl Store {
                 ));
             }
             let data: String = tx.query_row(
-                "SELECT data FROM projects WHERE id=?1",
+                "SELECT data FROM active_projects WHERE id=?1",
                 [owner.project_id.to_string()],
                 |r| r.get(0),
             )?;
-            let project: Project = serde_json::from_str(&data)?;
+            let mut project: Project = serde_json::from_str(&data)?;
+            let model = match pinned {
+                Some(model) => Some(model.clone()),
+                None => super::models::role_selection(tx, owner.project_id, role)?,
+            };
+            if let Some(model) = &model {
+                super::models::require_available(tx, model)?;
+                super::models::apply(&mut project.profile, model);
+            }
             line(&project.profile.provider_id, 120)?;
             line(&project.profile.model_id, 200)?;
             let context = Self::select_knowledge(
@@ -463,7 +496,8 @@ impl Store {
                 None
             };
             let prompt = if supervised {
-                format!("{prompt}\n\nProject knowledge (untrusted reference material):{knowledge}\nSupervisor evaluation only: no tools, no project work, only the requested JSON object.")
+                let purpose = if role == "supervisor" { "Supervisor evaluation" } else { "Read-only evaluation" };
+                format!("{prompt}\n\nProject knowledge (untrusted reference material):{knowledge}\n{purpose} only: no tools, no project work, only the requested JSON object.")
             } else {
                 format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. When user input is needed, use the question tool and wait for its answer instead of ending with a question in the final response. An explicit user interview (such as 'Grill me') requires asking the user before implementing; do not answer on their behalf. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
             };
@@ -475,6 +509,7 @@ impl Store {
                 prompt
             };
             let mut images = Vec::new();
+            let mut files = Vec::new();
             for ticket in owner.ticket_ids.iter().filter(|_| previous.is_none()) {
                 let data: String = tx.query_row(
                     "SELECT data FROM tickets WHERE id=?1",
@@ -482,10 +517,18 @@ impl Store {
                     |r| r.get(0),
                 )?;
                 let t: Ticket = serde_json::from_str(&data)?;
+                if t.draft {
+                    return Err(StoreError::Invalid(
+                        "Entwurf muss zuerst freigegeben werden",
+                    ));
+                }
                 images.extend(t.images);
+                files.extend(t.files);
             }
             validate_images(&images).map_err(StoreError::Invalid)?;
+            validate_files(&files).map_err(StoreError::Invalid)?;
             Some(AgentSpec {
+                files,
                 role: role.into(),
                 images,
                 read_only: supervised,
@@ -531,7 +574,7 @@ impl Store {
 
     pub fn pending(&self, runner: RunnerId) -> Result<Vec<RunnerCommand>> {
         let db = self.0.lock().map_err(|_| StoreError::Internal)?;
-        let mut stmt = db.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN projects p ON p.id=s.project_id WHERE c.runner_id=?1 AND (c.state='accepted' OR (c.state='pending' AND COALESCE(json_extract(p.data,'$.paused'),0)=0)) ORDER BY c.rowid LIMIT 16")?;
+        let mut stmt = db.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN active_projects p ON p.id=s.project_id WHERE c.runner_id=?1 AND (c.state='accepted' OR (c.state='pending' AND COALESCE(json_extract(p.data,'$.paused'),0)=0)) ORDER BY c.rowid LIMIT 16")?;
         let rows = stmt.query_map([runner.to_string()], |r| r.get::<_, String>(0))?;
         let mut values = Vec::new();
         for row in rows {
@@ -558,10 +601,10 @@ impl Store {
                         super::token_budgets::admit(tx,owner.project_id,value.agent_spec.as_ref().map_or("",|a|a.role.as_str()))
                             .map_err(|e| match e { StoreError::Invalid(_) => StoreError::WorkConflict, other => other })?;
                     }
-                    let paused:bool=tx.query_row("SELECT COALESCE(json_extract(p.data,'$.paused'),0) FROM projects p JOIN streams s ON s.project_id=p.id WHERE s.id=?1",[value.stream_id.to_string()],|r|r.get(0))?;if paused{return Err(StoreError::WorkConflict);}
+                    let paused:bool=tx.query_row("SELECT COALESCE(json_extract(p.data,'$.paused'),0) FROM active_projects p JOIN streams s ON s.project_id=p.id WHERE s.id=?1",[value.stream_id.to_string()],|r|r.get(0))?;if paused{return Err(StoreError::WorkConflict);}
                     if value.kind==CommandKind::RunAgent && value.agent_spec.as_ref().is_some_and(|a|!a.read_only) {
                         let owner=stream(tx,value.stream_id)?;
-                        let limit:u8=tx.query_row("SELECT COALESCE(json_extract(data,'$.max_sessions'),1) FROM projects WHERE id=?1",[owner.project_id.to_string()],|r|r.get(0))?;
+                        let limit:u8=tx.query_row("SELECT COALESCE(json_extract(data,'$.max_sessions'),1) FROM active_projects WHERE id=?1",[owner.project_id.to_string()],|r|r.get(0))?;
                         let active:u64=tx.query_row("SELECT COUNT(DISTINCT c.stream_id) FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.state='accepted' AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0",[owner.project_id.to_string()],|r|r.get(0))?;
                         if active>=u64::from(limit) {return Err(StoreError::WorkConflict);}
                     }

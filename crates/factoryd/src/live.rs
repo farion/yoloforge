@@ -7,6 +7,7 @@ pub(super) struct EventCursor {
     after: u64,
 }
 struct Feed {
+    headers_only: bool,
     app: App,
     principal: Principal,
     cursor: u64,
@@ -17,6 +18,23 @@ pub(super) async fn event_stream(
     axum::Extension(principal): axum::Extension<Principal>,
     headers: HeaderMap,
     Query(query): Query<EventCursor>,
+) -> Response {
+    stream_response(app, principal, headers, query, false).await
+}
+pub(super) async fn desktop_event_stream(
+    State(app): State<App>,
+    axum::Extension(principal): axum::Extension<Principal>,
+    headers: HeaderMap,
+    Query(query): Query<EventCursor>,
+) -> Response {
+    stream_response(app, principal, headers, query, true).await
+}
+async fn stream_response(
+    app: App,
+    principal: Principal,
+    headers: HeaderMap,
+    query: EventCursor,
+    headers_only: bool,
 ) -> Response {
     let cursor = match headers.get("last-event-id") {
         Some(v) => match v.to_str().ok().and_then(|s| s.parse::<u64>().ok()) {
@@ -40,6 +58,7 @@ pub(super) async fn event_stream(
     }
     let stream = futures_util::stream::unfold(
         Feed {
+            headers_only,
             app,
             principal,
             cursor,
@@ -69,10 +88,17 @@ pub(super) async fn event_stream(
                 }
                 let store = feed.app.store.clone();
                 let cursor = feed.cursor;
-                let page = tokio::task::spawn_blocking(move || store.events(cursor, 100))
-                    .await
-                    .ok()?
-                    .ok()?;
+                let headers_only = feed.headers_only;
+                let page = tokio::task::spawn_blocking(move || {
+                    if headers_only {
+                        store.event_headers(cursor, 100)
+                    } else {
+                        store.events(cursor, 100)
+                    }
+                })
+                .await
+                .ok()?
+                .ok()?;
                 feed.pending = page.events.into();
                 if feed.pending.is_empty() {
                     tokio::time::sleep(Duration::from_millis(250)).await;

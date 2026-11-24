@@ -20,6 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
+pub const SCHEMA_VERSION: u32 = 35;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -35,6 +36,13 @@ impl From<serde_json::Error> for StoreError {
 pub struct Store(Arc<Mutex<Connection>>);
 
 pub struct DurableSnapshot {
+    pub token_totals: ObservedTokenTotals,
+    pub session_activity_unix_ms: std::collections::BTreeMap<String, u64>,
+    pub editable_tasks: std::collections::BTreeMap<TicketId, Revision>,
+    pub session_titles: std::collections::BTreeMap<String, String>,
+    pub session_closures: Vec<SessionClosure>,
+    pub compactions: Vec<Compaction>,
+    pub runtime_terminations: Vec<RuntimeTermination>,
     pub token_budgets: Vec<TokenBudget>,
     pub scheduler_policies: Vec<SchedulerPolicy>,
     pub projects: Vec<Project>,
@@ -59,7 +67,7 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 31,
+            version <= SCHEMA_VERSION,
             "database schema is newer than this factoryd supports"
         );
         if version == 0 {
@@ -161,7 +169,23 @@ impl Store {
         if version < 31 {
             tx.execute_batch(include_str!("../migrations/031_archive_blobs.sql"))?;
         }
+        if version < 32 {
+            tx.execute_batch(include_str!("../migrations/032_desktop.sql"))?;
+        }
+        if version < 33 {
+            tx.execute_batch(include_str!("../migrations/033_task_edits.sql"))?;
+        }
+        if version < 34 {
+            tx.execute_batch(include_str!("../migrations/034_ticket_numbers.sql"))?;
+            numbering::migrate(&tx).map_err(|error| anyhow::anyhow!("Ticket numbering migration failed: {error:?}"))?;
+        }
+        if version < 35 {
+            tx.execute_batch(include_str!("../migrations/035_models.sql"))?;
+        }
         tx.commit()?;
+        // Connection-local view centralizes fencing of removed projects without
+        // changing or discarding the historical rows or the database schema version.
+        db.execute_batch("CREATE TEMP VIEW active_projects AS SELECT rowid AS rowid,* FROM main.projects WHERE COALESCE(json_extract(data,'$.deleted'),0)=0;")?;
         Ok(Self(Arc::new(Mutex::new(db))))
     }
 
@@ -208,7 +232,10 @@ impl Store {
     pub fn create_project(&self, body: CreateProject) -> Result<Project> {
         self.mutate(body.request_id, "project.create", &body, |tx| {
             project_fields(&body.name, &body.repository, &body.base_branch)?;
-            let project = Project {
+            let mut project = Project {
+                runner_mapping: None,
+                key: numbering::project_key(tx,&body.name,body.key.as_deref(),None)?,
+                deleted: false,
                 max_sessions: default_session_limit(),
                 paused: false,
                 runner_bindings: Default::default(),
@@ -221,11 +248,15 @@ impl Store {
                 created_unix_ms: super::unix_ms(),
                 profile: ExecutionProfile::default(),
             };
+            if let Some(mapping) = body.runner_mapping {
+                scheduler::map_project_runner(tx, &mut project, mapping)?;
+            }
             tx.execute(
                 "INSERT INTO projects(id,data) VALUES(?1,?2)",
                 params![project.id.to_string(), serde_json::to_string(&project)?],
             )?;
             event(tx, "project.created", project.id.to_string(), &project)?;
+            numbering::reserve_key(tx,project.id,&project.key)?;
             Ok(project)
         })
     }
@@ -239,7 +270,7 @@ impl Store {
                 body.priority,
             )?;
             let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",
                 [body.project_id.to_string()],
                 |r| r.get(0),
             )?;
@@ -248,6 +279,9 @@ impl Store {
             }
             let now = super::unix_ms();
             let ticket = Ticket {
+                key: numbering::next_reference(tx,body.project_id)?,
+                draft: false,
+                files: vec![],
                 execution_command: None,
                 requested_session: None,
                 routing_note: String::new(),
@@ -287,7 +321,7 @@ impl Store {
             |tx| {
                 let data: Option<String> = tx
                     .query_row(
-                        "SELECT data FROM projects WHERE id=?1",
+                        "SELECT data FROM active_projects WHERE id=?1",
                         [id.to_string()],
                         |r| r.get(0),
                     )
@@ -297,7 +331,7 @@ impl Store {
                 if project.revision != body.expected_revision {
                     return Err(StoreError::RevisionConflict(project.revision));
                 }
-                if body.name.is_none() && body.repository.is_none() && body.base_branch.is_none() {
+                if body.name.is_none() && body.repository.is_none() && body.base_branch.is_none() && body.key.is_none() && body.runner_mapping.is_none() {
                     return Err(StoreError::Invalid("Project update is empty"));
                 }
                 if body
@@ -321,13 +355,27 @@ impl Store {
                 if let Some(v) = &body.name {
                     project.name = v.clone();
                 }
+                if let Some(key) = &body.key {
+                    if key.trim().is_empty() {return Err(StoreError::Invalid("Projektkürzel darf nicht leer sein"));}
+                    let key=numbering::project_key(tx,&project.name,Some(key),Some(id))?;
+                    if key!=project.key {
+                        numbering::rename(tx,id,&key)?;
+                        project.key=key;
+                    }
+                }
                 if let Some(v) = &body.repository {
                     project.repository = v.clone();
+                    if let Some(setup) = &mut project.setup {
+                        setup.repository_source = v.clone();
+                    }
                 }
                 if let Some(v) = &body.base_branch {
                     project.base_branch = v.clone();
                 }
                 project_fields(&project.name, &project.repository, &project.base_branch)?;
+                if let Some(mapping) = body.runner_mapping {
+                    scheduler::map_project_runner(tx, &mut project, mapping)?;
+                }
                 project.revision.0 = project
                     .revision
                     .0
@@ -414,22 +462,97 @@ impl Store {
     }
 
     pub fn snapshot(&self) -> Result<DurableSnapshot> {
+        self.snapshot_with_usage(false)
+    }
+
+    pub fn desktop_snapshot(&self) -> Result<DurableSnapshot> {
+        self.snapshot_with_usage(true)
+    }
+
+    fn snapshot_with_usage(&self, include_usage: bool) -> Result<DurableSnapshot> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction()?;
         let cursor = tx.query_row("SELECT COALESCE(MAX(sequence),0) FROM events", [], |r| {
             r.get(0)
         })?;
-        let projects = records(&tx, "SELECT data FROM projects ORDER BY rowid")?;
-        let tickets = records(&tx, "SELECT data FROM tickets ORDER BY rowid")?;
+        let projects = records(&tx, "SELECT data FROM active_projects ORDER BY rowid")?;
+        let tickets: Vec<Ticket> = records(&tx, "SELECT data FROM tickets ORDER BY rowid")?;
+        let mut editable_tasks = std::collections::BTreeMap::new();
+        for ticket in &tickets {
+            if tasks::editable(&tx, ticket)? {
+                editable_tasks.insert(ticket.id, ticket.revision);
+            }
+        }
         let streams = records(&tx, "SELECT data FROM streams ORDER BY rowid")?;
-        let commands = records(&tx, "SELECT data FROM commands ORDER BY rowid")?;
+        let commands: Vec<RunnerCommand> =
+            records(&tx, "SELECT data FROM commands ORDER BY rowid")?;
         let questions = records(&tx, "SELECT data FROM questions ORDER BY rowid")?;
         let controls = records(&tx, "SELECT data FROM controls ORDER BY rowid")?;
         let scheduler_policies =
             records(&tx, "SELECT data FROM scheduler_policies ORDER BY rowid")?;
         let token_budgets = records(&tx, "SELECT data FROM token_budgets ORDER BY rowid")?;
+        let session_closures = records(&tx, "SELECT data FROM session_closures ORDER BY rowid")?;
+        let compactions = records(&tx, "SELECT data FROM compactions ORDER BY rowid")?;
+        let runtime_terminations =
+            records(&tx, "SELECT data FROM runtime_terminations ORDER BY rowid")?;
+        let session_titles = {
+            let mut stmt=tx.prepare("SELECT json_extract(e.data,'$.session_id'),json_extract(e.data,'$.session_title') FROM excerpts e JOIN commands c ON c.id=e.command_id WHERE json_type(e.data,'$.session_title')='text' ORDER BY json_extract(c.data,'$.created_unix_ms'),json_extract(e.data,'$.captured_unix_ms')")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut titles = std::collections::BTreeMap::new();
+            for row in rows {
+                let (id, title) = row?;
+                if !title.trim().is_empty() {
+                    titles.insert(id, title);
+                }
+            }
+            titles
+        };
+        let session_activity_unix_ms = {
+            let mut statement=tx.prepare(
+                "SELECT c.id,MAX(e.created_unix_ms) FROM commands c JOIN events e ON e.aggregate_id=c.id AND e.kind IN ('command.created','command.updated') GROUP BY c.id
+                 UNION ALL
+                 SELECT q.command_id,MAX(e.created_unix_ms) FROM questions q JOIN events e ON e.aggregate_id=q.id AND e.kind IN ('question.created','question.updated') GROUP BY q.command_id")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+            })?;
+            let mut by_command = std::collections::BTreeMap::<String, u64>::new();
+            for row in rows {
+                let (id, time) = row?;
+                by_command
+                    .entry(id)
+                    .and_modify(|value| *value = (*value).max(time))
+                    .or_insert(time);
+            }
+            let mut activity = std::collections::BTreeMap::<String, u64>::new();
+            for command in commands.iter().filter(|c| c.kind == CommandKind::RunAgent) {
+                let time = by_command
+                    .get(&command.id.to_string())
+                    .copied()
+                    .unwrap_or(command.created_unix_ms)
+                    .max(command.created_unix_ms);
+                activity
+                    .entry(command.session_id())
+                    .and_modify(|value| *value = (*value).max(time))
+                    .or_insert(time);
+            }
+            activity
+        };
+        let token_totals = if include_usage {
+            usage::observed_token_totals(&tx, &commands)?
+        } else {
+            ObservedTokenTotals::default()
+        };
         tx.commit()?;
         Ok(DurableSnapshot {
+            token_totals,
+            session_activity_unix_ms,
+            editable_tasks,
+            session_titles,
+            session_closures,
+            compactions,
+            runtime_terminations,
             token_budgets,
             scheduler_policies,
             projects,
@@ -475,12 +598,14 @@ impl Store {
         })
     }
 }
+mod models;
 
 mod archive;
 mod archive_blobs;
 mod checkpoints;
 mod compaction;
 mod controls;
+mod desktop;
 mod devices;
 mod excerpts;
 mod knowledge;
@@ -495,6 +620,8 @@ mod sessions;
 mod setup;
 mod supervisor;
 mod tasks;
+mod task_history;
+mod numbering;
 mod termination;
 mod token_budgets;
 mod usage;
@@ -514,6 +641,12 @@ fn event(tx: &Transaction<'_>, kind: &str, id: String, payload: &impl Serialize)
         "INSERT INTO events(kind,aggregate_id,created_unix_ms,payload) VALUES(?1,?2,?3,?4)",
         params![kind, id, super::unix_ms(), serde_json::to_string(payload)?],
     )?;
+    if matches!(
+        kind,
+        "question.created" | "question.updated" | "command.updated" | "scheduler.blocked"
+    ) {
+        desktop::record_notification(tx, kind, &id, &serde_json::to_value(payload)?)?;
+    }
     Ok(())
 }
 fn project_fields(name: &str, repository: &str, base_branch: &str) -> Result<()> {

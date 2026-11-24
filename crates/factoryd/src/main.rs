@@ -1,6 +1,7 @@
 use anyhow::{ensure, Context, Result};
 use clap::Parser;
 use std::{env, net::SocketAddr, path::PathBuf};
+mod managed_opencode;
 
 #[derive(Parser)]
 #[command(
@@ -58,6 +59,20 @@ async fn main() -> Result<()> {
         );
     }
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
+    let binary = env::var_os("FACTORY_OPENCODE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "opencode".into());
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut shutdown = Box::pin(async move {
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    });
+    let (mut opencode, gateway) = tokio::select! {
+        result = managed_opencode::Runtime::start(&args.database, binary) => result?,
+        _ = &mut shutdown => return Ok(()),
+    };
+    store
+        .enable_model_settings()
+        .map_err(|_| anyhow::anyhow!("Could not initialize Factory model settings"))?;
     println!(
         "factoryd {} listening on {}",
         env!("CARGO_PKG_VERSION"),
@@ -92,21 +107,22 @@ async fn main() -> Result<()> {
             }
         }
     });
-    axum::serve(
+    let serving = axum::serve(
         listener,
-        factoryd::router_with_shutdown(&token, store, stopping.clone()),
+        factoryd::router_with_model_gateway(&token, store, stopping.clone(), Some(gateway)),
     )
     .with_graceful_shutdown(async move {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("signal handler");
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+        shutdown.await;
         stopping.store(true, std::sync::atomic::Ordering::Relaxed);
-    })
-    .await?;
+    });
+    let result = tokio::select! {
+        result = std::future::IntoFuture::into_future(serving) => result,
+        _ = opencode.supervise() => unreachable!("OpenCode supervisor never returns"),
+    };
+    opencode.shutdown().await;
     supervisor.abort();
     if let Some(push) = push {
         push.abort();
     }
-    Ok(())
+    Ok(result?)
 }

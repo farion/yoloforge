@@ -14,16 +14,10 @@ pub fn effective(args: &Args, c: &RunnerCommand) -> Result<Args> {
             s.runner_id == c.runner_id,
             "Project setup belongs to another runner"
         );
-        args.opencode_registration = Some(if s.service_registration.is_empty() {
-            std::env::var_os("XDG_STATE_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")
-                })
-                .join("opencode/service.json")
-        } else {
-            PathBuf::from(&s.service_registration)
-        });
+        if !s.service_registration.is_empty() {
+            ensure!(args.managed_opencode.is_none(), "Externe OpenCode-Registrierung ist auf diesem verwalteten Runner nicht erlaubt");
+            args.opencode_registration = Some(PathBuf::from(&s.service_registration));
+        }
     }
     Ok(args)
 }
@@ -75,12 +69,23 @@ pub async fn prepare(
     let CommandOutput::Workspace { workspace } = &output else {
         return output;
     };
+    if args.managed_opencode.is_some() {
+        if let Err(e) = tokio::task::block_in_place(|| crate::managed_opencode::validate_workspace(Path::new(&workspace.path))) {
+            return CommandOutput::WorkspaceError { workspace_error: e.to_string().chars().take(240).collect() };
+        }
+    }
     let Some(s) = c.workspace_spec.as_ref().and_then(|s| s.setup.as_ref()) else {
         return output;
     };
     let checked = async {
         if let Some(config) = &s.harness {
-            tokio::task::block_in_place(|| harness(Path::new(&workspace.path), config))?;
+            tokio::task::block_in_place(|| {
+                let path = Path::new(&workspace.path);
+                if args.managed_opencode.is_some() {
+                    crate::managed_opencode::validate_config(Path::new("Factory-Harness"), config)?;
+                }
+                harness(path, config)
+            })?;
         } else {
             for relative in ["opencode.json","opencode.jsonc",".opencode"] {
                 if !s.repository_path.is_empty() && fs::symlink_metadata(Path::new(&s.repository_path).join(relative)).is_ok() {
@@ -98,26 +103,12 @@ pub async fn prepare(
                 Err(_) => OpenCodeStatus::Unavailable,
             }
         }.await;
-        ensure!(!matches!(status,OpenCodeStatus::Unsupported{..}),"Existing OpenCode service has an unsupported version; required 2.0.27; service left unchanged");
-        if !matches!(status,OpenCodeStatus::Ready{..}) && s.service_registration.is_empty() {
-            let mut command = tokio::process::Command::new("opencode");
-            command
-                .args(["service", "start"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true);
-            let status = tokio::time::timeout(std::time::Duration::from_secs(30), command.status())
-                .await
-                .context("OpenCode service startup timed out; retry setup to check its state")?
-                .context("OpenCode executable missing on runner; install OpenCode 2.0.27")?;
-            ensure!(status.success(), "OpenCode service start failed on runner");
+        if let OpenCodeStatus::Unsupported { version } = &status {
+            anyhow::bail!("OpenCode {version} wird nicht unterstützt; benötigt wird OpenCode V2 ab 2.0.27. Der Dienst wurde nicht verändert.");
         }
-        let client = factory_opencode::OpenCodeClient::from_registration(path)
-            .context("OpenCode service registration unavailable on runner")?;
         ensure!(
-            matches!(client.status().await, OpenCodeStatus::Ready { .. }),
-            "OpenCode unavailable or unsupported; required version 2.0.27"
+            matches!(status, OpenCodeStatus::Ready { .. }),
+            "OpenCode nicht erreichbar oder inkompatibel; benötigt wird OpenCode V2 ab 2.0.27"
         );
         Ok::<_, anyhow::Error>(())
     }

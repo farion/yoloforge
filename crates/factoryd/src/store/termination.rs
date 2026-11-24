@@ -43,6 +43,11 @@ fn save(tx: &Transaction<'_>, value: &RuntimeTermination) -> Result<()> {
     )
 }
 impl Store {
+    pub fn runtime_binding(&self, id: CommandId) -> Result<Option<RuntimeBinding>> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        binding(&tx, id)
+    }
     pub fn terminal_cleanup_commands(&self, runner: RunnerId) -> Result<Vec<RunnerCommand>> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction()?;

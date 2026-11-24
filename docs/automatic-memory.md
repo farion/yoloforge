@@ -1,9 +1,12 @@
 # Automatische Session-Erkenntnisse
 
 Server-Schema 27 journalisiert eine einmalige Auswertung je erfolgreichem,
-schreibendem Agentauftrag mit finalem Archiv. Im Leerlauf verwendet der Scheduler
-den gemeinsamen Read-only-Orchestrator mit Rolle `orchestrator-memory`.
-Neue Aufgaben, offene Fragen und laufende Schreibaufträge haben Vorrang.
+schreibendem Agentauftrag mit finalem Archiv. Im Leerlauf startet der Scheduler
+einen schreibgeschützten **Memorizer**-Lauf mit Rolle `memorizer` und eigener
+OpenCode-Session im gemeinsamen Controller-Arbeitsbereich. Neue Aufgaben, offene
+Fragen und laufende Schreibaufträge haben Vorrang. In der Ansicht **Memorizer**
+sind offene und archivierte Läufe sichtbar, einschließlich älterer Läufe mit
+Rolle `orchestrator-memory`.
 
 Der Auswerter erhält begrenzte Ausschnitte aus Aufgabenprompt und gemeldetem
 Ergebnis, nicht das vollständige Archiv. Er liefert maximal 3500 UTF-8-Bytes

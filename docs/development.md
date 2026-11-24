@@ -8,8 +8,8 @@ Im Repository drei Terminals öffnen:
 # Terminal 1: Server laufen lassen
 bash scripts/dev-local.sh server
 
-# Terminal 2: Oberfläche; q beendet nur die Oberfläche
-bash scripts/dev-local.sh tui
+# Terminal 2: Desktop-Oberfläche (alternativ: tui)
+bash scripts/dev-local.sh gui
 
 # Terminal 3 (optional): lokalen Runner anzeigen
 bash scripts/dev-local.sh runner
@@ -23,14 +23,14 @@ Test überschrieben. Der bestehende Server auf Port 7432 wird nicht verwendet.
 
 `2` → `n` legt ein Projekt an, `3` → `n` ein Ticket, `Ctrl-S` speichert.
 Ein JSON-Verbindungstest ist `bash scripts/dev-local.sh snapshot`.
-Ohne OpenCode-Konfiguration meldet der Runner `not_configured`; Projekte,
-Tickets und Oberfläche funktionieren bereits. `2` → `n` öffnet jetzt den
-Projekt-Assistenten; vorhandene Projekte werden über `2` → `p` eingerichtet.
-Ohne technische Eingaben reicht `2` → `n` → `Ctrl-S`: Repository und Speicherort
-werden automatisch verwaltet und der Runner automatisch gewählt. Fuer Agentstarts
-muessen Provider-/Modell-ID explizit im Projekt konfiguriert sein. Der Assistent zeigt den Vorbereitungsstatus. Siehe [Projektanlage](project-setup.md), einschließlich
-der noch offenen Provider-Anmeldung. Die Runner-Übersicht zeigt weiterhin die
-globale Runner-Verbindung; projektspezifische Verbindungen werden im Auftrag geprüft.
+`factoryd` startet immer ein separates OpenCode mit persistentem Zustand, auch
+beim Start über `dev-local.sh server`. `runner` startet sein eigenes
+OpenCode. Beide benötigen das Binary **2.4.1** im `PATH` oder als
+`FACTORY_OPENCODE_BIN=/pfad/zu/opencode`. Persönliche OpenCode-Konfiguration
+und Logins werden nicht übernommen. In der GUI den Zugang unter
+**Factory-Einstellungen → Modell-Anbieter** verbinden. Das automatisch
+gewählte Standardmodell lässt sich unter **Default-Modelle** ändern.
+Siehe [verwaltetes OpenCode](managed-opencode.md).
 
 Bei direktem `cargo run --bin factory` werden Server und Token nicht automatisch
 angelegt. Dafür den manuellen Startablauf weiter unten verwenden.

@@ -40,6 +40,8 @@ fn review_pins_profile_and_source_and_only_matching_test_evidence_can_authorize_
     let store = Store::open(&path).unwrap();
     let p = store
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "Review".into(),
             repository: "https://example.invalid/repo.git".into(),

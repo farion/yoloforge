@@ -1,4 +1,31 @@
 use super::*;
+pub(super) async fn delete_project(
+    State(app): State<App>,
+    Path(id): Path<ProjectId>,
+    body: Result<Json<DeleteProject>, JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid project deletion",
+        );
+    };
+    db_call(body.request_id, move || app.store.delete_project(id, body)).await
+}
+pub(super) async fn submit_task(
+    State(app): State<App>,
+    body: Result<Json<SubmitTask>, JsonRejection>,
+) -> Response {
+    let Ok(Json(b)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid task submission",
+        );
+    };
+    db_call(b.task.request_id, move || app.store.submit_task(b)).await
+}
 pub(super) async fn hosted(
     State(app): State<App>,
     Path(id): Path<CommandId>,

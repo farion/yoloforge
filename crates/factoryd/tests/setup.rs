@@ -7,6 +7,7 @@ fn project_setup_is_atomic_replayable_and_pins_host_and_harness() {
     let path = dir.path().join("db");
     let s = Store::open(&path).unwrap();
     let b = SetupProject {
+        key: Some("wiz".into()),
         request_id: RequestId::new(),
         project_id: None,
         expected_revision: Revision(0),
@@ -32,6 +33,7 @@ fn project_setup_is_atomic_replayable_and_pins_host_and_harness() {
     assert!(s.snapshot().unwrap().projects.is_empty());
     db.execute_batch("DROP TRIGGER setup_failure").unwrap();
     let first = s.setup_project(b.clone()).unwrap();
+    assert_eq!(first.project.key,"WIZ");
     assert_eq!(
         first
             .command

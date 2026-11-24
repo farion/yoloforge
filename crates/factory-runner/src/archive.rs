@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Cursor {
     #[serde(default)]
+    pub(crate) native_archived: bool,
+    #[serde(default)]
     pub(crate) blobs: Vec<crate::archive_blobs::Pending>,
     #[serde(default)]
     pub(crate) supplement_scan_complete: bool,
@@ -43,7 +45,10 @@ pub async fn backfill(
         return Ok(());
     };
     let outcome = match crate::setup::effective(args, &record.command) {
-        Ok(effective) => step(factory, journal, &mut record, &effective, registration).await,
+        Ok(effective) => match step(factory, journal, &mut record, &effective, registration).await {
+            Ok(done) => archive_decision(journal, &mut record, &effective).await.map(|_| done),
+            Err(error) => Err(error),
+        },
         Err(error) => Err(error),
     };
     match outcome {
@@ -64,6 +69,57 @@ pub async fn backfill(
         }
     }
     tokio::task::block_in_place(|| journal.save(&record))?;
+    Ok(())
+}
+/// Only one-shot, read-only controller runs are disposable. Worker sessions
+/// remain available for follow-ups. Require both durable receipts before cleanup.
+pub async fn archive_decision(journal: &Journal, record: &mut Record, args: &Args) -> Result<()> {
+    if record.archive.native_archived
+        || !record.reported
+        || record.result.is_none()
+        || !record.archive.finished
+        || record.archive.blobs.iter().any(|b| b.offset < b.file.bytes)
+        || !record.command.agent_spec.as_ref().is_some_and(|spec| {
+            spec.read_only
+                && matches!(
+                    spec.role.as_str(),
+                    "orchestrator" | "orchestrator-question" | "orchestrator-memory" | "supervisor" | "memorizer"
+                )
+        })
+    {
+        return Ok(());
+    }
+    let execution = record.agent.as_ref().context("Decision execution missing")?;
+    let client = OpenCodeClient::from_registration(
+        args.opencode_registration.as_ref().context("Decision registration missing")?,
+    )?;
+    ensure!(execution.endpoint == client.endpoint(), "Decision endpoint changed");
+    let id = record.command.session_id();
+    if let Some(session) = client.session(&id).await? {
+        ensure!(
+            session["id"] == id
+                && session["metadata"]["factory_command"] == record.command.session_root().to_string()
+                && session["location"]["directory"] == execution.workspace.path,
+            "Decision session identity changed"
+        );
+        ensure!(!client.active(&id).await?, "Decision session still active");
+        for kind in ["inbox", "form", "permission"] {
+            ensure!(
+                client.session_items(&id, kind).await?.as_array().is_some_and(|v| v.is_empty()),
+                "Decision session has pending input"
+            );
+        }
+        if session["time"]["archived"].as_u64().is_none_or(|v| v == 0) {
+            client.archive_session(&id).await?;
+        }
+        ensure!(
+            client.session(&id).await?
+                .is_some_and(|s| s["time"]["archived"].as_u64().is_some_and(|v| v > 0)),
+            "Decision session archive state not confirmed"
+        );
+    }
+    record.archive.native_archived = true;
+    tokio::task::block_in_place(|| journal.save(record))?;
     Ok(())
 }
 /// One bounded page per step. A terminal result is held until the final traversal has been uploaded.
@@ -237,6 +293,99 @@ mod tests {
         Json, Router,
     };
     use std::sync::{Arc, Mutex};
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decision_cleanup_requires_receipts_idle_identity_and_survives_restart() {
+        use axum::{extract::Path, routing::get};
+        use clap::Parser;
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let session_id = agent_session_id(id);
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let active_state = active.clone();
+        let active_id = session_id.clone();
+        let seen = updates.clone();
+        let observed_updates = updates.clone();
+        let router = Router::new()
+            .route("/api/session/active", get(move || {
+                let active = active_state.clone();
+                let id = active_id.clone();
+                async move {
+                    Json(json!({"data":if active.load(std::sync::atomic::Ordering::SeqCst) {json!({id:{}})} else {json!({})}}))
+                }
+            }))
+            .route("/api/session/{id}", get(move |Path(sid): Path<String>| {
+                let updates = observed_updates.clone();
+                async move {
+                Json(json!({"data":{"id":sid,"metadata":{"factory_command":id.to_string()},"location":{"directory":"/work"},"time":{"archived":if updates.lock().unwrap().is_empty(){0}else{42}}}}))
+                }
+            }).patch(move |Json(body): Json<serde_json::Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    StatusCode::NO_CONTENT
+                }
+            }))
+            .route("/api/session/{id}/{kind}", get(|| async { Json(json!({"data":[]})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let registration = dir.path().join("service.json");
+        std::fs::write(&registration, json!({"url":endpoint,"password":"test"}).to_string()).unwrap();
+        let args = Args::try_parse_from([
+            "factory-runner", "--server", "http://127.0.0.1:1",
+            "--id", &runner.to_string(), "--name", "test",
+            "--opencode-registration", registration.to_str().unwrap(),
+        ]).unwrap();
+        let path = dir.path().join("journal");
+        let journal = Journal::open(&path, "http://127.0.0.1:1", runner).unwrap();
+        let command: RunnerCommand = serde_json::from_value(json!({
+            "id":id,"stream_id":StreamId::new(),"runner_id":runner,"ownership_epoch":1,
+            "kind":"run_agent","state":"accepted","created_unix_ms":1,
+            "agent_spec":{"prompt":"Extract observations","profile":ExecutionProfile::default(),"read_only":true,"role":"memorizer"}
+        })).unwrap();
+        let mut record = journal.receive(command).unwrap();
+        record.agent = Some(serde_json::from_value(json!({
+            "workspace":{"path":"/work","branch":"main","base_commit":"a".repeat(40)},
+            "endpoint":endpoint,"session_attempted":true,"prompt_attempted":true
+        })).unwrap());
+        record.result = Some(CommandOutput::Agent {agent: AgentProgress {
+            session_id, message_id:agent_message_id(id), phase:AgentPhase::Succeeded, summary:"new".into(),
+        }});
+        // No archive or result receipt: do not contact or mutate OpenCode.
+        archive_decision(&journal, &mut record, &args).await.unwrap();
+        record.archive.finished = true;
+        archive_decision(&journal, &mut record, &args).await.unwrap();
+        record.reported = true;
+        record.agent.as_mut().unwrap().workspace.path = "/other".into();
+        assert!(archive_decision(&journal, &mut record, &args).await.is_err());
+        record.agent.as_mut().unwrap().workspace.path = "/work".into();
+        assert!(archive_decision(&journal, &mut record, &args).await.is_err());
+        assert!(updates.lock().unwrap().is_empty());
+        active.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Workers are reusable and must not be archived.
+        record.command.agent_spec.as_mut().unwrap().read_only = false;
+        archive_decision(&journal, &mut record, &args).await.unwrap();
+        assert!(updates.lock().unwrap().is_empty());
+        record.command.agent_spec.as_mut().unwrap().read_only = true;
+        record.archive.supplement_scan_complete = true;
+        journal.save(&record).unwrap();
+        assert!(journal.archive_backfill(0).unwrap().is_some(), "Historical decisions must be selected");
+        archive_decision(&journal, &mut record, &args).await.unwrap();
+        drop(journal);
+        let journal = Journal::open(&path, "http://127.0.0.1:1", runner).unwrap();
+        let mut record = journal.record(id).unwrap().unwrap();
+        // Simulate losing the local receipt after the native PATCH succeeded.
+        record.archive.native_archived = false;
+        archive_decision(&journal, &mut record, &args).await.unwrap();
+        archive_decision(&journal, &mut record, &args).await.unwrap();
+        assert!(record.archive.native_archived);
+        assert!(journal.archive_backfill(u64::MAX).unwrap().is_none());
+        assert_eq!(*updates.lock().unwrap(), vec![json!({"archived":true})]);
+        server.abort();
+    }
     async fn receive(
         State(seen): State<Arc<Mutex<Vec<ReportArchive>>>>,
         Json(body): Json<ReportArchive>,

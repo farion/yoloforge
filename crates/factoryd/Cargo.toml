@@ -10,7 +10,7 @@ axum.workspace = true
 clap.workspace = true
 factory-core.workspace = true
 factory-protocol.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 sha2 = "0.10"
 subtle = "2"
 serde.workspace = true
@@ -18,10 +18,11 @@ serde_json.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }
 url = "2"
 futures-util = "0.3"
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
 tiktoken-rs = "0.12.1"
+fs2 = "0.4"
+tempfile = "3"
 
 [dev-dependencies]
 factory-protocol = { workspace = true, features = ["client"] }
 serde_json.workspace = true
-tempfile = "3"

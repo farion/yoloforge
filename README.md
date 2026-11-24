@@ -10,8 +10,26 @@ Betreibers. Siehe [Deployment](docs/deployment.md).
 
 Persönliche Entwicklungs-Factory zur Verwaltung paralleler OpenCode-Arbeitsstreams.
 Ein zentraler Rust-Dienst verwaltet Projekte und Aufgaben; Agenten arbeiten auf
-dem Laptop oder Server. Eine Ratatui-Oberfläche und später eine Android-App
-bedienen denselben Zustand.
+dem Laptop oder Server. Die native [Rust-/egui-GUI](docs/gui.md), die
+Ratatui-Oberfläche und die Android-App bedienen denselben Zustand.
+
+## Native Desktop-GUI (Linux)
+
+```sh
+cargo build --workspace --locked
+cargo run --locked -p factory-gui --bin yoloforge-gui
+```
+
+Dark Theme, Aufgaben-/Fragenverwaltung, schreibgeschützte OpenCode-Tabs,
+Instanzpräsenz, Orchestrator, Runner, Diagnose und globale Benachrichtigungen.
+Ohne Zugang öffnet sich ein Verbindungsdialog mit lokalem Startassistenten.
+[Bedienung und Grenzen](docs/gui.md) · [Funktionszuordnung](docs/gui-parity.md).
+
+### Screenshots
+
+![Factory-Übersicht mit Aufgabenfluss von Eingang bis Ergebnis](screenshot1.jpg)
+
+![Aufgabenarchiv mit Status, Tokenverbrauch und OpenCode-Zugriff](screenshot2.jpg)
 
 ## Ausprobieren
 
@@ -44,6 +62,7 @@ bleiben aber getrennte Prozesse. Pro Stream schreibt nur ein Runner.
 - [Datenmodell und Runner-Protokoll](docs/protocol.md)
 - [Zugang, Verbindungen und Deployment](docs/access-and-deployment.md)
 - [Umsetzungstickets und Abnahme](docs/backlog.md)
+- [Umsetzungsplan für die native Rust-/egui-GUI](docs/gui-plan.md)
 - [Repository klonen, registrieren und aktualisieren](docs/repositories.md)
 - [Projektgedächtnis und begrenzte Kontextauswahl](docs/knowledge.md)
 - [Nachrichtenarchiv und Export](docs/session-archive.md)

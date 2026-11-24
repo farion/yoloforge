@@ -24,6 +24,45 @@ fn save_policy(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
     tx.execute("INSERT INTO scheduler_policies(project_id,data) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET data=excluded.data",params![p.project_id.to_string(),serde_json::to_string(p)?])?;
     event(tx, "scheduler.policy", p.project_id.to_string(), p)
 }
+fn bind_project_runner(project: &mut Project, runner: RunnerId) {
+    let binding = project.runner_bindings.entry(runner).or_insert_with(|| ProjectLocation {
+        repository_path: String::new(),
+        service_registration: String::new(),
+    });
+    project.setup = Some(ProjectSetup {
+        runner_id: runner,
+        repository_source: project.repository.clone(),
+        repository_path: binding.repository_path.clone(),
+        service_registration: binding.service_registration.clone(),
+        harness: project.setup.as_ref().and_then(|setup| setup.harness.clone()),
+    });
+}
+
+pub(super) fn map_project_runner(
+    tx: &Transaction<'_>,
+    project: &mut Project,
+    mapping: ProjectRunnerMapping,
+) -> Result<()> {
+    if project.runner_mapping == Some(mapping) {
+        return Ok(());
+    }
+    project.runner_mapping = Some(mapping);
+    let runners = match mapping {
+        ProjectRunnerMapping::Runner(runner) => {
+            bind_project_runner(project, runner);
+            vec![runner]
+        }
+        ProjectRunnerMapping::Automatic => Vec::new(),
+    };
+    if let Some(mut policy) = policy(tx, project.id)? {
+        if policy.runner_ids != runners {
+            policy.runner_ids = runners;
+            policy.revision.0 += 1;
+            save_policy(tx, &policy)?;
+        }
+    }
+    Ok(())
+}
 pub(super) fn activate_prompts(tx: &Transaction<'_>, id: ProjectId) -> Result<()> {
     if let Some(mut p) = policy(tx, id)? {
         if !p.enabled || p.remaining_starts != UNLIMITED_STARTS {
@@ -123,9 +162,16 @@ impl Store {
     pub fn autostart_runner(&self, runner: RunnerId) -> Result<()> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let projects:Vec<Project>=records(&tx,"SELECT p.data FROM projects p LEFT JOIN scheduler_policies s ON s.project_id=p.id WHERE s.project_id IS NULL ORDER BY p.rowid")?;
+        let projects: Vec<Project> = records(&tx, "SELECT p.data FROM active_projects p
+            LEFT JOIN scheduler_policies s ON s.project_id=p.id
+            WHERE s.project_id IS NULL OR (
+                json_extract(p.data,'$.runner_mapping')='automatic'
+                AND json_array_length(s.data,'$.runner_ids')=0
+            ) ORDER BY p.rowid")?;
         for mut p in projects {
-            let target = if let Some(setup) = &p.setup {
+            let target = if let Some(ProjectRunnerMapping::Runner(target)) = p.runner_mapping {
+                target
+            } else if let (None, Some(setup)) = (p.runner_mapping, &p.setup) {
                 setup.runner_id
             } else {
                 let tasks: bool = tx.query_row(
@@ -138,7 +184,7 @@ impl Store {
                     [p.id.to_string()],
                     |r| r.get(0),
                 )?;
-                if !tasks || used {
+                if p.setup.is_none() && (!tasks || used) {
                     continue;
                 }
                 if !p.repository.contains("://")
@@ -147,20 +193,7 @@ impl Store {
                 {
                     p.repository = "factory:managed".into();
                 }
-                p.setup = Some(ProjectSetup {
-                    runner_id: runner,
-                    repository_source: p.repository.clone(),
-                    repository_path: String::new(),
-                    service_registration: String::new(),
-                    harness: None,
-                });
-                p.runner_bindings.insert(
-                    runner,
-                    ProjectLocation {
-                        repository_path: String::new(),
-                        service_registration: String::new(),
-                    },
-                );
+                bind_project_runner(&mut p, runner);
                 p.revision.0 += 1;
                 tx.execute(
                     "UPDATE projects SET data=?1 WHERE id=?2",
@@ -173,17 +206,20 @@ impl Store {
             if target != runner {
                 continue;
             }
-            save_policy(
-                &tx,
-                &SchedulerPolicy {
+            if let Some(mut existing) = policy(&tx, p.id)? {
+                existing.runner_ids = vec![runner];
+                existing.revision.0 += 1;
+                save_policy(&tx, &existing)?;
+            } else {
+                save_policy(&tx, &SchedulerPolicy {
                     project_id: p.id,
                     revision: Revision(1),
                     enabled: true,
                     runner_ids: vec![runner],
                     max_parallel: p.max_sessions,
                     remaining_starts: UNLIMITED_STARTS,
-                },
-            )?;
+                })?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -200,7 +236,7 @@ impl Store {
             &b,
             |tx| {
                 let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                    "SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",
                     [id.to_string()],
                     |r| r.get(0),
                 )?;
@@ -209,12 +245,14 @@ impl Store {
                 }
                 if b.enabled {
                     let data: String = tx.query_row(
-                        "SELECT data FROM projects WHERE id=?1",
+                        "SELECT data FROM active_projects WHERE id=?1",
                         [id.to_string()],
                         |r| r.get(0),
                     )?;
                     let project: Project = serde_json::from_str(&data)?;
-                    if project.setup.is_none()
+                    if let Some(model) = super::models::role_selection(tx, id, "implementer")? {
+                        super::models::require_available(tx, &model)?;
+                    } else if project.setup.is_none()
                         || !project.profile.provider_id.is_empty()
                         || !project.profile.model_id.is_empty()
                     {
@@ -246,7 +284,7 @@ impl Store {
                 };
                 save_policy(tx, &p)?;
                 let raw: String = tx.query_row(
-                    "SELECT data FROM projects WHERE id=?1",
+                    "SELECT data FROM active_projects WHERE id=?1",
                     [id.to_string()],
                     |r| r.get(0),
                 )?;
@@ -328,10 +366,10 @@ impl Store {
             if !p.enabled {
                 continue;
             }
-            let paused: bool = tx.query_row(
-                "SELECT COALESCE(json_extract(data,'$.paused'),0) FROM projects WHERE id=?1",
+            let (paused, mapped): (bool, bool) = tx.query_row(
+                "SELECT COALESCE(json_extract(data,'$.paused'),0), json_extract(data,'$.runner_mapping') IS NOT NULL FROM active_projects WHERE id=?1",
                 [p.project_id.to_string()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             if paused {
                 continue;
@@ -376,7 +414,8 @@ impl Store {
                     continue;
                 }
                 let owner = super::work::stream(&tx, sid)?;
-                if !p.runner_ids.contains(&owner.runner_id) {
+                // Remapping controls new assignments, not work already pinned to a runner.
+                if !mapped && !p.runner_ids.contains(&owner.runner_id) {
                     continue;
                 }
                 let latest: String = tx.query_row(
@@ -396,7 +435,8 @@ impl Store {
                 }
                 // A rejected transition must not prevent other projects from advancing.
                 tx.execute_batch("SAVEPOINT scheduled_start")?;
-                match Self::enqueue_in(
+                let pins = super::models::ticket(&tx, tid)?;
+                match Self::enqueue_with_model(
                     &tx,
                     sid,
                     &EnqueueCommand {
@@ -406,7 +446,8 @@ impl Store {
                         prompt: Some(prompt),
                     },
                     None,
-                    false,
+                    "",
+                    pins.as_ref().and_then(|m| m.implementer.as_ref()),
                 ) {
                     Ok(c) => {
                         let mut ticket = t.clone();
@@ -435,6 +476,9 @@ impl Store {
                     Err(e) => return Err(e),
                 }
                 tx.execute_batch("RELEASE scheduled_start")?;
+            }
+            if p.runner_ids.is_empty() {
+                continue;
             }
             let mut stmt = tx.prepare("SELECT data FROM streams WHERE project_id=?1")?;
             let streams = stmt
@@ -468,7 +512,8 @@ impl Store {
             let mut ready = all
                 .values()
                 .filter(|t| {
-                    matches!(t.status, TicketState::Backlog | TicketState::Ready)
+                    !t.draft
+                        && matches!(t.status, TicketState::Backlog | TicketState::Ready)
                         && t.depends_on
                             .iter()
                             .all(|id| all.get(id).is_some_and(|t| t.status == TicketState::Done))
@@ -499,8 +544,9 @@ impl Store {
                         t.id, t.title, t.description, t.acceptance_criteria
                     )
                 });
-                if prompt.trim().is_empty() && !t.images.is_empty() {
-                    prompt = "Bearbeite die Aufgabe in den angehaengten Bildern.".into();
+                if prompt.trim().is_empty() && (!t.images.is_empty() || !t.files.is_empty()) {
+                    prompt =
+                        "Bearbeite die Aufgabe anhand der angehängten Bilder und Dateien.".into();
                 }
                 if prompt.len() > 16384 {
                     t.status = TicketState::Blocked;

@@ -23,6 +23,73 @@ fn configure_models(s: &Store) {
 }
 
 #[test]
+fn orchestrator_retries_failed_preparation_after_cooldown_and_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let s = Store::open(&path).unwrap();
+    let p = s.create_project(CreateProject {
+        runner_mapping: None,
+        key: None,
+        request_id: RequestId::new(),
+        name: "Recover".into(),
+        repository: "factory:managed".into(),
+        base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let ticket = s.save_task(SaveTask {
+        request_id: RequestId::new(),
+        id: None,
+        expected_revision: Revision(0),
+        project_id: p.id,
+        prompt: "Do work".into(),
+        images: vec![],
+        requested_session: None,
+    }).unwrap();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    let first = s.pending(runner).unwrap().pop().unwrap();
+    assert_eq!(first.kind, CommandKind::PrepareWorkspace);
+    complete(&s, &first, CommandOutput::WorkspaceError {
+        workspace_error: "OpenCode unavailable".into(),
+    });
+    s.scheduler_tick().unwrap();
+    assert!(s.pending(runner).unwrap().is_empty());
+    assert_eq!(s.notifications("test", None).unwrap().entries[0].command_id, Some(first.id));
+    let history = s.task_history(ticket.id, None).unwrap();
+    assert!(history.entries.iter().any(|entry| {
+        entry.level == TaskHistoryLevel::Error
+            && entry.message.starts_with("Orchestrator-Vorbereitung fehlgeschlagen")
+            && entry.created_unix_ms > 0
+    }));
+    assert!(history.entries.iter().any(|entry| entry.message == "Aufgabe eingereiht"));
+    assert!(history.entries.windows(2).all(|pair| pair[0].sequence > pair[1].sequence));
+    drop(s);
+
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("UPDATE events SET created_unix_ms=0 WHERE aggregate_id=?1 AND kind='command.updated'",
+        [first.id.to_string()]).unwrap();
+    drop(db);
+    let s = Store::open(&path).unwrap();
+    s.scheduler_tick().unwrap();
+    s.scheduler_tick().unwrap();
+    let pending = s.pending(runner).unwrap();
+    assert_eq!(pending.len(), 1);
+    let retry = &pending[0];
+    assert_eq!(retry.kind, CommandKind::PrepareWorkspace);
+    assert_eq!(retry.stream_id, first.stream_id);
+    assert_ne!(retry.id, first.id);
+    prepare(&s, retry);
+    s.scheduler_tick().unwrap();
+    let decision = s.pending(runner).unwrap().pop().unwrap();
+    decide(&s, &decision, r#"{"action":"new","reason":"Recovered"}"#);
+    s.scheduler_tick().unwrap();
+    assert!(s.snapshot().unwrap().streams.iter().any(|w| w.ticket_ids == [ticket.id]));
+    let history = s.task_history(ticket.id, None).unwrap();
+    assert!(history.entries.iter().any(|entry| entry.message == "Arbeitsbereich wird vorbereitet"));
+}
+
+#[test]
 fn automatic_setup_preserves_user_model_and_missing_model_blocks_agents() {
     for configured in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -30,6 +97,8 @@ fn automatic_setup_preserves_user_model_and_missing_model_blocks_agents() {
         let s = Store::open(&path).unwrap();
         let p = s
             .create_project(CreateProject {
+                runner_mapping: None,
+                key: None,
                 request_id: RequestId::new(),
                 name: "Pinned".into(),
                 repository: "factory:managed".into(),
@@ -91,6 +160,8 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
         let s = Store::open(&path).unwrap();
         let p = s
             .create_project(CreateProject {
+                runner_mapping: None,
+                key: None,
                 request_id: RequestId::new(),
                 name: "Memory".into(),
                 repository: "factory:managed".into(),
@@ -151,9 +222,12 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
         let eval = s.pending(runner).unwrap()[0].clone();
         assert_eq!(
             eval.agent_spec.as_ref().unwrap().role,
-            "orchestrator-memory"
+            "memorizer"
         );
         assert!(eval.agent_spec.as_ref().unwrap().read_only);
+        let prompt = &eval.agent_spec.as_ref().unwrap().prompt;
+        assert!(prompt.contains("You are the YoloForge Memorizer."));
+        assert!(!prompt.contains("Supervisor evaluation only"));
         complete(
             &s,
             &eval,
@@ -258,7 +332,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
                 .find(|c| {
                     c.agent_spec
                         .as_ref()
-                        .is_some_and(|a| a.role == "orchestrator-memory")
+                        .is_some_and(|a| a.role == "memorizer")
                 })
                 .unwrap();
             assert!(evaluation
@@ -328,6 +402,8 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
         let s = Store::open(&path).unwrap();
         let p = s
             .create_project(CreateProject {
+                runner_mapping: None,
+                key: None,
                 request_id: RequestId::new(),
                 name: "Questions".into(),
                 repository: "factory:managed".into(),
@@ -535,6 +611,8 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "Fixed".into(),
             repository: "factory:managed".into(),
@@ -762,6 +840,8 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
         let s = Store::open(&dir.path().join("db")).unwrap();
         let p = s
             .create_project(CreateProject {
+                runner_mapping: None,
+                key: None,
                 request_id: RequestId::new(),
                 name: "Waiting".into(),
                 repository: "factory:managed".into(),
@@ -809,6 +889,8 @@ fn legacy_missing_folder_failure_gets_one_fenced_replacement_and_scheduler_conti
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "Legacy".into(),
             repository: "/new/project".into(),
@@ -972,6 +1054,8 @@ fn prompt_images_autostart_pause_restart_and_capability_fencing() {
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "Auto".into(),
             repository: "factory:managed".into(),

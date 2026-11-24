@@ -9,6 +9,8 @@ mod termination_cases;
 fn setup(store: &Store) -> (RunnerId, RunnerCommand) {
     let p = store
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "questions".into(),
             repository: "/repo".into(),
@@ -109,6 +111,43 @@ fn external(command: CommandId) -> ExternalQuestion {
 }
 
 #[test]
+fn desktop_notifications_are_deduplicated_persistent_and_read_per_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notifications.sqlite");
+    let store = Store::open(&path).unwrap();
+    let (runner, cmd) = setup(&store);
+    let body = QuestionSnapshot {
+        ownership_epoch: 1,
+        questions: vec![external(cmd.id)],
+    };
+    store.sync_questions(runner, cmd.id, body.clone()).unwrap();
+    store.sync_questions(runner, cmd.id, body).unwrap();
+    let page = store.notifications("desktop-a", None).unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.unread, 1);
+    assert_eq!(page.entries[0].command_id, Some(cmd.id));
+    assert!(page.entries[0].project_id.is_some());
+    let mark = MarkNotifications {
+        request_id: RequestId::new(),
+        ids: vec![page.entries[0].id],
+        read: true,
+    };
+    store.mark_notifications("desktop-a", mark.clone()).unwrap();
+    store.mark_notifications("desktop-a", mark).unwrap();
+    assert_eq!(store.notifications("desktop-a", None).unwrap().unread, 0);
+    assert_eq!(store.notifications("desktop-b", None).unwrap().unread, 1);
+    assert!(store
+        .notifications("desktop-a", Some(page.entries[0].id))
+        .unwrap()
+        .entries
+        .is_empty());
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert!(store.notifications("desktop-a", None).unwrap().entries[0].read);
+    assert_eq!(store.notifications("desktop-b", None).unwrap().unread, 1);
+}
+
+#[test]
 fn excerpts_survive_restart_and_reject_stale_foreign_and_oversized_samples() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("excerpt.sqlite");
@@ -117,6 +156,7 @@ fn excerpts_survive_restart_and_reject_stale_foreign_and_oversized_samples() {
     let body = ReportExcerpt {
         ownership_epoch: 1,
         excerpt: SessionExcerpt {
+            session_title: Some("OpenCode: Farben abstimmen".into()),
             session_id: agent_session_id(cmd.id),
             revision: Revision(1),
             captured_unix_ms: 1,
@@ -139,6 +179,15 @@ fn excerpts_survive_restart_and_reject_stale_foreign_and_oversized_samples() {
     drop(store);
     let store = Store::open(&path).unwrap();
     assert_eq!(store.excerpt(cmd.id).unwrap(), Some(body.excerpt.clone()));
+    assert_eq!(
+        store
+            .snapshot()
+            .unwrap()
+            .session_titles
+            .get(&agent_session_id(cmd.id))
+            .map(String::as_str),
+        Some("OpenCode: Farben abstimmen")
+    );
     assert_eq!(
         store.report_excerpt(runner, cmd.id, body.clone()).unwrap(),
         body.excerpt

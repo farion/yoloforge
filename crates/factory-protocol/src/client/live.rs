@@ -6,9 +6,15 @@ pub struct EventFeed {
 }
 impl FactoryClient {
     pub async fn event_stream(&self, after: u64) -> Result<EventFeed, ClientError> {
+        self.feed_at("/v1/events/stream", after).await
+    }
+    pub async fn desktop_event_stream(&self, after: u64) -> Result<EventFeed, ClientError> {
+        self.feed_at("/v1/desktop/events/stream", after).await
+    }
+    async fn feed_at(&self, path: &str, after: u64) -> Result<EventFeed, ClientError> {
         let response = self
             .http
-            .get(format!("{}/v1/events/stream", self.base))
+            .get(format!("{}{path}", self.base))
             .header("last-event-id", after.to_string())
             .timeout(Duration::from_secs(3600))
             .send()

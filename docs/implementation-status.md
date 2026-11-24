@@ -1,6 +1,6 @@
 # Softwarestand der 15 Punkte
 
-Stand: 0.1.3-dev, Server-Schema 31.
+Stand: 0.1.3-dev, Server-Schema 33.
 Abnahmen sind auf Wunsch des Betreibers aus der Aufgabenplanung gestrichen.
 Zielhost-, Realmodell-, Geräte- und Hosting-Abnahmen sind keine offenen Aufgaben
 und keine Voraussetzung für den Abschluss. Bereits dokumentierte Testergebnisse
@@ -25,6 +25,11 @@ in den technischen Detaildokumenten bleiben als historische Befunde erhalten.
 | 15 | GitHub-Releases und Ansible-Vertrag | Getrennte Plattformartefakte, Serverimage, Prüfsummen und stabil signiertes APK vorhanden. Stable ist v0.1.2; neue Funktionen liegen auf main in 0.1.3-dev. |
 
 ## Priorisierte Softwarearbeit
+
+**Native GUI:** Rust-/egui-Client mit Dark Theme, Dialogen, Aufgabenfreigabe,
+Dateiaufgaben, gruppierten Fragen, lesenden Sessiontabs, Instanzpräsenz und
+dauerhaften Benachrichtigungen ist vorhanden. Bestehende TUI bleibt nutzbar.
+[Bedienung](gui.md), [Funktionszuordnung](gui-parity.md), [Prüfliste](gui-plan.md).
 
 **Festgefahrene Arbeit:** Bei Stillstand anhand belastbarer Signale reagieren,
 ohne langsame Tools oder menschliche Rückfragen abzubrechen. Das ist nicht Teil

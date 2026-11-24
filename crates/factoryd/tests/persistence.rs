@@ -5,6 +5,8 @@ use std::sync::{Arc, Barrier};
 
 fn project() -> CreateProject {
     CreateProject {
+        runner_mapping: None,
+        key: None,
         request_id: RequestId::new(),
         name: "Factory".into(),
         repository: "git@github.com:example/factory.git".into(),
@@ -40,6 +42,8 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
     let store = Store::open(&path).unwrap();
     let p = store.create_project(project()).unwrap();
     let body = UpdateProject {
+        runner_mapping: None,
+        key: None,
         request_id: RequestId::new(),
         expected_revision: p.revision,
         name: Some("Renamed".into()),
@@ -67,6 +71,8 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
             store.update_project(
                 p.id,
                 UpdateProject {
+                    runner_mapping: None,
+                    key: None,
                     request_id: RequestId::new(),
                     expected_revision: edited.revision,
                     name: None,
@@ -82,6 +88,8 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
         .update_project(
             p.id,
             UpdateProject {
+                runner_mapping: None,
+                key: None,
                 request_id: RequestId::new(),
                 expected_revision: edited.revision,
                 name: Some("Still renameable".into()),
@@ -108,6 +116,8 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
             store.update_project(
                 other.id,
                 UpdateProject {
+                    runner_mapping: None,
+                    key: None,
                     request_id: RequestId::new(),
                     expected_revision: other.revision,
                     name: None,
@@ -119,6 +129,74 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
         ));
     }
     assert_eq!(store.snapshot().unwrap().cursor, cursor);
+}
+
+#[test]
+fn a_local_project_gets_a_runner_only_when_automatic_setup_is_needed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("automatic.db")).unwrap();
+    let mut create = project();
+    create.repository = "/path/to/local/project".into();
+    create.base_branch = "develop".into();
+    let project = store.create_project(create).unwrap();
+    assert!(project.setup.is_none());
+    assert!(project.runner_bindings.is_empty());
+    let runner = RunnerId::new();
+    store.autostart_runner(runner).unwrap();
+    assert!(store.scheduler_policy(project.id).unwrap().is_none());
+    store.create_ticket(ticket(project.id)).unwrap();
+    store.autostart_runner(runner).unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let configured = &snapshot.projects[0];
+    let setup = configured.setup.as_ref().unwrap();
+    assert_eq!(setup.runner_id, runner);
+    assert_eq!(setup.repository_source, project.repository);
+    assert_eq!(configured.base_branch, "develop");
+    assert!(snapshot.streams.is_empty());
+}
+
+#[test]
+fn project_runner_selection_persists_and_can_return_to_automatic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mapping.db");
+    let store = Store::open(&path).unwrap();
+    let manual = RunnerId::new();
+    let automatic = RunnerId::new();
+    let mut body = project();
+    body.repository = "/local/repo".into();
+    body.runner_mapping = Some(ProjectRunnerMapping::Runner(manual));
+    let project = store.create_project(body).unwrap();
+    store.create_ticket(ticket(project.id)).unwrap();
+    store.autostart_runner(automatic).unwrap();
+    assert!(store.scheduler_policy(project.id).unwrap().is_none());
+    store.autostart_runner(manual).unwrap();
+    assert_eq!(store.scheduler_policy(project.id).unwrap().unwrap().runner_ids, [manual]);
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.snapshot().unwrap().projects[0].runner_mapping, Some(ProjectRunnerMapping::Runner(manual)));
+    let change = UpdateProject {
+        runner_mapping: Some(ProjectRunnerMapping::Automatic),
+        key: None,
+        request_id: RequestId::new(),
+        expected_revision: project.revision,
+        name: None,
+        repository: None,
+        base_branch: None,
+    };
+    let edited = store.update_project(project.id, change.clone()).unwrap();
+    assert_eq!(edited.runner_mapping, Some(ProjectRunnerMapping::Automatic));
+    assert!(store.scheduler_policy(project.id).unwrap().unwrap().runner_ids.is_empty());
+    store.scheduler_tick().unwrap();
+    store.autostart_runner(automatic).unwrap();
+    let policy = store.scheduler_policy(project.id).unwrap().unwrap();
+    assert_eq!(policy.runner_ids, [automatic]);
+    let snapshot = store.snapshot().unwrap();
+    let configured = &snapshot.projects[0];
+    assert_eq!(configured.setup.as_ref().unwrap().runner_id, automatic);
+    assert!(configured.runner_bindings.contains_key(&manual));
+    assert!(snapshot.streams.is_empty());
+    assert_eq!(store.update_project(project.id, change).unwrap(), edited);
 }
 
 #[test]
@@ -136,6 +214,8 @@ fn profile_and_metadata_share_one_project_revision() {
         first.update_project(
             id,
             UpdateProject {
+                runner_mapping: None,
+                key: None,
                 request_id: RequestId::new(),
                 expected_revision: Revision(1),
                 name: Some("new name".into()),

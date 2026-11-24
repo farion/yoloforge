@@ -132,7 +132,7 @@ impl Store {
                 super::checkpoints::verify_bundle(tx, source.id, &checkpoint)?;
                 let owner = super::work::stream(tx, id)?;
                 let data: String = tx.query_row(
-                    "SELECT data FROM projects WHERE id=?1",
+                    "SELECT data FROM active_projects WHERE id=?1",
                     [owner.project_id.to_string()],
                     |r| r.get(0),
                 )?;

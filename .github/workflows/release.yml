@@ -34,13 +34,16 @@ jobs:
           toolchain: 1.98.0
       - name: Verify tag and manifest version agree
         run: python3 -c 'import os,tomllib; assert os.environ["RELEASE_TAG"] == "v" + tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"]'
+      - name: Native Linux GUI dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libxkbcommon-dev libwayland-dev wayland-protocols libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libgl1-mesa-dev libegl1-mesa-dev
       - run: cargo test --workspace --locked
-      - run: cargo build --release --locked -p factoryd -p factory-runner -p factory-tui
+      - run: cargo build --release --locked -p factoryd -p factory-runner -p factory-tui -p factory-gui
       - name: Package binaries and deployment contract
         run: |
           python3 scripts/package-release.py --kind server --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
           python3 scripts/package-release.py --kind tui --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
           python3 scripts/package-release.py --kind runner --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
+          python3 scripts/package-release.py --kind gui --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
       - name: Test the standalone server package
         if: matrix.arch == 'x86_64'
         run: python3 scripts/smoke-server-package.py "dist/yoloforge-server-${RELEASE_TAG}-linux-x86_64.tar.gz"

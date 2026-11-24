@@ -45,10 +45,29 @@ jobs:
         with:
           toolchain: 1.98.0
           components: rustfmt, clippy
+      - name: Native Linux GUI dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake libxkbcommon-dev libwayland-dev wayland-protocols libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libgl1-mesa-dev libegl1-mesa-dev xvfb sway grim wtype python3-gi gir1.2-gtk-3.0 thunar
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: cargo build --workspace --locked
+      - name: Desktop API and native egui window smoke
+        run: env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/smoke-gui.py --screenshots target/gui-smoke
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+      - name: Native Wayland drag-and-drop without Factory services
+        env:
+          YOLOFORGE_WAYLAND_SMOKE_OUTPUT: target/gui-smoke
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          python3 scripts/smoke-gui-wayland.py
+          python3 scripts/smoke-gui-wayland.py --uri-only
+          python3 scripts/smoke-gui-wayland.py --thunar
+          python3 scripts/smoke-gui-wayland.py --covered-clipboard
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yoloforge-gui-smoke
+          path: target/gui-smoke/*.png
       - run: python3 scripts/smoke-client.py target/debug/yoloforge --stack-limit-mib 1
       - run: python3 -u scripts/smoke-foundation.py
       - run: python3 -u scripts/smoke-tui-answers.py

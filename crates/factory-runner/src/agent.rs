@@ -126,6 +126,16 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
             "Awaiting durable Factory runtime binding before agent writes",
         ));
     }
+    if args.managed_opencode.is_some() {
+        let execution = record.agent.as_ref().expect("execution initialized");
+        if !execution.prompt_attempted {
+            if let Err(e) = tokio::task::block_in_place(|| {
+                crate::managed_opencode::validate_workspace(std::path::Path::new(&execution.workspace.path))
+            }) {
+                return Ok(progress(&command, AgentPhase::Failed, e.to_string().chars().take(240).collect::<String>()));
+            }
+        }
+    }
     match advance(&client, journal, record, args).await {
         Ok(value) => Ok(value),
         Err(_) => Ok(progress(
@@ -174,6 +184,16 @@ pub async fn capture(record: &mut Record, args: &Args) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis() as u64;
     record.excerpt = Some(SessionExcerpt {
+        session_title: session["title"]
+            .as_str()
+            .map(|v| {
+                v.trim()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(512)
+                    .collect()
+            })
+            .filter(|v: &String| !v.is_empty()),
         session_id: id,
         revision: Revision(revision),
         captured_unix_ms,
@@ -436,7 +456,13 @@ async fn advance(
         record.agent.as_mut().unwrap().prompt_attempted = true;
         tokio::task::block_in_place(|| journal.save(record))?;
         client
-            .prompt_with_images(&session_id, &message_id, &spec.prompt, &spec.images)
+            .prompt_with_files(
+                &session_id,
+                &message_id,
+                &spec.prompt,
+                &spec.images,
+                &spec.files,
+            )
             .await?;
         return Ok(progress(
             &command,
@@ -459,6 +485,11 @@ async fn advance(
                 || message["metadata"]["factory_images"] == image_digest(&spec.images),
             "Projected image prompt differs"
         );
+        ensure!(
+            spec.files.is_empty()
+                || message["metadata"]["factory_files"] == files_digest(&spec.files),
+            "Projected file prompt differs"
+        );
         true
     } else {
         let inbox = client.session_items(&session_id, "inbox").await?;
@@ -477,6 +508,11 @@ async fn advance(
                     || pending["payload"]["metadata"]["factory_images"]
                         == image_digest(&spec.images),
                 "Inbox image prompt differs"
+            );
+            ensure!(
+                spec.files.is_empty()
+                    || pending["payload"]["metadata"]["factory_files"] == files_digest(&spec.files),
+                "Inbox file prompt differs"
             );
         }
         false
@@ -629,7 +665,7 @@ mod tests {
             if mode == 0 {
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
-            json!({"data":{"id":id,"metadata":{"factory_command":fake.command.id},"location":{"directory":"/prepared"},
+            json!({"data":{"id":id,"title":"OpenCode: Implement archive capture","metadata":{"factory_command":fake.command.id},"location":{"directory":"/prepared"},
                 "model":{"providerID":spec.profile.provider_id,"id":spec.profile.model_id},"outcome":if matches!(mode,4|6|7|8) {"interrupted"} else {"succeeded"}}})
         } else if path.ends_with("/inbox") && mode == 7 {
             json!({"data":[{"id":"msg_pending"}]})
@@ -677,6 +713,7 @@ mod tests {
                 base_branch: "main".into(),
             }),
             agent_spec: Some(AgentSpec {
+                files: vec![],
                 role: String::new(),
                 images: vec![],
                 read_only: false,
@@ -752,6 +789,7 @@ mod tests {
             name: "test".into(),
             location: crate::Location::Local,
             opencode_registration: Some(registration),
+            managed_opencode: None,
             journal: Some(path),
             repositories: None,
             workspace_root: Some(PathBuf::from("/prepared")),
@@ -792,6 +830,10 @@ mod tests {
         assert_eq!(posts.load(Ordering::SeqCst), 0);
         capture(&mut record, &args).await.unwrap();
         let excerpt = record.excerpt.clone().unwrap();
+        assert_eq!(
+            excerpt.session_title.as_deref(),
+            Some("OpenCode: Implement archive capture")
+        );
         assert_eq!(excerpt.messages[0].text, "durable output\n");
         journal.save(&record).unwrap();
         mode.store(5, Ordering::SeqCst);

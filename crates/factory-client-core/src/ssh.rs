@@ -1,0 +1,409 @@
+//! Native SSH attachment. Credentials and host-key policy stay with the user's SSH setup.
+use anyhow::{ensure, Context, Result};
+use factory_core::{CommandId, RunnerId};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, path::PathBuf, process::Command};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub host: String,
+    pub server: String,
+    pub journal: String,
+    #[serde(default)]
+    pub opencode_registration: Option<String>,
+}
+pub fn config_path() -> PathBuf {
+    std::env::var_os("YOLOFORGE_SSH_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+                })
+                .join("yoloforge/ssh.json")
+        })
+}
+
+pub fn read_profile(runner: RunnerId) -> Result<Option<Profile>> {
+    let path = config_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let meta = std::fs::symlink_metadata(&path)?;
+    ensure!(
+        meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 1024 * 1024,
+        "Ungueltige SSH-Konfigurationsdatei"
+    );
+    let profiles: BTreeMap<RunnerId, Profile> = serde_json::from_slice(&std::fs::read(path)?)?;
+    Ok(profiles.get(&runner).cloned())
+}
+
+pub fn save_profile(
+    runner: RunnerId,
+    expected: Option<Profile>,
+    profile: Option<Profile>,
+) -> Result<()> {
+    use std::{
+        fs::{File, OpenOptions},
+        io::Write,
+    };
+    let path = config_path();
+    let parent = path.parent().context("SSH-Konfigurationspfad fehlt")?;
+    std::fs::create_dir_all(parent)?;
+    let lock_path = path.with_extension("json.lock");
+    if let Ok(meta) = std::fs::symlink_metadata(&lock_path) {
+        ensure!(
+            meta.is_file() && !meta.file_type().is_symlink(),
+            "Ungueltige SSH-Sperrdatei"
+        );
+    }
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock.try_lock()
+        .context("SSH-Konfiguration wird bereits bearbeitet")?;
+    struct Lock(File);
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            let _ = self.0.unlock();
+        }
+    }
+    let _lock = Lock(lock);
+    let mut profiles: BTreeMap<RunnerId, Profile> = if path.exists() {
+        let meta = std::fs::symlink_metadata(&path)?;
+        ensure!(
+            meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 1024 * 1024,
+            "Ungueltige SSH-Konfigurationsdatei"
+        );
+        serde_json::from_slice(&std::fs::read(&path)?)?
+    } else {
+        BTreeMap::new()
+    };
+    if profiles.get(&runner) == profile.as_ref() {
+        return Ok(());
+    }
+    ensure!(
+        profiles.get(&runner) == expected.as_ref(),
+        "SSH-Profil wurde geaendert; aktuellen Stand neu laden"
+    );
+    if let Some(p) = profile {
+        command(&p, runner, CommandId::new())?;
+        ensure!(
+            p.journal.starts_with('/')
+                && p.opencode_registration
+                    .as_ref()
+                    .is_none_or(|p| p.starts_with('/')),
+            "Runner-Pfade muessen absolut sein"
+        );
+        profiles.insert(runner, p);
+    } else {
+        profiles.remove(&runner);
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(&serde_json::to_vec_pretty(&profiles)?)?;
+    temp.as_file().sync_all()?;
+    temp.persist(&path).map_err(|e| e.error)?;
+    #[cfg(unix)]
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+pub fn configured(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
+    configured_mode(runner, id, false)
+}
+pub fn readiness(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
+    configured_mode(runner, id, true)
+}
+pub fn fetch_repository(runner: RunnerId, id: CommandId) -> Result<Option<Command>> {
+    configured_operation(runner, id, true, true)
+}
+pub fn publish_review(
+    runner: RunnerId,
+    id: CommandId,
+    config: &str,
+    token_file: &str,
+) -> Result<Option<Command>> {
+    let bytes = match std::fs::read(config_path()) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let profiles: BTreeMap<RunnerId, Profile> = serde_json::from_slice(&bytes)?;
+    let Some(p) = profiles.get(&runner) else {
+        return Ok(None);
+    };
+    publication_command(p, runner, id, config, token_file).map(Some)
+}
+fn publication_command(
+    p: &Profile,
+    runner: RunnerId,
+    id: CommandId,
+    config: &str,
+    token_file: &str,
+) -> Result<Command> {
+    // Validate the same SSH host/Factory identity as the other runner helpers.
+    let validated = command_operation(p, runner, id, true, true)?;
+    let mut args = validated
+        .get_args()
+        .map(|s| s.to_os_string())
+        .collect::<Vec<_>>();
+    args.pop().context("Remote command missing")?;
+    let remote = [
+        "env",
+        "-u",
+        "FACTORY_TOKEN",
+        &format!("FACTORY_TOKEN_FILE={token_file}"),
+        "factory-runner",
+        "--id",
+        &runner.to_string(),
+        "--name",
+        "hosting-tui",
+        "--server",
+        &p.server,
+        "--journal",
+        &p.journal,
+        "--publish-review",
+        &id.to_string(),
+        "--hosting-config",
+        config,
+    ]
+    .into_iter()
+    .map(quote)
+    .collect::<Result<Vec<_>>>()?
+    .join(" ");
+    let mut command = Command::new("ssh");
+    command
+        .args(args)
+        .arg(remote)
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TOKEN_FILE")
+        .env_remove("OPENCODE_PASSWORD");
+    Ok(command)
+}
+pub fn project_readiness(
+    runner: RunnerId,
+    id: CommandId,
+    provider: &str,
+    model: &str,
+) -> Result<Option<Command>> {
+    let Some(mut command) = readiness(runner, id)? else {
+        return Ok(None);
+    };
+    let mut args = command
+        .get_args()
+        .map(|s| s.to_os_string())
+        .collect::<Vec<_>>();
+    let remote = args.pop().context("SSH remote command missing")?;
+    let remote = format!(
+        "{} '--inspect-model' {}",
+        remote.to_string_lossy(),
+        quote(&format!("{provider}/{model}"))?
+    );
+    // Rebuild the command because std::process::Command cannot replace an argument.
+    command = Command::new("ssh");
+    command
+        .args(args)
+        .arg(remote)
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TOKEN_FILE")
+        .env_remove("OPENCODE_PASSWORD");
+    Ok(Some(command))
+}
+fn configured_mode(runner: RunnerId, id: CommandId, readiness: bool) -> Result<Option<Command>> {
+    configured_operation(runner, id, readiness, false)
+}
+fn configured_operation(
+    runner: RunnerId,
+    id: CommandId,
+    readiness: bool,
+    fetch: bool,
+) -> Result<Option<Command>> {
+    let path = config_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("SSH-Profil nicht lesbar"),
+    };
+    let profiles: BTreeMap<RunnerId, Profile> =
+        serde_json::from_slice(&bytes).context("Ungueltiges YoloForge-SSH-Profil")?;
+    profiles
+        .get(&runner)
+        .map(|p| command_operation(p, runner, id, readiness, fetch))
+        .transpose()
+}
+fn quote(s: &str) -> Result<String> {
+    ensure!(
+        !s.is_empty() && !s.chars().any(|c| c.is_control()),
+        "Leeres oder ungueltiges SSH-Profilfeld"
+    );
+    Ok(format!("'{}'", s.replace('\'', "'\\''")))
+}
+pub fn command(p: &Profile, runner: RunnerId, id: CommandId) -> Result<Command> {
+    command_mode(p, runner, id, false)
+}
+fn command_mode(p: &Profile, runner: RunnerId, id: CommandId, readiness: bool) -> Result<Command> {
+    command_operation(p, runner, id, readiness, false)
+}
+fn command_operation(
+    p: &Profile,
+    runner: RunnerId,
+    id: CommandId,
+    readiness: bool,
+    fetch: bool,
+) -> Result<Command> {
+    let url = reqwest::Url::parse(&p.server).context("Ungueltige Factory-URL im SSH-Profil")?;
+    ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "Factory-URL darf keine Zugangsdaten enthalten"
+    );
+    ensure!(
+        !p.host.starts_with('-')
+            && !p.host.is_empty()
+            && p.host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-@:[]".contains(&b)),
+        "SSH-Ziel muss ein Host oder SSH-Alias sein"
+    );
+    let mut args = vec![
+        "factory-runner".to_string(),
+        "--id".into(),
+        runner.to_string(),
+        "--name".into(),
+        "native-attach".into(),
+        "--server".into(),
+        p.server.clone(),
+        "--journal".into(),
+        p.journal.clone(),
+        if fetch {
+            "--fetch-repository".into()
+        } else {
+            "--open-session".into()
+        },
+        id.to_string(),
+    ];
+    if let Some(path) = &p.opencode_registration {
+        args.extend(["--opencode-registration".into(), path.clone()]);
+    }
+    if readiness && !fetch {
+        args.push("--session-readiness".into());
+    }
+    let remote = args
+        .iter()
+        .map(|s| quote(s))
+        .collect::<Result<Vec<_>>>()?
+        .join(" ");
+    let mut command = Command::new("ssh");
+    if readiness {
+        command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
+    } else {
+        command.arg("-t");
+    }
+    command
+        .args(["--", &p.host, &remote])
+        .env_remove("FACTORY_TOKEN")
+        .env_remove("FACTORY_TOKEN_FILE")
+        .env_remove("OPENCODE_PASSWORD");
+    Ok(command)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn publication_pins_review_and_quotes_paths_without_transporting_tokens() {
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let p = Profile {
+            host: "user@runner".into(),
+            server: "http://127.0.0.1:7432".into(),
+            journal: "/runner/journal".into(),
+            opencode_registration: None,
+        };
+        let command = publication_command(
+            &p,
+            runner,
+            id,
+            "/config/it's hosting.json",
+            "/private/operator token",
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args[0], "-T");
+        let remote = args.last().unwrap();
+        assert!(remote.contains(&format!("'--publish-review' '{}'", id)));
+        assert!(remote.contains("'FACTORY_TOKEN_FILE=/private/operator token'"));
+        assert!(remote.contains("'/config/it'\\''s hosting.json'"));
+        assert!(!remote.contains("--fetch-repository") && !remote.contains("--open-session"));
+        assert!(command
+            .get_envs()
+            .any(|(k, v)| k == "FACTORY_TOKEN" && v.is_none()));
+    }
+    #[test]
+    fn fetch_is_noninteractive_and_pins_the_prepared_command() {
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let p = Profile {
+            host: "user@runner".into(),
+            server: "http://127.0.0.1:7432".into(),
+            journal: "/private/runner journal".into(),
+            opencode_registration: None,
+        };
+        let c = command_operation(&p, runner, id, true, true).unwrap();
+        let args = c
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args[0], "-T");
+        let remote = args.last().unwrap();
+        assert!(remote.contains(&format!("'--fetch-repository' '{}'", id)));
+        assert!(!remote.contains("--open-session"));
+        assert!(!remote.contains("--session-readiness"));
+        assert!(remote.contains("'/private/runner journal'"));
+    }
+    #[test]
+    fn ssh_uses_exact_ids_and_quotes_remote_paths_without_passwords() {
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let mut p = Profile {
+            host: "user@runner".into(),
+            server: "http://127.0.0.1:7432".into(),
+            journal: "/home/user/a 'quoted' journal; echo ignored".into(),
+            opencode_registration: None,
+        };
+        let c = command(&p, runner, id).unwrap();
+        let args = c
+            .get_args()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(&args[..3], ["-t", "--", "user@runner"]);
+        assert!(args[3].contains(&id.to_string()));
+        assert!(args[3].contains("'\\''quoted'\\''"));
+        let status = command_mode(&p, runner, id, true).unwrap();
+        let status_args = status
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &status_args[..5],
+            ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+        );
+        assert!(status_args
+            .last()
+            .unwrap()
+            .contains("'--session-readiness'"));
+        assert!(status_args.last().unwrap().contains(&id.to_string()));
+        p.host = "-oProxyCommand=anything".into();
+        assert!(command(&p, runner, id).is_err());
+        assert!(quote("bad\npath").is_err());
+    }
+}

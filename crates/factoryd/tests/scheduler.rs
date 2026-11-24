@@ -31,6 +31,8 @@ fn concurrent_ticks_respect_dependencies_budget_and_restart_without_duplicate_st
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "Scheduled".into(),
             repository: "/repo".into(),

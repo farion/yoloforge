@@ -33,7 +33,7 @@ fn branch(value: &str) -> Result<()> {
 
 fn scope(tx: &Transaction<'_>, project: ProjectId, ticket: Option<TicketId>) -> Result<()> {
     let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+        "SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",
         [project.to_string()],
         |r| r.get(0),
     )?;
@@ -260,7 +260,7 @@ impl Store {
             branch(value)?;
         }
         let project_data: String = tx.query_row(
-            "SELECT data FROM projects WHERE id=?1",
+            "SELECT data FROM active_projects WHERE id=?1",
             [project.to_string()],
             |r| r.get(0),
         )?;

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const VERSION_HEADER: &str = "x-factory-protocol";
 pub const RUNNER_HEADER: &str = "x-factory-runner-registration";
+mod desktop;
+pub use desktop::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -148,6 +150,8 @@ pub struct Registration {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunnerView {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     pub id: RunnerId,
     pub name: String,
     pub location: RunnerLocation,
@@ -159,6 +163,25 @@ pub struct RunnerView {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Observed input + output tokens; absent entries have no recorded usage.
+    #[serde(default, skip_serializing_if = "ObservedTokenTotals::is_empty")]
+    pub token_totals: ObservedTokenTotals,
+    /// Last durable activity per OpenCode session, excluding presence heartbeats.
+    #[serde(default)]
+    pub session_activity_unix_ms: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    pub editable_tasks: std::collections::BTreeMap<TicketId, Revision>,
+    #[serde(default)]
+    pub session_titles: std::collections::BTreeMap<String, String>,
+    /// Desktop metadata transport; binary prompt inputs are fetched on demand.
+    #[serde(default)]
+    pub payloads_deferred: bool,
+    #[serde(default)]
+    pub session_closures: Vec<SessionClosure>,
+    #[serde(default)]
+    pub compactions: Vec<Compaction>,
+    #[serde(default)]
+    pub runtime_terminations: Vec<RuntimeTermination>,
     #[serde(default)]
     pub scheduler_policies: Vec<SchedulerPolicy>,
     #[serde(default)]
@@ -184,6 +207,18 @@ pub struct Snapshot {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub controls: Vec<StreamControl>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ObservedTokenTotals {
+    pub by_session: std::collections::BTreeMap<CommandId, u64>,
+    pub by_execution: std::collections::BTreeMap<CommandId, u64>,
+}
+
+impl ObservedTokenTotals {
+    fn is_empty(&self) -> bool {
+        self.by_session.is_empty() && self.by_execution.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -345,6 +380,10 @@ pub struct CommandResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateProject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_mapping: Option<ProjectRunnerMapping>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub request_id: RequestId,
     pub name: String,
     pub repository: String,
@@ -353,6 +392,8 @@ pub struct CreateProject {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupProject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub request_id: RequestId,
     pub project_id: Option<ProjectId>,
     pub expected_revision: Revision,
@@ -372,6 +413,10 @@ pub struct ProjectSetupResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_mapping: Option<ProjectRunnerMapping>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub request_id: RequestId,
     pub expected_revision: Revision,
     pub name: Option<String>,
@@ -408,12 +453,46 @@ pub struct SaveTask {
     pub prompt: String,
     pub images: Vec<PromptImage>,
 }
+
+/// New endpoint: old SaveTask continues to release immediately for compatibility.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitTask {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_token: Option<RequestId>,
+    pub task: SaveTask,
+    pub draft: bool,
+    #[serde(default)]
+    pub files: Vec<PromptFile>,
+}
+pub mod models;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BeginTaskEdit {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_token: Option<RequestId>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskEdit {
+    pub ticket: Ticket,
+    pub edit_token: RequestId,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PauseProject {
     pub request_id: RequestId,
     pub expected_revision: Revision,
     pub paused: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteProject {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub confirm_name: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

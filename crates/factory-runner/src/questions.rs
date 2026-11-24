@@ -291,6 +291,7 @@ mod tests {
             name: "test".into(),
             location: crate::Location::Local,
             opencode_registration: Some(reg),
+            managed_opencode: None,
             journal: None,
             repositories: None,
             workspace_root: None,

@@ -194,6 +194,23 @@ impl Journal {
     }
     pub fn archive_backfill(&self, now: u64) -> Result<Option<Record>> {
         let raw:Option<String>=self.db.query_row("SELECT data FROM commands WHERE json_extract(data,'$.reported')=1 AND json_extract(data,'$.command.kind')='run_agent' AND json_extract(data,'$.result') IS NOT NULL AND json_extract(data,'$.agent.prompt_attempted')=1 AND (COALESCE(json_extract(data,'$.archive.finished'),0)=0 OR COALESCE(json_extract(data,'$.archive.supplement_scan_complete'),0)=0 OR EXISTS(SELECT 1 FROM json_each(json_extract(commands.data,'$.archive.blobs')) b WHERE json_extract(b.value,'$.offset')<json_extract(b.value,'$.file.bytes'))) AND COALESCE(json_extract(data,'$.archive.retry_after_ms'),0)<=?1 ORDER BY COALESCE(json_extract(data,'$.archive.retry_after_ms'),0),rowid LIMIT 1",[now.min(i64::MAX as u64)],|r|r.get(0)).optional()?;
+        let raw = match raw {
+            Some(raw) => Some(raw),
+            None => self.db.query_row(
+                "SELECT data FROM commands WHERE json_extract(data,'$.reported')=1
+                 AND json_extract(data,'$.command.kind')='run_agent'
+                 AND json_extract(data,'$.result') IS NOT NULL
+                 AND json_extract(data,'$.agent.prompt_attempted')=1
+                 AND json_extract(data,'$.archive.finished')=1
+                 AND COALESCE(json_extract(data,'$.archive.native_archived'),0)=0
+                 AND json_extract(data,'$.command.agent_spec.read_only')=1
+                 AND json_extract(data,'$.command.agent_spec.role') IN ('orchestrator','orchestrator-question','orchestrator-memory','supervisor','memorizer')
+                 AND COALESCE(json_extract(data,'$.archive.retry_after_ms'),0)<=?1
+                 ORDER BY COALESCE(json_extract(data,'$.archive.retry_after_ms'),0),rowid LIMIT 1",
+                [now.min(i64::MAX as u64)],
+                |r| r.get(0),
+            ).optional()?,
+        };
         raw.map(|raw| serde_json::from_str(&raw).map_err(Into::into))
             .transpose()
     }

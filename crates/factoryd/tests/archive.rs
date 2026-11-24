@@ -4,6 +4,266 @@ use factoryd::store::{Store, StoreError};
 use serde_json::json;
 
 #[test]
+fn snapshot_session_activity_uses_durable_changes_not_snapshot_poll_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("activity.sqlite");
+    let store = Store::open(&path).unwrap();
+    let command = command(&store);
+    store
+        .observe_agent(
+            command.runner_id,
+            command.id,
+            ObserveAgent {
+                ownership_epoch: 1,
+                progress: AgentProgress {
+                    session_id: command.session_id(),
+                    message_id: agent_message_id(command.id),
+                    phase: AgentPhase::Running,
+                    summary: "Aktivität".into(),
+                },
+            },
+        )
+        .unwrap();
+    let time = command.created_unix_ms + 1000;
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert!(
+        db.execute(
+            "UPDATE events SET created_unix_ms=?1 WHERE aggregate_id=?2 AND kind='command.updated'",
+            rusqlite::params![time, command.id.to_string()]
+        )
+        .unwrap()
+            > 0
+    );
+    let snapshot = store.snapshot().unwrap();
+    assert_eq!(
+        snapshot.session_activity_unix_ms[&command.session_id()],
+        time
+    );
+    assert_eq!(
+        store.snapshot().unwrap().session_activity_unix_ms,
+        snapshot.session_activity_unix_ms
+    );
+    drop(db);
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.snapshot().unwrap().session_activity_unix_ms[&command.session_id()],
+        time
+    );
+}
+
+#[test]
+fn conversation_window_does_not_confuse_streaming_revisions_with_distinct_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let c = command(&store);
+    for revision in 1..=40 {
+        let mut messages = vec![
+            json!({"id":"msg_tool","type":"assistant","time":{"created":20},"content":[{"type":"tool","name":"read","state":{"status":"running","input":{"filePath":"README.md"},"content":[{"type":"text","text":format!("step {revision}")}]}}]}),
+        ];
+        if revision == 1 {
+            messages.insert(
+                0,
+                json!({"id":"msg_user","type":"user","text":"Bitte prüfen","time":{"created":10}}),
+            );
+        }
+        store
+            .report_archive(
+                c.runner_id,
+                c.id,
+                ReportArchive {
+                    ownership_epoch: 1,
+                    batch: ArchiveBatch {
+                        session_id: c.session_id(),
+                        revision,
+                        captured_unix_ms: revision,
+                        final_scan_complete: false,
+                        messages,
+                    },
+                },
+            )
+            .unwrap();
+    }
+    let view = store.conversation_window(c.id, None, None).unwrap();
+    assert_eq!(view.entries.len(), 2);
+    assert_eq!(view.entries[0].message["type"], "user");
+    assert_eq!(
+        view.entries[1].message["content"][0]["state"]["content"][0]["text"],
+        "step 40"
+    );
+    assert!(view.next_before.is_none());
+    assert_eq!(
+        store
+            .archive_window(c.id, None, None)
+            .unwrap()
+            .entries
+            .len(),
+        32,
+        "Raw revision browsing remains available"
+    );
+}
+
+#[test]
+fn conversation_history_uses_first_appearance_not_latest_revision_as_its_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let c = command(&store);
+    for revision in 1..=3 {
+        let messages = (0..16).map(|i|json!({"id":format!("msg_{}",(revision-1)*16+i),"type":"assistant","content":[{"type":"text","text":"Version 1"}]})).collect();
+        store
+            .report_archive(
+                c.runner_id,
+                c.id,
+                ReportArchive {
+                    ownership_epoch: 1,
+                    batch: ArchiveBatch {
+                        session_id: c.session_id(),
+                        revision,
+                        captured_unix_ms: revision,
+                        final_scan_complete: false,
+                        messages,
+                    },
+                },
+            )
+            .unwrap();
+    }
+    store.report_archive(c.runner_id,c.id,ReportArchive { ownership_epoch:1,batch:ArchiveBatch { session_id:c.session_id(),revision:4,captured_unix_ms:4,final_scan_complete:false,messages:vec![json!({"id":"msg_0","type":"assistant","content":[{"type":"text","text":"Aktualisierte erste Nachricht"}]})] } }).unwrap();
+    let recent = store.conversation_window(c.id, None, None).unwrap();
+    assert_eq!(recent.entries.len(), 32);
+    assert_eq!(recent.entries[0].message["id"], "msg_16");
+    let older = store
+        .conversation_window(c.id, None, recent.next_before)
+        .unwrap();
+    assert_eq!(older.entries.len(), 16);
+    assert!(older.next_before.is_none());
+    assert_eq!(
+        older.entries[0].message["content"][0]["text"],
+        "Aktualisierte erste Nachricht"
+    );
+    assert_eq!(
+        older.entries[0].sequence, 49,
+        "Older message may have a newer revision sequence than the history cursor"
+    );
+    assert_eq!(recent.next_after, 49);
+}
+
+#[test]
+fn desktop_archive_starts_at_current_tail_and_pages_history_and_updates_without_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let c = command(&store);
+    for revision in 1..=5 {
+        let messages = (0..16).map(|i| { let n = (revision - 1) * 16 + i; json!({"id":format!("msg_window_{n}"),"sessionID":c.session_id(),"type":"assistant","text":format!("Grüße 界 {n}")}) }).collect();
+        store
+            .report_archive(
+                c.runner_id,
+                c.id,
+                ReportArchive {
+                    ownership_epoch: 1,
+                    batch: ArchiveBatch {
+                        session_id: c.session_id(),
+                        revision,
+                        captured_unix_ms: revision,
+                        final_scan_complete: false,
+                        messages,
+                    },
+                },
+            )
+            .unwrap();
+    }
+    let latest = store.archive_window(c.id, None, None).unwrap();
+    assert_eq!(latest.entries.len(), 32);
+    assert_eq!(latest.latest_sequence, 80);
+    assert_eq!(latest.next_after, 80);
+    assert_eq!(
+        latest.entries.last().unwrap().message["text"],
+        "Grüße 界 79"
+    );
+    let older = store
+        .archive_window(c.id, None, latest.next_before)
+        .unwrap();
+    assert_eq!(older.entries.len(), 32);
+    let oldest = store.archive_window(c.id, None, older.next_before).unwrap();
+    assert_eq!(oldest.entries.len(), 16);
+    assert!(oldest.next_before.is_none());
+    let sequences = oldest
+        .entries
+        .iter()
+        .chain(&older.entries)
+        .chain(&latest.entries)
+        .map(|e| e.sequence)
+        .collect::<Vec<_>>();
+    assert_eq!(sequences, (1..=80).collect::<Vec<_>>());
+    store
+        .report_archive(
+            c.runner_id,
+            c.id,
+            ReportArchive {
+                ownership_epoch: 1,
+                batch: ArchiveBatch {
+                    session_id: c.session_id(),
+                    revision: 6,
+                    captured_unix_ms: 6,
+                    final_scan_complete: false,
+                    messages: vec![json!({"id":"msg_new","text":"Aktuell"})],
+                },
+            },
+        )
+        .unwrap();
+    let update = store
+        .archive_window(c.id, Some(latest.next_after), None)
+        .unwrap();
+    assert_eq!(update.entries.len(), 1);
+    assert_eq!(update.next_after, 81);
+    assert!(!update.more_newer);
+    assert!(matches!(
+        store.archive_window(c.id, Some(1), Some(2)),
+        Err(StoreError::Invalid(_))
+    ));
+}
+
+#[test]
+fn desktop_archive_bounds_bytes_by_whole_messages_not_text_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let c = command(&store);
+    let text = "x".repeat(5 * 1024 * 1024);
+    for revision in 1..=2 {
+        store
+            .report_archive(
+                c.runner_id,
+                c.id,
+                ReportArchive {
+                    ownership_epoch: 1,
+                    batch: ArchiveBatch {
+                        session_id: c.session_id(),
+                        revision,
+                        captured_unix_ms: revision,
+                        final_scan_complete: false,
+                        messages: vec![json!({"id":format!("msg_big_{revision}"),"text":text})],
+                    },
+                },
+            )
+            .unwrap();
+    }
+    let latest = store.archive_window(c.id, None, None).unwrap();
+    assert_eq!(latest.entries.len(), 1);
+    assert_eq!(
+        latest.entries[0].message["text"].as_str().unwrap().len(),
+        text.len()
+    );
+    let older = store
+        .archive_window(c.id, None, latest.next_before)
+        .unwrap();
+    assert_eq!(older.entries.len(), 1);
+    assert_eq!(
+        older.entries[0].message["text"].as_str().unwrap().len(),
+        text.len()
+    );
+    assert!(older.next_before.is_none());
+}
+
+#[test]
 fn supervisor_context_and_extracted_memory_use_the_target_branch_not_its_own_worktree() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("db")).unwrap();
@@ -1510,9 +1770,10 @@ fn usage_deduplicates_continuation_snapshots_and_preserves_unknown_coverage() {
     let project = store.snapshot().unwrap().projects[0].id;
     let message = |input, cost| {
         serde_json::json!({"id":"msg_usage","type":"assistant",
-        "model":{"providerID":"openai","id":"test"},"time":{"completed":1},
+        "model":{"providerID":"openai","id":"test"},"time":{"created":20,"completed":21},
         "tokens":{"input":input,"output":5,"reasoning":2,"cache":{"read":3,"write":0}},"cost":cost})
     };
+    let prompt = |id, created| json!({"id":agent_message_id(id),"type":"user","time":{"created":created}});
     let batch = |revision, messages, final_scan_complete| ReportArchive {
         ownership_epoch: 1,
         batch: ArchiveBatch {
@@ -1523,7 +1784,7 @@ fn usage_deduplicates_continuation_snapshots_and_preserves_unknown_coverage() {
             messages,
         },
     };
-    let initial = batch(1, vec![message(10, 0.1)], false);
+    let initial = batch(1, vec![prompt(first.id, 10), message(10, 0.1)], false);
     store
         .report_archive(first.runner_id, first.id, initial.clone())
         .unwrap();
@@ -1675,6 +1936,24 @@ fn usage_deduplicates_continuation_snapshots_and_preserves_unknown_coverage() {
     let store = Store::open(&path).unwrap();
     assert_eq!(store.project_usage(project).unwrap(), report);
     assert!(store.project_usage(ProjectId::new()).is_err());
+    let totals = store.desktop_snapshot().unwrap().token_totals;
+    assert_eq!(totals.by_session, [(first.id, 17)].into());
+    assert_eq!(totals.by_execution, [(first.id, 17)].into());
+
+    let mut followup = message(25, 0.1);
+    followup["id"] = json!("msg_followup");
+    followup["time"] = json!({"created":40});
+    let mut manual = message(5, 0.1);
+    manual["id"] = json!("msg_manual_response");
+    manual["time"] = json!({"created":60});
+    store.report_archive(next.runner_id, next.id, batch(2, vec![
+        prompt(first.id, 10), message(12, 0.2), prompt(next.id, 30), followup,
+        json!({"id":"msg_manual_prompt","type":"user","time":{"created":50}}), manual,
+    ], false)).unwrap();
+    let totals = store.desktop_snapshot().unwrap().token_totals;
+    assert_eq!(totals.by_session, [(first.id, 57)].into());
+    assert_eq!(totals.by_execution, [(first.id, 17), (next.id, 30)].into());
+    assert!(store.snapshot().unwrap().token_totals.by_session.is_empty());
 }
 
 #[test]
@@ -1801,6 +2080,8 @@ fn interrupted_native_session_requires_confirmation_archive_and_explicit_release
 fn command(store: &Store) -> RunnerCommand {
     let p = store
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "archive".into(),
             repository: "/repo".into(),

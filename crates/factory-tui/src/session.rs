@@ -376,6 +376,7 @@ mod tests {
     #[test]
     fn transcript_shows_conversation_tools_and_explicit_truncation_without_terminal_controls() {
         let excerpt = SessionExcerpt {
+            session_title: None,
             session_id: "session".into(),
             revision: Revision(1),
             captured_unix_ms: 0,

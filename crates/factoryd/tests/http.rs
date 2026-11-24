@@ -5,6 +5,226 @@ use reqwest::{Client, StatusCode};
 const TOKEN: &str = "test-only-credential-0123456789abcdef";
 
 #[tokio::test]
+async fn task_edit_endpoint_reserves_full_payload_and_requires_owner_to_release() {
+    use factory_protocol::client::FactoryClient;
+    let server = server().await;
+    let client = FactoryClient::new(&server.url, TOKEN).unwrap();
+    let project:Project=serde_json::from_value(client.management_request("POST","/v1/projects",&serde_json::json!({"request_id":RequestId::new(),"name":"Bearbeiten","repository":"factory:managed","base_branch":"main"})).await.unwrap()).unwrap();
+    let file = PromptFile::from_bytes("grüße.txt".into(), "Vollständige Daten".as_bytes()).unwrap();
+    let mut submission = SubmitTask {
+        edit_token: None,
+        task: SaveTask {
+            request_id: RequestId::new(),
+            id: None,
+            expected_revision: Revision(0),
+            project_id: project.id,
+            prompt: "Noch nicht verarbeitet".into(),
+            images: vec![],
+            requested_session: None,
+        },
+        draft: false,
+        files: vec![file.clone()],
+    };
+    let ticket: Ticket = serde_json::from_value(
+        client
+            .management_request(
+                "POST",
+                "/v1/tasks/submit",
+                &serde_json::to_value(&submission).unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let snapshot = client.desktop_snapshot().await.unwrap();
+    assert_eq!(
+        snapshot.editable_tasks.get(&ticket.id),
+        Some(&ticket.revision)
+    );
+    assert!(snapshot.tickets[0].files[0].data.is_empty());
+    let body = BeginTaskEdit {
+        request_id: RequestId::new(),
+        expected_revision: ticket.revision,
+        edit_token: None,
+    };
+    let edit: TaskEdit = serde_json::from_value(
+        client
+            .management_request(
+                "POST",
+                &format!("/v1/tasks/{}/edit", ticket.id),
+                &serde_json::to_value(&body).unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(edit.edit_token, body.request_id);
+    assert_eq!(edit.ticket.files, vec![file]);
+    assert!(edit.ticket.draft);
+    submission.task.id = Some(ticket.id);
+    submission.task.request_id = RequestId::new();
+    submission.task.expected_revision = edit.ticket.revision;
+    assert!(client
+        .management_request(
+            "POST",
+            "/v1/tasks/submit",
+            &serde_json::to_value(&submission).unwrap()
+        )
+        .await
+        .is_err());
+    submission.edit_token = Some(edit.edit_token);
+    let saved: Ticket = serde_json::from_value(
+        client
+            .management_request(
+                "POST",
+                "/v1/tasks/submit",
+                &serde_json::to_value(&submission).unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!saved.draft);
+}
+
+#[tokio::test]
+async fn client_observations_are_authenticated_distinct_and_ephemeral() {
+    let srv = server().await;
+    let http = Client::new();
+    let id = RequestId::new().to_string();
+    let path = "/v1/desktop/clients";
+    // The observer itself has no client header and must not become a client node.
+    let read = || request(&http, &srv, reqwest::Method::GET, path);
+    assert!(read()
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<ClientPresence>>()
+        .await
+        .unwrap()
+        .is_empty());
+    let unauth = http
+        .get(format!("{}{path}", srv.url))
+        .header(VERSION_HEADER, "1")
+        .header("x-factory-client-id", &id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+    assert!(read()
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<ClientPresence>>()
+        .await
+        .unwrap()
+        .is_empty());
+    for (id, kind) in [(&id, "desktop"), (&RequestId::new().to_string(), "tui")] {
+        assert!(read()
+            .header("x-factory-client-id", id)
+            .header("x-factory-client-kind", kind)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success());
+    }
+    let observed = read()
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<ClientPresence>>()
+        .await
+        .unwrap();
+    assert_eq!(observed.len(), 2);
+    assert!(observed.iter().any(|c| c.name == "Desktop"));
+    assert!(observed.iter().any(|c| c.name == "CLI / TUI"));
+    assert!(observed.iter().all(|c| c.observed_unix_ms > 0));
+    // Repeated calls from the same instance update rather than duplicate it.
+    let body = read()
+        .header("x-factory-client-id", &id)
+        .header("x-factory-client-kind", "desktop")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!body.contains(TOKEN));
+    assert_eq!(
+        serde_json::from_str::<Vec<ClientPresence>>(&body)
+            .unwrap()
+            .len(),
+        2
+    );
+    let other = server().await;
+    assert!(request(&http, &other, reqwest::Method::GET, path)
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<ClientPresence>>()
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn project_deletion_management_client_is_confirmed_and_replayed() {
+    let server = server().await;
+    let client = factory_protocol::client::FactoryClient::new(&server.url, TOKEN).unwrap();
+    let p: Project = serde_json::from_value(
+        client
+            .management_request(
+                "POST",
+                "/v1/projects",
+                &serde_json::to_value(CreateProject {
+                    runner_mapping: None,
+                    key: None,
+                    request_id: RequestId::new(),
+                    name: "Löschen bestätigen".into(),
+                    repository: "factory:managed".into(),
+                    base_branch: "main".into(),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let path = format!("/v1/projects/{}", p.id);
+    let wrong = serde_json::to_value(DeleteProject {
+        request_id: RequestId::new(),
+        expected_revision: p.revision,
+        confirm_name: "nicht bestätigt".into(),
+    })
+    .unwrap();
+    assert!(client
+        .management_request("DELETE", &path, &wrong)
+        .await
+        .is_err());
+    let body = serde_json::to_value(DeleteProject {
+        request_id: RequestId::new(),
+        expected_revision: p.revision,
+        confirm_name: p.name.clone(),
+    })
+    .unwrap();
+    let receipt = client
+        .management_request("DELETE", &path, &body)
+        .await
+        .unwrap();
+    assert_eq!(receipt["deleted"], true);
+    assert_eq!(
+        client
+            .management_request("DELETE", &path, &body)
+            .await
+            .unwrap(),
+        receipt
+    );
+    let snapshot = client.snapshot().await.unwrap();
+    assert!(snapshot.projects.is_empty());
+}
+
+#[tokio::test]
 async fn command_poll_requires_current_runner_registration() {
     let server = server().await;
     let client = Client::new();
@@ -116,6 +336,8 @@ async fn project_ticket_routes_expose_revision_conflicts_and_durable_event_curso
     let client = Client::new();
     let project = request(&client, &server, reqwest::Method::POST, "/v1/projects")
         .json(&CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "api-test".into(),
             repository: "/tmp/repo".into(),

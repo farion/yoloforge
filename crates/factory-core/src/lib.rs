@@ -174,6 +174,8 @@ pub struct Device {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionExcerpt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
     pub session_id: String,
     pub revision: Revision,
     pub captured_unix_ms: u64,
@@ -469,6 +471,8 @@ pub struct ContextTokenCount {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PromptFile>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -669,6 +673,13 @@ pub struct Revision(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_mapping: Option<ProjectRunnerMapping>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    /// Removed from normal operation; history and repository files are retained.
+    #[serde(default)]
+    pub deleted: bool,
     #[serde(default = "default_session_limit")]
     pub max_sessions: u8,
     #[serde(default)]
@@ -685,6 +696,12 @@ pub struct Project {
     pub created_unix_ms: u64,
     #[serde(default)]
     pub profile: ExecutionProfile,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRunnerMapping {
+    Automatic,
+    Runner(RunnerId),
 }
 /// Project harness settings and the selected execution-host binding. No credentials.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -707,6 +724,14 @@ pub struct ProjectLocation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Ticket {
+    /// Stable project-scoped human reference, e.g. WOAI-1; never part of the prompt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    /// Older clients created released tickets. Missing field preserves that behavior.
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<PromptFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_command: Option<CommandId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

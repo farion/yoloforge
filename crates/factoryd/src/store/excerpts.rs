@@ -30,6 +30,9 @@ impl Store {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let command = super::work::command(&tx, id, runner, body.ownership_epoch)?;
         let value = body.excerpt;
+        if let Some(title) = &value.session_title {
+            line(title, 2048)?;
+        }
         if command.kind != CommandKind::RunAgent || command.state == CommandState::Pending {
             return Err(StoreError::WorkConflict);
         }

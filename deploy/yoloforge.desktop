@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=YoloForge
+Comment=Aufgaben, Fragen und OpenCode-Sessions verwalten
+Exec=yoloforge-gui
+Icon=yoloforge
+Terminal=false
+Categories=Development;
+StartupNotify=true

@@ -5,7 +5,7 @@ pub(super) fn budget_reason(reason: &str) -> bool {
 
 pub(super) fn load(tx: &Transaction<'_>, id: ProjectId) -> Result<TokenBudget> {
     let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+        "SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",
         [id.to_string()],
         |r| r.get(0),
     )?;
@@ -32,7 +32,7 @@ pub(super) fn load(tx: &Transaction<'_>, id: ProjectId) -> Result<TokenBudget> {
 fn bucket(role: &str) -> &'static str {
     match role {
         "" | "work" => "work",
-        "orchestrator-memory" => "memory",
+        "memorizer" | "orchestrator-memory" => "memory",
         _ => "orchestration",
     }
 }
@@ -105,6 +105,8 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let project = store
             .create_project(CreateProject {
+                runner_mapping: None,
+                key: None,
                 request_id: RequestId::new(),
                 name: "budget".into(),
                 repository: "/repo".into(),
@@ -143,7 +145,7 @@ mod tests {
         assert_eq!(store.token_budget(project.id).unwrap(), saved);
         let mut db = store.0.lock().unwrap();
         let tx = db.transaction().unwrap();
-        for role in ["", "work", "orchestrator-memory"] {
+        for role in ["", "work", "memorizer", "orchestrator-memory"] {
             assert!(admit(&tx, project.id, role).is_err());
         }
         for role in ["supervisor", "orchestrator", "orchestrator-question"] {

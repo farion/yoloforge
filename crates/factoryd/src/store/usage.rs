@@ -12,7 +12,7 @@ impl Store {
 
 pub(super) fn usage_in(tx: &Transaction<'_>, project: ProjectId) -> Result<ProjectUsage> {
     let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+        "SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",
         [project.to_string()],
         |r| r.get(0),
     )?;
@@ -82,4 +82,77 @@ pub(super) fn usage_in(tx: &Transaction<'_>, project: ProjectId) -> Result<Proje
     }
     Ok(ProjectUsage { token_budget:Some(super::token_budgets::load(tx,project)?),project_id:project,groups:groups.into_values().collect(),
             source:"Latest archived native messages; incomplete coverage possible; reported cost is not an invoice; reasoning/cache counters are separate and must not be summed blindly".into() })
+}
+
+/// Continuation archives can contain the entire native conversation. Deduplicate
+/// each message across executions and attribute task usage by its native prompt,
+/// not by whichever execution last archived the message.
+pub(super) fn observed_token_totals(
+    tx: &Transaction<'_>,
+    commands: &[RunnerCommand],
+) -> Result<ObservedTokenTotals> {
+    use std::collections::BTreeMap;
+
+    let prompts: BTreeMap<_, _> = commands
+        .iter()
+        .filter(|c| c.kind == CommandKind::RunAgent)
+        .map(|c| (agent_message_id(c.id), (c.session_root(), c.id)))
+        .collect();
+    let mut stmt = tx.prepare(
+        "WITH latest AS (
+            SELECT MAX(sequence) AS sequence FROM archive_messages GROUP BY command_id,message_id
+         ), messages AS (
+            SELECT COALESCE(json_extract(c.data,'$.agent_spec.continuation.root_command_id'),c.id) AS root,
+                m.message_id,m.sequence,c.rowid AS command_order,
+                json_extract(m.data,'$.type') AS kind,
+                CASE WHEN json_type(m.data,'$.time.created')='integer'
+                     THEN json_extract(m.data,'$.time.created') END AS created,
+                json_extract(m.data,'$.tokens') AS tokens
+            FROM latest JOIN archive_messages m USING(sequence) JOIN commands c ON c.id=m.command_id
+         ), samples AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY root,message_id ORDER BY command_order DESC,sequence DESC) AS rank
+            FROM messages WHERE kind IN ('user','assistant')
+         )
+         SELECT root,message_id,kind,created,tokens FROM samples WHERE rank=1
+         ORDER BY root,created,(kind!='user'),sequence",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut totals = ObservedTokenTotals::default();
+    let mut session = None;
+    let mut execution = None;
+    while let Some(row) = rows.next()? {
+        let Ok(root) = row.get::<_, String>(0)?.parse::<CommandId>() else {
+            continue;
+        };
+        if session != Some(root) {
+            session = Some(root);
+            execution = None;
+        }
+        let kind = row.get::<_, String>(2)?;
+        let has_time = row.get::<_, Option<i64>>(3)?.is_some_and(|t| t >= 0);
+        if kind == "user" {
+            let id = row.get::<_, String>(1)?;
+            execution = prompts
+                .get(&id)
+                .filter(|(session, _)| has_time && *session == root)
+                .map(|(_, command)| *command);
+            continue;
+        }
+        let Some(tokens) = row
+            .get::<_, Option<String>>(4)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<TokenUsage>(&raw).ok())
+            .and_then(|tokens| tokens.input.checked_add(tokens.output))
+        else {
+            continue;
+        };
+        let total = totals.by_session.entry(root).or_default();
+        *total = total.saturating_add(tokens);
+        if let Some(id) = execution.filter(|_| has_time) {
+            let total = totals.by_execution.entry(id).or_default();
+            *total = total.saturating_add(tokens);
+        }
+    }
+    Ok(totals)
 }

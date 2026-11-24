@@ -835,6 +835,7 @@ impl Dialog {
                 }
                 let harness = self.harness_edit()?;
                 Request::SetupProject(Box::new(SetupProject {
+                    key: None,
                     request_id,
                     project_id,
                     expected_revision,
@@ -907,6 +908,8 @@ impl Dialog {
                 },
             ),
             Target::NewProject => Request::Project(CreateProject {
+                runner_mapping: None,
+                key: None,
                 request_id,
                 name: value(0),
                 repository: value(1),
@@ -919,6 +922,8 @@ impl Dialog {
                 Request::UpdateProject(
                     id,
                     UpdateProject {
+                        runner_mapping: None,
+                        key: None,
                         request_id,
                         expected_revision,
                         name: self.fields[0].changed(),
@@ -1614,6 +1619,7 @@ mod tests {
         s.runners.push(RunnerView {
             id: runner,
             name: "Laptop".into(),
+            capabilities: vec![],
             location: RunnerLocation::Local,
             version: "test".into(),
             connection: ConnectionState::Online,
@@ -1707,6 +1713,7 @@ mod tests {
         s.runners.push(RunnerView {
             id: runner,
             name: "Local-Test".into(),
+            capabilities: vec![],
             location: RunnerLocation::Local,
             version: "test".into(),
             connection: ConnectionState::Online,
@@ -1738,6 +1745,7 @@ mod tests {
             s.runners.push(RunnerView {
                 id,
                 name: "host".into(),
+                capabilities: vec![],
                 location: RunnerLocation::Local,
                 version: "test".into(),
                 connection: ConnectionState::Online,
@@ -1843,6 +1851,7 @@ mod tests {
         s.runners.push(RunnerView {
             id: runner,
             name: "local".into(),
+            capabilities: vec![],
             location: RunnerLocation::Local,
             version: "test".into(),
             connection: ConnectionState::Online,

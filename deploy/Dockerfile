@@ -11,6 +11,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && groupadd --gid 10001 factory && useradd --uid 10001 --gid factory --no-create-home factory \
     && install -d -o factory -g factory -m 0700 /data
 COPY --from=build /src/target/release/factoryd /usr/local/bin/factoryd
+COPY deploy/install-opencode.sh /tmp/install-opencode.sh
+RUN sh /tmp/install-opencode.sh && rm /tmp/install-opencode.sh
 COPY --chmod=0755 scripts/factory-backup.py /usr/local/bin/factory-backup
 USER 10001:10001
 WORKDIR /data

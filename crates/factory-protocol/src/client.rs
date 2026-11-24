@@ -39,7 +39,187 @@ impl fmt::Display for ClientError {
 }
 impl std::error::Error for ClientError {}
 
+#[derive(Debug)]
+pub struct RequestFailure {
+    pub error: ClientError,
+    pub message: Option<String>,
+}
+impl From<ClientError> for RequestFailure {
+    fn from(error: ClientError) -> Self {
+        Self {
+            error,
+            message: None,
+        }
+    }
+}
+
 impl FactoryClient {
+    pub async fn desktop_snapshot(&self) -> Result<Snapshot, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/desktop/snapshot", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn task_payload(&self, id: TicketId) -> Result<Ticket, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/tasks/{id}", self.base))
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn archive_window(
+        &self,
+        id: CommandId,
+        after: Option<u64>,
+        before: Option<u64>,
+    ) -> Result<ArchiveWindow, ClientError> {
+        self.archive_view(id, after, before, false).await
+    }
+    pub async fn conversation_window(
+        &self,
+        id: CommandId,
+        after: Option<u64>,
+        before: Option<u64>,
+    ) -> Result<ArchiveWindow, ClientError> {
+        self.archive_view(id, after, before, true).await
+    }
+    async fn archive_view(
+        &self,
+        id: CommandId,
+        after: Option<u64>,
+        before: Option<u64>,
+        conversation: bool,
+    ) -> Result<ArchiveWindow, ClientError> {
+        let mut request = self
+            .http
+            .get(format!("{}/v1/commands/{id}/archive/window", self.base));
+        if conversation {
+            request = request.query(&[("conversation", true)]);
+        }
+        if let Some(after) = after {
+            request = request.query(&[("after", after)]);
+        }
+        if let Some(before) = before {
+            request = request.query(&[("before", before)]);
+        }
+        Self::decode(request.send().await).await
+    }
+    /// Same-origin structured administration; never follow a user-provided URL.
+    pub async fn management_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        self.management_request_detailed(method, path, body)
+            .await
+            .map_err(|e| e.error)
+    }
+    pub async fn management_request_detailed(
+        &self,
+        method: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, RequestFailure> {
+        if !path.starts_with("/v1/") || path.contains("..") || path.contains(['#', '\\']) {
+            return Err(ClientError::InvalidResponse.into());
+        }
+        let request = match method {
+            "GET" => self.http.get(format!("{}{path}", self.base)),
+            "POST" => self.http.post(format!("{}{path}", self.base)).json(body),
+            "PUT" => self.http.put(format!("{}{path}", self.base)).json(body),
+            "PATCH" => self.http.patch(format!("{}{path}", self.base)).json(body),
+            "DELETE" => self.http.delete(format!("{}{path}", self.base)).json(body),
+            _ => return Err(ClientError::InvalidResponse.into()),
+        };
+        let request = if method == "POST" && path.starts_with("/v1/model-settings/accesses/")
+            && path.ends_with("/openai/oauth/complete") {
+            request.timeout(Duration::from_secs(310))
+        } else {
+            request
+        };
+        let response = request
+            .send()
+            .await
+            .map_err(|_| RequestFailure::from(ClientError::Transport))?;
+        let status = response.status();
+        if !status.is_success() {
+            let api = response.json::<ApiError>().await.ok();
+            return Err(RequestFailure {
+                error: ClientError::Http {
+                    status,
+                    code: api.as_ref().map(|e| e.code.clone()),
+                    current_revision: api.as_ref().and_then(|e| e.current_revision),
+                },
+                message: api.map(|e| e.message),
+            });
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| ClientError::InvalidResponse.into())
+    }
+    pub async fn instances(&self) -> Result<Vec<OpenCodeInstance>, ClientError> {
+        Self::decode(
+            self.http
+                .get(format!("{}/v1/instances", self.base))
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn report_instances(
+        &self,
+        runner: RunnerId,
+        registration: RegistrationId,
+        body: &ReportInstances,
+    ) -> Result<(), ClientError> {
+        Self::decode(
+            self.http
+                .put(format!("{}/v1/runners/{runner}/instances", self.base))
+                .header(RUNNER_HEADER, registration.to_string())
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn notifications(
+        &self,
+        before: Option<u64>,
+    ) -> Result<NotificationPage, ClientError> {
+        let mut request = self.http.get(format!("{}/v1/notifications", self.base));
+        if let Some(before) = before {
+            request = request.query(&[("before", before)]);
+        }
+        Self::decode(request.send().await).await
+    }
+    pub async fn mark_notifications(&self, body: &MarkNotifications) -> Result<(), ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/notifications/read", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
+    pub async fn submit_task(&self, body: &SubmitTask) -> Result<Ticket, ClientError> {
+        Self::decode(
+            self.http
+                .post(format!("{}/v1/tasks/submit", self.base))
+                .json(body)
+                .send()
+                .await,
+        )
+        .await
+    }
     pub async fn archive_files(
         &self,
         id: CommandId,
@@ -1103,6 +1283,16 @@ impl FactoryClient {
     }
 
     pub fn new(url: &str, token: &str) -> Result<Self> {
+        Self::new_with_desktop_id(url, token, None)
+    }
+
+    /// Reuse an installation identity across Desktop restarts and reconnects.
+    /// The server still scopes this claim to the authenticated principal.
+    pub fn new_desktop(url: &str, token: &str, desktop_id: RequestId) -> Result<Self> {
+        Self::new_with_desktop_id(url, token, Some(desktop_id))
+    }
+
+    fn new_with_desktop_id(url: &str, token: &str, desktop_id: Option<RequestId>) -> Result<Self> {
         let parsed = Url::parse(url)?;
         ensure!(
             parsed.username().is_empty()
@@ -1127,6 +1317,30 @@ impl FactoryClient {
         auth.set_sensitive(true);
         headers.insert(header::AUTHORIZATION, auth);
         headers.insert(VERSION_HEADER, header::HeaderValue::from_static("1"));
+        headers.insert(
+            "x-factory-client-id",
+            header::HeaderValue::from_str(&desktop_id.unwrap_or_else(RequestId::new).to_string())?,
+        );
+        let executable = std::env::current_exe().ok();
+        let name = executable
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let kind = if desktop_id.is_some() {
+            "desktop"
+        } else {
+            match name {
+                "yoloforge-gui" => "desktop",
+                "factory" | "yoloforge" => "tui",
+                "factory-runner" => "runner",
+                _ => "api",
+            }
+        };
+        headers.insert(
+            "x-factory-client-kind",
+            header::HeaderValue::from_static(kind),
+        );
         Ok(Self {
             http: Client::builder()
                 .default_headers(headers)

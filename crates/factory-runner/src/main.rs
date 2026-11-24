@@ -18,6 +18,8 @@ mod containment;
 mod hosting;
 mod journal;
 mod managed;
+mod managed_opencode;
+mod presence;
 mod publication;
 mod questions;
 mod recovery;
@@ -57,6 +59,9 @@ struct Args {
     /// Explicit native OpenCode service registration. Re-read on every heartbeat.
     #[arg(long)]
     opencode_registration: Option<PathBuf>,
+    /// Factory-owned OpenCode v2.4.1 runtime; JSON with binary, port, and optional config.
+    #[arg(long, conflicts_with = "opencode_registration")]
+    managed_opencode: Option<PathBuf>,
     #[arg(long)]
     journal: Option<PathBuf>,
     /// JSON object mapping Factory project IDs to existing local Git repositories.
@@ -192,6 +197,10 @@ async fn report(
     delivered?;
     record.reported = true;
     tokio::task::block_in_place(|| journal.save(&record))?;
+    // Cleanup failure must not replay the result; idle backfill retries it.
+    if let Err(error) = archive::archive_decision(journal, &mut record, args).await {
+        eprintln!("Decision session archival deferred for {}: {error}", record.command.id);
+    }
     println!("Command {} result confirmed", record.command.id);
     Ok(())
 }
@@ -549,6 +558,13 @@ async fn run(mut args: Args) -> Result<()> {
         );
         *root = root.canonicalize()?;
     }
+    let path = args
+        .journal
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!(".factory-data/runner-{}.sqlite3", args.id)));
+    if args.managed_opencode.is_some() {
+        args.opencode_registration = Some(managed_opencode::registration(&path, args.id));
+    }
     if let Some(id) = args.fetch_repository {
         return attach::fetch_repository(&args, id).await;
     }
@@ -562,10 +578,6 @@ async fn run(mut args: Args) -> Result<()> {
     if let Some(id) = args.publish_review {
         return hosting::publish(&args, &client, id).await;
     }
-    let path = args
-        .journal
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(format!(".factory-data/runner-{}.sqlite3", args.id)));
     let journal = Journal::open(&path, &args.server, args.id)?;
     if let Some(id) = args.rescan_archive_files {
         let mut record = journal
@@ -642,13 +654,32 @@ async fn run(mut args: Args) -> Result<()> {
         println!("Ergebnis bereitgestellt: {}", target.display());
         return Ok(());
     }
+    let mut managed_child = if let Some(settings) = &args.managed_opencode {
+        Some(managed_opencode::start(settings, args.opencode_registration.as_deref()
+            .expect("managed registration configured"), &args.server).await?)
+    } else {
+        None
+    };
     let instance_id = InstanceId::new();
     let mut registration: Option<Registration> = None;
     let mut was_connected = false;
     let mut waiting_for_registration = false;
     let mut next_command = 0;
     let mut next_cleanup = 0;
+    let mut next_presence = std::time::Instant::now();
+    let mut next_model_catalog = std::time::Instant::now() + Duration::from_secs(30);
     loop {
+        if let Some(child) = &mut managed_child {
+            anyhow::ensure!(child.try_wait()?.is_none(), "Verwaltetes OpenCode wurde beendet");
+            if std::time::Instant::now() >= next_model_catalog {
+                let settings = args.managed_opencode.as_deref().expect("managed settings");
+                let registration = args.opencode_registration.as_deref().expect("managed registration");
+                if managed_opencode::refresh(settings, registration, &args.server).await.is_err() {
+                    eprintln!("Factory-Modellkatalog nicht aktualisiert; kein lokaler Modell-Fallback");
+                }
+                next_model_catalog = std::time::Instant::now() + Duration::from_secs(30);
+            }
+        }
         let opencode = opencode_status(&args.opencode_registration).await;
         let result = if let Some(current) = &registration {
             client
@@ -671,6 +702,7 @@ async fn run(mut args: Args) -> Result<()> {
                         REVIEW_CAPABILITY.into(),
                         PROJECT_SETUP_CAPABILITY.into(),
                         TASK_IMAGES_CAPABILITY.into(),
+                        TASK_FILES_CAPABILITY.into(),
                         CONTEXT_PLANNING_CAPABILITY.into(),
                         LOCAL_PROJECT_CAPABILITY.into(),
                     ],
@@ -694,6 +726,16 @@ async fn run(mut args: Args) -> Result<()> {
                     println!("Runner {} connected; boot {}", args.id, current.boot_id);
                 }
                 was_connected = true;
+                if std::time::Instant::now() >= next_presence {
+                    // Observation must not block command processing indefinitely or turn a
+                    // missing optional endpoint on an older server into a runner failure.
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(8),
+                        presence::sync(&client, &journal, &args, current.registration_id),
+                    )
+                    .await;
+                    next_presence = std::time::Instant::now() + Duration::from_secs(10);
+                }
                 let command_result = commands(
                     &client,
                     &journal,

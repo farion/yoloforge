@@ -55,7 +55,7 @@ pub(super) fn create(tx: &Transaction<'_>, cmd: &RunnerCommand, owner: &Workstre
         8192,
     )?;
     let data: String = tx.query_row(
-        "SELECT data FROM projects WHERE id=?1",
+        "SELECT data FROM active_projects WHERE id=?1",
         [owner.project_id.to_string()],
         |r| r.get(0),
     )?;

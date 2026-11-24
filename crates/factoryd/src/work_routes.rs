@@ -337,11 +337,18 @@ pub(super) async fn pending_commands(
             .capabilities
             .iter()
             .any(|c| c == CONTEXT_PLANNING_CAPABILITY);
+        let files = guard.entries[&id]
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == TASK_FILES_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
             }
             store.pending(id).map(|mut commands| {
+                commands
+                    .retain(|c| files || c.agent_spec.as_ref().is_none_or(|s| s.files.is_empty()));
                 commands.retain(|c| {
                     setup || c.workspace_spec.as_ref().is_none_or(|s| s.setup.is_none())
                 });
@@ -429,6 +436,11 @@ pub(super) async fn ack_command(
         .capabilities
         .iter()
         .any(|c| c == CONTEXT_PLANNING_CAPABILITY);
+    let files = guard.entries[&runner]
+        .input
+        .capabilities
+        .iter()
+        .any(|c| c == TASK_FILES_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_context_planning_support(
             runner,
@@ -437,6 +449,7 @@ pub(super) async fn ack_command(
             context_planning,
         )?;
         store.require_image_support(runner, id, body.ownership_epoch, images)?;
+        store.require_file_support(runner, id, body.ownership_epoch, files)?;
         store.require_setup_support(runner, id, body.ownership_epoch, setup)?;
         store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;
         store.require_review_support(runner, id, body.ownership_epoch, reviews)?;

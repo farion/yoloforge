@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kind", choices=["server", "tui", "runner"], required=True)
+    parser.add_argument("--kind", choices=["server", "tui", "runner", "gui"], required=True)
     parser.add_argument("--os", choices=["linux", "windows"], required=True)
     parser.add_argument("--arch", choices=["x86_64", "aarch64"], required=True)
     parser.add_argument("--version", required=True)
@@ -26,7 +26,7 @@ def main():
         parser.error("Tag and Cargo version differ")
     if args.os == "windows" and (args.kind != "tui" or args.arch != "x86_64"):
         parser.error("Only the x86_64 TUI is currently supported on Windows")
-    binary = {"server": "factoryd", "tui": "yoloforge", "runner": "factory-runner"}[args.kind]
+    binary = {"server": "factoryd", "tui": "yoloforge", "runner": "factory-runner", "gui": "yoloforge-gui"}[args.kind]
     if args.os == "windows":
         binary += ".exe"
     name = f"yoloforge-{args.kind}-{args.version}-{args.os}-{args.arch}"
@@ -40,7 +40,7 @@ def main():
         shutil.copy2(args.binaries / binary, package / binary)
         shutil.copy2(ROOT / "LICENSE", package / "LICENSE")
         if args.kind == "server":
-            for source in ("deploy/package/Dockerfile", "deploy/package/compose.yaml", "scripts/factory-backup.py"):
+            for source in ("deploy/package/Dockerfile", "deploy/package/compose.yaml", "scripts/factory-backup.py", "deploy/install-opencode.sh"):
                 shutil.copy2(ROOT / source, package / Path(source).name)
             shutil.copytree(ROOT / "docs", package / "docs")
             (package / "README.md").write_text(
@@ -54,6 +54,12 @@ def main():
                 encoding="utf-8")
         elif args.kind == "tui":
             shutil.copy2(ROOT / "docs/client-installation.md", package / "README.md")
+        elif args.kind == "gui":
+            for helper in ("factoryd", "factory-runner"):
+                shutil.copy2(args.binaries / helper, package / helper)
+            shutil.copy2(ROOT / "docs/gui.md", package / "README.md")
+            shutil.copy2(ROOT / "deploy/yoloforge.desktop", package / "yoloforge.desktop")
+            shutil.copy2(ROOT / "deploy/yoloforge.svg", package / "yoloforge.svg")
         else:
             for source in ("deploy/factory-runner@.service", "deploy/runner.env.example", "docs/deployment.md"):
                 shutil.copy2(ROOT / source, package / Path(source).name)

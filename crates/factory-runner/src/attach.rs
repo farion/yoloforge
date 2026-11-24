@@ -65,6 +65,8 @@ pub async fn fetch_repository(args: &Args, id: CommandId) -> Result<()> {
 }
 
 pub async fn open(args: &Args, id: CommandId) -> Result<()> {
+    ensure!(args.managed_opencode.is_none() || args.session_readiness,
+        "Verwaltetes OpenCode unterstützt hier nur --session-readiness");
     let path = args
         .journal
         .clone()

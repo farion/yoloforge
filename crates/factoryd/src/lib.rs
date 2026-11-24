@@ -23,8 +23,11 @@ mod access;
 mod archive_routes;
 mod checkpoint_routes;
 mod compaction_routes;
+mod desktop;
 mod knowledge_routes;
 mod live;
+mod model_routes;
+pub mod model_gateway;
 mod review_routes;
 mod scheduler_routes;
 mod supervisor_routes;
@@ -42,6 +45,8 @@ struct Entry {
 }
 #[derive(Default)]
 struct Registry {
+    clients: BTreeMap<String, ClientPresence>,
+    instances: BTreeMap<RunnerId, Vec<OpenCodeInstance>>,
     entries: BTreeMap<RunnerId, Entry>,
     revision: Revision,
 }
@@ -74,6 +79,45 @@ pub fn router_with_shutdown(
         stopping,
     };
     Router::new()
+        .route("/v1/instances", get(desktop::instances))
+        .route("/v1/me", get(desktop::me))
+        .route("/v1/desktop/snapshot", get(desktop_snapshot))
+        .route("/v1/desktop/clients", get(desktop::clients))
+        .route("/v1/desktop/events", get(desktop::desktop_events))
+        .route("/v1/desktop/events/stream", get(live::desktop_event_stream))
+        .route("/v1/events/{id}", get(desktop::event_payload))
+        .route("/v1/tasks/{id}", get(desktop::task_payload))
+        .route("/v1/tasks/{id}/history", get(desktop::task_history))
+        .route("/v1/tasks/{id}/models", get(model_routes::task))
+        .route("/v1/model-settings", get(model_routes::factory).put(model_routes::set_factory))
+        .route("/v1/model-settings/setup", get(model_routes::setup))
+        .route("/v1/model-settings/accesses/{access}/status", get(model_gateway::status))
+        .route("/v1/model-settings/accesses/{access}/openai/oauth", post(model_gateway::begin))
+        .route("/v1/model-settings/accesses/{access}/openai/oauth/start", post(model_gateway::begin_named))
+        .route("/v1/model-settings/accesses/{access}/openai/oauth/complete", post(model_gateway::finish))
+        .route("/v1/model-settings/accesses/{access}/openai/oauth/cancel", post(model_gateway::cancel))
+        .route("/v1/projects/{id}/models", get(model_routes::project).put(model_routes::set_project))
+        .route("/v1/tasks/{id}/edit", post(desktop::begin_task_edit))
+        .route("/v1/commands/{id}", get(desktop::command_payload))
+        .route("/v1/events/history", get(desktop::event_history))
+        .route(
+            "/v1/commands/{id}/archive/window",
+            get(desktop::archive_window),
+        )
+        .route(
+            "/v1/commands/{id}/runtime-binding",
+            get(desktop::runtime_binding),
+        )
+        .route(
+            "/v1/runners/{runner}/instances",
+            axum::routing::put(desktop::report_instances),
+        )
+        .route("/v1/notifications", get(desktop::notifications))
+        .route("/v1/notifications/read", post(desktop::mark_notifications))
+        .route(
+            "/v1/notifications/status",
+            post(desktop::notification_states),
+        )
         .route(
             "/v1/projects/{id}/supervisor",
             get(supervisor_routes::read).put(supervisor_routes::configure),
@@ -140,7 +184,10 @@ pub fn router_with_shutdown(
             "/v1/runners/{runner}/commands/{command}/excerpt",
             axum::routing::put(report_excerpt),
         )
-        .route("/v1/projects/{id}", patch(update_project))
+        .route(
+            "/v1/projects/{id}",
+            patch(update_project).delete(review_routes::delete_project),
+        )
         .route("/v1/questions/{id}/answer", post(answer_question))
         .route(
             "/v1/runners/{runner}/commands/{command}/questions",
@@ -169,6 +216,13 @@ pub fn router_with_shutdown(
             "/v1/tasks",
             post(review_routes::task).layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024)),
         )
+        .route(
+            "/v1/tasks/submit",
+            post(review_routes::submit_task)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
+        .route("/v1/tasks/submit-with-model", post(model_routes::submit)
+            .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)))
         .route(
             "/v1/projects/{id}/scheduler",
             get(scheduler_routes::read).post(scheduler_routes::configure),
@@ -246,6 +300,17 @@ pub fn router_with_shutdown(
         })
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
+}
+
+pub fn router_with_model_gateway(
+    token: &str, store: Store, stopping: Arc<std::sync::atomic::AtomicBool>,
+    gateway: Option<model_gateway::Gateway>,
+) -> Router {
+    let router = router_with_shutdown(token, store.clone(), stopping);
+    match gateway {
+        Some(gateway) => router.layer(axum::Extension(gateway.clone())).merge(model_gateway::routes(gateway, store)),
+        None => router,
+    }
 }
 
 fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
@@ -347,6 +412,7 @@ async fn authenticate(State(app): State<App>, mut request: Request, next: Next) 
             "Device role does not permit this route",
         );
     }
+    desktop::observe_client(&app, &principal, request.headers()).await;
     request.extensions_mut().insert(principal);
     next.run(request).await
 }
@@ -516,13 +582,56 @@ async fn heartbeat(
     registration(&app, body.registration_id).into_response()
 }
 async fn snapshot(State(app): State<App>) -> Response {
+    snapshot_response(app, false).await
+}
+async fn desktop_snapshot(State(app): State<App>) -> Response {
+    snapshot_response(app, true).await
+}
+async fn snapshot_response(app: App, compact: bool) -> Response {
     let store = app.store.clone();
-    let durable = match tokio::task::spawn_blocking(move || store.snapshot()).await {
+    let durable = match tokio::task::spawn_blocking(move || {
+        let mut snapshot = if compact {
+            store.desktop_snapshot()?
+        } else {
+            store.snapshot()?
+        };
+        if compact {
+            for ticket in &mut snapshot.tickets {
+                for image in &mut ticket.images {
+                    image.data = String::new();
+                }
+                for file in &mut ticket.files {
+                    file.data = String::new();
+                }
+            }
+            for command in &mut snapshot.commands {
+                if let Some(spec) = &mut command.agent_spec {
+                    for image in &mut spec.images {
+                        image.data = String::new();
+                    }
+                    for file in &mut spec.files {
+                        file.data = String::new();
+                    }
+                }
+            }
+        }
+        Ok::<_, StoreError>(snapshot)
+    })
+    .await
+    {
         Ok(Ok(value)) => value,
         _ => return db_error(StoreError::Internal, RequestId::new()),
     };
     let registry = app.registry.read().await;
     Json(Snapshot {
+        token_totals: durable.token_totals,
+        session_activity_unix_ms: durable.session_activity_unix_ms,
+        editable_tasks: durable.editable_tasks,
+        session_titles: durable.session_titles,
+        payloads_deferred: compact,
+        session_closures: durable.session_closures,
+        compactions: durable.compactions,
+        runtime_terminations: durable.runtime_terminations,
         scheduler_policies: durable.scheduler_policies,
         token_budgets: durable.token_budgets,
         protocol_version: PROTOCOL_VERSION,
@@ -533,6 +642,7 @@ async fn snapshot(State(app): State<App>) -> Response {
             .entries
             .iter()
             .map(|(id, e)| RunnerView {
+                capabilities: e.input.capabilities.clone(),
                 id: *id,
                 name: e.input.name.clone(),
                 location: e.input.location,

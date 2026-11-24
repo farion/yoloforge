@@ -20,6 +20,27 @@ Scheduler-Ablauf.
 
 ## Ausführung
 
+### Archivierung technischer Entscheidungssessions
+
+Orchestrator-, Rückfragen-, Memorizer- und Supervisor-Auswertungen verwenden kurze,
+eigene OpenCode-Sessions. Nach bestätigter Ergebnisübernahme und vollständiger
+Archivübertragung archiviert der Runner diese Sessions auch in OpenCode.
+Laufende Auswertungen und Sessions mit offenen Eingaben bleiben unverändert;
+Arbeitssessions werden nicht automatisch archiviert. Verläufe werden nicht gelöscht.
+Der Leerlauf-Nachlauf holt dies auch für ältere, bereits bestätigte Aufträge aus
+dem Runner-Journal nach. Fehler werden mit begrenztem Retry-Abstand erneut versucht;
+ein Neustart oder eine verlorene Bestätigung löst keine erneute Agentenausführung aus.
+
+Die GUI bietet getrennte Projektseiten **Orchestrator**, **Supervisor** und
+**Memorizer**, jeweils
+mit **Offen** und **Archiv**. Die Sessionlisten und Instanzzähler sind nach Rolle
+getrennt; Rückfragenauswertungen gehören zum Orchestrator, Wissensextraktion zum Memorizer.
+Terminale Auswertungen erscheinen im Archiv, unabhängig davon, ob die native
+OpenCode-Archivierung bereits erreichbar war. Auch fehlgeschlagene Auswertungen
+bleiben dort lesbar; Suchfeld und Zähler gelten für den jeweiligen Tab.
+Verteilung, Sessionlimit, Supervisor-Konfiguration und Supervisorhistorie liegen
+unter **Erweiterte Projekteinstellungen**, nicht oberhalb der Sessionlisten.
+
 Ohne feste Auswahl erzeugt der Scheduler einen dauerhaften, schreibgeschützten
 OpenCode-Auftrag im projektbezogenen Orchestrator-Arbeitsbereich. Das Modell erhält
 Prompt, Bilder und höchstens 16 aktuelle Sessionkandidaten mit Ziel und Zusammenfassung.

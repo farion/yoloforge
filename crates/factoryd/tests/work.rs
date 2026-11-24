@@ -5,6 +5,8 @@ use factoryd::store::{Store, StoreError};
 fn project(store: &Store) -> Project {
     store
         .create_project(CreateProject {
+            runner_mapping: None,
+            key: None,
             request_id: RequestId::new(),
             name: "work".into(),
             repository: "/tmp/repo".into(),
@@ -177,6 +179,9 @@ fn migration_from_v1_preserves_projects_and_adds_work_tables() {
     db.execute_batch(include_str!("../migrations/001_initial.sql"))
         .unwrap();
     let p = Project {
+        runner_mapping: None,
+        key: String::new(),
+        deleted: false,
         max_sessions: default_session_limit(),
         paused: false,
         runner_bindings: Default::default(),
@@ -197,7 +202,9 @@ fn migration_from_v1_preserves_projects_and_adds_work_tables() {
     drop(db);
     let store = Store::open(&path).unwrap();
     let snap = store.snapshot().unwrap();
-    assert_eq!(snap.projects, vec![p]);
+    let mut expected=p;
+    expected.key="BM".into();
+    assert_eq!(snap.projects, vec![expected]);
     assert!(snap.streams.is_empty());
     assert!(snap.commands.is_empty());
 }

@@ -1,0 +1,2045 @@
+use crate::{
+    app::{badge, App, AMBER, BLUE, GREEN, MUTED, RED},
+    backend::ArchiveRead,
+    conversation, design,
+    dialogs::{json_read, Dialog},
+    model::*,
+};
+use egui::{self, RichText};
+use factory_core::*;
+use factory_protocol::*;
+use serde_json::json;
+use std::collections::BTreeMap;
+
+impl App {
+    pub fn draw_shell(&mut self, ctx: &egui::Context) {
+        if let Some(snapshot) = &self.snapshot {
+            self.factory_flow.observe(&self.server, snapshot, self.online, crate::overview::now_ms());
+        }
+        // Migrate the former settings page from saved desktop navigation.
+        if self.settings.page == Page::Settings {
+            self.settings.page = Page::Tasks;
+            self.settings_dirty = true;
+            self.dialog = Some(Dialog::FactorySettings);
+        }
+        let snapshot = self.snapshot.clone();
+        egui::TopBottomPanel::top("tabs")
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(17, 20, 26))
+                    .inner_margin(10),
+            )
+            .show(ctx, |ui| self.header_tabs(ui));
+        let _footer = egui::TopBottomPanel::bottom("connection-status")
+            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(design::FOOTER_MARGIN))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let connect = design::icon_button(
+                        ui,
+                        egui_phosphor::regular::PLUGS_CONNECTED,
+                        "Verbindungsübersicht",
+                        true,
+                    );
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::new("test-footer-connect"), connect.rect)
+                    });
+                    if connect.clicked() {
+                        self.dialog = Some(Dialog::ConnectionInfo);
+                    }
+                    let width = (ui.available_width() - 230.0).max(30.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, 36.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            let text = ui
+                                .vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    let color = if self.online { GREEN } else { AMBER };
+                                    let status = ui.colored_label(
+                                        color,
+                                        if self.online { "Verbunden" } else { "Offline" },
+                                    );
+                                    let url = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(&self.server).color(color),
+                                            )
+                                            .truncate(),
+                                        )
+                                        .on_hover_text(&self.server);
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d| {
+                                        d.insert_temp(
+                                            egui::Id::new("test-footer-lines"),
+                                            (status.rect, url.rect),
+                                        )
+                                    });
+                                    #[cfg(not(test))]
+                                    let _ = (status, url);
+                                })
+                                .response;
+                            #[cfg(test)]
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(egui::Id::new("test-footer-text"), text.rect)
+                            });
+                            #[cfg(not(test))]
+                            let _ = text;
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                        let settings = design::icon_button(
+                            ui, egui_phosphor::regular::GEAR, "Factory-Einstellungen", true,
+                        );
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(
+                            egui::Id::new("test-footer-settings"), settings.rect,
+                        ));
+                        if settings.clicked() {
+                            self.dialog = Some(Dialog::FactorySettings);
+                        }
+                        let _version = ui.label(
+                            RichText::new(format!("YoloForge {}", env!("CARGO_PKG_VERSION")))
+                                .color(MUTED),
+                        );
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(egui::Id::new("test-footer-version"), _version.rect)
+                        });
+                    });
+                });
+            });
+        #[cfg(test)]
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("test-footer-panel"), _footer.response.rect));
+        if self.active_tab == 0 {
+            egui::SidePanel::left("sidebar")
+                .exact_width(300.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_rgb(19, 22, 28))
+                        .inner_margin(18),
+                )
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("sidebar-scroll")
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = design::MAIN_MENU_ITEM_GAP;
+                            let page = self.page();
+                            let reveal_selected = ui.ctx().data_mut(|data| {
+                                let id = egui::Id::new("sidebar-last-page");
+                                let changed = data.get_temp::<Page>(id) != Some(page);
+                                data.insert_temp(id, page);
+                                changed
+                            });
+                            ui.colored_label(MUTED, "PROJEKT");
+                            let mut selected_project = self.settings.project;
+                            ui.horizontal(|ui| {
+                                let width =
+                                    (ui.available_width() - 36.0 - ui.spacing().item_spacing.x)
+                                        .max(60.0);
+                                let _selector = egui::ComboBox::from_id_salt("project-select")
+                                    .width(width)
+                                    .wrap_mode(egui::TextWrapMode::Truncate)
+                                    .selected_text(
+                                        self.project().map_or_else(||"Projekt auswählen".into(),|p|
+                                            if p.key.is_empty(){p.name.clone()}else{format!("{} · {}",p.key,p.name)}),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        if let Some(s) = &snapshot {
+                                            for project in &s.projects {
+                                                ui.selectable_value(
+                                                    &mut selected_project,
+                                                    Some(project.id),
+                                                    if project.key.is_empty(){project.name.clone()}
+                                                    else{format!("{} · {}",project.key,project.name)},
+                                                );
+                                            }
+                                        }
+                                     });
+                                _selector.response.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
+                                self.set_project(selected_project);
+                                let menu = ui
+                                    .scope(|ui| {
+                                        ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
+                                        ui.menu_button(
+                                            RichText::new(
+                                                egui_phosphor::regular::DOTS_THREE_VERTICAL,
+                                            )
+                                            .size(20.0),
+                                            |ui| self.project_menu(ui),
+                                        )
+                                    })
+                                    .inner
+                                    .response;
+                                menu.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        "Projektmenü",
+                                    )
+                                });
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(
+                                        egui::Id::new("test-project-controls"),
+                                        (_selector.response.rect, menu.rect),
+                                    )
+                                });
+                                menu.on_hover_text("Projektmenü");
+                            });
+                            ui.add_space(8.0);
+                            if design::accent_button(
+                                    ui, egui::Button::new(
+                                        RichText::new("+ Aufgabe").size(20.0).strong(),
+                                    )
+                                    .min_size(egui::vec2(ui.available_width(), 55.0)),
+                                    self.settings.project.is_some(),
+                                    BLUE.gamma_multiply(0.8),
+                                )
+                                .clicked()
+                            {
+                                self.new_task();
+                            }
+                            ui.add_space(10.0);
+                            let project = self.settings.project;
+                            let question_count = snapshot
+                                .as_ref()
+                                .zip(project)
+                                .map_or(0, |(s, p)| question_groups(s, p, true).len());
+                            let queue = snapshot.as_ref().zip(project).map_or(0, |(s,p)| queued_task_count(s, p));
+                            let work = self.session_counts(Page::Sessions);
+                            let controllers = self.session_counts(Page::Orchestrator);
+                            let supervisors = self.session_counts(Page::Supervisor);
+                            let memorizers = self.session_counts(Page::Memorizer);
+                            for (page, badges, hint) in [
+                                (Page::Tasks, &[(queue, BLUE)][..], format!("{queue} in der Warteschlange")),
+                                (Page::Questions, &[(question_count, RED)][..], format!("{question_count} offen")),
+                                (Page::Sessions, &[(work.running, GREEN), (work.idle, BLUE), (work.failed, RED)][..],
+                                    format!("{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen", work.running, work.idle, work.failed)),
+                                (Page::Orchestrator, &[(controllers.running, GREEN)][..], format!("{} laufend", controllers.running)),
+                                (Page::Supervisor, &[(supervisors.running, GREEN)][..], format!("{} laufend", supervisors.running)),
+                                (Page::Memorizer, &[(memorizers.running, GREEN)][..], format!("{} laufend", memorizers.running)),
+                            ] {
+                                let row = design::navigation_row_with_badges(
+                                    ui,
+                                    Some(page.icon()),
+                                    page.title(),
+                                    self.page() == page,
+                                    badges,
+                                ).on_hover_text(hint);
+                                if reveal_selected && self.page() == page {
+                                    row.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if row.clicked() {
+                                    self.set_page(page);
+                                }
+                            }
+                            ui.add_space(16.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+                            ui.colored_label(MUTED, "FACTORY");
+                            for page in [
+                                Page::Overview,
+                                Page::Notifications,
+                                Page::Infrastructure,
+                                Page::Runners,
+                                Page::Diagnostics,
+                            ] {
+                                let row = design::navigation_row_with_icon(
+                                    ui,
+                                    Some(page.icon()),
+                                    page.title(),
+                                    self.page() == page,
+                                    (page == Page::Notifications).then_some((
+                                        usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
+                                        AMBER,
+                                    )),
+                                );
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(
+                                        egui::Id::new(("test-factory-navigation", page)),
+                                        row.rect,
+                                    )
+                                });
+                                if reveal_selected && self.page() == page {
+                                    row.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                if row.clicked() {
+                                    self.set_page(page);
+                                }
+                            }
+                        });
+                });
+        }
+        if self.active_tab > 0 {
+            self.session_sidebar(ctx);
+        }
+        egui::TopBottomPanel::top("breadcrumb")
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 12)))
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let context = if self.active_tab > 0 {
+                        "OpenCode · schreibgeschützt"
+                    } else {
+                        self.page().title()
+                    };
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  ›  {context}",
+                            self.active_tab
+                                .checked_sub(1)
+                                .and_then(|i| self.tabs.get(i))
+                                .and_then(|t| self
+                                    .snapshot
+                                    .as_ref()?
+                                    .projects
+                                    .iter()
+                                    .find(|p| p.id == t.project))
+                                .or_else(|| if self.page().global() {
+                                    None
+                                } else {
+                                    self.project()
+                                })
+                                .map_or("Factory", |p| p.name.as_str())
+                        ))
+                        .size(20.0),
+                    );
+                });
+            });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(22, 25, 31))
+                    .inner_margin(24),
+            )
+            .show(ctx, |ui| {
+                if self.active_tab > 0 {
+                    self.session_tab(ui);
+                    return;
+                }
+                if self.page() == Page::Overview {
+                    crate::overview::show(ui, self);
+                    return;
+                }
+                if self.page() == Page::Infrastructure {
+                    crate::infrastructure::show(ui, self);
+                    return;
+                }
+                if self.snapshot.is_none() && self.page() != Page::Diagnostics {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(80.0);
+                        ui.heading("Deine Factory im Blick");
+                        ui.label("Mit einem Server verbinden oder eine lokale Factory starten.");
+                        if ui.button("Verbindung einrichten …").clicked() {
+                            self.dialog = Some(Dialog::connection(self.server.clone()));
+                        }
+                    });
+                    return;
+                }
+                if !self.page().global() && self.settings.project.is_none() {
+                    ui.heading("Noch kein Projekt");
+                    ui.label("Lege ein Projekt an, um Aufgaben zu verwalten.");
+                    if ui.button("Projekt anlegen …").clicked() {
+                        self.project_editor(None);
+                    }
+                    return;
+                }
+                match self.page() {
+                    Page::Tasks => self.tasks(ui),
+                    Page::Questions => self.questions(ui),
+                    Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer => {
+                        self.session_list(ui, self.page())
+                    }
+                    Page::Runners => self.runners(ui),
+                    Page::Diagnostics => self.diagnostics(ui),
+                    Page::Notifications => self.notifications_view(ui),
+                    Page::Settings => {}
+                    Page::Overview | Page::Infrastructure => {}
+                }
+            });
+    }
+    pub(crate) fn handle_file_drop(&mut self, ctx: &egui::Context) {
+        // Consume once, including when egui performs multiple layout passes.
+        let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
+        let paths = dropped
+            .iter()
+            .filter_map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+        if dropped.len() > paths.len() {
+            self.notice("Ein Anhang enthält keinen lokalen Dateipfad. Bitte über „Dateien/Bilder hinzufügen“ auswählen.");
+        }
+        if !paths.is_empty() {
+            if let Some(Dialog::Task(task)) = &self.dialog {
+                if task.read_only {
+                    self.notice("Diese Aufgabenansicht ist schreibgeschützt. Zum Anhängen einen bearbeitbaren Auftrag öffnen.");
+                } else if task.request.is_none() {
+                    self.backend.load_attachments(task.id, paths);
+                    self.notice("Anhänge werden geladen …");
+                } else {
+                    self.notice(
+                        "Diese Aufgabe wurde bereits gesendet. Bitte einen neuen Entwurf öffnen.",
+                    );
+                }
+            } else {
+                self.notice("Zum Anhängen bitte zuerst „+ Aufgabe“ öffnen.");
+            }
+        }
+    }
+    fn header_tabs(&mut self, ui: &mut egui::Ui) {
+        use egui_phosphor::regular::{CARET_LEFT, CARET_RIGHT, FACTORY, TERMINAL_WINDOW};
+
+        const TAB_WIDTH: f32 = 220.0;
+        let pager_id = ui.id().with("session-tab-pager");
+        ui.horizontal(|ui| {
+            let (factory, _) = design::tab_with_icon(
+                ui, Some(FACTORY), "Factory", self.active_tab == 0, TAB_WIDTH, false,
+            );
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(
+                egui::Id::new(("test-header-tab", 0usize)), (factory.rect, self.active_tab == 0),
+            ));
+            if factory.clicked() {
+                self.active_tab = 0;
+            }
+
+            let gap = ui.spacing().item_spacing.x;
+            let remaining = ui.available_width();
+            let fit = |width: f32| ((width + gap) / (TAB_WIDTH + gap)).floor() as usize;
+            let overflow = self.tabs.len() > fit(remaining);
+            let slots = if overflow {
+                fit(remaining - 2.0 * (design::ICON_BUTTON_SIZE + gap)).max(1)
+            } else {
+                fit(remaining)
+            };
+            let last_start = self.tabs.len().saturating_sub(slots);
+            let active_index = self.active_tab.checked_sub(1).filter(|&i| i < self.tabs.len());
+            let active_root = active_index.map(|i| self.tabs[i].root);
+            let (previous_start, previous_active, previous_slots) = ui.ctx().data_mut(|d| {
+                d.get_temp::<(usize, Option<CommandId>, usize)>(pager_id).unwrap_or_default()
+            });
+            let mut start = previous_start.min(last_start);
+            if let Some(index) = active_index.filter(|_| {
+                active_root != previous_active || slots != previous_slots
+            }) {
+                start = start.clamp((index + 1).saturating_sub(slots), index);
+            }
+
+            let mut next_start = start;
+            if overflow && design::icon_button(ui, CARET_LEFT, "Tabs nach links", start > 0).clicked() {
+                next_start -= 1;
+            }
+            let mut close = None;
+            for (index, tab) in self.tabs.iter().enumerate().skip(start).take(slots) {
+                ui.push_id(tab.root, |ui| {
+                    let (response, closed) = design::tab_with_icon(
+                        ui, Some(TERMINAL_WINDOW), &tab.title, self.active_tab == index + 1, TAB_WIDTH, true,
+                    );
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(
+                        egui::Id::new(("test-header-tab", index + 1)), (response.rect, self.active_tab == index + 1),
+                    ));
+                    if response.clicked() {
+                        self.active_tab = index + 1;
+                    }
+                    if closed {
+                        close = Some(index);
+                    }
+                });
+            }
+            if overflow && design::icon_button(ui, CARET_RIGHT, "Tabs nach rechts", start < last_start).clicked() {
+                next_start += 1;
+            }
+            if next_start != start {
+                ui.ctx().request_repaint();
+            }
+            if let Some(index) = close {
+                self.tabs.remove(index);
+                if self.active_tab == index + 1 {
+                    self.active_tab = 0;
+                } else if self.active_tab > index + 1 {
+                    self.active_tab -= 1;
+                }
+            }
+            ui.ctx().data_mut(|d| d.insert_temp(pager_id, (next_start, active_root, slots)));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(
+                egui::Id::new("test-visible-header-tabs"), start..(start + slots).min(self.tabs.len()),
+            ));
+        });
+    }
+
+    pub(crate) fn session_counts(&self, page: Page) -> SessionCounts {
+        let (Some(s), Some(project)) = (&self.snapshot, self.settings.project) else {
+            return SessionCounts::default();
+        };
+        sidebar_session_counts(s, project, page, self.online, &self.instances)
+    }
+    pub fn new_task(&mut self) {
+        if self.models.needs_setup() {
+            self.dialog = Some(Dialog::ModelSetupRequired);
+            return;
+        }
+        let Some(p) = self.settings.project else {
+            return;
+        };
+        let mut dialog = Dialog::task(self.server.clone(), p, None);
+        if let Some(draft) = self
+            .settings
+            .task_drafts
+            .iter()
+            .find(|d| d.server == self.server && d.project == p && d.ticket.is_none())
+        {
+            if let Dialog::Task(task) = &mut dialog {
+                task.draft = draft.clone();
+            }
+        }
+        self.dialog = Some(dialog);
+    }
+    fn project_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_width(310.0);
+        if design::navigation_row(ui, "Neues Projekt", false, None).clicked() {
+            self.project_editor(None);
+            ui.close();
+        }
+        let project = self.project().cloned();
+        ui.add_enabled_ui(project.is_some(),|ui| {
+        let edit=design::navigation_row(ui,"Projekt editieren",false,None);
+        let pause=ui.add_enabled_ui(self.online && project.as_ref().is_some_and(|p|!self.project_pause_pending(p.id)), |ui|
+            design::navigation_row(ui,if project.as_ref().is_some_and(|p|p.paused) {"Projekt fortsetzen"} else {"Projekt pausieren"},false,None)
+        ).inner.on_hover_text("Gilt für neue automatische Arbeit. Laufende Prozesse werden nicht gestoppt.");
+        let delete=design::navigation_row(ui,"Projekt löschen",false,None);
+        let advanced=design::navigation_row(ui,"Erweiterte Projekteinstellungen",false,None);
+        #[cfg(test)]
+        ui.ctx().data_mut(|data|data.insert_temp(egui::Id::new("test-project-menu-rows"),[edit.rect,pause.rect,delete.rect,advanced.rect]));
+        let Some(p)=project else {return;};
+        if edit.clicked() {
+            self.project_editor(Some(&p));
+            ui.close();
+        }
+        if pause.clicked() {
+            self.toggle_project_pause(&p);
+            ui.close();
+        }
+        if delete.clicked() {
+            self.dialog=Some(Dialog::form("Projekt löschen",&format!("Projekt „{}“ aus der Factory-Auswahl entfernen. Repository-Dateien und Historie bleiben erhalten. Laufende oder eingereihte Aufträge verhindern das Löschen. Zum Bestätigen den vollständigen Projektnamen eingeben.",p.name),"DELETE",format!("/v1/projects/{}",p.id),json!(DeleteProject {request_id:RequestId::new(),expected_revision:p.revision,confirm_name:String::new()})));
+            ui.close();
+        }
+        if advanced.clicked() {self.dialog=Some(Dialog::project_settings(p.id));ui.close();}
+        });
+    }
+    pub(crate) fn project_editor(&mut self, project: Option<&Project>) {
+        let dialog = if let Some(p) = project {
+            Dialog::form(
+                "Projekt bearbeiten", "", "PATCH", format!("/v1/projects/{}", p.id),
+                json!(UpdateProject {
+                    runner_mapping: p.runner_mapping,
+                    request_id: RequestId::new(),
+                    expected_revision: p.revision,
+                    name: Some(p.name.clone()),
+                    key: (!p.key.is_empty()).then(|| p.key.clone()),
+                    repository: p.repository.starts_with('/').then(|| p.repository.clone()),
+                    base_branch: None,
+                }),
+            )
+        } else {
+            Dialog::form(
+                "Neues Projekt", "", "POST", "/v1/projects".into(),
+                json!(CreateProject {
+                    runner_mapping: None,
+                    request_id: RequestId::new(),
+                    name: String::new(),
+                    key: None,
+                    repository: String::new(),
+                    base_branch: "main".into(),
+                }),
+            )
+        };
+        let mut dialog = Some(dialog);
+        crate::project_settings::restore_form(self, &mut dialog);
+        self.dialog = dialog;
+    }
+
+    pub(crate) fn project_setup(&mut self, project: Option<Project>) {
+        let runner = project
+            .as_ref()
+            .and_then(|p| p.setup.as_ref().map(|s| s.runner_id))
+            .or_else(|| self.snapshot.as_ref()?.runners.first().map(|r| r.id))
+            .unwrap_or_default();
+        let setup = project
+            .as_ref()
+            .and_then(|p| p.setup.clone())
+            .unwrap_or(ProjectSetup {
+                repository_source: String::new(),
+                runner_id: runner,
+                repository_path: String::new(),
+                service_registration: String::new(),
+                harness: None,
+            });
+        let body = SetupProject {
+            key: Some(project.as_ref().map_or_else(String::new,|p|p.key.clone())),
+            request_id: RequestId::new(),
+            project_id: project.as_ref().map(|p| p.id),
+            expected_revision: project.as_ref().map_or(Revision(0), |p| p.revision),
+            name: project
+                .as_ref()
+                .map_or_else(String::new, |p| p.name.clone()),
+            repository: project
+                .as_ref()
+                .map_or_else(|| "factory:managed".into(), |p| p.repository.clone()),
+            base_branch: project
+                .as_ref()
+                .map_or_else(|| "main".into(), |p| p.base_branch.clone()),
+            profile: project
+                .as_ref()
+                .map_or_else(ExecutionProfile::default, |p| p.profile.clone()),
+            setup,
+        };
+        self.dialog = Some(Dialog::form("Projekt einrichten", "Name und Modellbindung angeben. „factory:managed“ legt ein verwaltetes Repository an; alternativ Repository-Quelle angeben. Pfade gelten auf dem ausgewählten Runner. Leere Pfade werden automatisch ermittelt.", "POST", "/v1/projects/setup".into(), json!(body)));
+    }
+    pub(crate) fn scheduler_for_project(&mut self, p: &Project) {
+        let policy = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.scheduler_policies.iter().find(|v| v.project_id == p.id));
+        let body = SetScheduler {
+            request_id: RequestId::new(),
+            expected_revision: policy.map_or(Revision(0), |v| v.revision),
+            enabled: policy.is_none_or(|v| v.enabled),
+            runner_ids: policy.map_or_else(
+                || {
+                    p.setup
+                        .as_ref()
+                        .map(|s| vec![s.runner_id])
+                        .unwrap_or_default()
+                },
+                |v| v.runner_ids.clone(),
+            ),
+            max_parallel: policy.map_or(p.max_sessions, |v| v.max_parallel),
+            start_budget: policy.map_or(UNLIMITED_STARTS, |v| v.remaining_starts),
+        };
+        self.dialog = Some(Dialog::form("Automatische Verteilung", "Aktivieren/Pausieren betrifft neue Zuweisungen, nicht bereits laufende Aufgaben. Neue Aufgaben explizit einreihen. Runner und Parallelität gelten für die weitere Verteilung.", "POST", format!("/v1/projects/{}/scheduler", p.id), json!(body)));
+    }
+    fn tasks(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(project) = self.settings.project else {
+            return;
+        };
+        if let Some(id) = self.detail {
+            self.task_details(ui, id);
+            return;
+        }
+        let all = s
+            .tickets
+            .iter()
+            .filter(|t| t.project_id == project)
+            .collect::<Vec<_>>();
+        if self.task_filter > 2 {
+            self.task_filter = 0;
+        }
+        let mut counts = [0; 3];
+        let buckets = all
+            .iter()
+            .map(|ticket| {
+                let bucket = task_bucket(&s, ticket);
+                counts[bucket.index()] += 1;
+                (ticket.id, bucket)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let tabs = TaskBucket::ALL.map(|bucket| (bucket.title(), counts[bucket.index()]));
+        design::section_toolbar(
+            ui,
+            "task",
+            &mut self.query,
+            "Aufgaben durchsuchen …",
+            &tabs,
+            &mut self.task_filter,
+        );
+        let needle = self.query.to_lowercase();
+        let mut tasks = all
+            .into_iter()
+            .filter(|t| {
+                buckets[&t.id].index() == self.task_filter
+                    && (needle.is_empty()
+                        || t.title.to_lowercase().contains(&needle)
+                        || t.key.to_lowercase().contains(&needle)
+                        || t.description.to_lowercase().contains(&needle))
+            })
+            .collect::<Vec<_>>();
+        tasks.sort_by_key(|t| std::cmp::Reverse(t.created_unix_ms));
+        if tasks.is_empty() {
+            ui.add_space(30.0);
+            ui.label(if !needle.is_empty() {
+                "Keine passenden Aufgaben in diesem Tab."
+            } else {
+                match self.task_filter {
+                1=>"Keine Drafts vorhanden.",
+                2=>"Noch keine erfolgreich abgeschlossenen Aufgaben im Archiv.",
+                _=>"Keine aktuellen Aufgaben. Mit „+ Aufgabe“ einen Arbeitsauftrag vorbereiten.",
+            }
+            });
+        }
+        let list_key = format!("tasks/{project}/{}", self.task_filter);
+        let mut list = self.take_list(
+            &list_key,
+            hash_of(
+                tasks
+                    .iter()
+                    .map(|t| (t.id, &t.key, t.revision.0, task_status(&s, t)))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt(("tasks", project, self.task_filter))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                list.list.ui_custom_layout(ui, tasks.len(), |ui, index| {
+                    let t = tasks[index];
+                    ui.push_id(t.id, |ui| {
+                        design::task_row_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.horizontal_top(|ui| {
+                                let status = if t.draft { "Draft" } else { task_status(&s, t) };
+                                let tokens = task_tokens(&s, t);
+                                let badges_width = design::badge_width(ui, status)
+                                    + design::badge_width(ui, &design::token_label(tokens));
+                                let width = (ui.available_width() - badges_width.max(185.0)).max(1.0);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(width, 0.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        let summary = task_text(t);
+                                        let _title = design::ticket_title(ui,&t.key,&summary,
+                                            egui::FontId::proportional(18.0),width)
+                                            .on_hover_text(t.prompt.as_deref().unwrap_or(&t.description));
+                                        #[cfg(test)]
+                                        ui.ctx().data_mut(|d| {
+                                            d.insert_temp(
+                                                egui::Id::new(("test-task-row-title", t.id)),
+                                                _title.rect,
+                                            )
+                                        });
+                                    },
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Min),
+                                    |ui| {
+                                        badge(ui, status, status_color(status));
+                                        design::token_pill(ui, tokens);
+                                    },
+                                );
+                            });
+                            ui.horizontal_top(|ui| {
+                                let attachments = t.images.len() + t.files.len();
+                                let session = task_session_command(&s, t);
+                                let editable = t.draft || s.editable_tasks.contains_key(&t.id);
+                                let labels = if session.is_some() {
+                                    vec!["Anzeigen", "OpenCode anzeigen"]
+                                } else if editable {
+                                    vec!["Anzeigen", "Bearbeiten"]
+                                } else {
+                                    vec!["Anzeigen"]
+                                };
+                                let reserved = labels
+                                    .iter()
+                                    .map(|label| {
+                                        ui.painter()
+                                            .layout_no_wrap(
+                                                (*label).into(),
+                                                egui::TextStyle::Button.resolve(ui.style()),
+                                                ui.visuals().text_color(),
+                                            )
+                                            .size()
+                                            .x
+                                            + 2.0 * ui.spacing().button_padding.x
+                                            + 2.0
+                                    })
+                                    .sum::<f32>()
+                                    + labels.len() as f32 * ui.spacing().item_spacing.x;
+                                let metadata_width = (ui.available_width() - reserved).max(100.0);
+                                let _date = ui
+                                    .allocate_ui_with_layout(
+                                        egui::vec2(metadata_width, 0.0),
+                                        egui::Layout::top_down(egui::Align::LEFT),
+                                        |ui| {
+                                            ui.spacing_mut().item_spacing.y =
+                                                design::TASK_METADATA_LINE_GAP;
+                                            let _attachments = ui.colored_label(
+                                                MUTED,
+                                                format!(
+                                                    "{} {}",
+                                                    attachments,
+                                                    if attachments == 1 {
+                                                        "Anhang"
+                                                    } else {
+                                                        "Anhänge"
+                                                    }
+                                                ),
+                                            );
+                                             let _created = ui
+                                                 .colored_label(MUTED, timestamp(t.created_unix_ms));
+                                             if !t.draft && t.execution_command.is_none()
+                                                 && matches!(t.status, TicketState::Backlog | TicketState::Ready)
+                                                 && !t.routing_note.is_empty()
+                                             {
+                                                 ui.add(egui::Label::new(
+                                                     RichText::new(&t.routing_note).color(design::history_color(task_routing_level(&t.routing_note), MUTED))
+                                                 ).truncate()).on_hover_text(&t.routing_note);
+                                             }
+                                            #[cfg(test)]
+                                            ui.ctx().data_mut(|d| {
+                                                d.insert_temp(
+                                                    egui::Id::new((
+                                                        "test-task-row-metadata-lines",
+                                                        t.id,
+                                                    )),
+                                                    (_attachments.rect, _created.rect),
+                                                )
+                                            });
+                                        },
+                                    )
+                                    .response;
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(ui.available_width(), _date.rect.height()),
+                                    egui::Layout::right_to_left(egui::Align::Max),
+                                    |ui| {
+                                        if let Some(command) = session {
+                                            let action = ui.button("OpenCode anzeigen");
+                                            #[cfg(test)]
+                                            ui.ctx().data_mut(|d| {
+                                                d.insert_temp(
+                                                    egui::Id::new(("test-task-row-action", t.id)),
+                                                    (action.rect, "OpenCode anzeigen"),
+                                                )
+                                            });
+                                            if action.clicked() {
+                                                self.open_session(project, command.session_root());
+                                            }
+                                        } else if editable {
+                                            let action = ui.add_enabled(
+                                                self.online,
+                                                egui::Button::new("Bearbeiten"),
+                                            );
+                                            #[cfg(test)]
+                                            ui.ctx().data_mut(|d| {
+                                                d.insert_temp(
+                                                    egui::Id::new(("test-task-row-action", t.id)),
+                                                    (action.rect, "Bearbeiten"),
+                                                )
+                                            });
+                                            if action.clicked() {
+                                                self.edit_task(t.id);
+                                            }
+                                        }
+                                        let view = ui
+                                            .button("Anzeigen")
+                                            .on_hover_text("Aufgabe schreibgeschützt anzeigen");
+                                        #[cfg(test)]
+                                        ui.ctx().data_mut(|d| {
+                                            d.insert_temp(
+                                                egui::Id::new(("test-task-row-view", t.id)),
+                                                view.rect,
+                                            )
+                                        });
+                                        if view.clicked() {
+                                            self.view_task(t.id);
+                                        }
+                                    },
+                                );
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| {
+                                    d.insert_temp(
+                                        egui::Id::new(("test-task-row-date", t.id)),
+                                        _date.rect,
+                                    )
+                                });
+                            });
+                        });
+                    });
+                    1
+                });
+            });
+        self.put_list(list_key, list);
+    }
+    fn task_details(&mut self, ui: &mut egui::Ui, id: TicketId) {
+        if ui.button("‹ Zur Aufgabenliste").clicked() {
+            self.detail = None;
+            return;
+        }
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(t) = s.tickets.iter().find(|t| t.id == id) else {
+            ui.colored_label(AMBER, "Aufgabe nicht mehr verfügbar.");
+            return;
+        };
+        let payload = self.task_data(t);
+        let complete = payload.is_some();
+        let t = payload.as_deref().unwrap_or(t);
+        ui.horizontal(|ui| {
+            if !t.key.is_empty() {design::ticket_pill(ui,&t.key);}
+            ui.heading(&t.title);
+        });
+        if !complete && self.online {
+            if ui
+                .add_enabled(
+                    !self.task_loading.contains_key(&t.id),
+                    egui::Button::new("Anhänge erneut laden"),
+                )
+                .clicked()
+            {
+                self.task_errors.remove(&t.id);
+            }
+        }
+        ui.horizontal_wrapped(|ui| {
+            badge(ui, task_status(&s, t), status_color(task_status(&s, t)));
+            design::token_pill(ui, task_tokens(&s, t));
+            if task_command(&s, t).is_none() && ui.button("Bearbeiten …").clicked() { self.edit_task(t.id); }
+            if ui.button("Technisches Ticket bearbeiten …").clicked() { self.dialog = Some(Dialog::form("Ticket bearbeiten", "Status und Metadaten des Tickets ändern. Eine Änderung beendet keine laufenden Prozesse.", "PATCH", format!("/v1/tickets/{}", t.id), json!(UpdateTicket { request_id: RequestId::new(), expected_revision: t.revision, title: Some(t.title.clone()), description: Some(t.description.clone()), acceptance_criteria: Some(t.acceptance_criteria.clone()), priority: Some(t.priority), status: Some(t.status) }))); }
+            if ui.button("Abhängigkeiten …").clicked() { self.dialog = Some(Dialog::form("Abhängigkeiten", "Alle vorausgesetzten Aufgaben müssen abgeschlossen sein. IDs gelten innerhalb desselben Projekts.", "POST", format!("/v1/tickets/{}/dependencies", t.id), json!(SetDependencies { request_id: RequestId::new(), expected_revision: t.revision, depends_on: t.depends_on.clone() }))); }
+            if ui.add_enabled(complete, egui::Button::new("Exportieren …")).clicked() { self.backend.save_json("aufgabe.json", json!(t)); }
+        });
+        egui::ScrollArea::vertical()
+            .id_salt(("task-detail", id))
+            .show(ui, |ui| {
+                ui.label(RichText::new("Vollständiger Arbeitsauftrag").strong());
+                ui.add(
+                    egui::Label::new(t.prompt.as_deref().unwrap_or(&t.description))
+                        .wrap()
+                        .selectable(true),
+                );
+                for (i, image) in t.images.iter().enumerate() {
+                    ui.label(&image.name);
+                    if !complete {
+                        continue;
+                    }
+                    if ui.button("Originalbild speichern …").clicked() {
+                        self.backend
+                            .save_input_file(image.name.clone(), image.data.clone());
+                    }
+                    if self
+                        .preview_image(
+                            ui,
+                            format!("task/{}/{}/{i}", t.id, t.revision.0),
+                            image,
+                            egui::vec2(360.0, 220.0),
+                            false,
+                        )
+                        .clicked()
+                    {
+                        self.dialog = Some(Dialog::image(image.clone()));
+                    }
+                }
+                for file in &t.files {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("{} · {}", file.name, file.mime));
+                        if ui
+                            .add_enabled(complete, egui::Button::new("Datei speichern …"))
+                            .clicked()
+                        {
+                            self.backend
+                                .save_input_file(file.name.clone(), file.data.clone());
+                        }
+                    });
+                }
+                ui.separator();
+                ui.colored_label(design::history_color(task_routing_level(&t.routing_note), ui.visuals().text_color()), &t.routing_note);
+                if let Some(c) = task_command(&s, t) {
+                    ui.horizontal_wrapped(|ui| {
+                        if c.kind == CommandKind::RunAgent
+                            && ui.button("OpenCode anzeigen").clicked()
+                        {
+                            self.open_session(t.project_id, c.session_root());
+                        }
+                        if ui.button("Diagnose").clicked() {
+                            self.navigate(Target::Diagnose(Some(t.project_id)));
+                        }
+                        ui.menu_button("Verwaltung …", |ui| self.command_menu(ui, c));
+                    });
+                    ui.collapsing(
+                        "Auftrag, Ausführungsprofil, Fortschritt und Ergebnis",
+                        |ui| json_read(ui, &json!(c)),
+                    );
+                    if s.payloads_deferred
+                        && ui
+                            .button("Vollständigen Originalauftrag einschließlich Anhängen laden")
+                            .clicked()
+                    {
+                        self.read("Originalauftrag", format!("/v1/commands/{}", c.id));
+                    }
+                }
+                ui.collapsing("Alle Aufgaben-Metadaten", |ui| json_read(ui, &json!(t)));
+            });
+    }
+    fn questions(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(project) = self.settings.project else {
+            return;
+        };
+        let current = question_task_groups(&s, project, false);
+        let archived = question_task_groups(&s, project, true);
+        let mut selected = usize::from(self.show_answered);
+        design::section_toolbar(
+            ui,
+            "question",
+            &mut self.query,
+            "Fragen durchsuchen …",
+            &[("Offen", current.len()), ("Archiv", archived.len())],
+            &mut selected,
+        );
+        self.show_answered = selected == 1;
+        let needle = self.query.to_lowercase();
+        let mut groups = if self.show_answered {
+            archived
+        } else {
+            current
+        };
+        groups.retain(|group| {
+            needle.is_empty()
+                || group.task.to_lowercase().contains(&needle)
+                || group.ticket_key.to_lowercase().contains(&needle)
+                || group.command.session_id().to_lowercase().contains(&needle)
+                || group.questions.iter().any(|q| {
+                    q.external
+                        .payload
+                        .to_string()
+                        .to_lowercase()
+                        .contains(&needle)
+                        || q.orchestration_note.to_lowercase().contains(&needle)
+                        || s.commands
+                            .iter()
+                            .find(|c| c.id == q.command_id)
+                            .is_some_and(|c| session_title(&s, c).to_lowercase().contains(&needle))
+                })
+        });
+        if groups.is_empty() {
+            ui.add_space(30.0);
+            ui.label(if !needle.is_empty() {
+                "Keine passenden Fragen in diesem Tab."
+            } else if self.show_answered {
+                "Noch keine beantworteten Fragen im Archiv."
+            } else {
+                "Keine aktuellen Fragen. Neue Rückfragen erscheinen automatisch hier."
+            });
+        }
+        egui::ScrollArea::vertical()
+            .id_salt(("questions", project, self.show_answered))
+            .show(ui, |ui| {
+                for group in groups {
+                    let command = group.command;
+                    let total: usize = group.questions.iter().map(|q| question_field_count(q).max(1)).sum();
+                    let answered: usize = group.questions.iter().filter(|q| q.state == QuestionState::Answered)
+                        .map(|q| question_field_count(q).max(1)).sum();
+                    let (status, color) = if answered == total { ("Beantwortet", GREEN) }
+                        else if answered > 0 { ("Teilweise beantwortet", BLUE) }
+                        else { ("Unbeantwortet", AMBER) };
+                    ui.push_id(command.id, |ui| {
+                        let row = design::task_row_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = design::TASK_METADATA_LINE_GAP;
+                            ui.horizontal_top(|ui| {
+                                let width = (ui.available_width() - 220.0).max(80.0);
+                                let title = ui.allocate_ui_with_layout(egui::vec2(width,0.0),
+                                    egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                                    let full = format!("Fragen zu: {}", group.task);
+                                    design::ticket_title(ui,&group.ticket_key,&full,
+                                        egui::FontId::proportional(18.0),width).on_hover_text(full);
+                                }).response;
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    let pill = ui.scope(|ui| badge(ui,status,color)).response;
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-question-heading",command.id)),(title.rect,pill.rect)));
+                                    #[cfg(not(test))]
+                                    let _ = (title,pill);
+                                });
+                            });
+                            ui.colored_label(MUTED, format!("{} offen · {} beantwortet", total-answered,answered));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                if ui.button("OpenCode anzeigen").clicked() {
+                                    self.open_session(project,command.session_root());
+                                }
+                                let action = if group.questions.iter().any(needs_answer) { "Beantworten" } else { "Anzeigen" };
+                                let button = ui.button(action);
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-question-open",command.id)),button.rect));
+                                if button.clicked() {
+                                    self.dialog = Some(if action == "Beantworten" {
+                                        Dialog::questions(group.questions.clone())
+                                    } else { Dialog::QuestionView(group.questions.clone()) });
+                                }
+                            });
+                        });
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-question-row",command.id)),row.response.rect));
+                        #[cfg(not(test))]
+                        let _ = row;
+                    });
+                }
+            });
+    }
+    fn session_list(&mut self, ui: &mut egui::Ui, page: Page) {
+        let controllers = page != Page::Sessions;
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(project) = self.settings.project else {
+            return;
+        };
+        let mut sessions = sessions_for_page(&s, project, page);
+        {
+            let archived = |c: &RunnerCommand| {
+                if controllers {
+                    if c.kind == CommandKind::PrepareWorkspace {
+                        c.state == CommandState::Failed && s.commands.iter().any(|later|
+                            later.stream_id == c.stream_id && later.kind == CommandKind::PrepareWorkspace
+                                && later.state == CommandState::Succeeded && later.created_unix_ms >= c.created_unix_ms)
+                    } else {
+                        controller_archived(&s, c)
+                    }
+                } else {
+                    session_closed(&s, c)
+                }
+            };
+            let closed = sessions.iter().filter(|c| archived(c)).count();
+            let mut selected = usize::from(self.sessions_closed);
+            design::section_toolbar(
+                ui,
+                match page {
+                    Page::Supervisor => "supervisor",
+                    Page::Orchestrator => "controller",
+                    Page::Memorizer => "memorizer",
+                    _ => "session",
+                },
+                &mut self.query,
+                "Sessions durchsuchen …",
+                &[
+                    ("Offen", sessions.len() - closed),
+                    (if controllers { "Archiv" } else { "Geschlossen" }, closed),
+                ],
+                &mut selected,
+            );
+            self.sessions_closed = selected == 1;
+            let needle = self.query.to_lowercase();
+            sessions.retain(|c| {
+                archived(c) == self.sessions_closed
+                    && (needle.is_empty()
+                        || session_title(&s, c).to_lowercase().contains(&needle)
+                        || c.session_id().to_lowercase().contains(&needle)
+                        || c.runner_id.to_string().contains(&needle)
+                        || s.runners
+                            .iter()
+                            .find(|r| r.id == c.runner_id)
+                            .is_some_and(|r| r.name.to_lowercase().contains(&needle))
+                        || c.agent_progress
+                            .as_ref()
+                            .is_some_and(|p| p.summary.to_lowercase().contains(&needle)))
+            });
+        }
+        if sessions.is_empty() {
+            ui.label(if !self.query.is_empty() {
+                "Keine passenden Sessions in diesem Tab.".into()
+            } else if controllers && self.sessions_closed {
+                format!("Keine archivierten {}-Läufe vorhanden.", page.title())
+            } else if controllers {
+                format!("Keine offenen {}-Läufe vorhanden.", page.title())
+            } else if self.sessions_closed {
+                "Keine geschlossenen Sessions vorhanden.".into()
+            } else {
+                "Keine offenen Sessions vorhanden.".into()
+            });
+        }
+        egui::ScrollArea::vertical()
+            .id_salt((
+                "sessions",
+                project,
+                page,
+                self.sessions_closed,
+            ))
+            .show(ui, |ui| {
+                for c in sessions {
+                    ui.push_id(c.session_root(), |ui| {
+                        let _row=design::task_row_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y=4.0;
+                            ui.horizontal_top(|ui| {
+                                let status=if controllers && c.state == CommandState::Failed { "Fehlgeschlagen" } else { session_row_status(&s,&c) };
+                                let tokens=s.token_totals.by_session.get(&c.session_root()).copied();
+                                let badges_width=design::badge_width(ui,status)+design::badge_width(ui,&design::token_label(tokens));
+                                let width=(ui.available_width()-badges_width.max(185.0)).max(1.0);
+                                ui.allocate_ui_with_layout(egui::vec2(width,0.0),egui::Layout::top_down(egui::Align::LEFT),|ui| {
+                                    let title=session_title(&s,&c);
+                                    let job=design::elided_text_job(title.clone(),egui::FontId::proportional(18.0),ui.visuals().text_color(),width,1);
+                                    let _title=ui.add(egui::Label::new(job)).on_hover_text(title);
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-title",c.session_root())),_title.rect));
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min),|ui| {
+                                    let color=match status {"Fehlgeschlagen"=>RED,"Working"=>GREEN,"Offen"=>BLUE,_=>MUTED};
+                                    ui.scope(|ui|badge(ui,status,color)).response.on_hover_text(session_status(&s,&c));
+                                    design::token_pill(ui, tokens);
+                                });
+                            });
+                            ui.horizontal_top(|ui| {
+                                let metadata_width=(ui.available_width()-230.0).max(100.0);
+                                let metadata=ui.allocate_ui_with_layout(egui::vec2(metadata_width,0.0),egui::Layout::top_down(egui::Align::LEFT),|ui| {
+                                    ui.spacing_mut().item_spacing.y=design::TASK_METADATA_LINE_GAP;
+                                    if let Some(CommandOutput::WorkspaceError { workspace_error }) = &c.result {
+                                        ui.add(egui::Label::new(egui::RichText::new(workspace_error).color(RED)).wrap());
+                                    } else {
+                                        let task=session_last_task(&s,&c).map(task_summary).unwrap_or_else(||"Keine zugeordnete Aufgabe".into());
+                                        ui.add(egui::Label::new(egui::RichText::new(format!("Letzte Aufgabe: {task}")).color(MUTED)).wrap());
+                                    }
+                                    let _activity=ui.colored_label(MUTED,format!("Zuletzt aktiv {}",timestamp(session_last_activity(&s,&c)))).on_hover_text("Letzte bekannte Änderung an Ausführung, Fragen oder zugeordneter Aufgabe; kein Verbindungs-Heartbeat.");
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-activity",c.session_root())),_activity.rect));
+                                }).response;
+                                if c.kind == CommandKind::PrepareWorkspace {
+                                    return;
+                                }
+                                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),metadata.rect.height()),egui::Layout::right_to_left(egui::Align::Max),|ui| {
+                                    let open=ui.button("OpenCode anzeigen");
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-open",c.session_root())),open.rect));
+                                    if open.clicked() {self.open_session(project,c.session_root());}
+                                    let menu=ui.scope(|ui| {
+                                        ui.spacing_mut().button_padding=egui::vec2(6.0,6.0);
+                                        ui.menu_button(RichText::new(egui_phosphor::regular::DOTS_THREE).size(20.0),|ui| {
+                                            ui.set_width(400.0);
+                                            if s.questions.iter().any(|q|q.session_id==c.session_id() && needs_answer(q)) && ui.button("Zu den Fragen").clicked() {
+                                                self.navigate(Target::Questions(project,c.session_id()));ui.close();
+                                            }
+                                            self.command_menu(ui,&c);
+                                            ui.separator();
+                                            if ui.button("Metadaten und Ausführung").clicked() {
+                                                let value=json!({"command":c,"closure":s.session_closures.iter().find(|v|v.root_command_id==c.session_root()),"termination":s.runtime_terminations.iter().find(|v|v.command_id==c.id),"compaction":s.compactions.iter().rev().find(|v|v.command_id==c.id),"runner":s.runners.iter().find(|r|r.id==c.runner_id),"presence":self.instances.iter().find(|i|i.commands.contains(&c.id))});
+                                                self.inspect("Session-Metadaten",value);ui.close();
+                                            }
+                                        }).response
+                                    }).inner;
+                                    menu.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,true,"Session verwalten"));
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-menu",c.session_root())),menu.rect));
+                                    menu.on_hover_text("Session verwalten");
+                                });
+                            });
+                        });
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row",c.session_root())),_row.response.rect));
+                    });
+                }
+            });
+    }
+    fn runners(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        if s.runners.is_empty() {
+            ui.label("Kein Runner verbunden. Einen lokalen Runner über den Verbindungsdialog starten oder einen vorhandenen Runner registrieren.");
+        }
+        egui::ScrollArea::vertical().id_salt("runners-scroll").show(ui, |ui| {
+            for runner in &s.runners {
+                ui.push_id(runner.id, |ui| {
+                    let row = design::task_row_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = design::TASK_METADATA_LINE_GAP;
+                        let (status, color) = if !self.online {
+                            ("Stand veraltet", AMBER)
+                        } else {
+                            match runner.connection {
+                                ConnectionState::Online => ("Verbunden", GREEN),
+                                ConnectionState::Suspect => ("Kontakt veraltet", AMBER),
+                                ConnectionState::Unreachable => ("Nicht erreichbar", RED),
+                            }
+                        };
+                        ui.horizontal_top(|ui| {
+                            let width = (ui.available_width() - 210.0).max(80.0);
+                            let title = ui.allocate_ui_with_layout(
+                                egui::vec2(width, 0.0),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    ui.horizontal(|ui| {
+                                        let icon = ui.label(RichText::new(design::RUNNER_ICON).size(22.0).color(color));
+                                        let name = ui.add(egui::Label::new(design::elided_text_job(
+                                            runner.name.clone(),egui::FontId::proportional(18.0),
+                                            ui.visuals().text_color(),ui.available_width(),1,
+                                        ))).on_hover_text(&runner.name);
+                                        #[cfg(test)]
+                                        ui.ctx().data_mut(|d|d.insert_temp(
+                                            egui::Id::new(("test-runner-icon",runner.id)),(icon.rect,name.rect,color),
+                                        ));
+                                        #[cfg(not(test))]
+                                        let _ = (icon,name);
+                                    });
+                                },
+                            ).response;
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                let pill = ui.scope(|ui| badge(ui, status, color)).response;
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| d.insert_temp(
+                                    egui::Id::new(("test-runner-heading", runner.id)), (title.rect, pill.rect),
+                                ));
+                                #[cfg(not(test))]
+                                let _ = (title, pill);
+                            });
+                        });
+                        let active: Vec<_> = s.commands.iter().filter(|command| {
+                            command.runner_id == runner.id
+                                && matches!(command.state, CommandState::Accepted | CommandState::Pending)
+                        }).collect();
+                        let location = match runner.location {
+                            RunnerLocation::Local => "Lokal",
+                            RunnerLocation::Server => "Server",
+                        };
+                        ui.colored_label(MUTED, format!(
+                            "{location} · {}",
+                            if active.len() == 1 { "1 offener Auftrag".into() }
+                            else { format!("{} offene Aufträge", active.len()) },
+                        ));
+                        let contact = if runner.last_seen_unix_ms == 0 {
+                            "Noch kein Kontakt bestätigt".to_string()
+                        } else {
+                            format!("Letzter Kontakt: {}", timestamp(runner.last_seen_unix_ms))
+                        };
+                        ui.colored_label(MUTED, contact);
+                        let opencode = match runner.opencode {
+                            OpenCodeStatus::Ready { .. } => "OpenCode bereit",
+                            OpenCodeStatus::NotConfigured => "OpenCode nicht eingerichtet",
+                            OpenCodeStatus::Unavailable => "OpenCode nicht erreichbar",
+                            OpenCodeStatus::Unsupported { .. } => "OpenCode-Version nicht unterstützt",
+                        };
+                        ui.colored_label(MUTED, opencode).on_hover_text(
+                            "Zuletzt gemeldeter OpenCode-Servicestatus des Runners, keine Aussage zur Anmeldung oder Modellbereitschaft eines Projekts.",
+                        );
+                        for command in active.into_iter().filter(|c| c.kind == CommandKind::RunAgent) {
+                            ui.separator();
+                            ui.horizontal_top(|ui| {
+                                let width = (ui.available_width() - 185.0).max(80.0);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(width, 0.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        let title = session_title(&s, command);
+                                        ui.add(egui::Label::new(design::elided_text_job(
+                                            title.clone(), egui::FontId::proportional(16.0),
+                                            ui.visuals().text_color(), width, 1,
+                                        ))).on_hover_text(title);
+                                        ui.colored_label(MUTED, command_status(command));
+                                    },
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    if let Some(project) = command_project(&s, command) {
+                                        let button = ui.button("OpenCode anzeigen");
+                                        #[cfg(test)]
+                                        ui.ctx().data_mut(|d| d.insert_temp(
+                                            egui::Id::new(("test-runner-session-open", command.id)), button.rect,
+                                        ));
+                                        if button.clicked() {
+                                            self.open_session(project, command.session_root());
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                    });
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(
+                        egui::Id::new(("test-runner-row", runner.id)), row.response.rect,
+                    ));
+                    #[cfg(not(test))]
+                    let _ = row;
+                });
+            }
+        });
+    }
+    fn diagnostics(&mut self, ui: &mut egui::Ui) {
+        if self.error.is_some()
+            || self.instance_error.is_some()
+            || self.client_error.is_some()
+            || self.tabs.iter().any(|tab| tab.error.is_some())
+            || !self.task_errors.is_empty()
+        {
+            ui.collapsing("Verbindungs- und Ladefehler", |ui| {
+                for (source, error) in [
+                    ("Server", self.error.as_deref()),
+                    ("Client-Präsenz", self.client_error.as_deref()),
+                    ("OpenCode-Präsenz", self.instance_error.as_deref()),
+                ] {
+                    if let Some(error) = error {
+                        ui.label(format!("{source}: {error}"));
+                    }
+                }
+                for tab in &self.tabs {
+                    if let Some(error) = &tab.error {
+                        ui.label(format!("OpenCode-Verlauf ({}): {error}", tab.title));
+                    }
+                }
+                for (id, (_, error)) in &self.task_errors {
+                    ui.label(format!("Aufgabe {id}: {error}"));
+                }
+            });
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.diagnostics_project, "Nur gewähltes Projekt");
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                design::singleline(&mut self.query)
+                    .hint_text(design::input_hint("Ereignis, Auftrag, Rolle oder Inhalt …"))
+                    .desired_width((ui.available_width() - 260.0).clamp(140.0, 380.0)),
+            );
+            if ui
+                .add_enabled(
+                    !self.events_loading && self.event_before.is_some(),
+                    egui::Button::new("Ältere Ereignisse laden"),
+                )
+                .clicked()
+            {
+                self.events_loading = true;
+                self.backend.history(self.event_before);
+            }
+            if self.events_loading {
+                ui.spinner();
+            }
+        });
+        ui.colored_label(MUTED, format!("{} Ereignisse geladen", self.events.len()))
+            .on_hover_text(format!("Dauerhafter Ereigniscursor: {}. Ältere Ereignisse bleiben über die Historie erreichbar.", self.event_cursor));
+        let events = self.events.clone();
+        let s = self.snapshot.clone();
+        let needle = self.query.to_lowercase();
+        egui::ScrollArea::vertical()
+            .id_salt("diagnostics-scroll")
+            .show(ui, |ui| {
+                let selected_project = self.settings.project;
+                let project_only = self.diagnostics_project;
+                for e in events.iter().rev().filter(|e| {
+                    let project_matches = !project_only
+                        || s.as_ref()
+                            .is_some_and(|s| event_project(s, e) == selected_project);
+                    project_matches
+                        && (needle.is_empty()
+                            || e.kind.to_lowercase().contains(&needle)
+                            || e.aggregate_id.contains(&needle)
+                            || e.payload.to_string().to_lowercase().contains(&needle))
+                }) {
+                    ui.push_id(e.sequence, |ui| {
+                        let row = design::task_row_frame().show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = design::TASK_METADATA_LINE_GAP;
+                            ui.horizontal_top(|ui| {
+                                let width = (ui.available_width() - 160.0).max(80.0);
+                                let title = ui.allocate_ui_with_layout(
+                                    egui::vec2(width, 0.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        ui.add(egui::Label::new(design::elided_text_job(
+                                            e.kind.clone(), egui::FontId::proportional(18.0),
+                                            ui.visuals().text_color(), width, 1,
+                                        ))).on_hover_text(&e.kind);
+                                    },
+                                ).response;
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    let category = match e.kind.split('.').next().unwrap_or("") {
+                                        "command" => "Auftrag",
+                                        "question" => "Frage",
+                                        "ticket" | "task" => "Aufgabe",
+                                        "runner" => "Runner",
+                                        "project" => "Projekt",
+                                        "knowledge" | "memory" => "Wissen",
+                                        "supervisor" => "Supervisor",
+                                        "memorizer" | "orchestrator-memory" => "Memorizer",
+                                        "orchestrator" | "scheduler" => "Verteilung",
+                                        "session" => "Session",
+                                        "stream" => "Arbeitsbereich",
+                                        _ => "System",
+                                    };
+                                    let pill = ui.scope(|ui| badge(ui, category, BLUE)).response;
+                                    pill.clone().on_hover_text("Ereigniskategorie, kein Live-Status");
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d| d.insert_temp(
+                                        egui::Id::new(("test-diagnostic-heading", e.sequence)), (title.rect, pill.rect),
+                                    ));
+                                    #[cfg(not(test))]
+                                    let _ = (title, pill);
+                                });
+                            });
+                            ui.horizontal_top(|ui| {
+                                let width = (ui.available_width() - 165.0).max(80.0);
+                                let metadata = ui.allocate_ui_with_layout(
+                                    egui::vec2(width, 0.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        ui.colored_label(MUTED, timestamp(e.created_unix_ms));
+                                        ui.add(egui::Label::new(design::elided_text_job(
+                                            e.aggregate_id.clone(), egui::FontId::proportional(14.0),
+                                            MUTED, width, 1,
+                                        ))).on_hover_text(&e.aggregate_id);
+                                    },
+                                ).response;
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(ui.available_width(), metadata.rect.height()),
+                                    egui::Layout::right_to_left(egui::Align::Max),
+                                    |ui| {
+                                    let button = ui.button("Anzeigen");
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d| d.insert_temp(
+                                        egui::Id::new(("test-diagnostic-open", e.sequence)), button.rect,
+                                    ));
+                                    if button.clicked() {
+                                        self.inspect("Ereignisdaten", json!(e));
+                                    }
+                                    ui.menu_button(egui_phosphor::regular::DOTS_THREE, |ui| {
+                                        if ui.button("Vollständiges Originalereignis laden").clicked() {
+                                            self.read("Originalereignis", format!("/v1/events/{}", e.sequence));
+                                            ui.close();
+                                        }
+                                    }).response.on_hover_text("Weitere Ereignisaktionen");
+                                });
+                            });
+                        });
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(
+                            egui::Id::new(("test-diagnostic-row", e.sequence)), row.response.rect,
+                        ));
+                        #[cfg(not(test))]
+                        let _ = row;
+                    });
+                }
+            });
+    }
+    fn notifications_view(&mut self, ui: &mut egui::Ui) {
+        if let Some(e) = &self.notification_error {
+            ui.colored_label(
+                AMBER,
+                format!("Benachrichtigungen nicht aktuell verfügbar: {e}"),
+            );
+        }
+        let pending = self.notification_reads_pending();
+        let enabled = self.online && self.notifications.iter().any(|n| !n.read && !pending.contains(&n.id));
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let label = "Alles als gelesen markieren";
+                let button = ui.add_enabled(enabled, egui::Button::new(format!(
+                    "{}  {label}", egui_phosphor::regular::CHECK,
+                )));
+                button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-notifications-mark-all"), button.rect));
+                if button.on_hover_text("Alle geladenen Benachrichtigungen als gelesen markieren").clicked() {
+                    let ids = self.notifications.iter().filter(|n| !n.read).map(|n| n.id).collect::<Vec<_>>();
+                    self.mark_notifications_read(ids);
+                }
+            },
+        );
+        if self.notifications.is_empty() {
+            ui.label("Noch keine Benachrichtigungen vorhanden. Der serverseitige Verlauf erfasst neue Fragen, Abschlüsse und Fehler ab dem GUI-Backend-Update.");
+        }
+        let snapshot = self.snapshot.clone();
+        egui::ScrollArea::vertical().id_salt("notification-list").auto_shrink([false, false]).show(ui, |ui| {
+            for n in self.notifications.clone() {
+                let read = n.read || pending.contains(&n.id);
+                let target = self.notification_target(&n);
+                ui.push_id(n.id, |ui| {
+                    let _row = design::task_row_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        let project = n.project_id.and_then(|id| snapshot.as_ref()?.projects.iter().find(|p| p.id == id))
+                            .map_or("Factory", |p| p.name.as_str());
+                        let key = snapshot.as_ref().and_then(|s| s.tickets.iter().find(|ticket| {
+                            Some(ticket.id) == n.ticket_id
+                                || n.command_id.is_some_and(|id| ticket.execution_command == Some(id))
+                        })).map_or("", |ticket| ticket.key.as_str());
+                        ui.horizontal_top(|ui| {
+                            let width = (ui.available_width() - if read { 0.0 } else { 70.0 }).max(1.0);
+                            ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                                let level = if n.kind == "scheduler.blocked" { TaskHistoryLevel::Error } else { task_routing_level(&n.title) };
+                                ui.visuals_mut().override_text_color = Some(design::history_color(level, ui.visuals().text_color()));
+                                design::ticket_title(ui, key, &n.title, egui::FontId::proportional(18.0), width)
+                                    .on_hover_text(&n.title);
+                            });
+                            if !read {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                    badge(ui, "Neu", AMBER);
+                                });
+                            }
+                        });
+                        let footer_height = ui.spacing().interact_size.y.max(
+                            2.0 * ui.text_style_height(&egui::TextStyle::Body) + design::TASK_METADATA_LINE_GAP,
+                        );
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), footer_height),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                            let target = target.unwrap_or(Target::Diagnose(n.project_id));
+                            let _open = ui.button(target.notification_label());
+                            #[cfg(test)]
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-notification-open", n.id)), _open.rect));
+                            if _open.clicked() {
+                                self.open_notification(n.id, target);
+                            }
+                            if !read {
+                                let _check = design::icon_button(ui, egui_phosphor::regular::CHECK, "Als gelesen markieren", self.online);
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-notification-check", n.id)), _check.rect));
+                                if _check.clicked() {
+                                    self.mark_notifications_read([n.id]);
+                                }
+                            }
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = design::TASK_METADATA_LINE_GAP;
+                                    let _project = ui.add(egui::Label::new(RichText::new(project).color(MUTED)).truncate())
+                                        .on_hover_text(project);
+                                    let _time = ui.colored_label(MUTED, timestamp(n.created_unix_ms));
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d| d.insert_temp(
+                                        egui::Id::new(("test-notification-metadata", n.id)),
+                                        (_project.rect, _time.rect),
+                                    ));
+                                });
+                            });
+                            },
+                        );
+                    });
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-notification-row", n.id)), _row.response.rect));
+                });
+            }
+            if let Some(before) = self.notification_before { if ui.add_enabled(self.online, egui::Button::new("Ältere Meldungen laden")).clicked() { self.backend.notifications(before); } }
+        });
+    }
+    fn session_sidebar(&mut self, ctx: &egui::Context) {
+        let Some(tab) = self.tabs.get(self.active_tab - 1) else { return };
+        let root = tab.root;
+        let Some(snapshot) = self.snapshot.clone() else { return };
+        let activities = session_activity(&snapshot, root);
+        let max_width = (ctx.content_rect().width() * 0.8).max(1.0);
+        let _panel = egui::SidePanel::left("session-activity-sidebar")
+            .default_width(500.0_f32.min(max_width))
+            .width_range(240.0_f32.min(max_width)..=max_width)
+            .resizable(true)
+            .frame(egui::Frame::new()
+                .fill(egui::Color32::from_rgb(19, 22, 28))
+                .inner_margin(18))
+            .show(ctx, |ui| {
+                ui.strong("Aufgaben und Fragen");
+                ui.add_space(10.0);
+                egui::ScrollArea::vertical().id_salt(("session-activities", root))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if activities.is_empty() {
+                            ui.colored_label(MUTED, "Noch keine Aufgaben oder Fragen in dieser Session.");
+                        }
+                        for activity in &activities {
+                            let (id, kind, title, status, action) = match activity {
+                                SessionActivity::Task(task) => (
+                                    task.id.to_string(), "Aufgabe".to_string(), task_text(task),
+                                    task_status(&snapshot, task), "Anzeigen",
+                                ),
+                                SessionActivity::Question(question) => (
+                                    question.id.to_string(),
+                                    if question_field_count(question) > 1 {
+                                        format!("{} Fragen", question_field_count(question))
+                                    } else { "Frage".to_string() },
+                                    question_summary(question),
+                                    match question.state {
+                                        QuestionState::Pending => "Offen",
+                                        QuestionState::Rejected => "Abgelehnt",
+                                        QuestionState::Unknown => "Ungeklärt",
+                                        _ => question_status(question.state),
+                                    },
+                                    if needs_answer(question) { "Beantworten" } else { "Anzeigen" },
+                                ),
+                            };
+                            ui.push_id(&id, |ui| {
+                                let ticket_key=match activity {
+                                    SessionActivity::Task(task)=>task.key.as_str(),
+                                    SessionActivity::Question(q)=>snapshot.tickets.iter()
+                                        .find(|ticket|ticket.execution_command==Some(q.command_id))
+                                        .map_or("",|ticket|ticket.key.as_str()),
+                                };
+                                let row = design::clickable_list_row(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal_top(|ui| {
+                                        let _kind = ui.small(&kind);
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                            let _pill = design::compact_status_pill(
+                                                ui, status, status_color(status), ui.available_width(),
+                                            );
+                                            #[cfg(test)]
+                                            ui.ctx().data_mut(|d| d.insert_temp(
+                                                egui::Id::new(("test-session-activity-pill", &id)),
+                                                (_pill.rect, _kind.rect, status.to_string(), status_color(status)),
+                                            ));
+                                        });
+                                    });
+                                    let width=ui.available_width();
+                                    design::ticket_title(ui,ticket_key,&title,
+                                        egui::FontId::proportional(16.0),width).on_hover_text(&title);
+                                });
+                                let row = row.response.on_hover_text(action);
+                                row.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,
+                                    ui.is_enabled(),format!("{kind}: {title} – {action}")));
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d|d.insert_temp(
+                                    egui::Id::new(("test-session-activity-action",&id)),(row.rect,action.to_string()),
+                                ));
+                                if row.clicked() {
+                                    match activity {
+                                        SessionActivity::Task(task) => self.view_task(task.id),
+                                        SessionActivity::Question(q) if needs_answer(q) => {
+                                            self.dialog = Some(Dialog::questions(vec![(**q).clone()]));
+                                        }
+                                        SessionActivity::Question(q) => {
+                                            self.dialog = Some(Dialog::QuestionView(vec![(**q).clone()]));
+                                        }
+                                    }
+                                }
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| d.insert_temp(
+                                    egui::Id::new(("test-session-activity-row", &id)), row.rect,
+                                ));
+                                #[cfg(not(test))]
+                                let _ = row;
+                            });
+                        }
+                    });
+            });
+        #[cfg(test)]
+        ctx.data_mut(|d| d.insert_temp(
+            egui::Id::new("test-session-sidebar-width"),
+            (_panel.response.rect, max_width),
+        ));
+    }
+
+    fn session_tab(&mut self, ui: &mut egui::Ui) {
+        let index = self.active_tab - 1;
+        if index >= self.tabs.len() {
+            self.active_tab = 0;
+            return;
+        }
+        let title = self.tabs[index].title.clone();
+        let root = self.tabs[index].root;
+        let _title = ui.add(egui::Label::new(design::elided_text_job(
+            title.clone(),egui::FontId::monospace(20.0),ui.visuals().text_color(),
+            ui.available_width(),1,
+        ))).on_hover_text(&title);
+        #[cfg(test)]
+        ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new("test-opencode-title"),_title.rect));
+        let jump_to_start = self.tabs[index].scroll_to_start;
+        self.tabs[index].scroll_to_start = false;
+        let tab = &self.tabs[index];
+        let working = self.online && self.snapshot.as_ref()
+            .and_then(|s| working_session_command(s, root, tab.selected_execution))
+            .is_some_and(|id| tab.archives.get(&id)
+                .is_none_or(|entries| !conversation::current_turn_ended(entries)));
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("test-opencode-working")));
+        let mut entries = tab
+            .archives
+            .iter()
+            .filter(|(id, _)| {
+                tab.selected_execution
+                    .is_none_or(|selected| selected == **id)
+            })
+            .flat_map(|(id, values)| values.iter().map(move |v| (*id, v)))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(_, e)| e.sequence);
+        if !tab.show_versions {
+            let mut latest = BTreeMap::new();
+            let mut first_seen = BTreeMap::new();
+            for (id, e) in entries {
+                let key = e.message["id"].as_str().unwrap_or("").to_string();
+                first_seen.entry(key.clone()).or_insert(
+                    tab.message_positions
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(e.sequence),
+                );
+                latest.insert(key, (id, e));
+            }
+            let mut ordered = latest
+                .into_iter()
+                .map(|(key, value)| (first_seen[&key], value))
+                .collect::<Vec<_>>();
+            ordered.sort_by_key(|(sequence, _)| *sequence);
+            entries = ordered.into_iter().map(|(_, value)| value).collect();
+            let assistant_errors: std::collections::BTreeSet<_> = entries.iter()
+                .filter(|(_, e)| e.message["type"] == "assistant" && !e.message["error"].is_null())
+                .map(|(id, _)| *id).collect();
+            entries.retain(|(id, e)| {
+                !conversation::empty_assistant(&e.message)
+                    && (e.message["type"] != "idle"
+                        || (!assistant_errors.contains(id) && matches!(e.message["outcome"].as_str(), Some("error" | "failed"))))
+            });
+            entries.sort_by_key(|(_, e)| {
+                (
+                    e.message["time"]["created"]
+                        .as_u64()
+                        .unwrap_or(e.captured_unix_ms),
+                    e.sequence,
+                )
+            });
+        }
+        // Clone references' backing values only for this view's interaction, not the snapshot.
+        let entries = entries
+            .iter()
+            .map(|(id, e)| (*id, (*e).clone()))
+            .collect::<Vec<_>>();
+        let follow = tab.follow;
+        let show_versions = tab.show_versions;
+        if self.online && entries.is_empty() && !working {
+            ui.label("Noch keine archivierten Nachrichten verfügbar.");
+        }
+        let list_key = format!("archive/{root}");
+        let mut list = self.take_list(
+            &list_key,
+            hash_of(
+                entries
+                    .iter()
+                    .map(|(_, entry)| (entry.message["id"].as_str().unwrap_or(""), entry.sequence))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+        let mut scroll = egui::ScrollArea::vertical()
+            .id_salt(("session-archive", root))
+            .stick_to_bottom(follow);
+        if jump_to_start {
+            scroll = scroll.vertical_scroll_offset(0.0);
+        }
+        let scroll = scroll.show(ui, |ui| {
+            conversation::transcript_style(ui);
+            list.list.ui_custom_layout(ui, entries.len(), |ui, index| {
+                let (command, entry) = &entries[index];
+                let row_id = if show_versions {
+                    format!("revision/{}", entry.sequence)
+                } else {
+                    format!("message/{}", entry.message["id"].as_str().unwrap_or(""))
+                };
+                ui.push_id(row_id, |ui| {
+                    conversation::message(ui, self, *command, entry, show_versions);
+                });
+                let height = conversation::line_height(ui);
+                ui.add_space(height);
+                1
+            });
+            if working {
+                conversation::working_indicator(ui);
+            }
+        });
+        let wheel = ui.input(|input| input.raw_scroll_delta.y);
+        let over_transcript = ui.ctx().pointer_hover_pos().is_some_and(|pos| scroll.inner_rect.contains(pos));
+        if over_transcript && wheel != 0.0 {
+            self.tabs[index].follow = scroll.state.offset.y + scroll.inner_rect.height()
+                >= scroll.content_size.y - 4.0;
+        }
+        if self.online && scroll.state.offset.y <= 8.0
+            && (jump_to_start || !self.tabs[index].follow || (over_transcript && wheel > 0.0))
+        {
+            if let Some((command,before)) = self.tabs[index].older.iter()
+                .filter(|(id,_)| !self.tabs[index].loading.contains_key(id))
+                .find_map(|(id,before)|before.map(|before|(*id,before)))
+            {
+                let request = self.next_request;
+                self.next_request += 1;
+                self.tabs[index].loading.insert(command,request);
+                self.backend.archive(command,ArchiveRead::Older(before),request,show_versions);
+            }
+        }
+        self.put_list(list_key, list);
+    }
+    pub(super) fn command_menu(&mut self, ui: &mut egui::Ui, c: &RunnerCommand) {
+        let Some(s) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(w) = s.streams.iter().find(|w| w.id == c.stream_id) else {
+            return;
+        };
+        if c.kind == CommandKind::RunAgent && ui.button("Vollständiges Sessionarchiv exportieren …").clicked() {
+            let commands = s.commands.iter().filter(|command| command.kind == CommandKind::RunAgent
+                && command.session_root() == c.session_root()).map(|command|command.id).collect();
+            self.backend.export_archive(commands);
+            ui.close();
+        }
+        for (label, operation) in [
+            ("Modell-/Provider-Bereitschaft prüfen …", "readiness"),
+            ("Repository-Refs abrufen …", "fetch"),
+            ("Geprüftes Ergebnis veröffentlichen …", "publish"),
+        ] {
+            if ui.button(label).clicked() {
+                let remote = s
+                    .runners
+                    .iter()
+                    .find(|r| r.id == c.runner_id)
+                    .is_some_and(|r| r.location == RunnerLocation::Server);
+                let profile = c
+                    .agent_spec
+                    .as_ref()
+                    .map(|a| a.profile.clone())
+                    .unwrap_or_else(|| {
+                        self.project()
+                            .map_or_else(ExecutionProfile::default, |p| p.profile.clone())
+                    });
+                self.dialog = Some(Dialog::form(label, "Nichtinteraktiver Runner-Helfer. Transport ausdrücklich wählen; SSH erfordert das lokale Runnerprofil. Journal-/Konfigurationspfade gelten auf dem ausführenden Host. Es wird keine OpenCode-TUI gestartet.", "RUNNER_HELPER", format!("runner-helper/{}/{}", c.runner_id, c.id), json!({"request_id":RequestId::new(),"operation":operation,"transport":if remote {"ssh"} else {"local"},"runner_id":c.runner_id,"command_id":c.id,"server":self.server,"journal":"","opencode_registration":"","hosting_config":"","token_file":"","provider_id":profile.provider_id,"model_id":profile.model_id})));
+                ui.close();
+            }
+        }
+        for (label, kind) in [
+            (
+                "Arbeitsbereich vorbereiten …",
+                CommandKind::PrepareWorkspace,
+            ),
+            ("OpenCode-Bereitschaft prüfen …", CommandKind::CheckOpenCode),
+        ] {
+            if ui.button(label).clicked() {
+                self.dialog = Some(Dialog::form(label, "Neuen technischen Auftrag an den zugeordneten Runner senden. Bestehende Aufträge werden nicht dupliziert.", "POST", format!("/v1/streams/{}/commands", w.id), json!(EnqueueCommand { request_id: RequestId::new(), expected_revision: w.revision, kind, prompt: None })));
+                ui.close();
+            }
+        }
+        if let Some(control) = s.controls.iter().find(|v| v.stream_id == w.id) {
+            if let Some(proof) = &control.proof {
+                if ui
+                    .button("Ungeklärte Container-Steuerung wiederholen …")
+                    .clicked()
+                {
+                    self.dialog = Some(Dialog::form("Container-Steuerung abgleichen", "Nur die bereits bestätigte Containeridentität verwenden. Kein blinder Neustart und kein Umgehen ungeklärter Ausführung.", "POST", format!("/v1/streams/{}/control/retry", w.id), json!(RetryControl { request_id: RequestId::new(), expected_revision: w.revision, previous_request: control.request_id, expected_proof: proof.clone(), reason: String::new() })));
+                    ui.close();
+                }
+            }
+        }
+        if ui.button("Arbeitsbereich-Metadaten").clicked() {
+            self.read("Arbeitsbereiche", "/v1/snapshot".into());
+            ui.close();
+        }
+        for (label, action) in [
+            ("Arbeitsbereich pausieren …", ControlAction::Pause),
+            ("Arbeitsbereich fortsetzen …", ControlAction::Resume),
+        ] {
+            if ui.button(label).clicked() {
+                self.dialog = Some(Dialog::form(label, "Pause und Fortsetzung sind asynchron. Ein unbestätigter Stopp ist kein Nachweis gestoppter Hintergrundprozesse.", "POST", format!("/v1/streams/{}/control", w.id), json!(SetControl { request_id: RequestId::new(), expected_revision: w.revision, action })));
+                ui.close();
+            }
+        }
+        if ui.button("Session schließen …").clicked() {
+            self.dialog = Some(Dialog::form("Session schließen", "Eine geschlossene Session steht nicht mehr für neue Folgeaufgaben zur Verfügung. Vorher laufende Arbeit und Fragen prüfen.", "POST", format!("/v1/commands/{}/closure", c.id), json!(CloseSession { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
+            ui.close();
+        }
+        if ui.button("Compaction anfordern …").clicked() {
+            self.dialog = Some(Dialog::form("Session komprimieren", "Die vorhandene Sessionpflege verwenden; Verlauf bleibt im Factory-Archiv zugänglich.", "POST", format!("/v1/commands/{}/compaction", c.id), json!(RequestCompaction { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
+            ui.close();
+        }
+        if ui.button("Checkpoint erstellen …").clicked() {
+            self.dialog = Some(Dialog::form(
+                "Checkpoint erstellen",
+                "Der Runner erstellt einen Git-Snapshot nach den vorhandenen Sicherheitsprüfungen.",
+                "POST",
+                format!("/v1/streams/{}/commands", w.id),
+                json!(EnqueueCommand {
+                    request_id: RequestId::new(),
+                    expected_revision: w.revision,
+                    kind: CommandKind::Checkpoint,
+                    prompt: None
+                }),
+            ));
+            ui.close();
+        }
+        if ui.button("Ergebnis-Review …").clicked() {
+            self.dialog = Some(Dialog::form("Ergebnis prüfen", "Checkpoint und erwarteten Zielcommit ausdrücklich auswählen. Der Runner muss Review unterstützen.", "POST", format!("/v1/streams/{}/review", w.id), json!(RequestReview { request_id: RequestId::new(), expected_revision: w.revision, checkpoint_command: c.id, expected_target_commit: String::new() })));
+            ui.close();
+        }
+        if ui.button("Review integrieren …").clicked() {
+            self.dialog = Some(Dialog::form("Review integrieren", "Nur einen erfolgreich geprüften Reviewkandidaten integrieren. Git-CAS schützt vor verändertem Zielstand.", "POST", format!("/v1/streams/{}/integrate", w.id), json!(RequestIntegration { request_id: RequestId::new(), expected_revision: w.revision, review_command: c.id })));
+            ui.close();
+        }
+        if ui.button("Checkpoint an Runner übergeben …").clicked() {
+            self.dialog = Some(Dialog::form("Arbeitsbereich übergeben", "Checkpoint und Zielrunner prüfen. Ownership wird revisionsgeschützt übertragen; keine unbestätigte laufende Ausführung übergehen.", "POST", format!("/v1/streams/{}/handoff", w.id), json!(HandoffStream { request_id: RequestId::new(), expected_revision: w.revision, checkpoint_command: c.id, target_runner: c.runner_id, reason: String::new() })));
+            ui.close();
+        }
+        if ui.button("Supervisor konfigurieren …").clicked() {
+            if let Some(p) = command_project(&s, c) {
+                self.dialog = Some(Dialog::form("Supervisor konfigurieren", "Aktuelle Policyrevision zuvor in den erweiterten Projekteinstellungen unter Supervisor prüfen. Auswertungen verbrauchen ein ausdrückliches Budget.", "PUT", format!("/v1/projects/{p}/supervisor"), json!(SetSupervisor { request_id: RequestId::new(), expected_revision: Revision(0), stream_id: w.id, enabled: true, evaluation_budget: 12, interval_seconds: 300 })));
+            }
+            ui.close();
+        }
+        if ui.button("Runtime-/Beendigungszustand").clicked() {
+            self.read(
+                "Runtime-Beendigung",
+                format!("/v1/commands/{}/termination", c.id),
+            );
+            ui.close();
+        }
+        if ui.button("Runtime-Identität / gezielt beenden …").clicked() {
+            self.read(
+                "Bestätigte Runtime-Identität",
+                format!("/v1/commands/{}/runtime-binding", c.id),
+            );
+            ui.close();
+        }
+        if ui.button("Archivdateien").clicked() {
+            self.read("Dateiarchiv", format!("/v1/commands/{}/files", c.id));
+            ui.close();
+        }
+    }
+}
+
+pub(crate) fn status_color(status: &str) -> egui::Color32 {
+    match status {
+        "Fehlgeschlagen" | "Abgebrochen" => RED,
+        "Braucht Antwort"
+        | "Blockiert"
+        | "Zustand ungeklärt"
+        | "Unterbrochen"
+        | "Pause noch unbestätigt"
+        | "Beendigung ungeklärt"
+        | "Offen"
+        | "Abgelehnt"
+        | "Ungeklärt"
+        | "Antwort erforderlich"
+        | "Antwort abgelehnt · erneut prüfen"
+        | "Wartet auf Wiederholung"
+        | "Orchestrator wartet"
+        | "Zustellung ungeklärt" => AMBER,
+        "In Bearbeitung" | "Wird gestartet" | "Abgeschlossen" | "Ergebnis vorhanden"
+        | "Beantwortet" => GREEN,
+        "Eingereiht" | "Antwort eingereiht" | "Wartet auf Runner" | "Wartet auf Start"
+        | "Wartet auf Session" | "Wird vorbereitet" | "Orchestrator prüft" => BLUE,
+        _ => MUTED,
+    }
+}
+fn event_project(s: &Snapshot, e: &FactoryEvent) -> Option<ProjectId> {
+    e.payload
+        .get("project_id")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .or_else(|| {
+            s.commands
+                .iter()
+                .find(|c| {
+                    c.id.to_string() == e.aggregate_id
+                        || e.payload["command_id"] == c.id.to_string()
+                })
+                .and_then(|c| command_project(s, c))
+        })
+        .or_else(|| {
+            s.tickets
+                .iter()
+                .find(|t| t.id.to_string() == e.aggregate_id)
+                .map(|t| t.project_id)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn excerpts_do_not_split_unicode_and_are_marked() {
+        assert_eq!(design::elide("Grüße界", 5), "Grüße…");
+        assert_eq!(design::elide("abc", 3), "abc");
+    }
+}

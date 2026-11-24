@@ -987,6 +987,8 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                 .update_project(
                     id,
                     &UpdateProject {
+                        runner_mapping: None,
+                        key: None,
                         request_id: request(request_id),
                         expected_revision: Revision(expected_revision),
                         name,
@@ -1259,6 +1261,8 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
         } => print(
             &client
                 .create_project(&CreateProject {
+                    runner_mapping: None,
+                    key: None,
                     request_id: request(request_id),
                     name,
                     repository,

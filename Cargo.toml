@@ -1,6 +1,11 @@
 [workspace]
 members = ["spikes/opencode", "crates/*"]
 resolver = "2"
+exclude = ["vendor/sdl3-sys"]
+
+[patch.crates-io]
+# SDL's Wayland receiver must prefer file URIs over accompanying plain text.
+sdl3-sys = { path = "vendor/sdl3-sys" }
 
 [workspace.package]
 version = "0.1.3-dev"

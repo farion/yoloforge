@@ -1,4 +1,4 @@
-//! Adapter pinned to the verified OpenCode 2.0.27 contract.
+//! Adapter for the native OpenCode V2 HTTP API.
 //! Credentials remain separate from Factory authentication and never implement Debug.
 use anyhow::{ensure, Context, Result};
 use factory_core::{OpenCodeStatus, QuestionKind, QuestionState};
@@ -6,7 +6,24 @@ use reqwest::{Client, Method, StatusCode, Url};
 use serde::Deserialize;
 use std::{fs, path::Path, time::Duration};
 
-pub const SUPPORTED_VERSION: &str = "2.0.27";
+fn supported_version(version: &str) -> bool {
+    let mut parts = version.trim().split(['-', '+']).next().unwrap_or("").split('.');
+    matches!(
+        (parts.next(), parts.next().and_then(|v| v.parse::<u32>().ok()),
+         parts.next().and_then(|v| v.parse::<u32>().ok()), parts.next()),
+        (Some("2"), Some(minor), Some(patch), None) if minor > 0 || patch >= 27
+    )
+}
+
+#[test]
+fn native_v2_versions_are_not_pinned_to_one_patch() {
+    for version in ["2.0.27", "2.0.99", "2.4.1", "2.9.0+build"] {
+        assert!(supported_version(version), "{version}");
+    }
+    for version in ["1.4.1", "2.0.26", "3.0.0", "2.1", "not-a-version"] {
+        assert!(!supported_version(version), "{version}");
+    }
+}
 mod excerpt;
 
 #[derive(Deserialize)]
@@ -48,7 +65,7 @@ impl OpenCodeClient {
             matches!(self.status().await, OpenCodeStatus::Ready { .. }),
             "OpenCode-Service nicht erreichbar oder inkompatibel"
         );
-        let mut lines = vec!["OpenCode-Service erreichbar (2.0.27)".to_string()];
+        let mut lines = vec!["OpenCode-V2-Service erreichbar".to_string()];
         if provider.is_empty() || model.is_empty() {
             lines.push("Projektmodell fehlt: Provider-ID und Modell-ID explizit konfigurieren. Kein automatisches Ersatzmodell.".into());
         } else {
@@ -413,6 +430,9 @@ impl OpenCodeClient {
             "OpenCode HTTP {}",
             response.status().as_u16()
         );
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(Some(serde_json::Value::Null));
+        }
         Ok(Some(response.json().await.map_err(|_| {
             anyhow::anyhow!("Invalid OpenCode response")
         })?))
@@ -474,7 +494,7 @@ impl OpenCodeClient {
                 Method::POST,
                 "/api/session",
                 Some(serde_json::json!({
-                    "id":id,"title":format!("Factory {command}"),"agent":"build",
+                    "id":id,"agent":"build",
                     "location":{"directory":directory},"model":{"providerID":provider,"id":model},
                     "metadata":{"factory_command":command},
                     "permissions": if read_only {Some(serde_json::json!([{"action":"*","resource":"*","effect":"deny"}]))} else {None}
@@ -491,6 +511,22 @@ impl OpenCodeClient {
         );
         Ok(())
     }
+    /// Archive without deleting history. Repeating this update is a native no-op.
+    pub async fn archive_session(&self, session: &str) -> Result<()> {
+        safe_id(session)?;
+        let updated = self
+            .request(
+                Method::PATCH,
+                &format!("/api/session/{session}"),
+                Some(serde_json::json!({"archived": true})),
+            )
+            .await?;
+        ensure!(
+            updated.is_some(),
+            "Decision session disappeared during archival"
+        );
+        Ok(())
+    }
     pub async fn prompt(&self, session: &str, id: &str, text: &str) -> Result<()> {
         self.prompt_with_images(session, id, text, &[]).await
     }
@@ -501,17 +537,37 @@ impl OpenCodeClient {
         text: &str,
         images: &[factory_core::PromptImage],
     ) -> Result<()> {
+        self.prompt_with_files(session, id, text, images, &[]).await
+    }
+    pub async fn prompt_with_files(
+        &self,
+        session: &str,
+        id: &str,
+        text: &str,
+        images: &[factory_core::PromptImage],
+        files: &[factory_core::PromptFile],
+    ) -> Result<()> {
         safe_id(session)?;
         safe_id(id)?;
         factory_core::validate_images(images).map_err(anyhow::Error::msg)?;
+        factory_core::validate_files(files).map_err(anyhow::Error::msg)?;
         let mut body = serde_json::json!({"id":id,"text":text});
-        if !images.is_empty() {
+        if !images.is_empty() || !files.is_empty() {
             body["files"] = serde_json::json!(images
                 .iter()
                 .map(|i| serde_json::json!({"uri":i.uri(),"name":i.name}))
+                .chain(
+                    files
+                        .iter()
+                        .map(|f| serde_json::json!({"uri":f.uri(),"name":f.name}))
+                )
                 .collect::<Vec<_>>());
             body["metadata"] =
                 serde_json::json!({"factory_images":factory_core::image_digest(images)});
+            if !files.is_empty() {
+                body["metadata"]["factory_files"] =
+                    serde_json::json!(factory_core::files_digest(files));
+            }
         }
         let value = self
             .request(
@@ -629,7 +685,7 @@ impl OpenCodeClient {
         let Ok(info) = response.json::<Info>().await else {
             return OpenCodeStatus::Unavailable;
         };
-        if info.version == SUPPORTED_VERSION {
+        if supported_version(&info.version) {
             OpenCodeStatus::Ready {
                 version: info.version,
             }
