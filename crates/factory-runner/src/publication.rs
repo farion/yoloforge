@@ -71,7 +71,9 @@ fn initialize_mirror(root: &Path, selected: &Path, spec: &WorkspaceSpec) -> Resu
     let parent = fs::canonicalize(parent).context("Der Elternordner der lokalen Spiegelkopie fehlt.")?;
     let name = selected.file_name().context("Mirror folder name missing")?;
     let target = parent.join(name);
-    ensure!(target == selected && fs::symlink_metadata(&target).is_err(),
+    ensure!(
+        (target == selected || git_path(&target)? == git_path(selected)?)
+            && fs::symlink_metadata(&target).is_err(),
         "Der Pfad der lokalen Spiegelkopie ist nicht neu oder nicht kanonisch.");
     let temp = tempfile::tempdir_in(&parent)?;
     git(temp.path(), &["init", "-b", &spec.base_branch])?;
@@ -84,7 +86,7 @@ fn initialize_mirror(root: &Path, selected: &Path, spec: &WorkspaceSpec) -> Resu
     fs::rename(&staged, &target)?;
     factory_platform::sync_dir(&parent)?;
     Ok(Workspace {
-        path: target.to_str().context("Non-UTF8 mirror path")?.into(),
+        path: selected.to_str().context("Non-UTF8 mirror path")?.into(),
         branch: spec.base_branch.clone(),
         base_commit: commit,
     })
