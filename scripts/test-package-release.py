@@ -86,6 +86,12 @@ class Packages(unittest.TestCase):
                         self.assertEqual(call.kwargs["timeout"], 30)
             VERIFY.verify(output, VERSION)
             (output / "SHA256SUMS").unlink()
+            for kind in ("gui", "runner"):
+                legacy = output / f"yoloforge-{kind}-{VERSION}-macos-x86_64.tar.gz"
+                legacy.write_bytes(b"unexpected Intel package")
+                with self.assertRaisesRegex(ValueError, "unexpected=.*macos-x86_64"):
+                    VERIFY.verify(output, VERSION)
+                legacy.unlink()
             next(output.glob("*.sha256")).write_text("invalid\n")
             with self.assertRaisesRegex(ValueError, "Checksum mismatch"):
                 VERIFY.verify(output, VERSION)

@@ -94,6 +94,8 @@ mod tests {
         let stream = StreamId::new();
         let id = CommandId::new();
         let session = agent_session_id(id);
+        let root = dir.path().join("work");
+        let workspace = root.join(stream.to_string());
         let writes = Arc::new(AtomicUsize::new(0));
         let mismatch = Arc::new(AtomicBool::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -102,6 +104,7 @@ mod tests {
         let m = mismatch.clone();
         let app = Router::new().fallback(move |request: Request| {
             let session = session.clone(); let w = w.clone(); let m = m.clone();
+            let workspace = workspace.clone();
             async move {
                 if request.method() != axum::http::Method::GET {
                     w.fetch_add(1, Ordering::SeqCst);
@@ -109,7 +112,7 @@ mod tests {
                 }
                 let path = request.uri().path();
                 Json(if path.ends_with(&format!("/session/{session}")) {
-                    json!({"data":{"id":session,"metadata":{"factory_command":id},"location":{"directory":format!("/work/{stream}")},"model":{"providerID":"openai","id":if m.load(Ordering::SeqCst) {"other"} else {"explicit"}},"outcome":"succeeded"}})
+                    json!({"data":{"id":session,"metadata":{"factory_command":id},"location":{"directory":workspace},"model":{"providerID":"openai","id":if m.load(Ordering::SeqCst) {"other"} else {"explicit"}},"outcome":"succeeded"}})
                 } else if path.ends_with("/active") {json!({"data":{}})}
                 else if path.contains("/message/") {json!({"data":{"type":"user","text":"task"}})}
                 else {json!({"data":[]})}).into_response()
@@ -136,7 +139,7 @@ mod tests {
             "--name",
             "fixture",
             "--workspace-root",
-            "/work",
+            root.to_str().unwrap(),
             "--opencode-registration",
             reg.to_str().unwrap(),
         ])

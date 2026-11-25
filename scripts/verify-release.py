@@ -6,7 +6,7 @@ from pathlib import Path
 
 PLATFORMS = [
     ("linux", "x86_64"), ("linux", "aarch64"),
-    ("macos", "x86_64"), ("macos", "aarch64"),
+    ("macos", "aarch64"),
     ("windows", "x86_64"),
 ]
 
@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args()
     verify(args.directory, args.version)
-    print("Verified all 12 GUI, runner and server packages.")
+    print(f"Verified all {len(expected_assets(args.version))} GUI, runner and server packages.")
 
 
 if __name__ == "__main__":

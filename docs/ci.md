@@ -7,10 +7,10 @@ Frühere TUI-, Android- und Container-Image-Builds sind ersetzt.
 | Plattform | Architektur | GUI | Runner | Server |
 | --- | --- | --- | --- | --- |
 | Linux / Ubuntu 24.04 | x86_64, aarch64 | ja | ja | ja |
-| macOS | Intel x86_64, Apple Silicon aarch64 | ja | ja | nein |
+| macOS | Apple Silicon aarch64 | ja | ja | nein |
 | Windows / MSVC | x86_64 | ja | ja | nein |
 
-Insgesamt entstehen zwölf Archive mit einzelnen `.sha256`-Dateien. macOS-GUIs
+Insgesamt entstehen zehn Archive mit einzelnen `.sha256`-Dateien. macOS-GUIs
 enthalten eine `.app`, Windows verwendet ZIP, Unix-Pakete verwenden `.tar.gz`.
 GUI-Pakete enthalten immer den passenden Runner, Linux zusätzlich `factoryd`.
 Kein Paket enthält Laufzeitdaten, Tokens oder Journale.
@@ -29,7 +29,7 @@ Kein Paket enthält Laufzeitdaten, Tokens oder Journale.
   als Actions-Artefakte bereit.
 - `.github/workflows/release.yml`: Tag-Push `v*` oder manueller Start mit einem
   vorhandenen Tag. Tag und Workspace-Version müssen übereinstimmen. Alle Builds
-  müssen erfolgreich sein, alle zwölf Pakete und ihre SHA-256-Prüfsummen müssen
+  müssen erfolgreich sein, alle zehn Pakete und ihre SHA-256-Prüfsummen müssen
   vorliegen. Erst dann wird das Draft-Release veröffentlicht.
 
 Beispiel bei Workspace-Version `1.2.3`:

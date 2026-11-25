@@ -27,10 +27,6 @@ jobs:
             os: linux
             arch: aarch64
             target: aarch64-unknown-linux-gnu
-          - runner: macos-15-intel
-            os: macos
-            arch: x86_64
-            target: x86_64-apple-darwin
           - runner: macos-15
             os: macos
             arch: aarch64
