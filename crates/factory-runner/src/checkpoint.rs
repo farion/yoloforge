@@ -568,7 +568,10 @@ mod tests {
         assert_eq!(receipt.base_commit, result_checkpoint.commit);
         assert_eq!(fs::read_to_string(repo.join("tracked")).unwrap(), "remote result");
         assert_eq!(crate::publication::return_checkpoint(&root, &return_spec).unwrap(), receipt);
-        let mirror = dir.path().join("mirrors").join("project");
+        let mirror = fs::canonicalize(dir.path())
+            .unwrap()
+            .join("mirrors")
+            .join("project");
         fs::create_dir(mirror.parent().unwrap()).unwrap();
         return_spec.setup.as_mut().unwrap().repository_path = mirror.display().to_string();
         let mirror_receipt = crate::publication::return_checkpoint(&root, &return_spec).unwrap();
