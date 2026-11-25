@@ -38,8 +38,8 @@ fn repository_path(root: &Path, dir: &Path, spec: &WorkspaceSpec, command: Comma
         .as_ref()
         .is_some_and(|setup| setup.repository_source == CHECKPOINT_REPOSITORY)
     {
-        root.join(".checkpoint-repositories")
-            .join(command.to_string())
+        root.join(".r")
+            .join(command.to_string().replace('-', ""))
     } else {
         dir.join(command.to_string())
     }
@@ -62,11 +62,13 @@ pub fn resolve(spec: &WorkspaceSpec, root: &Path) -> Result<PathBuf> {
         plan.ready && plan.source == setup.repository_source && plan.branch == spec.base_branch,
         "Managed repository binding differs"
     );
-    let checkpoint_parent = root.join(".checkpoint-repositories");
+    let legacy_checkpoint_parent = root.join(".checkpoint-repositories");
+    let checkpoint_parent = root.join(".r");
     ensure!(
         (plan.path.parent() == Some(dir.as_path())
             || (setup.repository_source == CHECKPOINT_REPOSITORY
-                && plan.path.parent() == Some(checkpoint_parent.as_path())))
+                && (plan.path.parent() == Some(checkpoint_parent.as_path())
+                    || plan.path.parent() == Some(legacy_checkpoint_parent.as_path()))))
             && fs::canonicalize(&plan.path)? == plan.path,
         "Managed repository path replaced"
     );
@@ -118,10 +120,15 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
     }
     let mut plan = if let Some(plan) = &r.repository {
         let expected = repository_path(&root, &dir, &spec, r.command.id);
+        let previous_checkpoint = root
+            .join(".checkpoint-repositories")
+            .join(r.command.id.to_string());
         ensure!(
             plan.source == setup.repository_source
                 && plan.branch == spec.base_branch
-                && (plan.path == expected || plan.path == dir.join(r.command.id.to_string())),
+                && (plan.path == expected
+                    || plan.path == previous_checkpoint
+                    || plan.path == dir.join(r.command.id.to_string())),
             "Repository plan changed"
         );
         plan.clone()
