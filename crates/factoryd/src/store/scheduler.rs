@@ -571,6 +571,7 @@ impl Store {
                     "",
                     pins.as_ref().and_then(|m| m.implementer.as_ref()),
                     Some((&repo_skills, &local_mcps)),
+                    super::routing::assigned_git(&tx, tid)?,
                 ) {
                     Ok(c) => {
                         let mut ticket = t.clone();
@@ -719,6 +720,7 @@ impl Store {
                     Err(e) => return Err(e),
                 };
                 tx.execute_batch("RELEASE routing_evaluation")?;
+                let mut direct_git = None;
                 match routed {
                     super::routing::Route::Pending => continue,
                     super::routing::Route::Session(root) => {
@@ -732,6 +734,23 @@ impl Store {
                         continue;
                     }
                     super::routing::Route::New => {}
+                    super::routing::Route::TargetGit { worktree_prompt, git } => {
+                        let raw: String = tx.query_row("SELECT data FROM active_projects WHERE id=?1",
+                            [t.project_id.to_string()], |r| r.get(0))?;
+                        let project: Project = serde_json::from_str(&raw)?;
+                        if !project.setup.as_ref().is_some_and(|s| std::path::Path::new(&s.repository_source).is_absolute())
+                            || !project.runner_bindings.get(&runner).is_some_and(|b| b.repository_path.is_empty())
+                        {
+                            super::routing::note(&tx, &mut t, "Orchestrator wartet: Git-Schritte benötigen einen lokalen Ziel-Checkout auf dem Runner")?;
+                            continue;
+                        }
+                        if let Some(work) = worktree_prompt {
+                            prompt = work;
+                        } else {
+                            direct_git = Some(git);
+                        }
+                        super::routing::note(&tx, &mut t, "Orchestrator: Git-Schritte laufen im Ziel-Checkout")?;
+                    }
                 }
                 let stream = Self::create_stream_in(
                     &tx,
@@ -743,19 +762,23 @@ impl Store {
                         ticket_ids: vec![t.id],
                     },
                 )?;
-                let c = Self::enqueue_in(
+                let direct = direct_git.is_some();
+                let c = Self::enqueue_with_pins(
                     &tx,
                     stream.id,
                     &EnqueueCommand {
                         request_id: RequestId::new(),
                         expected_revision: stream.revision,
-                        kind: CommandKind::PrepareWorkspace,
+                        kind: if direct { CommandKind::TargetGit } else { CommandKind::PrepareWorkspace },
                         prompt: None,
                     },
                     None,
-                    false,
+                    "",
+                    None,
+                    None,
+                    direct_git,
                 )?;
-                tx.execute("INSERT INTO scheduler_runs(ticket_id,stream_id,prepare_id,prompt) VALUES(?1,?2,?3,?4)",params![t.id.to_string(),stream.id.to_string(),c.id.to_string(),prompt])?;
+                tx.execute("INSERT INTO scheduler_runs(ticket_id,stream_id,prepare_id,prompt,agent_id) VALUES(?1,?2,?3,?4,?5)",params![t.id.to_string(),stream.id.to_string(),c.id.to_string(),prompt,direct.then(|| c.id.to_string())])?;
                 t.status = TicketState::InProgress;
                 t.execution_command = Some(c.id);
                 save_ticket(&tx, &mut t)?;

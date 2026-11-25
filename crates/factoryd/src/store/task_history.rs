@@ -96,6 +96,11 @@ fn summarize(kind: &str, data: &serde_json::Value) -> Option<(String, TaskHistor
                 ("run_agent", "pending") => line("Bearbeitung an Runner übergeben", Info),
                 ("run_agent", "succeeded") => line("Bearbeitung abgeschlossen", Success),
                 ("run_agent", "failed") => line("Bearbeitung fehlgeschlagen", Error),
+                ("target_git", "pending") => line("Git-Schritte für den Ziel-Checkout eingeplant", Info),
+                ("target_git", "succeeded" | "failed") => {
+                    let level = if data["state"] == "succeeded" { Success } else { Error };
+                    line(data["result"]["git_summary"].as_str().unwrap_or("Git-Schritte beendet"), level)
+                }
                 _ => None,
             }
         }

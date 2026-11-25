@@ -26,6 +26,9 @@ pub struct Record {
     /// history was absent. Never infer that no external side effect occurred.
     #[serde(default)]
     pub recovery_required: bool,
+    /// A crash during target Git requires inspection, never a guessed replay.
+    #[serde(default)]
+    pub target_git_started: bool,
     #[serde(default)]
     pub repository: Option<crate::managed::Plan>,
     #[serde(default)]
@@ -143,6 +146,7 @@ impl Journal {
             return Ok(record);
         }
         let record = Record {
+            target_git_started: false,
             recovery_required: command.state != CommandState::Pending
                 && command.kind != CommandKind::CheckOpenCode,
             repository: None,

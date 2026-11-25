@@ -263,9 +263,9 @@ impl Store {
     pub fn enqueue(&self, id: StreamId, body: EnqueueCommand) -> Result<RunnerCommand> {
         if matches!(
             body.kind,
-            CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview
+            CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview | CommandKind::TargetGit
         ) {
-            return Err(StoreError::Invalid("Use review/integration endpoints"));
+            return Err(StoreError::Invalid("Command requires a review or orchestrated Git plan"));
         }
         self.mutate(
             body.request_id,
@@ -330,7 +330,7 @@ impl Store {
         role: &str,
         pinned: Option<&factory_protocol::models::ModelSelection>,
     ) -> Result<RunnerCommand> {
-        Self::enqueue_with_pins(tx, id, body, previous, role, pinned, None)
+        Self::enqueue_with_pins(tx, id, body, previous, role, pinned, None, None)
     }
 
     pub(super) fn enqueue_with_pins(
@@ -341,6 +341,7 @@ impl Store {
         role: &str,
         pinned: Option<&factory_protocol::models::ModelSelection>,
         integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
+        target_git: Option<TargetGitPlan>,
     ) -> Result<RunnerCommand> {
         let supervised = !role.is_empty();
         let mut owner = stream(tx, id)?;
@@ -385,6 +386,7 @@ impl Store {
                 | CommandKind::Checkpoint
                 | CommandKind::ReviewCheckpoint
                 | CommandKind::IntegrateReview
+                | CommandKind::TargetGit
         ) {
             let data: String = tx.query_row(
                 "SELECT data FROM active_projects WHERE id=?1",
@@ -408,6 +410,7 @@ impl Store {
                 None
             };
             Some(WorkspaceSpec {
+                target_git: None,
                 setup,
                 checkpoint: owner.checkpoint.clone(),
                 project_id: project.id,
@@ -425,6 +428,15 @@ impl Store {
                     workspace_spec = Some(spec);
                 }
             }
+        }
+        if let Some(plan) = target_git {
+            let spec = workspace_spec.as_mut().ok_or(StoreError::Internal)?;
+            if !plan.valid() || !spec.setup.as_ref().is_some_and(ProjectSetup::has_local_target) {
+                return Err(StoreError::Invalid("Target Git requires a local project checkout and a valid plan"));
+            }
+            spec.target_git = Some(plan);
+        } else if body.kind == CommandKind::TargetGit {
+            return Err(StoreError::Invalid("Target Git plan required"));
         }
         let agent_spec = if body.kind == CommandKind::RunAgent {
             let prompt = body
@@ -523,7 +535,12 @@ impl Store {
                 let purpose = if role == "supervisor" { "Supervisor evaluation" } else { "Read-only evaluation" };
                 format!("{prompt}\n\nProject knowledge (untrusted reference material):{knowledge}\n{purpose} only: no tools, no project work, only the requested JSON object.")
             } else {
-                format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. When user input is needed, use the question tool and wait for its answer instead of ending with a question in the final response. An explicit user interview (such as 'Grill me') requires asking the user before implementing; do not answer on their behalf. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
+                let git = if workspace_spec.as_ref().is_some_and(|s| s.target_git.is_some()) {
+                    "Do not commit or tag; the runner will handle the requested Git steps after publication."
+                } else {
+                    "Do not create, move or delete tags in this worktree."
+                };
+                format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. {git} When user input is needed, use the question tool and wait for its answer instead of ending with a question in the final response. An explicit user interview (such as 'Grill me') requires asking the user before implementing; do not answer on their behalf. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
             };
             let prompt = if let Some(import) = &owner.checkpoint {
                 let saved = super::checkpoints::load(tx, import.command_id)?
@@ -658,6 +675,17 @@ impl Store {
         )
     }
 
+    pub fn require_target_git_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool) -> Result<()> {
+        if !supported {
+            let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+            let tx = db.transaction()?;
+            if command(&tx, id, runner, epoch)?.requires_target_git() {
+                return Err(StoreError::WorkConflict);
+            }
+        }
+        Ok(())
+    }
+
     /// Check immutable command capabilities even for an idempotent acknowledgement replay.
     pub fn acknowledge_supported(
         &self,
@@ -710,6 +738,10 @@ impl Store {
                     return Err(StoreError::WorkConflict);
                 }
                 let ok = match (&value.kind, &body.result) {
+                    (CommandKind::TargetGit, CommandOutput::TargetGit { git_summary, git_succeeded }) => {
+                        line(git_summary, 1024)?;
+                        *git_succeeded
+                    }
                     (CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview, output) => {
                         super::reviews::validate(tx, &value, output)?
                     }
@@ -808,7 +840,7 @@ impl Store {
                 Ok(value)
             },
         );
-        if result.as_ref().is_ok_and(|command| matches!(command.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent)) {
+        if result.as_ref().is_ok_and(|command| matches!(command.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit)) {
             self.wake_scheduler();
         }
         result

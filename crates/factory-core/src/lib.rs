@@ -356,6 +356,47 @@ pub enum CommandKind {
     Checkpoint,
     ReviewCheckpoint,
     IntegrateReview,
+    TargetGit,
+}
+pub const TARGET_GIT_CAPABILITY: &str = "target-git-v1";
+
+/// A bounded plan, never a shell command or a model-selected checkout path.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TargetGitPlan {
+    pub commit: bool,
+    pub commit_message: Option<String>,
+    pub tag: Option<TargetTag>,
+    pub push: bool,
+    pub remote: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TargetTag {
+    Named { name: String },
+    Patch,
+    Minor,
+    Major,
+}
+
+impl TargetGitPlan {
+    pub fn valid(&self) -> bool {
+        let name = |s: &str| {
+            !s.is_empty() && s.len() <= 128 && !s.starts_with('-') && !s.starts_with('.')
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
+        };
+        (self.commit || self.tag.is_some() || self.push)
+            && self.commit_message.as_ref().is_none_or(|s| {
+                self.commit && !s.trim().is_empty() && s.len() <= 1024
+                    && !s.chars().any(|c| c.is_control() && c != '\n')
+            })
+            && self.remote.as_ref().is_none_or(|s| self.push && name(s))
+            && match &self.tag {
+                Some(TargetTag::Named { name: tag }) => name(tag),
+                _ => true,
+            }
+    }
 }
 pub const REVIEW_CAPABILITY: &str = "git-review-v1";
 /// Runner-generated status prefix; preserves a blocked publication in the
@@ -640,6 +681,10 @@ pub struct SupervisorEvaluation {
     pub knowledge_id: Option<KnowledgeId>,
 }
 impl RunnerCommand {
+    pub fn requires_target_git(&self) -> bool {
+        self.kind == CommandKind::TargetGit
+            || self.workspace_spec.as_ref().is_some_and(|s| s.target_git.is_some())
+    }
     pub fn requires_checkpoint(&self) -> bool {
         self.kind == CommandKind::Checkpoint
             || self
@@ -694,6 +739,8 @@ pub fn agent_message_id(id: CommandId) -> String {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_git: Option<TargetGitPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<ProjectSetup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<CheckpointImport>,
@@ -713,6 +760,7 @@ pub struct Workspace {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CommandOutput {
+    TargetGit { git_summary: String, git_succeeded: bool },
     Review { review: ReviewResult },
     Integration { integration: IntegrationResult },
     ReviewError { review_error: String },
@@ -805,6 +853,11 @@ pub struct ProjectSetup {
     pub service_registration: String,
     /// None preserves the repository's native OpenCode config; Some creates a new config.
     pub harness: Option<serde_json::Value>,
+}
+impl ProjectSetup {
+    pub fn has_local_target(&self) -> bool {
+        std::path::Path::new(&self.repository_source).is_absolute() && self.repository_path.is_empty()
+    }
 }
 pub const PROJECT_SETUP_CAPABILITY: &str = "project-setup-v2";
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
