@@ -1503,14 +1503,16 @@ impl FactoryClient {
         .await
     }
     pub async fn register(&self, body: &RegisterRunner) -> Result<Registration, ClientError> {
-        Self::decode(
-            self.http
-                .post(format!("{}/v1/runners/register", self.base))
-                .json(body)
-                .send()
-                .await,
-        )
-        .await
+        self.register_with_native_boot(body, None).await
+    }
+    pub async fn register_with_native_boot(
+        &self, body: &RegisterRunner, native_boot: Option<&NativeRunnerBoot>,
+    ) -> Result<Registration, ClientError> {
+        let mut request = self.http.post(format!("{}/v1/runners/register", self.base)).json(body);
+        if let Some(boot) = native_boot {
+            request = request.header(NATIVE_RUNNER_BOOT_HEADER, format!("{}:{}", boot.machine, boot.boot));
+        }
+        Self::decode(request.send().await).await
     }
     pub async fn heartbeat(
         &self,

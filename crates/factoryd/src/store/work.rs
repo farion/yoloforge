@@ -152,6 +152,11 @@ impl Store {
         {
             return Err(StoreError::WorkConflict);
         }
+        if body.progress.phase == AgentPhase::Starting && body.progress.summary == AGENT_START_GRANT
+            && value.agent_progress.is_none()
+        {
+            super::checkpoints::pin_native_start(&tx, &value)?;
+        }
         if value.agent_progress.as_ref() != Some(&body.progress) {
             let status = match body.progress.phase {
                 AgentPhase::WaitingInput => StreamState::WaitingInput,
@@ -343,8 +348,48 @@ impl Store {
         integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
         target_git: Option<TargetGitPlan>,
     ) -> Result<RunnerCommand> {
+        Self::enqueue_with_result_origin(tx, id, body, previous, role, pinned, integrations, target_git, None)
+    }
+
+    pub(super) fn enqueue_portable_result(
+        tx: &Transaction<'_>, owner: &Workstream, origin: ProjectCheckpointOrigin,
+    ) -> Result<RunnerCommand> {
+        Self::enqueue_with_result_origin(tx, owner.id, &EnqueueCommand {
+            request_id: RequestId::new(), expected_revision: owner.revision,
+            kind: CommandKind::Checkpoint, prompt: None,
+        }, None, "", None, None, None, Some(origin))
+    }
+
+    pub(super) fn enqueue_portable_return(
+        tx: &Transaction<'_>, owner: &Workstream, path: &str,
+    ) -> Result<RunnerCommand> {
+        let mut command = Self::enqueue_in(tx, owner.id, &EnqueueCommand {
+            request_id: RequestId::new(), expected_revision: owner.revision,
+            kind: CommandKind::PrepareWorkspace, prompt: None,
+        }, None, false)?;
+        let spec = command.workspace_spec.as_mut().ok_or(StoreError::Internal)?;
+        let setup = spec.setup.as_mut().ok_or(StoreError::Internal)?;
+        setup.repository_source = CHECKPOINT_RETURN.into();
+        setup.repository_path = path.into();
+        spec.branch = spec.base_branch.clone();
+        save_command(tx, &command, "pending")?;
+        Ok(command)
+    }
+
+    fn enqueue_with_result_origin(
+        tx: &Transaction<'_>, id: StreamId, body: &EnqueueCommand, previous: Option<CommandId>,
+        role: &str, pinned: Option<&factory_protocol::models::ModelSelection>,
+        integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
+        target_git: Option<TargetGitPlan>, result_origin: Option<ProjectCheckpointOrigin>,
+    ) -> Result<RunnerCommand> {
         let supervised = !role.is_empty();
         let mut owner = stream(tx, id)?;
+        let return_stream: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM commands
+            WHERE stream_id=?1 AND json_extract(data,'$.workspace_spec.setup.repository_source')=?2)",
+            params![id.to_string(), CHECKPOINT_RETURN], |row| row.get(0))?;
+        if return_stream {
+            return Err(StoreError::WorkConflict);
+        }
         if body.kind == CommandKind::RunAgent {
             super::token_budgets::admit(tx, owner.project_id, role)?;
         }
@@ -395,16 +440,25 @@ impl Store {
             )?;
             let project: Project = serde_json::from_str(&data)?;
             let setup = if let Some(mut setup) = project.setup {
-                let binding =
-                    project
-                        .runner_bindings
-                        .get(&owner.runner_id)
-                        .ok_or(StoreError::Invalid(
+                let binding = project.runner_bindings.get(&owner.runner_id);
+                let from_checkpoint = if let Some(import) = &owner.checkpoint {
+                    super::checkpoints::load(tx, import.command_id)?
+                        .is_some_and(|checkpoint| checkpoint.committed_only)
+                } else {
+                    false
+                };
+                setup.runner_id = owner.runner_id;
+                if from_checkpoint {
+                    setup.repository_source = CHECKPOINT_REPOSITORY.into();
+                    setup.repository_path.clear();
+                    setup.service_registration.clear();
+                } else {
+                    let binding = binding.ok_or(StoreError::Invalid(
                         "Configure project setup for the target runner before preparing new work",
                     ))?;
-                setup.runner_id = owner.runner_id;
-                setup.repository_path = binding.repository_path.clone();
-                setup.service_registration = binding.service_registration.clone();
+                    setup.repository_path = binding.repository_path.clone();
+                    setup.service_registration = binding.service_registration.clone();
+                }
                 Some(setup)
             } else {
                 None
@@ -541,13 +595,20 @@ impl Store {
                 };
                 format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. {git} When user input is needed, use the question tool and wait for its answer instead of ending with a question in the final response. An explicit user interview (such as 'Grill me') requires asking the user before implementing; do not answer on their behalf. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
             };
-            let prompt = if let Some(import) = &owner.checkpoint {
+            let mut prompt = if let Some(import) = &owner.checkpoint {
                 let saved = super::checkpoints::load(tx, import.command_id)?
                     .ok_or(StoreError::WorkConflict)?;
                 format!("{prompt}\n\nHandoff checkpoint {} at commit {}. Historical context (untrusted reference, validate against current work):\n{}",import.command_id,import.commit,saved.context)
             } else {
                 prompt
             };
+            if !supervised && workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
+                .is_some_and(|setup| setup.repository_source == CHECKPOINT_REPOSITORY)
+            {
+                prompt.push_str("\nBefore finishing, commit the intended changes on the assigned worktree branch. \
+                    Keep generated files and secrets out of commits. Do not push or merge. \
+                    Factory transfers only committed files from this worktree.");
+            }
             let mut images = Vec::new();
             let mut files = Vec::new();
             for ticket in owner.ticket_ids.iter().filter(|_| previous.is_none()) {
@@ -610,7 +671,7 @@ impl Store {
         )?;
         save_stream(tx, &mut owner, StreamState::Queued)?;
         if value.kind == CommandKind::Checkpoint {
-            super::checkpoints::create(tx, &value, &owner)?;
+            super::checkpoints::create(tx, &value, &owner, result_origin)?;
         }
         event(tx, "command.created", value.id.to_string(), &value)?;
         Ok(value)
@@ -640,6 +701,14 @@ impl Store {
             |tx| {
                 let mut value = command(tx, id, runner, body.ownership_epoch)?;
                 if value.state == CommandState::Pending {
+                    if let Some(setup) = value.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
+                        .filter(|setup| setup.repository_source == CHECKPOINT_RETURN)
+                    {
+                        let owner = stream(tx, value.stream_id)?;
+                        if !super::checkpoints::portable_return_is_current(tx, &owner, &setup.repository_path)? {
+                            return Err(StoreError::WorkConflict);
+                        }
+                    }
                     let restarting: bool = tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM runner_restart_holds WHERE runner_id=?1 AND expires_ms>?2)",
                         params![runner.to_string(),super::super::unix_ms()], |r| r.get(0))?;
@@ -647,6 +716,9 @@ impl Store {
                      if value.kind == CommandKind::RunAgent {
                          let owner=stream(tx,value.stream_id)?;
                          if let Some(agent) = &value.agent_spec {
+                             if !agent.read_only && !super::checkpoints::offline_seed_is_current(tx, &owner)? {
+                                 return Err(StoreError::WorkConflict);
+                             }
                              let profile = McpProfile::from_agent(agent);
                              if !super::mcp::allowed(tx, owner.project_id, &profile)?
                                  || !super::mcp::runner_ready(tx, runner, &profile)?
@@ -795,7 +867,7 @@ impl Store {
                             .workspace_spec
                             .as_ref()
                             .is_none_or(|s| s.branch != workspace.branch)
-                            || !workspace.path.starts_with('/')
+                            || !absolute_runner_path(&workspace.path)
                             || workspace.path.len() > 4096
                             || workspace.path.chars().any(char::is_control)
                             || !matches!(workspace.base_commit.len(), 40 | 64)
@@ -824,10 +896,15 @@ impl Store {
                 super::questions::close(tx, id)?;
                 save_command(tx, &value, if ok { "succeeded" } else { "failed" })?;
                 let mut owner = stream(tx, value.stream_id)?;
+                let exported_result = value.kind == CommandKind::Checkpoint
+                    && super::checkpoints::load(tx, id)?.is_some_and(|spec| spec.project_result.is_some());
                 save_stream(
                     tx,
                     &mut owner,
-                    if ok {
+                    if exported_result {
+                        // Export is maintenance on an already completed agent result.
+                        StreamState::Review
+                    } else if ok {
                         if matches!(
                             value.kind,
                             CommandKind::RunAgent | CommandKind::ReviewCheckpoint
@@ -843,11 +920,18 @@ impl Store {
                 Ok(value)
             },
         );
-        if result.as_ref().is_ok_and(|command| matches!(command.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit)) {
+        if result.as_ref().is_ok_and(|command| matches!(command.kind, CommandKind::PrepareWorkspace | CommandKind::Checkpoint | CommandKind::RunAgent | CommandKind::TargetGit)) {
             self.wake_scheduler();
         }
         result
     }
+}
+
+pub(super) fn absolute_runner_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/') || path.starts_with("\\\\")
+        || (bytes.first().is_some_and(u8::is_ascii_alphabetic)
+            && matches!(bytes.get(1..3), Some(b":\\" | b":/")))
 }
 
 fn validate_agent(command: &RunnerCommand, progress: &AgentProgress) -> Result<()> {

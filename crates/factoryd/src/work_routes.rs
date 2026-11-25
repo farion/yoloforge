@@ -456,6 +456,8 @@ pub(super) async fn ack_command(
     let local_mcp = guard.entries[&runner].input.capabilities.iter().any(|c| c == mcp::LOCAL_MCP_CAPABILITY);
     let remote_mcp = guard.entries[&runner].input.capabilities.iter().any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
     let target_git = guard.entries[&runner].input.capabilities.iter().any(|c| c == TARGET_GIT_CAPABILITY);
+    let automatic_checkpoint = guard.entries[&runner].input.capabilities.iter()
+        .any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_context_planning_support(
             runner,
@@ -470,7 +472,7 @@ pub(super) async fn ack_command(
         store.require_local_mcp_support(runner, id, body.ownership_epoch, local_mcp)?;
         store.require_remote_mcp_support(runner, id, body.ownership_epoch, remote_mcp)?;
         store.require_setup_support(runner, id, body.ownership_epoch, setup)?;
-        store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;
+        store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints, automatic_checkpoint)?;
         store.require_review_support(runner, id, body.ownership_epoch, reviews)?;
         store.require_target_git_support(runner, id, body.ownership_epoch, target_git)?;
         store.acknowledge_supported(runner, id, body, lifecycle)

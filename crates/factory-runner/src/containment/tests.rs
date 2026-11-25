@@ -416,6 +416,7 @@ while True: time.sleep(1)
             .unwrap()
             .clone();
         let mut request = RuntimeTermination {
+            automatic_failover: false,
             binding: None,
             request_id: RequestId::new(),
             command_id: command.id,

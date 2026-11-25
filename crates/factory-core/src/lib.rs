@@ -247,6 +247,8 @@ pub struct RuntimeTermination {
     pub proof: Option<RemovalProof>,
     pub result: Option<CommandOutput>,
     pub archive_may_be_incomplete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automatic_failover: bool,
 }
 fn pause_action() -> ControlAction {
     ControlAction::Pause
@@ -453,12 +455,42 @@ pub struct HostedReview {
     pub url: String,
 }
 pub const CHECKPOINT_CAPABILITY: &str = "git-checkpoint-v1";
+pub const AUTOMATIC_CHECKPOINT_CAPABILITY: &str = "automatic-checkpoint-v1";
+pub const CHECKPOINT_REPOSITORY: &str = "factory:checkpoint";
+pub const CHECKPOINT_RETURN: &str = "factory:checkpoint-return";
+pub const AGENT_START_GRANT: &str = "Start authorized before writing to OpenCode";
+pub const NATIVE_RUNNER_BOOT_HEADER: &str = "x-factory-native-boot";
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeRunnerBoot {
+    pub machine: String,
+    pub boot: String,
+}
+
+impl NativeRunnerBoot {
+    pub fn from_header(value: &str) -> Option<Self> {
+        let (machine, boot) = value.split_once(':')?;
+        let digest = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        (digest(machine) && digest(boot)).then(|| Self { machine: machine.into(), boot: boot.into() })
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointSpec {
     pub command_id: CommandId,
     pub source_commands: Vec<CommandId>,
     pub stopped_runtimes: Vec<RemovalProof>,
     pub context: String,
+    #[serde(default)]
+    pub committed_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_result: Option<ProjectCheckpointOrigin>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProjectCheckpointOrigin {
+    pub runner_id: RunnerId,
+    pub repository: String,
+    pub repository_path: String,
+    pub base_branch: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GitCheckpoint {

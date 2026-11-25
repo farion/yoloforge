@@ -574,6 +574,7 @@ async fn register(
     State(app): State<App>,
     axum::Extension(principal): axum::Extension<Principal>,
     axum::Extension(peer): axum::Extension<ObservedIp>,
+    headers: HeaderMap,
     body: Result<Json<RegisterRunner>, JsonRejection>,
 ) -> Response {
     let Ok(Json(body)) = body else {
@@ -592,7 +593,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 16
+        || body.capabilities.len() > 17
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(
@@ -641,11 +642,18 @@ async fn register(
         let ready = matches!(body.opencode, OpenCodeStatus::Ready { .. });
         let local_source = local && body.location == RunnerLocation::Local
             && peer.0.is_some_and(|ip| ip.is_loopback());
+        let checkpoint = body.capabilities.iter().any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY);
+        let server_runner = body.location == RunnerLocation::Server;
+        let native_boot = (checkpoint && body.location == RunnerLocation::Local
+            && principal.role == DeviceRole::Runner && principal.runner_id == Some(runner))
+            .then(|| headers.get(NATIVE_RUNNER_BOOT_HEADER)?.to_str().ok().and_then(NativeRunnerBoot::from_header))
+            .flatten();
         if !matches!(
             tokio::task::spawn_blocking(move || {
-                store.autostart_runner(runner)?;
+                store.autostart_runner_at(runner, server_runner)?;
+                store.observe_native_runner_boot(runner, native_boot)?;
                 store.observe_mcp_runner(runner, mcp_ready, remote)?;
-                store.observe_automatic_runner(runner, ready, local_source)?;
+                store.observe_automatic_runner_location(runner, ready, local_source, checkpoint, server_runner)?;
                 if local {
                     store.recover_local_projects(runner)?;
                 }
@@ -736,11 +744,13 @@ async fn heartbeat(
         let ready = matches!(entry.input.opencode, OpenCodeStatus::Ready { .. });
         let local_source = local && entry.input.location == RunnerLocation::Local
             && peer.0.is_some_and(|ip| ip.is_loopback());
+        let checkpoint = entry.input.capabilities.iter().any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY);
+        let server_runner = entry.input.location == RunnerLocation::Server;
         if !matches!(
             tokio::task::spawn_blocking(move || {
-                store.autostart_runner(id)?;
+                store.autostart_runner_at(id, server_runner)?;
                 store.observe_mcp_runner(id, mcp_ready, remote)?;
-                store.observe_automatic_runner(id, ready, local_source)?;
+                store.observe_automatic_runner_location(id, ready, local_source, checkpoint, server_runner)?;
                 if local {
                     store.recover_local_projects(id)?;
                 }

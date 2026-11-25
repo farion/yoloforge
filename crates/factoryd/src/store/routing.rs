@@ -70,7 +70,9 @@ fn candidates(tx: &Transaction<'_>, project: ProjectId) -> Result<Vec<RunnerComm
     let rows = stmt.query_map([project.to_string()], |r| r.get::<_, String>(0))?;
     rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
 }
-pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -> Result<Route> {
+pub(super) fn route(
+    tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket, seed: Option<&CheckpointImport>,
+) -> Result<Route> {
     if let Some(root) = t.requested_session {
         return Ok(Route::Session(root));
     }
@@ -265,11 +267,13 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
     let controller = controller
         .map(|id| super::work::stream(tx, id.parse().map_err(|_| StoreError::Internal)?))
         .transpose()?;
-    let owner = if let Some(owner) = controller.filter(|owner| p.runner_ids.contains(&owner.runner_id)) {
+    let owner = if let Some(owner) = controller.filter(|owner|
+        p.runner_ids.contains(&owner.runner_id) && owner.checkpoint.as_ref() == seed
+    ) {
         owner
     } else {
         let runner = *p.runner_ids.first().ok_or(StoreError::WorkConflict)?;
-        let owner = Store::create_stream_in(
+        let mut owner = Store::create_stream_in(
             tx,
             &CreateStream {
                 request_id: RequestId::new(),
@@ -279,6 +283,7 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
                 ticket_ids: vec![],
             },
         )?;
+        super::checkpoints::seed_stream(tx, &mut owner, seed)?;
         tx.execute(
             "INSERT INTO orchestrators(project_id,stream_id) VALUES(?1,?2)
              ON CONFLICT(project_id) DO UPDATE SET stream_id=excluded.stream_id",

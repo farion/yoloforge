@@ -128,10 +128,10 @@ fn checkpoint_requires_stopped_writer_and_atomically_pins_context() {
         .unwrap();
     assert_eq!(prepare.ownership_epoch, 2);
     assert!(store
-        .require_checkpoint_support(next, prepare.id, 2, false)
+        .require_checkpoint_support(next, prepare.id, 2, false, false)
         .is_err());
     assert!(store
-        .require_checkpoint_support(next, prepare.id, 2, true)
+        .require_checkpoint_support(next, prepare.id, 2, true, false)
         .is_ok());
     assert_eq!(
         prepare.workspace_spec.as_ref().unwrap().checkpoint,

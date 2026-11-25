@@ -48,6 +48,11 @@ Pfad setzen. Die persönliche OpenCode-Konfiguration wird nicht übernommen.
 
 ## Betrieb und Grenzen
 
+- Absolute Projektpfade beziehen sich auf das Dateisystem des zugeordneten
+  Runners, nicht auf den Desktop. In einem Container muss der Pfad dort sichtbar
+  und für den Runner-Benutzer beschreibbar sein. Soll der Runner ein neues
+  Repository anlegen, muss er auch im Elternverzeichnis schreiben dürfen.
+  Für einen Desktop-Pfad den lokal laufenden Runner zuordnen.
 - Das Linux-Paket enthält eine systemd-Vorlage. macOS und Windows werden zunächst
   direkt oder durch die GUI gestartet; es wird kein Systemdienst installiert.
 - GUI-verwaltete Runner laufen nach dem Schließen der GUI weiter. Die GUI nutzt
@@ -60,8 +65,7 @@ Pfad setzen. Die persönliche OpenCode-Konfiguration wird nicht übernommen.
   Linux-Review-Runner verwenden. Native Git-/Agent-Arbeit funktioniert unabhängig
   davon. Auf macOS benötigen Container-Reviews einen passenden lokalen
   Docker-Unix-Socket und exakt verfügbare Worktree-Bind-Mounts.
-- Die Server-Pakete und die lokale Factory-Einrichtung bleiben Linux-only.
-  macOS-/Windows-GUIs verbinden sich mit einer bestehenden Factory und können
-  dabei native lokale Runner verwalten.
+- Separate Server-Pakete bleiben Linux-only. Die lokale Factory aus dem
+  GUI-Paket ist auch für macOS und Windows vorgesehen.
 - Desktop-Pakete sind derzeit nicht mit einer Herstelleridentität signiert
   oder notarisiert. macOS/Gatekeeper und Windows/SmartScreen können warnen.

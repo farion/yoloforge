@@ -179,37 +179,54 @@ fn capture(
         );
         plan.clone()
     } else {
-        ensure!(
-            git(path, &["ls-files", "--unmerged"])?.is_empty(),
-            "Resolve index conflicts before checkpointing"
-        );
-        ensure!(
-            !git(path, &["ls-files", "--stage"])?
-                .lines()
-                .any(|l| l.starts_with("160000 ")),
-            "Submodules require separate checkpoints"
-        );
         let parent = git(path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-        let temp = tempfile::tempdir()?;
-        let index = temp.path().join("index");
-        let index = git_path(&index)?;
-        let env = [("GIT_INDEX_FILE", index.as_ref())];
-        git_env(path, &["read-tree", &parent], &env)?;
-        git_env(path, &["add", "--all", "--", "."], &env)?;
-        ensure!(
-            !git_env(path, &["ls-files", "--stage"], &env)?
-                .lines()
-                .any(|l| l.starts_with("160000 ")),
-            "Nested repositories require separate checkpoints"
-        );
-        let tree = git_env(path, &["write-tree"], &env)?;
-        // Detect changes during capture without touching the user's index.
-        git_env(path, &["add", "--all", "--", "."], &env)?;
-        ensure!(
-            git_env(path, &["write-tree"], &env)? == tree
-                && git(path, &["rev-parse", "HEAD"])? == parent,
-            "Workspace changed during capture"
-        );
+        let tree = if spec.committed_only {
+            if spec.project_result.is_some() {
+                ensure!(
+                    git(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
+                    "Commit the intended changes in this worktree before exporting the project result"
+                );
+                git(path, &["merge-base", "--is-ancestor", &work.base_commit, &parent])
+                    .context("Result commit is not based on the imported project checkpoint")?;
+            }
+            ensure!(
+                !git(path, &["ls-tree", "-r", &parent])?.lines().any(|line| line.starts_with("160000 ")),
+                "Submodules require separate checkpoints"
+            );
+            git(path, &["rev-parse", &format!("{parent}^{{tree}}")])?
+        } else {
+            ensure!(
+                git(path, &["ls-files", "--unmerged"])?.is_empty(),
+                "Resolve index conflicts before checkpointing"
+            );
+            ensure!(
+                !git(path, &["ls-files", "--stage"])?
+                    .lines()
+                    .any(|l| l.starts_with("160000 ")),
+                "Submodules require separate checkpoints"
+            );
+            let temp = tempfile::tempdir()?;
+            let index = temp.path().join("index");
+            let index = git_path(&index)?;
+            let env = [("GIT_INDEX_FILE", index.as_ref())];
+            git_env(path, &["read-tree", &parent], &env)?;
+            git_env(path, &["add", "--all", "--", "."], &env)?;
+            ensure!(
+                !git_env(path, &["ls-files", "--stage"], &env)?
+                    .lines()
+                    .any(|l| l.starts_with("160000 ")),
+                "Nested repositories require separate checkpoints"
+            );
+            let tree = git_env(path, &["write-tree"], &env)?;
+            // Detect changes during capture without touching the user's index.
+            git_env(path, &["add", "--all", "--", "."], &env)?;
+            ensure!(
+                git_env(path, &["write-tree"], &env)? == tree
+                    && git(path, &["rev-parse", "HEAD"])? == parent,
+                "Workspace changed during capture"
+            );
+            tree
+        };
         let date = format!("@{} +0000", record.command.created_unix_ms / 1000);
         let message = format!("YoloForge checkpoint {}", record.command.id);
         let commit = git_env(
@@ -336,8 +353,8 @@ fn capture(
 mod tests {
     use super::*;
     use clap::Parser;
-    #[test]
-    fn dirty_snapshot_preserves_index_and_worktree_imports_and_replays_after_restart() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dirty_snapshot_preserves_index_and_worktree_imports_and_replays_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repository");
         fs::create_dir(&repo).unwrap();
@@ -413,6 +430,8 @@ mod tests {
         ])
         .unwrap();
         let spec = CheckpointSpec {
+            committed_only: false,
+            project_result: None,
             command_id: cmd.id,
             source_commands: vec![],
             stopped_runtimes: vec![],
@@ -452,6 +471,92 @@ mod tests {
         );
         assert!(!imported.join("deleted").exists());
         assert!(!imported.join("ignored").exists());
+        // Automatic transfer uses committed files only and the target has no
+        // mapping, clone or access to the source folder.
+        let mut automatic = cmd.clone();
+        automatic.id = CommandId::new();
+        let mut auto_record = journal.receive(automatic.clone()).unwrap();
+        let committed = capture(&journal, &mut auto_record, &args, &CheckpointSpec {
+            command_id: automatic.id, committed_only: true, ..spec.clone()
+        }).unwrap();
+        let mut result_cmd = automatic.clone();
+        result_cmd.id = CommandId::new();
+        let mut result_record = journal.receive(result_cmd.clone()).unwrap();
+        let error = capture(&journal, &mut result_record, &args, &CheckpointSpec {
+            command_id: result_cmd.id, committed_only: true,
+            project_result: Some(ProjectCheckpointOrigin {
+                runner_id: runner, repository: "/source".into(),
+                repository_path: String::new(), base_branch: "main".into(),
+            }),
+            ..spec.clone()
+        }).unwrap_err();
+        assert!(error.to_string().contains("Commit the intended changes"));
+        let import = CheckpointImport {
+            command_id: automatic.id, commit: committed.commit.clone(),
+            bundle_sha256: committed.bundle_sha256.clone(), bundle_bytes: committed.bundle_bytes,
+        };
+        let target = RunnerId::new();
+        let target_root = dir.path().join("target");
+        install_bundle(&target_root, &import, &bundle_bytes(&committed).unwrap()).unwrap();
+        let target_journal = Journal::open(&dir.path().join("target.sqlite3"), &args.server, target).unwrap();
+        let mut target_command = cmd.clone();
+        target_command.id = CommandId::new();
+        target_command.runner_id = target;
+        target_command.kind = CommandKind::PrepareWorkspace;
+        target_command.ownership_epoch = 2;
+        let workspace_spec = target_command.workspace_spec.as_mut().unwrap();
+        workspace_spec.branch = format!("factory/{stream}-epoch-2");
+        workspace_spec.setup = Some(ProjectSetup {
+            runner_id: target, repository_source: CHECKPOINT_REPOSITORY.into(),
+            repository_path: String::new(), service_registration: String::new(), harness: None,
+        });
+        workspace_spec.checkpoint = Some(import);
+        let mut record = target_journal.receive(target_command.clone()).unwrap();
+        let target_args = Args { id: target, repositories: None, workspace_root: Some(target_root.clone()), ..args.clone() };
+        crate::managed::ensure_repository(&target_journal, &mut record, &target_args).await.unwrap();
+        let CommandOutput::Workspace { workspace } =
+            workspace::prepare(&target_journal, &target_command, None, &target_root)
+        else { panic!("checkpoint did not prepare a new target workspace") };
+        let restored = Path::new(&workspace.path);
+        assert_eq!(fs::read_to_string(restored.join("tracked")).unwrap(), "initial");
+        assert!(restored.join("deleted").exists());
+        assert!(!restored.join("untracked-ü").exists());
+        fs::write(restored.join("tracked"), "remote result").unwrap();
+        git(restored, &["add", "tracked"]).unwrap();
+        git(restored, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "remote result"]).unwrap();
+        let mut result_command = target_command.clone();
+        result_command.id = CommandId::new();
+        result_command.kind = CommandKind::Checkpoint;
+        let mut result_record = target_journal.receive(result_command.clone()).unwrap();
+        let result_checkpoint = capture(&target_journal, &mut result_record, &target_args, &CheckpointSpec {
+            command_id: result_command.id, committed_only: true,
+            project_result: Some(ProjectCheckpointOrigin {
+                runner_id: runner, repository: "/source".into(),
+                repository_path: String::new(), base_branch: "main".into(),
+            }),
+            ..spec.clone()
+        }).unwrap();
+        assert_eq!(git(restored, &["show", &format!("{}:tracked", result_checkpoint.commit)]).unwrap(), "remote result");
+        assert_eq!(fs::read_to_string(path.join("tracked")).unwrap(), "working version");
+        let returned = CheckpointImport {
+            command_id: result_command.id, commit: result_checkpoint.commit.clone(),
+            bundle_sha256: result_checkpoint.bundle_sha256.clone(), bundle_bytes: result_checkpoint.bundle_bytes,
+        };
+        install_bundle(&root, &returned, &bundle_bytes(&result_checkpoint).unwrap()).unwrap();
+        let mut return_spec = cmd.workspace_spec.clone().unwrap();
+        return_spec.checkpoint = Some(returned);
+        return_spec.setup = Some(ProjectSetup {
+            runner_id: runner, repository_source: CHECKPOINT_RETURN.into(),
+            repository_path: repo.display().to_string(), service_registration: String::new(), harness: None,
+        });
+        fs::write(repo.join("tracked"), "personal edit").unwrap();
+        assert!(crate::publication::return_checkpoint(&root, &return_spec).is_err());
+        assert_eq!(fs::read_to_string(repo.join("tracked")).unwrap(), "personal edit");
+        fs::write(repo.join("tracked"), "initial").unwrap();
+        let receipt = crate::publication::return_checkpoint(&root, &return_spec).unwrap();
+        assert_eq!(receipt.base_commit, result_checkpoint.commit);
+        assert_eq!(fs::read_to_string(repo.join("tracked")).unwrap(), "remote result");
+        assert_eq!(crate::publication::return_checkpoint(&root, &return_spec).unwrap(), receipt);
         // Replay must retain the pinned tree even if a human edits the worktree later.
         fs::write(path.join("tracked"), "later user edit").unwrap();
         drop(journal);

@@ -148,6 +148,15 @@ impl Store {
         id: CommandId,
         body: &RequestTermination,
     ) -> Result<RuntimeTermination> {
+        Self::request_termination_with_failover(tx, id, body, false)
+    }
+
+    pub(super) fn request_termination_with_failover(
+        tx: &Transaction<'_>,
+        id: CommandId,
+        body: &RequestTermination,
+        automatic_failover: bool,
+    ) -> Result<RuntimeTermination> {
         line(&body.reason, 512)?;
         let data: Option<String> = tx
             .query_row(
@@ -209,6 +218,7 @@ impl Store {
             runtime: body.runtime.clone(),
             previous_request: body.previous_request,
             reason: body.reason.clone(),
+            automatic_failover,
             state: TerminationState::Requested,
             summary: "Removal requested; process quiescence not yet confirmed".into(),
             proof: None,
@@ -298,6 +308,9 @@ impl Store {
             save(&tx, &v)?;
         }
         tx.commit()?;
+        if v.automatic_failover && v.state == TerminationState::Stopped {
+            self.wake_scheduler();
+        }
         Ok(v)
     }
 }

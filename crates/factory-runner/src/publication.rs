@@ -57,6 +57,35 @@ fn unchanged_target(target: &Path, branch: &str, parent: &str) -> Result<()> {
     );
     Ok(())
 }
+
+pub(crate) fn return_checkpoint(root: &Path, spec: &WorkspaceSpec) -> Result<Workspace> {
+    let setup = spec.setup.as_ref().context("Return checkout was not pinned")?;
+    let import = spec.checkpoint.as_ref().context("Return checkpoint was not pinned")?;
+    ensure!(setup.repository_source == CHECKPOINT_RETURN, "Not a checkpoint return");
+    let selected = Path::new(&setup.repository_path);
+    ensure!(selected.is_absolute() && fs::symlink_metadata(selected)?.is_dir(),
+        "Der lokale Projektordner fehlt oder wurde durch einen Link ersetzt.");
+    let target = fs::canonicalize(selected)?;
+    ensure!(fs::canonicalize(git(&target, &["rev-parse", "--show-toplevel"])?)? == target,
+        "Der lokale Projektpfad ist nicht der Git-Checkout.");
+    // Checkout filters can run arbitrary commands on data added to a remote tree.
+    ensure!(!git(&target, &["config", "--list", "--name-only"])?.lines()
+        .any(|key| key.starts_with("filter.") &&
+            (key.ends_with(".clean") || key.ends_with(".smudge") || key.ends_with(".process"))),
+        "Lokaler Checkout verwendet Git-Filter; automatische Übernahme nicht möglich.");
+    let head = git(&target, &["rev-parse", "HEAD"])?;
+    unchanged_target(&target, &spec.base_branch, &head)?;
+    let commit = crate::checkpoint::import_objects(&target, &fs::canonicalize(root)?, import)?;
+    if git(&target, &["merge-base", "--is-ancestor", &commit, &head]).is_err() {
+        git(&target, &["merge-base", "--is-ancestor", &head, &commit])
+            .context("Lokaler und übertragener Stand sind auseinanderentwickelt; nichts überschrieben.")?;
+        unchanged_target(&target, &spec.base_branch, &head)?;
+        git(&target, &["-c", "merge.autoStash=false", "-c", "submodule.recurse=false",
+            "merge", "--ff-only", "--no-overwrite-ignore", &commit])
+            .context("Fast-forward des lokalen Checkouts fehlgeschlagen; lokale Dateien wurden nicht erzwungen überschrieben.")?;
+    }
+    Ok(Workspace { path: target.display().to_string(), branch: spec.base_branch.clone(), base_commit: commit })
+}
 pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> {
     let summary = match &r.result {
         Some(CommandOutput::Agent { agent }) => &agent.summary,

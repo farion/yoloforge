@@ -7,6 +7,7 @@ use anyhow::{ensure, Context, Result};
 use factory_core::*;
 use factory_opencode::OpenCodeClient;
 use factory_protocol::client::FactoryClient;
+use factory_protocol::ObserveAgent;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -155,6 +156,17 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args, factory: 
             if let Err(error) = tokio::task::block_in_place(|| crate::repo_skills::verify(&execution.workspace, ids)) {
                 return Ok(progress(&command, AgentPhase::Failed, error.to_string().chars().take(240).collect::<String>()));
             }
+        }
+    }
+    // The Factory can reassign an accepted but not yet launched automatic run.
+    // Serialize this start decision with the ownership check before any
+    // OpenCode session creation or prompt submission.
+    if let Some((factory, registration)) = factory {
+        if record.agent.as_ref().is_some_and(|execution| !execution.session_attempted && !execution.prompt_attempted) {
+            factory.observe_agent(args.id, registration, command.id, &ObserveAgent {
+                ownership_epoch: command.ownership_epoch,
+                progress: progress(&command, AgentPhase::Starting, AGENT_START_GRANT),
+            }).await?;
         }
     }
     match advance(&client, journal, record, args, factory).await {

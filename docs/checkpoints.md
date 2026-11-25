@@ -1,5 +1,91 @@
 # Checkpoints und Runner-Übergabe
 
+## Automatischer Wechsel
+
+Für Projekte mit Runner-Zuordnung **Automatisch** sichert die Factory bei
+scheduler-gesteuerten Aufträgen nach der Workspace-Vorbereitung zunächst den
+committeten Stand, wenn der Runner automatische Checkpoints unterstützt.
+Der Upload enthält Git-Historie, aber keine uncommitteten Arbeitsdateien.
+Wird dieser Runner danach unerreichbar, kann die Factory einen noch nicht
+gestarteten Auftrag (auch nach Annahme) auf einen kompatiblen und für die gewählten MCPs
+geeigneten Runner umstellen. Der Zielrunner erstellt aus dem bestätigten
+Bundle ein neues verwaltetes Repository; der Desktop-Pfad ist dort nicht nötig.
+
+Sobald der committete Stand übertragen ist, bevorzugt **Automatisch** für
+einen neuen portablen Auftrag einen verfügbaren und kompatiblen **Server-Runner**,
+auch wenn der Laptop noch online ist. Der Desktop-Runner bereitet den Stand vor,
+startet aber nicht die schreibende Ausführung, wenn der Server übernehmen kann.
+Sobald der Server-Runner den Auftrag ausführt, kann der Laptop ausgeschaltet
+bleiben. Der Server-Runner muss mit `--location server` registriert sein; sein
+Name allein genügt nicht. Fest zugewiesene Runner und Aufträge, die den lokalen
+Checkout oder lokale MCPs benötigen, werden nicht automatisch verschoben.
+Vor einer neuen Vorbereitung am Quell-Runner übernimmt der verwaltete
+Git-Basisbranch lokal hinzugekommene Commits, solange ein Fast-forward möglich
+ist. Bereits vorbereitete Arbeitsbereiche behalten ihren gepinnten Stand.
+
+Vor dem ersten schreibenden OpenCode-Aufruf holt der Runner eine Startfreigabe
+ein. Fehlt danach der Heartbeat, behandelt die Factory das nicht als Stopp.
+Bei einer nachweislich gebundenen, isolierten Container-Runtime fordert
+**Automatisch** bei längerem Kontaktverlust deren kontrolliertes Entfernen an,
+sofern ein geeigneter Ersatzrunner und ein bestätigtes Bundle verfügbar sind.
+Ausführungen, die auf eine Antwort warten oder ihren Abschluss melden, werden
+dabei nicht abgebrochen.
+Erst mit einem passenden Stoppnachweis startet der Auftrag auf dem Ersatzrunner
+in einer neuen Session vom Checkpoint vor dem ursprünglichen Start neu.
+Neuere Änderungen werden dabei nicht übertragen; externe Effekte werden nicht
+zurückgesetzt. Bei einem ausgeschalteten Rechner muss der Nachweis ggf.
+bis zur Wiederverbindung warten. Bei einem lokalen Linux-Runner mit verwaltetem
+OpenCode kann die Factory nach einer erneuten, gerätegebunden authentifizierten
+Registrierung auf demselben Rechner einen vollständigen Systemneustart
+erkennen. Erst dann darf Auto den nativen Auftrag vom bestätigten Checkpoint
+auf einem anderen Runner neu starten. Ein Runner-Neustart im selben Systemboot,
+ein anderer Rechner oder ein fehlender Heartbeat reichen nicht aus. Das ist
+keine Fortsetzung der nativen Session; seit dem Checkpoint entstandene
+Änderungen fehlen. Runner-Identität und Gerätezugang nicht auf andere Rechner
+klonen. Ein manuell angeforderter Stopp löst keine automatische Wiederholung
+aus.
+
+Ohne bestätigtes Bundle gibt es keinen automatischen Wechsel. Explizit zugewiesene Runner,
+lokale Git-Zieloperationen und native Session-Fortsetzungen bleiben gebunden.
+Die bestehende Bundle-Grenze von 64 MiB gilt auch hier. Schlägt der Upload
+fehl, kann der Auftrag auf dem ursprünglichen Runner starten, ist aber nicht
+automatisch übertragbar.
+
+### Neue Aufträge bei ausgeschaltetem Quell-Runner
+
+Hat ein Auto-Projekt einen lokalen Quellpfad, können Orchestrator und neuer
+Auftrag auf einem anderen Runner aus einem bestätigten Projekt-Checkpoint
+starten. Dafür muss der Checkpoint zum gespeicherten Quell-Checkout und
+Basisbranch passen. Wenn ein schreibender Auftrag noch aktiv ist oder die
+Factory seit dem Checkpoint ein neueres erfolgreiches Ergebnis kennt, wartet
+der neue Auftrag stattdessen auf einen aktuellen Stand. Nicht zur Factory
+übertragene lokale Änderungen sind auf dem Ersatzrunner nicht verfügbar.
+Die gespeicherte Zuordnung zum Quell-Checkout bleibt unverändert.
+
+### Ergebnisse aus einem übertragenen Arbeitsbereich
+
+Nach erfolgreicher Ausführung in einem importierten Arbeitsbereich exportiert
+die Factory den neuen, committeten Stand automatisch als nächsten
+Projekt-Checkpoint. Der Runner prüft, dass der Ergebniscommit vom importierten
+Stand abstammt und keine nicht ignorierten, uncommitteten Dateien zurückbleiben.
+Ein nachweislich neueres oder gleichzeitig laufendes schreibendes Ergebnis
+verhindert eine automatische Veröffentlichung konkurrierender Stände.
+
+Folgeaufträge können nach bestätigtem Upload diesen Stand verwenden, auch
+wenn der ursprüngliche Runner nicht erreichbar ist. Wenn der ursprüngliche
+Runner zurückkommt, überträgt Auto den verifizierten Stand auch in den
+ursprünglichen Desktop-Checkout: nur auf dem vorgesehenen Branch,
+bei sauberem Arbeitsverzeichnis und nur per Fast-forward. Lokale Änderungen,
+abweichende Historie und kollidierende ignorierte Dateien werden nicht
+überschrieben. Checkouts mit externen Git-Filtern werden nicht automatisch
+aktualisiert. Ein blockierter Rücktransfer bleibt in der Diagnose sichtbar
+und kann nach Bereinigung erneut versucht werden. Bis dahin bleibt der
+bestätigte Ergebnisstand in der Factory verfügbar.
+Nach bestätigter Rückübernahme kann Auto bei erreichbarem Quell-Runner wieder
+einen frischen Stand vom Desktop sichern, statt immer die ältere Kopie zu nutzen.
+
+## Manuelle Übergabe
+
 API/CLI und Runner unterstützen Git-Checkpoints und Übergaben zwischen zwei
 Runnern. Factory speichert das Bundle in SQLite; der Zielrunner lädt es über
 seinen authentifizierten Command-Endpunkt. Ein gemeinsames Dateisystem ist

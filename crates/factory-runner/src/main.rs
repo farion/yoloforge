@@ -619,6 +619,34 @@ fn registration_capabilities(managed: bool) -> Vec<String> {
     .collect()
 }
 
+fn native_runner_boot(args: &Args) -> Option<NativeRunnerBoot> {
+    #[cfg(target_os = "linux")]
+    {
+        use sha2::{Digest, Sha256};
+        if !matches!(args.location, Location::Local) || args.containment.is_some()
+            || args.managed_opencode.is_none()
+        {
+            return None;
+        }
+        let machine = std::fs::read_to_string("/etc/machine-id").ok()?;
+        let machine = machine.trim();
+        if machine.len() != 32 || !machine.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+        let boot: InstanceId = boot.trim().parse().ok()?;
+        let hash = |value: &str| format!("{:x}", Sha256::digest(format!("yoloforge:{}:{value}", args.id)));
+        Some(NativeRunnerBoot {
+            machine: hash(&format!("machine:{machine}")), boot: hash(&format!("boot:{boot}")),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = args;
+        None
+    }
+}
+
 async fn run(mut args: Args) -> Result<()> {
     for root in &mut args.archive_source_root {
         anyhow::ensure!(
@@ -641,6 +669,7 @@ async fn run(mut args: Args) -> Result<()> {
         return attach::open(&args, id).await;
     }
     let client = FactoryClient::from_env(&args.server)?;
+    let native_boot = native_runner_boot(&args);
     if let Some(project) = args.watch_publications {
         return hosting::watch(&args, &client, project).await;
     }
@@ -767,8 +796,7 @@ async fn run(mut args: Args) -> Result<()> {
             }
         } else {
             let opencode = opencode_status(&args.opencode_registration).await;
-            let result = client
-                .register(&RegisterRunner {
+            let mut input = RegisterRunner {
                     capabilities: registration_capabilities(args.managed_opencode.is_some()),
                     id: args.id,
                     instance_id,
@@ -779,8 +807,14 @@ async fn run(mut args: Args) -> Result<()> {
                     },
                     version: env!("CARGO_PKG_VERSION").into(),
                     opencode,
-                })
-                .await;
+                };
+            input.capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
+            let mut result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
+                // Older servers cap registration at 16 capability strings.
+                input.capabilities.pop();
+                result = client.register(&input).await;
+            }
             if result.is_ok() {
                 next_heartbeat = std::time::Instant::now() + HEARTBEAT_INTERVAL;
             }

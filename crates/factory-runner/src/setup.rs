@@ -53,6 +53,19 @@ pub async fn prepare(
     record: &mut crate::journal::Record,
     args: &Args,
 ) -> CommandOutput {
+    if let Some(spec) = record.command.workspace_spec.as_ref().filter(|spec| spec.setup.as_ref()
+        .is_some_and(|setup| setup.repository_source == CHECKPOINT_RETURN))
+    {
+        let result = tokio::task::block_in_place(|| {
+            crate::publication::return_checkpoint(
+                args.workspace_root.as_deref().context("Workspace root missing")?, spec,
+            )
+        });
+        return match result {
+            Ok(workspace) => CommandOutput::Workspace { workspace },
+            Err(error) => CommandOutput::WorkspaceError { workspace_error: error.to_string().chars().take(240).collect() },
+        };
+    }
     if let Err(e) = crate::managed::ensure_repository(j, record, args).await {
         return CommandOutput::WorkspaceError {
             workspace_error: e.to_string().chars().take(240).collect(),

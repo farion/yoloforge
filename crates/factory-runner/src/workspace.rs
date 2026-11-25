@@ -186,6 +186,11 @@ fn key(command: &RunnerCommand) -> String {
     }
 }
 
+pub(crate) fn has_plan(journal: &Journal, command: &RunnerCommand) -> Result<bool> {
+    Ok(journal.db.query_row("SELECT EXISTS(SELECT 1 FROM workspaces WHERE stream_id=?1)",
+        [key(command)], |row| row.get(0))?)
+}
+
 pub fn prepare(
     journal: &Journal,
     command: &RunnerCommand,

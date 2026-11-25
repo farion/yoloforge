@@ -216,7 +216,9 @@ impl Store {
         // changing or discarding the historical rows or the database schema version.
         db.execute_batch("CREATE TEMP VIEW active_projects AS SELECT rowid AS rowid,* FROM main.projects WHERE COALESCE(json_extract(data,'$.deleted'),0)=0;")?;
         db.execute_batch("CREATE TEMP TABLE live_mcp_runners(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL, remote INTEGER NOT NULL);")?;
-        db.execute_batch("CREATE TEMP TABLE live_automatic_runners(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL, local_source INTEGER NOT NULL);")?;
+        db.execute_batch("CREATE TEMP TABLE live_automatic_runners(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL, local_source INTEGER NOT NULL, checkpoint INTEGER NOT NULL, server_runner INTEGER NOT NULL);")?;
+        db.execute_batch("CREATE TEMP TABLE automatic_runner_contacts(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL);")?;
+        db.execute_batch("CREATE TEMP TABLE native_runner_boots(runner_id TEXT PRIMARY KEY, data TEXT NOT NULL);")?;
         Ok(Self(Arc::new(Mutex::new(db)), Arc::new(tokio::sync::Notify::new())))
     }
 

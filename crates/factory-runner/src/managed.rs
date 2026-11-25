@@ -23,12 +23,18 @@ pub struct Plan {
     #[serde(default)]
     create_local: bool,
 }
-fn directory(root: &Path, id: ProjectId) -> PathBuf {
-    root.join(".repositories").join(id.to_string())
+fn directory(root: &Path, spec: &WorkspaceSpec) -> Result<PathBuf> {
+    let project = root.join(".repositories").join(spec.project_id.to_string());
+    if spec.setup.as_ref().is_some_and(|setup| setup.repository_source == CHECKPOINT_REPOSITORY) {
+        let checkpoint = spec.checkpoint.as_ref().context("Checkpoint repository requires an import")?;
+        Ok(project.join("imports").join(checkpoint.command_id.to_string()))
+    } else {
+        Ok(project)
+    }
 }
 pub fn resolve(spec: &WorkspaceSpec, root: &Path) -> Result<PathBuf> {
     let setup = spec.setup.as_ref().context("Setup missing")?;
-    let dir = directory(&fs::canonicalize(root)?, spec.project_id);
+    let dir = directory(&fs::canonicalize(root)?, spec)?;
     ensure!(
         fs::canonicalize(&dir)? == dir,
         "Managed repository directory replaced"
@@ -75,14 +81,22 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
         .context("Workspace root missing")?;
     fs::create_dir_all(root)?;
     let root = fs::canonicalize(root)?;
-    let dir = directory(&root, spec.project_id);
+    let dir = directory(&root, &spec)?;
     fs::create_dir_all(&dir)?;
     ensure!(
         fs::canonicalize(&dir)? == dir,
         "Managed directory is a symlink"
     );
     if fs::symlink_metadata(dir.join("binding.json")).is_ok() {
-        resolve(&spec, &root)?;
+        let repository = resolve(&spec, &root)?;
+        if Path::new(&setup.repository_source).is_absolute()
+            && spec.checkpoint.is_none()
+            && !tokio::task::block_in_place(|| crate::workspace::has_plan(j, &r.command))?
+        {
+            tokio::task::block_in_place(|| refresh_local_base(
+                &repository, Path::new(&setup.repository_source), &spec.base_branch,
+            ))?;
+        }
         return Ok(());
     }
     let mut plan = if let Some(plan) = &r.repository {
@@ -117,7 +131,16 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
             .context("Managed repository destination already occupied; nothing overwritten")?;
         plan.attempted = true;
         save(j, r, &plan)?;
-        if plan.source == "factory:managed" {
+        if plan.source == CHECKPOINT_REPOSITORY {
+            let import = spec.checkpoint.as_ref().context("Checkpoint import missing")?;
+            let hash = match import.commit.len() {
+                40 => "--object-format=sha1",
+                64 => "--object-format=sha256",
+                _ => anyhow::bail!("Invalid checkpoint commit hash"),
+            };
+            tokio::task::block_in_place(|| git(&plan.path, &["init", "--bare", hash]))?;
+            tokio::task::block_in_place(|| crate::checkpoint::import_objects(&plan.path, &root, import))?;
+        } else if plan.source == "factory:managed" {
             tokio::task::block_in_place(|| -> Result<()> {
                 git(
                     &plan.path,
@@ -188,16 +211,18 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                     )??;
             ensure!(status.success(),"Repository import failed; check runner Git access. Retry preparation after fixing access; no files deleted");
         }
-        tokio::task::block_in_place(|| {
-            git(
-                &plan.path,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    &format!("refs/heads/{}^{{commit}}", plan.branch),
-                ],
-            )
-        })?;
+        if plan.source != CHECKPOINT_REPOSITORY {
+            tokio::task::block_in_place(|| {
+                git(
+                    &plan.path,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("refs/heads/{}^{{commit}}", plan.branch),
+                    ],
+                )
+            })?;
+        }
         plan.ready = true;
         save(j, r, &plan)?;
     }
@@ -208,6 +233,28 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
         .map_err(|_| anyhow::anyhow!("Managed binding occupied; nothing overwritten"))?;
     factory_platform::sync_dir(&dir)?;
     resolve(&spec, &root)?;
+    Ok(())
+}
+
+/// Refresh only the managed base ref from committed source history. An
+/// existing worktree remains pinned to its original command and commit.
+fn refresh_local_base(repository: &Path, source: &Path, branch: &str) -> Result<()> {
+    let source = source.canonicalize().context("The local project checkout is unavailable")?;
+    let reference = format!("refs/heads/{branch}");
+    let revision = format!("{reference}^{{commit}}");
+    let previous = git(repository, &["rev-parse", "--verify", &revision])?;
+    let current = git(&source, &["rev-parse", "--verify", &revision])
+        .context("The configured base branch is missing from the local project")?;
+    if previous == current {
+        return Ok(());
+    }
+    crate::workspace::git_network(repository, &[
+        "fetch", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance",
+        "--", git_path(&source)?.as_ref(), &reference,
+    ])?;
+    git(repository, &["merge-base", "--is-ancestor", &previous, &current])
+        .context("The local base branch diverged from the managed history; nothing was overwritten")?;
+    git(repository, &["update-ref", &reference, &current, &previous])?;
     Ok(())
 }
 // Publish only a complete repository, without replacing an entry created by another process.
@@ -234,10 +281,15 @@ fn initialize_local(source: &str, branch: &str, project: ProjectId) -> Result<()
         return Ok(());
     }
     let parent = target.parent().context("Project folder has no parent")?;
-    fs::create_dir_all(parent).context("Cannot create project parent folder")?;
+    fs::create_dir_all(parent).map_err(|error| {
+        // The workspace result only includes the outer error. Keep the OS
+        // reason before the path so it survives the result's length limit.
+        anyhow::anyhow!("Cannot create project parent folder on the runner: {error}; path: {}", parent.display())
+    })?;
     let attempt = tempfile::Builder::new()
         .prefix(".yoloforge-create-")
-        .tempdir_in(parent)?
+        .tempdir_in(parent)
+        .with_context(|| format!("Cannot stage repository in project parent folder on the runner: {}", parent.display()))?
         .keep();
     git(&attempt, &["init", "--initial-branch", branch])?;
     git(
@@ -273,6 +325,23 @@ fn initialize_local(source: &str, branch: &str, project: ProjectId) -> Result<()
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn project_parent_failure_reports_runner_path_and_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("not-a-directory");
+        fs::write(&blocked, "keep").unwrap();
+        let parent = blocked.join("projects");
+        let target = parent.join("example");
+        let cause = fs::create_dir_all(&parent).unwrap_err().to_string();
+        let error = initialize_local(target.to_str().unwrap(), "main", ProjectId::new())
+            .unwrap_err().to_string();
+        assert!(error.contains("on the runner"));
+        assert!(error.contains(&cause));
+        assert!(error.contains(parent.to_str().unwrap()));
+        assert_eq!(fs::read_to_string(blocked).unwrap(), "keep");
+    }
+
     async fn exercise(import: bool, local: bool) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("work");
@@ -360,11 +429,25 @@ mod tests {
                 "keep"
             );
             assert!(!Path::new(&workspace.path).join("user-draft").exists());
+            let source = Path::new(&source);
+            fs::write(source.join("new-file"), "new committed source").unwrap();
+            git(source, &["add", "new-file"]).unwrap();
+            git(source, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "new source"]).unwrap();
+            let next = git(source, &["rev-parse", "HEAD"]).unwrap();
+            let mut fresh = c.clone();
+            fresh.id = CommandId::new();
+            fresh.stream_id = StreamId::new();
+            fresh.workspace_spec.as_mut().unwrap().branch = format!("factory/{}", fresh.stream_id);
+            let mut record = j.receive(fresh).unwrap();
+            ensure_repository(&j, &mut record, &args).await.unwrap();
+            assert_eq!(git(&resolved, &["rev-parse", "main"]).unwrap(), next);
+            assert_eq!(git(Path::new(&workspace.path), &["rev-parse", "HEAD"]).unwrap(), head);
+            assert_eq!(fs::read_to_string(source.join("user-draft")).unwrap(), "keep");
         }
         let mut occupied = c;
         occupied.id = CommandId::new();
         occupied.workspace_spec.as_mut().unwrap().project_id = ProjectId::new();
-        let target = directory(&root, occupied.workspace_spec.as_ref().unwrap().project_id)
+        let target = directory(&root, occupied.workspace_spec.as_ref().unwrap()).unwrap()
             .join(occupied.id.to_string());
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("existing"), "keep").unwrap();

@@ -2830,6 +2830,7 @@ fn question_archive_contains_only_answered_questions_and_sessions_close_only_on_
         "Finishing a task must not close a reusable session"
     );
     s.runtime_terminations.push(RuntimeTermination {
+        automatic_failover: false,
         binding: None,
         request_id: RequestId::new(),
         command_id: command.id,
