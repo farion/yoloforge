@@ -426,10 +426,22 @@ async fn commands(
                         .command
                         .agent_spec
                         .as_ref()
-                        .is_some_and(|s| !s.read_only)
+                        .is_some_and(|s| !s.read_only && s.role != factory_protocol::directs::ROLE)
                 {
                     let planned_git = record.command.requires_target_git();
                     let publication = tokio::task::block_in_place(|| publication::publish_with_summary(journal, &record, args, &progress.summary));
+                    let managed = record.command.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
+                        .is_some_and(|setup| setup.repository_source == "factory:managed");
+                    let outcome = match &publication {
+                        Ok(Some(_)) if managed => PublicationOutcome::Managed,
+                        Ok(Some(_)) => PublicationOutcome::Local,
+                        Ok(None) => PublicationOutcome::NotPublished,
+                        Err(_) => PublicationOutcome::Blocked,
+                    };
+                    record.publication_notice = Some(PublicationNotice {
+                        outcome,
+                        unix_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64,
+                    });
                     if planned_git {
                         let (ok, summary) = match publication {
                             Ok(Some(_)) => match tokio::task::block_in_place(|| publication::published_commit(journal, record.command.id)) {
@@ -446,7 +458,7 @@ async fn commands(
                         progress.summary.truncate(end);
                     } else {
                         match publication {
-                            Ok(Some(path))=>progress.summary.push_str(&format!("\n\nErgebnis automatisch im Projektordner bereitgestellt: {}",path.display())),
+                            Ok(Some(path))=>progress.summary = format!("{PUBLICATION_CONFIRMED_PREFIX}\nErgebnis automatisch im Projektordner bereitgestellt: {}\n\nAgentenergebnis:\n{}", path.display(), progress.summary),
                             Ok(None)=>{},
                             Err(e) if e.downcast_ref::<publication::PublicationConflict>().is_some()=> {
                                 progress.summary=format!("{PUBLICATION_CONFLICT_PREFIX}\n{e}\n\nAgentenergebnis:\n{}",progress.summary);
@@ -454,8 +466,11 @@ async fn commands(
                                 while !progress.summary.is_char_boundary(end) {end-=1;}
                                 progress.summary.truncate(end);
                             },
-                            Err(e)=>progress.summary.push_str(&format!("\n\nErgebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert: {e}")),
+                            Err(e)=>progress.summary = format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: {e}\n\nAgentenergebnis:\n{}", progress.summary),
                         }
+                        let mut end = progress.summary.len().min(32768);
+                        while !progress.summary.is_char_boundary(end) { end -= 1; }
+                        progress.summary.truncate(end);
                     }
                 }
                 record.result = Some(CommandOutput::Agent { agent: progress });
@@ -601,6 +616,7 @@ fn registration_capabilities(managed: bool) -> Vec<String> {
         CHECKPOINT_CAPABILITY,
         REVIEW_CAPABILITY,
         TARGET_GIT_CAPABILITY,
+        MERGER_CAPABILITY,
         PROJECT_SETUP_CAPABILITY,
         TASK_IMAGES_CAPABILITY,
         TASK_FILES_CAPABILITY,
@@ -609,6 +625,7 @@ fn registration_capabilities(managed: bool) -> Vec<String> {
     ]
     .into_iter()
     .chain(managed.then_some([
+        factory_protocol::directs::CAPABILITY,
         factory_protocol::REPO_SKILLS_CAPABILITY,
         factory_protocol::mcp::LOCAL_MCP_CAPABILITY,
         factory_protocol::mcp::REMOTE_MCP_CAPABILITY,
@@ -813,6 +830,9 @@ async fn run(mut args: Args) -> Result<()> {
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
                 // Older servers cap registration at 16 capability strings.
                 input.capabilities.pop();
+                input
+                    .capabilities
+                    .retain(|capability| capability != factory_protocol::directs::CAPABILITY);
                 result = client.register(&input).await;
             }
             if result.is_ok() {
@@ -960,9 +980,18 @@ mod startup_identity_tests {
     fn managed_runner_registration_fits_server_limit_without_losing_git_recovery() {
         for managed in [false, true] {
             let capabilities = registration_capabilities(managed);
-            assert!(capabilities.len() <= 16);
+            assert!(capabilities.len() <= 18);
             assert!(capabilities.iter().any(|cap| cap == TARGET_GIT_CAPABILITY));
+            assert!(capabilities.iter().any(|cap| cap == MERGER_CAPABILITY));
             assert!(!capabilities.iter().any(|cap| cap == RUNNER_RESTART_CAPABILITY));
+            assert!(
+                capabilities
+                    .iter()
+                    .filter(|capability| *capability != factory_protocol::directs::CAPABILITY
+                        && *capability != MERGER_CAPABILITY)
+                    .count()
+                    <= 16
+            );
         }
     }
 

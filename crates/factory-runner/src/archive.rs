@@ -27,6 +27,8 @@ pub struct Cursor {
     pub(crate) revision: u64,
     next: Option<String>,
     final_scan: bool,
+    #[serde(default)]
+    native_final_page_queued: bool,
     pub(crate) finished: bool,
     pending: Option<ArchiveBatch>,
 }
@@ -189,6 +191,20 @@ pub async fn step(
         record.archive.next = None;
         tokio::task::block_in_place(|| journal.save(record))?;
     }
+    if record.archive.native_final_page_queued {
+        let notice = record.publication_notice.as_ref().context("Publication archive notice missing")?;
+        let batch = ArchiveBatch {
+            session_id: record.command.session_id(),
+            revision: record.archive.revision.checked_add(1).context("Archive revision exhausted")?,
+            captured_unix_ms: notice.unix_ms,
+            final_scan_complete: true,
+            messages: vec![publication_message(record.command.id, notice)],
+        };
+        record.archive.pending = Some(batch);
+        tokio::task::block_in_place(|| journal.save(record))?;
+        upload(factory, journal, record, registration).await?;
+        return Ok(true);
+    }
     let execution = record.agent.as_ref().context("Archive execution missing")?;
     let client = OpenCodeClient::from_registration(
         args.opencode_registration
@@ -213,6 +229,9 @@ pub async fn step(
     let (mut messages, next) = client
         .archive_page(&session_id, record.archive.next.as_deref())
         .await?;
+    // This archive type is reserved for facts reported by the runner, not text
+    // or metadata supplied by a model, tool, or native Session client.
+    messages.retain(|message| message["type"] != PUBLICATION_ARCHIVE_TYPE);
     tokio::task::block_in_place(|| {
         crate::archive_files::capture(&mut messages, &execution.workspace.path)
     })?;
@@ -227,11 +246,13 @@ pub async fn step(
     tokio::task::block_in_place(|| {
         crate::archive_blobs::capture(record, args, &messages, revision)
     })?;
+    let native_final_page = record.archive.final_scan && next.is_none();
+    record.archive.native_final_page_queued = native_final_page && record.publication_notice.is_some();
     let batch = ArchiveBatch {
         session_id,
         revision,
         captured_unix_ms,
-        final_scan_complete: record.archive.final_scan && next.is_none(),
+        final_scan_complete: native_final_page && !record.archive.native_final_page_queued,
         messages,
     };
     record.archive.next = next;
@@ -245,6 +266,15 @@ pub async fn step(
             .iter()
             .all(|b| b.offset == b.file.bytes))
         || !final_result)
+}
+
+fn publication_message(command: CommandId, notice: &PublicationNotice) -> serde_json::Value {
+    serde_json::json!({
+        "id": format!("factory_publication_{command}"),
+        "type": PUBLICATION_ARCHIVE_TYPE,
+        "time": { "created": notice.unix_ms },
+        "publication": notice,
+    })
 }
 async fn upload(
     factory: &FactoryClient,
@@ -403,6 +433,67 @@ mod tests {
         })
         .into_response()
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publication_follows_full_native_page_and_survives_restart() {
+        use axum::routing::get;
+        use clap::Parser;
+        use serde_json::json;
+        let runner = RunnerId::new();
+        let id = CommandId::new();
+        let sid = agent_session_id(id);
+        let session = sid.clone();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let router = Router::new()
+            .route("/api/session/{id}", get(move || {
+                let session = session.clone();
+                async move { Json(json!({"data":{"id":session,"metadata":{"factory_command":id},"location":{"directory":"/work"}}})) }
+            }))
+            .route("/api/session/{id}/message", get(|| async {
+                Json(json!({"data":(0..16).map(|i| json!({"id":format!("msg_{i}"),"type":"assistant"})).collect::<Vec<_>>(),"cursor":{"next":null}}))
+            }))
+            .route("/v1/runners/{runner}/commands/{id}/archive", put(receive))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = FactoryClient::new(&endpoint, "test-archive-token-0123456789abcdef").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal");
+        let service = dir.path().join("service.json");
+        std::fs::write(&service, json!({"url":endpoint,"password":"test"}).to_string()).unwrap();
+        let args = Args::try_parse_from(["factory-runner", "--id", &runner.to_string(), "--name", "test",
+            "--opencode-registration", service.to_str().unwrap()]).unwrap();
+        let journal = Journal::open(&path, &endpoint, runner).unwrap();
+        let mut record = journal.receive(serde_json::from_value(json!({
+            "id":id,"stream_id":StreamId::new(),"runner_id":runner,"ownership_epoch":1,
+            "kind":"run_agent","state":"accepted","created_unix_ms":1
+        })).unwrap()).unwrap();
+        record.agent = Some(serde_json::from_value(json!({
+            "workspace":{"path":"/work","branch":"main","base_commit":"a".repeat(40)},
+            "endpoint":endpoint,"session_attempted":true,"prompt_attempted":true
+        })).unwrap());
+        record.result = Some(CommandOutput::Agent { agent: AgentProgress {
+            session_id: sid, message_id: agent_message_id(id), phase: AgentPhase::Succeeded, summary: "Done".into(),
+        }});
+        record.publication_notice = Some(PublicationNotice { unix_ms: 100, outcome: PublicationOutcome::Local });
+        let registration = RegistrationId::new();
+        assert!(step(&client, &journal, &mut record, &args, registration).await.is_err());
+        drop(journal);
+        let journal = Journal::open(&path, &endpoint, runner).unwrap();
+        let mut record = journal.record(id).unwrap().unwrap();
+        assert!(!step(&client, &journal, &mut record, &args, registration).await.unwrap());
+        assert!(step(&client, &journal, &mut record, &args, registration).await.unwrap());
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0].batch.messages, seen[1].batch.messages);
+        assert_eq!(seen[1].batch.messages.len(), 16);
+        assert!(!seen[1].batch.final_scan_complete);
+        assert!(seen[2].batch.final_scan_complete);
+        assert_eq!(seen[2].batch.messages, vec![publication_message(id, record.publication_notice.as_ref().unwrap())]);
+        server.abort();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn historical_backfill_replays_outbox_after_restart_and_never_reexecutes_work() {
         use clap::Parser;

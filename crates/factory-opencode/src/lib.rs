@@ -489,8 +489,13 @@ impl OpenCodeClient {
         provider: &str,
         model: &str,
         permissions: Option<serde_json::Value>,
+        direct: bool,
     ) -> Result<()> {
         safe_id(id)?;
+        let mut metadata = serde_json::json!({"factory_command":command});
+        if direct {
+            metadata["factory_direct"] = serde_json::Value::Bool(true);
+        }
         let result = self
             .request(
                 Method::POST,
@@ -498,7 +503,7 @@ impl OpenCodeClient {
                 Some(serde_json::json!({
                     "id":id,"agent":"build",
                     "location":{"directory":directory},"model":{"providerID":provider,"id":model},
-                    "metadata":{"factory_command":command},
+                    "metadata":metadata,
                     "permissions": permissions
                 })),
             )

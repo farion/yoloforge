@@ -20,6 +20,8 @@ pub const MUTED: Color32 = Color32::from_rgb(173, 180, 192);
 pub const AMBER: Color32 = Color32::from_rgb(244, 190, 84);
 
 pub struct SessionTab {
+    pub direct_id: Option<CommandId>,
+    pub direct_options: crate::directs::Options,
     pub scroll_to_start: bool,
     pub selected_execution: Option<CommandId>,
     pub initialized: BTreeSet<CommandId>,
@@ -138,7 +140,16 @@ impl App {
         } else {
             crate::persistence::load_settings()
         };
-        let settings = loaded.as_ref().cloned().unwrap_or_default();
+        let mut settings = loaded.as_ref().cloned().unwrap_or_default();
+        let connection_load_failed = if cfg!(test) {
+            false
+        } else {
+            match crate::persistence::load_remembered_factory() {
+                Ok(Some(connection)) => { settings.apply_remembered_factory(connection); false }
+                Ok(None) => false, // Existing installations still read the old settings.
+                Err(_) => true,
+            }
+        };
         #[cfg(test)]
         let settings = Settings { language: crate::i18n::Language::German, ..settings };
         crate::i18n::set_language(settings.language);
@@ -218,6 +229,9 @@ impl App {
             screenshot_requested: false,
             exit_after_ms,
         };
+        if connection_load_failed {
+            app.notice(crate::tr!("Gespeicherte Factory-Verbindung konnte nicht geladen werden."));
+        }
         if !cfg!(test) {
             match crate::local_runners::load() {
                 Ok(runners) => app.local_runners = runners,
@@ -329,12 +343,16 @@ impl App {
     fn remember_confirmed_connection(
         &mut self,
         save_token: impl FnOnce(&str, &str) -> anyhow::Result<std::path::PathBuf>,
+        save_connection: impl FnOnce(&crate::persistence::RememberedFactory) -> anyhow::Result<()>,
     ) -> anyhow::Result<bool> {
         let Some(credential) = self.pending_credential.take() else { return Ok(false); };
         let path = match credential {
             ConnectionCredential::Existing(path) => path,
             ConnectionCredential::New(token) => save_token(&self.server, &token)?,
         };
+        save_connection(&crate::persistence::RememberedFactory {
+            server: self.server.clone(), credential_file: path.clone(),
+        })?;
         if self.settings.server == self.server && self.settings.credential_file.as_ref() == Some(&path) {
             return Ok(false);
         }
@@ -480,6 +498,12 @@ impl App {
     }
     pub fn open_session(&mut self, project: ProjectId, root: CommandId) {
         if !self.online { return; }
+        if let Some(direct) = self.snapshot.as_ref().and_then(|s|
+            s.directs.iter().find(|d| d.project_id == project && d.root_command_id == Some(root))).cloned()
+        {
+            self.open_direct(&direct);
+            return;
+        }
         if self.snapshot.as_ref().is_none_or(|s| {
             !s.commands
                 .iter()
@@ -502,7 +526,19 @@ impl App {
                     .map(|c| session_title(s, c))
             })
             .unwrap_or_else(|| root.to_string());
+        self.push_session_tab(project, root, title, None);
+    }
+    pub(crate) fn open_direct(&mut self, direct: &directs::Direct) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.direct_id == Some(direct.id)) {
+            self.active_tab = index + 1;
+        } else {
+            self.push_session_tab(direct.project_id, direct.root_command_id.unwrap_or(direct.id), "Direct".into(), Some(direct.id));
+        }
+    }
+    fn push_session_tab(&mut self, project: ProjectId, root: CommandId, title: String, direct_id: Option<CommandId>) {
         self.tabs.push(SessionTab {
+            direct_id,
+            direct_options: Default::default(),
             scroll_to_start: false,
             selected_execution: None,
             initialized: BTreeSet::new(),
@@ -875,7 +911,9 @@ impl App {
                 }
             }
             self.previews.insert(key.clone(), None);
-            self.backend.preview(key.clone(), image.clone(), full);
+            let max_texture_side = ui.ctx().input(|input| input.max_texture_side);
+            self.backend
+                .preview(key.clone(), image.clone(), full, max_texture_side);
         }
         match self.previews.get(&key).and_then(Option::as_ref) {
             Some(Ok(texture)) => ui.add(
@@ -909,6 +947,43 @@ impl App {
             .request(id, method.into(), path.clone(), Value::Null);
         self.dialog = Some(Dialog::read(title.into(), id, path));
     }
+    pub(crate) fn publication_notification_status(&self, n: &Notification) -> Option<&'static str> {
+        if n.kind != "command.updated" { return None; }
+        let command = self.snapshot.as_ref().and_then(|s| s.commands.iter().find(|c| Some(c.id) == n.command_id));
+        if command.is_some_and(command_publication_blocked) || n.title == "Intent: Übernahme blockiert" {
+            Some(crate::tr!("Übernahme blockiert"))
+        } else if n.title == "Intent: Übernahme noch nicht bestätigt"
+            || (n.title == "Aufgabe abgeschlossen" && command.is_some_and(command_publication_unconfirmed))
+        {
+            Some(crate::tr!("Übernahme nicht bestätigt"))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn notification_label(&self, n: &Notification) -> String {
+        let snapshot = self.snapshot.as_deref();
+        let project = n.project_id.and_then(|id| snapshot?.projects.iter().find(|p| p.id == id));
+        let project_name = project.map_or("Factory", |p| p.name.as_str());
+        let ticket = snapshot.and_then(|s| {
+            let mut matches = s.tickets.iter().filter(|t| Some(t.project_id) == n.project_id
+                && n.ticket_id.map_or_else(|| n.command_id.is_some() && t.execution_command == n.command_id, |id| t.id == id));
+            let ticket = matches.next()?;
+            matches.next().is_none().then_some(ticket)
+        });
+        let key = ticket.filter(|t| !t.key.is_empty()).map(|t| t.key.as_str());
+        if let Some(status) = self.publication_notification_status(n) {
+            return format!("{}: {status}", key.unwrap_or(project_name));
+        }
+        if n.kind == "command.updated" {
+            if n.title == "Aufgabe abgeschlossen" {
+                return key.map_or_else(|| format!("{project_name}: {}", crate::tr!("Intent abgeschlossen")),
+                    |key| crate::tr!("{key} abgeschlossen", key = key));
+            }
+        }
+        format!("{project_name}: {}", n.title)
+    }
+
     pub fn notification_target(&self, n: &Notification) -> Option<Target> {
         let Some(project) = n.project_id else { return Some(Target::Diagnose(None)) };
         if let Some(q) = n.question_id {
@@ -981,6 +1056,10 @@ impl App {
                 Event::SnapshotPeer(peer) => self.server_peer = peer,
                 Event::Snapshot(Ok(mut s)) => {
                     let reconnected = !self.online && (self.updated.is_some() || self.error.is_some());
+                    let direct_preparation_failed = self.snapshot.as_ref().is_some_and(|old|
+                        s.directs.iter().any(|direct| direct.preparation_failed && old.directs.iter().any(|previous|
+                            previous.id == direct.id && !previous.preparation_failed))
+                    );
                     if self
                         .snapshot
                         .as_ref()
@@ -1027,10 +1106,16 @@ impl App {
                     }
                     self.cache_projects(&s.projects);
                     self.snapshot = Some(std::sync::Arc::new(s));
+                    if direct_preparation_failed {
+                        self.notice(crate::tr!("Direct konnte nicht gestartet werden. Details stehen in der Diagnose."));
+                    }
                     self.updated = Some(Instant::now());
                     self.online = true;
                     self.error = None;
-                    match self.remember_confirmed_connection(crate::persistence::save_connection_token) {
+                    let save_connection = |connection: &crate::persistence::RememberedFactory| {
+                        if cfg!(test) { Ok(()) } else { crate::persistence::save_remembered_factory(connection) }
+                    };
+                    match self.remember_confirmed_connection(crate::persistence::save_connection_token, save_connection) {
                         Ok(true) if !cfg!(test) => self.backend.persist(self.settings.clone()),
                         Ok(_) => {},
                         Err(_) => self.notice(crate::tr!("Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden.")),
@@ -1078,18 +1163,7 @@ impl App {
                                     .rev()
                                     .filter(|n| n.id > self.latest_notification)
                                 {
-                                    let project = n
-                                        .project_id
-                                        .and_then(|p| {
-                                            self.snapshot
-                                                .as_ref()?
-                                                .projects
-                                                .iter()
-                                                .find(|v| v.id == p)
-                                        })
-                                        .map(|p| p.name.as_str())
-                                        .unwrap_or("Factory");
-                                    let label = format!("{project}: {}", n.title);
+                                    let label = self.notification_label(n);
                                     self.notices.push((label.clone(), Instant::now()));
                                     if self.settings.desktop_notifications {
                                         self.backend.desktop_notification(
@@ -1326,6 +1400,31 @@ impl App {
                         }
                     }
                     if let Some(request) = self.settings.pending.iter().find(|r| r.id == id &&
+                        (r.path == "/v1/directs" || r.path.starts_with("/v1/directs/"))).cloned()
+                    {
+                        match &result {
+                            Ok(value) => {
+                                if let Ok(direct) = serde_json::from_value::<directs::Direct>(value.clone()) {
+                                    if let Some(s) = &mut self.snapshot {
+                                        let directs = &mut std::sync::Arc::make_mut(s).directs;
+                                        directs.retain(|previous| previous.id != direct.id);
+                                        directs.insert(0, direct.clone());
+                                    }
+                                    if request.path == "/v1/directs" {
+                                        self.open_direct(&direct);
+                                    } else if request.path.ends_with("/prompt") {
+                                        self.settings.session_prompts.retain(|saved|
+                                            saved.draft.server != request.server || serde_json::json!(saved.id) != request.body["request_id"]);
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                self.notice(crate::tr!("Direct-Aktion nicht bestätigt. Details stehen in der Diagnose."));
+                                self.action_errors.push((crate::overview::now_ms(), error.message.clone()));
+                            }
+                        }
+                    }
+                    if let Some(request) = self.settings.pending.iter().find(|r| r.id == id &&
                         r.path.starts_with("/v1/commands/") && r.path.ends_with("/prompt")).cloned()
                     {
                         if let Ok(value) = &result {
@@ -1345,6 +1444,28 @@ impl App {
                             } else { crate::tr!("Prompt konnte nicht eingereiht werden. Der Entwurf bleibt erhalten.") });
                             self.action_errors.push((crate::overview::now_ms(), format!("Session-Prompt ({} · {}): {}", request.server, request.path, error.message)));
                             if self.action_errors.len() > 50 { self.action_errors.remove(0); }
+                        }
+                    }
+                    if let Some(ticket_id) = self.settings.pending.iter().find(|r| r.id == id && r.method == "DELETE")
+                        .and_then(|r| r.path.strip_prefix("/v1/tasks/")).and_then(|raw| raw.parse::<TicketId>().ok())
+                    {
+                        if result.as_ref().is_ok_and(|value|
+                            value["id"] == serde_json::json!(ticket_id) && value["status"] == "cancelled")
+                        {
+                            self.task_payloads.remove(&ticket_id);
+                            if let Some(snapshot) = &mut self.snapshot {
+                                std::sync::Arc::make_mut(snapshot).tickets.retain(|t| t.id != ticket_id);
+                            }
+                            self.notice(crate::tr!("Intent gelöscht."));
+                        } else {
+                            if result.is_ok() {
+                                result = Err(Failure { message: "Unexpected delete receipt".into(), uncertain: true });
+                            }
+                            if let Err(error) = &result {
+                                self.action_errors.push((crate::overview::now_ms(), error.message.clone()));
+                                if self.action_errors.len() > 50 { self.action_errors.remove(0); }
+                            }
+                            self.notice(crate::tr!("Löschen nicht bestätigt. Details stehen in der Diagnose."));
                         }
                     }
                     let project_update = self.settings.pending.iter().any(|r| r.id == id
@@ -1596,6 +1717,22 @@ impl App {
                     for cache in self.lists.values_mut() {
                         cache.list.reset();
                     }
+                    let max_texture_side = self
+                        .backend
+                        .context()
+                        .input(|input| input.max_texture_side);
+                    let result = result.and_then(|pixels| {
+                        if pixels.width() <= max_texture_side
+                            && pixels.height() <= max_texture_side
+                        {
+                            Ok(pixels)
+                        } else {
+                            Err(crate::tr!(
+                                "Bildvorschau überschreitet die maximale Texturgröße des Geräts."
+                            )
+                            .into())
+                        }
+                    });
                     self.previews.insert(
                         key.clone(),
                         Some(result.map(|pixels| {
@@ -1736,8 +1873,9 @@ impl App {
             Some(_) => None,
             None => self.active_tab.checked_sub(1).and_then(|index| self.tabs.get(index))
                 .filter(|tab| self.snapshot.as_ref().is_some_and(|s|
-                    can_prompt_session(s, tab.project, tab.root)))
-                .and_then(|tab| self.session_prompts.get(&tab.root))
+                    can_prompt_session(s, tab.project, tab.root) || tab.direct_id.is_some_and(|id|
+                        s.directs.iter().any(|d| d.id == id && d.state == directs::DirectState::Open))))
+                .and_then(|tab| self.session_prompts.get(&tab.direct_id.unwrap_or(tab.root)))
                 .filter(|composer| composer.request.is_none()).map(|composer| composer.id),
         }
     }
@@ -1779,6 +1917,11 @@ impl App {
         crate::model_settings::tick(self);
         if let Some(snapshot) = &self.snapshot {
             for tab in &mut self.tabs {
+                if let Some(root) = tab.direct_id.and_then(|id|
+                    snapshot.directs.iter().find(|direct| direct.id == id)?.root_command_id)
+                {
+                    tab.root = root;
+                }
                 if let Some(command) = snapshot
                     .commands
                     .iter()
@@ -1993,7 +2136,7 @@ mod remembered_connection_tests {
             assert_eq!(server, "https://remote.example");
             crate::persistence::write_new(&path, secret.as_bytes())?;
             Ok(path.clone())
-        }).unwrap());
+        }, |_| Ok(())).unwrap());
         let json = serde_json::to_string(&app.settings).unwrap();
         assert!(!json.contains(token));
         let restored: Settings = serde_json::from_str(&json).unwrap();

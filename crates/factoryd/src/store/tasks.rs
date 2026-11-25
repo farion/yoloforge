@@ -1,5 +1,31 @@
 use super::*;
 use factory_protocol::models::{ModelSelection, SubmitTaskWithModel};
+
+pub(super) fn block_unpublished_intents(tx: &Transaction<'_>, owner: &Workstream, command: CommandId) -> Result<()> {
+    set_publication_state(tx, owner, command, TicketState::Blocked,
+        "Automatische Übernahme blockiert; Änderungen liegen im Arbeitsbereich.")
+}
+
+pub(super) fn set_publication_state(
+    tx: &Transaction<'_>, owner: &Workstream, command: CommandId, state: TicketState, note: &str,
+) -> Result<()> {
+    for id in &owner.ticket_ids {
+        let raw: String = tx.query_row("SELECT data FROM tickets WHERE id=?1",
+            [id.to_string()], |row| row.get(0))?;
+        let mut ticket: Ticket = serde_json::from_str(&raw)?;
+        if ticket.execution_command != Some(command) || ticket.status == TicketState::Cancelled {
+            continue;
+        }
+        ticket.status = state;
+        ticket.revision.0 += 1;
+        ticket.updated_unix_ms = super::super::unix_ms();
+        ticket.routing_note = note.into();
+        tx.execute("UPDATE tickets SET revision=?1,data=?2 WHERE id=?3",
+            params![ticket.revision.0, serde_json::to_string(&ticket)?, id.to_string()])?;
+        event(tx, "ticket.updated", id.to_string(), &ticket)?;
+    }
+    Ok(())
+}
 pub(super) fn editable(db: &Connection, t: &Ticket) -> Result<bool> {
     if t.execution_command.is_some()
         || !matches!(t.status, TicketState::Backlog | TicketState::Ready)
@@ -17,6 +43,45 @@ pub(super) fn editable(db: &Connection, t: &Ticket) -> Result<bool> {
     )?)
 }
 impl Store {
+    pub fn delete_failed_task(&self, id: TicketId, body: DeleteFailedTask) -> Result<Ticket> {
+        let result = self.mutate(body.request_id, &format!("task.delete_failed/{id}"), &body, |tx| {
+            let raw: String = tx.query_row(
+                "SELECT t.data FROM tickets t JOIN active_projects p ON p.id=t.project_id WHERE t.id=?1",
+                [id.to_string()], |row| row.get(0),
+            ).optional()?.ok_or(StoreError::NotFound)?;
+            let mut ticket: Ticket = serde_json::from_str(&raw)?;
+            if ticket.revision != body.expected_revision {
+                return Err(StoreError::RevisionConflict(ticket.revision));
+            }
+            if ticket.draft || !matches!(ticket.status, TicketState::InProgress | TicketState::Blocked)
+                || ticket.execution_command != Some(body.failed_command)
+            {
+                return Err(StoreError::WorkConflict);
+            }
+            let raw: String = tx.query_row(
+                "SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1 AND s.project_id=?2",
+                params![body.failed_command.to_string(), ticket.project_id.to_string()], |row| row.get(0),
+            ).optional()?.ok_or(StoreError::WorkConflict)?;
+            let failed: RunnerCommand = serde_json::from_str(&raw)?;
+            if failed.state != CommandState::Failed
+                || !matches!(failed.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit)
+            {
+                return Err(StoreError::WorkConflict);
+            }
+            ticket.status = TicketState::Cancelled;
+            ticket.revision.0 += 1;
+            ticket.updated_unix_ms = super::super::unix_ms();
+            ticket.routing_note = "Fehlgeschlagener Intent gelöscht".into();
+            tx.execute("UPDATE tickets SET revision=?1,data=?2 WHERE id=?3",
+                params![ticket.revision.0, serde_json::to_string(&ticket)?, id.to_string()])?;
+            tx.execute("INSERT INTO deleted_intents(ticket_id) VALUES(?1)", [id.to_string()])?;
+            event(tx, "task.deleted", id.to_string(), &ticket)?;
+            Ok(ticket)
+        });
+        if result.is_ok() { self.wake_scheduler(); }
+        result
+    }
+
     pub fn retry_task(&self, id: TicketId, body: RetryTask) -> Result<Ticket> {
         let result = self.mutate(body.request_id, &format!("task.retry/{id}"), &body,
             |tx| retry_failed(tx, id, &body));
@@ -194,7 +259,7 @@ impl Store {
              let session = if let Some(root)=b.requested_session {
                 let data:Option<String>=tx.query_row("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1 AND s.project_id=?2",params![root.to_string(),b.project_id.to_string()],|r|r.get(0)).optional()?;
                 let c:RunnerCommand=serde_json::from_str(&data.ok_or(StoreError::Invalid("Session gehoert nicht zu diesem Projekt"))?)?;
-                 if c.kind!=CommandKind::RunAgent || c.session_root()!=root || c.agent_spec.as_ref().is_none_or(|a|a.read_only){return Err(StoreError::Invalid("Keine auswaehlbare Arbeitssession"));}
+                 if c.kind!=CommandKind::RunAgent || c.session_root()!=root || c.agent_spec.as_ref().is_none_or(|a|a.read_only || a.role == factory_protocol::directs::ROLE){return Err(StoreError::Invalid("Keine auswaehlbare Arbeitssession"));}
                  if direct && tx.query_row(
                      "SELECT EXISTS(SELECT 1 FROM runtime_terminations WHERE stream_id=?1)",
                      [c.stream_id.to_string()], |r| r.get::<_, bool>(0))? {
@@ -295,6 +360,7 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask)
     let latest: String = tx.query_row("SELECT id FROM commands WHERE stream_id=?1 ORDER BY rowid DESC LIMIT 1",
         [owner.id.to_string()], |r| r.get(0))?;
     if failed.state != CommandState::Failed || latest != failed.id.to_string()
+        || failed.agent_spec.as_ref().is_some_and(|s| s.role == MERGER_ROLE)
         || failed.runner_id != owner.runner_id || failed.ownership_epoch != owner.ownership_epoch
         || owner.project_id != ticket.project_id
         || !matches!(failed.kind, CommandKind::PrepareWorkspace | CommandKind::TargetGit | CommandKind::RunAgent)

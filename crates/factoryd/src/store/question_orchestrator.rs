@@ -38,7 +38,7 @@ fn command(tx: &Transaction<'_>, id: CommandId) -> Result<RunnerCommand> {
     Ok(serde_json::from_str(&raw)?)
 }
 pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
-    let mut stmt=tx.prepare("SELECT q.data,e.data FROM questions q JOIN commands c ON c.id=q.command_id JOIN streams s ON s.id=c.stream_id LEFT JOIN question_evaluations e ON e.question_id=q.id WHERE s.project_id=?1 AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 ORDER BY q.rowid")?;
+    let mut stmt=tx.prepare("SELECT q.data,e.data FROM questions q JOIN commands c ON c.id=q.command_id JOIN streams s ON s.id=c.stream_id LEFT JOIN question_evaluations e ON e.question_id=q.id WHERE s.project_id=?1 AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND COALESCE(json_extract(c.data,'$.agent_spec.role'),'')<>'merger' AND NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=c.stream_id) ORDER BY q.rowid")?;
     let rows = stmt
         .query_map([p.project_id.to_string()], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))

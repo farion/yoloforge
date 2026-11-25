@@ -40,6 +40,11 @@ pub(super) fn record_notification(
     let dedup;
     if matches!(kind, "question.created" | "question.updated") {
         let q: Question = serde_json::from_value(payload.clone())?;
+        let direct: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM commands c JOIN directs d ON d.stream_id=c.stream_id WHERE c.id=?1)",
+            [q.command_id.to_string()], |row| row.get(0),
+        )?;
+        if direct { return Ok(()); }
         if !matches!(q.state, QuestionState::Pending | QuestionState::Rejected) {
             return Ok(());
         }
@@ -49,6 +54,7 @@ pub(super) fn record_notification(
         dedup = format!("question/{}", q.id);
     } else if kind == "command.updated" {
         let c: RunnerCommand = serde_json::from_value(payload.clone())?;
+        if c.agent_spec.as_ref().is_some_and(|agent| agent.role == factory_protocol::directs::ROLE) { return Ok(()); }
         let uncertain = c
             .agent_progress
             .as_ref()
@@ -83,6 +89,10 @@ pub(super) fn record_notification(
                 "Orchestrator-Auswertung fehlgeschlagen"
             } else if uncertain {
                 "Sessionzustand ungeklärt"
+            } else if command_publication_blocked(&c) {
+                "Intent: Übernahme blockiert"
+            } else if command_publication_unconfirmed(&c) {
+                "Intent: Übernahme noch nicht bestätigt"
             } else if c.state == CommandState::Succeeded {
                 "Aufgabe abgeschlossen"
             } else {
@@ -291,7 +301,7 @@ impl Store {
         let db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let data: Option<String> = db
             .query_row(
-                "SELECT data FROM tickets WHERE id=?1",
+                "SELECT t.data FROM tickets t WHERE t.id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)",
                 [id.to_string()],
                 |r| r.get(0),
             )

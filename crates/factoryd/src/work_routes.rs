@@ -347,11 +347,14 @@ pub(super) async fn pending_commands(
         let local_mcp = guard.entries[&id].input.capabilities.iter().any(|c| c == mcp::LOCAL_MCP_CAPABILITY);
         let remote_mcp = guard.entries[&id].input.capabilities.iter().any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
         let target_git = guard.entries[&id].input.capabilities.iter().any(|c| c == TARGET_GIT_CAPABILITY);
+        let directs = guard.entries[&id].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
+        let merger = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
             }
-            store.pending(id).map(|mut commands| {
+            store.pending_with_direct_support(id, directs).map(|mut commands| {
+                commands.retain(|c| merger || c.agent_spec.as_ref().is_none_or(|s| s.role != MERGER_ROLE));
                 commands
                     .retain(|c| files || c.agent_spec.as_ref().is_none_or(|s| s.files.is_empty()));
                 commands.retain(|c| repo_skills || c.agent_spec.as_ref().is_none_or(|s| s.repo_skills.is_none()));
@@ -458,7 +461,11 @@ pub(super) async fn ack_command(
     let target_git = guard.entries[&runner].input.capabilities.iter().any(|c| c == TARGET_GIT_CAPABILITY);
     let automatic_checkpoint = guard.entries[&runner].input.capabilities.iter()
         .any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY);
+    let directs = guard.entries[&runner].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
+    let merger = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
     db_call(body.request_id, move || {
+        store.require_direct_support(runner, id, body.ownership_epoch, directs)?;
+        store.require_merger_support(runner, id, body.ownership_epoch, merger)?;
         store.require_context_planning_support(
             runner,
             id,

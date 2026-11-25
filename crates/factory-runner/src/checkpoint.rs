@@ -180,11 +180,22 @@ fn capture(
         );
         plan.clone()
     } else {
-        let parent = git(path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        let published = if spec.committed_only && spec.project_result.is_some()
+            && record.command.workspace_spec.as_ref().and_then(|w| w.setup.as_ref())
+                .is_some_and(|s| s.repository_source == "factory:managed")
+        {
+            crate::publication::managed_export_commit(journal, &record.command, &common)?
+        } else {
+            None
+        };
+        let parent = match &published {
+            Some(commit) => commit.clone(),
+            None => git(path, &["rev-parse", "--verify", "HEAD^{commit}"])?,
+        };
         let tree = if spec.committed_only {
             if spec.project_result.is_some() {
                 ensure!(
-                    git(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
+                    published.is_some() || git(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
                     "Commit the intended changes in this worktree before exporting the project result"
                 );
                 git(path, &["merge-base", "--is-ancestor", &work.base_commit, &parent])

@@ -465,30 +465,17 @@ impl Backend {
             s.send(Event::Saved(result.map_err(|e| e.to_string())));
         });
     }
-    pub fn preview(&self, key: String, image: PromptImage, full: bool) {
+    pub fn preview(
+        &self,
+        key: String,
+        image: PromptImage,
+        full: bool,
+        max_texture_side: usize,
+    ) {
         let s = self.sender();
         self.runtime.spawn_blocking(move || {
-            let result = (|| -> anyhow::Result<egui::ColorImage> {
-                let bytes = crate::persistence::image_bytes(&image);
-                let mut reader =
-                    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
-                let mut limits = image::Limits::default();
-                limits.max_alloc = Some(64 * 1024 * 1024);
-                limits.max_image_width = Some(8192);
-                limits.max_image_height = Some(8192);
-                reader.limits(limits);
-                let decoded = reader.decode()?;
-                let decoded = if full {
-                    decoded.thumbnail(4096, 4096)
-                } else {
-                    decoded.thumbnail(256, 192)
-                }
-                .into_rgba8();
-                Ok(egui::ColorImage::from_rgba_unmultiplied(
-                    [decoded.width() as usize, decoded.height() as usize],
-                    decoded.as_raw(),
-                ))
-            })();
+            let bytes = crate::persistence::image_bytes(&image);
+            let result = decode_preview(bytes, full, max_texture_side);
             s.send(Event::Preview(key, result.map_err(|e| e.to_string())));
         });
     }
@@ -586,6 +573,32 @@ impl Backend {
             sender.send(Event::LocalRunners(crate::local_runners::perform(&client, &server, action).await));
         });
     }
+}
+
+fn decode_preview(
+    bytes: Vec<u8>,
+    full: bool,
+    max_texture_side: usize,
+) -> anyhow::Result<egui::ColorImage> {
+    let mut reader =
+        image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    reader.limits(limits);
+    let decoded = reader.decode()?;
+    let max_texture_side = u32::try_from(max_texture_side.max(1)).unwrap_or(u32::MAX);
+    let (max_width, max_height) = if full {
+        (max_texture_side, max_texture_side)
+    } else {
+        (256.min(max_texture_side), 192.min(max_texture_side))
+    };
+    let decoded = decoded.thumbnail(max_width, max_height).into_rgba8();
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [decoded.width() as usize, decoded.height() as usize],
+        decoded.as_raw(),
+    ))
 }
 fn snapshot_error(error: &ClientError) -> String {
     match error {
@@ -779,6 +792,20 @@ fn clipboard_attachment_keeps_the_screenshot_bytes() {
         else { panic!("Expected an image attachment") };
     assert_eq!(result, PromptImage::from_bytes(crate::tr!("Zwischenablage.png").into(), &bytes).unwrap());
     assert!(clipboard_attachment(crate::tr!("Zwischenablage.png"), &bytes[..8]).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn full_preview_respects_the_renderer_texture_limit() {
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::new(40, 21))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+
+    let preview = decode_preview(png.into_inner(), true, 20).unwrap();
+
+    assert_eq!(preview.width(), 20);
+    assert!(preview.height() <= 20);
 }
 
 fn load_attachment(path: &std::path::Path) -> Result<InputAttachment, String> {

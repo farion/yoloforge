@@ -563,6 +563,35 @@ fn failed_git_is_evaluated_and_requeued_with_the_same_plan_and_owner() {
 }
 
 #[test]
+fn deleting_failed_intent_is_fenced_and_preserves_execution_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let (store, ticket, failed) = failed_git(&path);
+    let body = DeleteFailedTask {
+        request_id: RequestId::new(), expected_revision: ticket.revision, failed_command: failed.id,
+    };
+    assert!(store.delete_failed_task(ticket.id, DeleteFailedTask {
+        request_id: RequestId::new(), expected_revision: Revision(ticket.revision.0 - 1), ..body.clone()
+    }).is_err());
+    assert!(store.delete_failed_task(ticket.id, DeleteFailedTask {
+        request_id: RequestId::new(), failed_command: CommandId::new(), ..body.clone()
+    }).is_err());
+    assert_eq!(store.task_payload(ticket.id).unwrap().id, ticket.id);
+    let deleted = store.delete_failed_task(ticket.id, body.clone()).unwrap();
+    assert_eq!(deleted.status, TicketState::Cancelled);
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.delete_failed_task(ticket.id, body).unwrap().revision, deleted.revision);
+    assert!(store.task_payload(ticket.id).is_err());
+    assert!(!store.snapshot().unwrap().tickets.iter().any(|t| t.id == ticket.id));
+    assert_eq!(store.command_payload(failed.id).unwrap().state, CommandState::Failed);
+    assert!(store.task_history(ticket.id, None).unwrap().entries.iter().any(|e| e.message == "Push not confirmed"));
+    assert!(store.retry_task(ticket.id, RetryTask {
+        request_id: RequestId::new(), expected_revision: deleted.revision, previous_command: failed.id,
+    }).is_err());
+}
+
+#[test]
 fn manual_retry_is_durable_deduplicated_and_not_limited_by_automatic_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");

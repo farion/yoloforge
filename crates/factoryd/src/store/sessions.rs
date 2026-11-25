@@ -46,7 +46,8 @@ impl Store {
             )
             .optional()?;
         let command: RunnerCommand = serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
-        if command.kind != CommandKind::RunAgent || command.state != CommandState::Succeeded {
+        if command.kind != CommandKind::RunAgent || command.state != CommandState::Succeeded
+            || command_publication_blocked(&command) {
             return Err(StoreError::WorkConflict);
         }
         let mut owner = super::work::stream(tx, command.stream_id)?;

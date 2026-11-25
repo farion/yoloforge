@@ -140,6 +140,8 @@ pub struct RoleModels {
     pub supervisor: Option<ModelSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memorizer: Option<ModelSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merger: Option<ModelSelection>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -82,7 +82,7 @@ fn check_selection(catalog: &FactoryModelSettings, selection: &ModelSelection) -
 }
 
 fn check_roles(catalog: &FactoryModelSettings, roles: &RoleModels) -> Result<()> {
-    for model in [&roles.orchestrator, &roles.implementer, &roles.supervisor, &roles.memorizer]
+    for model in [&roles.orchestrator, &roles.implementer, &roles.supervisor, &roles.memorizer, &roles.merger]
         .into_iter()
         .flatten()
     {
@@ -93,7 +93,7 @@ fn check_roles(catalog: &FactoryModelSettings, roles: &RoleModels) -> Result<()>
 
 fn clear_role_accesses(roles: &mut RoleModels, alias: &str) -> bool {
     let mut changed = false;
-    for model in [&mut roles.orchestrator, &mut roles.implementer, &mut roles.supervisor, &mut roles.memorizer] {
+    for model in [&mut roles.orchestrator, &mut roles.implementer, &mut roles.supervisor, &mut roles.memorizer, &mut roles.merger] {
         if model.as_ref().is_some_and(|m| m.access_id == alias) {
             *model = None;
             changed = true;
@@ -109,6 +109,7 @@ fn role(roles: &RoleModels, role: &str) -> Option<ModelSelection> {
         }
         "supervisor" => roles.supervisor.clone(),
         "memorizer" => roles.memorizer.clone(),
+        MERGER_ROLE => roles.merger.clone(),
         _ => roles.implementer.clone(),
     }
 }

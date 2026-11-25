@@ -173,6 +173,7 @@ pub(super) fn portable_result_origin(
         return Ok(None);
     };
     if completed.state != CommandState::Succeeded
+        || command_publication_blocked(completed)
         || completed.workspace_spec.as_ref().is_none_or(|spec|
             spec.target_git.is_some()
                 || (!direct_managed && spec.checkpoint.as_ref() != Some(&base))
@@ -468,12 +469,12 @@ impl Store {
                 {
                     return Err(StoreError::WorkConflict);
                 }
-                let supervised: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1)",
+                let fixed_runner: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1 UNION ALL SELECT 1 FROM directs WHERE stream_id=?1)",
                     [id.to_string()],
                     |r| r.get(0),
                 )?;
-                if supervised {
+                if fixed_runner {
                     return Err(StoreError::WorkConflict);
                 }
                 let data: Option<String> = tx

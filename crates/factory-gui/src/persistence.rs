@@ -129,6 +129,66 @@ pub fn load_settings() -> Result<Settings> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
 
+/// Only a confirmed connection updates this file. Independent GUI instances
+/// can save window state and drafts without rolling back the last connection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RememberedFactory {
+    pub server: String,
+    pub credential_file: PathBuf,
+}
+
+#[cfg(test)]
+#[test]
+fn remembered_connection_survives_unrelated_settings_writes_and_bad_desktop_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let credential = save_connection_token_in(&directory.path().join("credentials"), "https://factory.example", "test-secret").unwrap();
+    let profile = RememberedFactory { server: "https://factory.example".into(), credential_file: credential };
+    write_remembered_factory(directory.path(), &profile).unwrap();
+    let desktop = directory.path().join("desktop.json");
+    for content in [b"{\"server\":\"https://old.example\"}".as_slice(), b"invalid json".as_slice()] {
+        fs::write(&desktop, content).unwrap();
+        let mut settings: Settings = serde_json::from_slice(&fs::read(&desktop).unwrap()).unwrap_or_default();
+        settings.apply_remembered_factory(read_remembered_factory(directory.path()).unwrap().unwrap());
+        let url = settings.startup_server("http://127.0.0.1:7432".into());
+        assert_eq!(url, profile.server);
+        assert_eq!(settings.credential_for(&url), Some(&profile.credential_file));
+        assert!(settings.credential_for("https://old.example").is_none());
+    }
+    assert!(!fs::read_to_string(directory.path().join("last-factory.json")).unwrap().contains("test-secret"));
+}
+
+pub(crate) fn load_remembered_factory() -> Result<Option<RememberedFactory>> {
+    read_remembered_factory(&data_dir()?)
+}
+
+fn read_remembered_factory(directory: &Path) -> Result<Option<RememberedFactory>> {
+    match fs::read(directory.join("last-factory.json")) {
+        Ok(data) => Ok(Some(serde_json::from_slice(&data)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) fn save_remembered_factory(connection: &RememberedFactory) -> Result<()> {
+    write_remembered_factory(&data_dir()?, connection)
+}
+
+fn write_remembered_factory(directory: &Path, connection: &RememberedFactory) -> Result<()> {
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    factory_platform::private_file(temporary.path())?;
+    serde_json::to_writer(temporary.as_file_mut(), connection)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(directory.join("last-factory.json"))?;
+    factory_platform::sync_dir(directory)
+}
+
+impl Settings {
+    pub(crate) fn apply_remembered_factory(&mut self, connection: RememberedFactory) {
+        self.server = connection.server;
+        self.credential_file = Some(connection.credential_file);
+    }
+}
+
 pub fn desktop_client_id() -> Result<RequestId> {
     desktop_client_id_in(&data_dir()?)
 }

@@ -1,7 +1,7 @@
 //! Persist intent before external writes. After uncertain delivery, only read and reconcile.
 use crate::{
     journal::{Journal, Record},
-    workspace, Args,
+    Args,
 };
 use anyhow::{ensure, Context, Result};
 use factory_core::*;
@@ -75,19 +75,13 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args, factory: 
         ));
     }
     if record.agent.is_none() {
-        let existing = tokio::task::block_in_place(|| {
-            workspace::existing(
-                journal,
-                &command,
-                args.repositories.as_deref(),
-                args.workspace_root
-                    .as_deref()
-                    .expect("workspace root initialized"),
-            )
-        });
+        let existing = tokio::task::block_in_place(|| crate::publication::execution_workspace(journal, record, args, true));
         let workspace = match existing {
             Ok(workspace) => workspace,
-            Err(_) => {
+            Err(error) => {
+                if command.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE) {
+                    return Ok(progress(&command, AgentPhase::Failed, &format!("Merger konnte nicht starten: {error}")));
+                }
                 return Ok(progress(
                     &command,
                     AgentPhase::Failed,
@@ -343,7 +337,16 @@ async fn advance(
         return Ok(progress(&command, AgentPhase::Failed, "MCP ist für diese Ausführung nicht freigegeben"));
     }
     let skill_names = spec.factory_skills.iter().map(FactorySkillRef::runtime_id).collect::<Vec<_>>();
-    let permissions = factory_opencode::session_permissions(spec.read_only, spec.repo_skills.as_deref(), &skill_names, &mcp_names, args.managed_opencode.is_some());
+    let mut permissions = factory_opencode::session_permissions(spec.read_only, spec.repo_skills.as_deref(), &skill_names, &mcp_names, args.managed_opencode.is_some());
+    if spec.role == factory_protocol::directs::ROLE {
+        if permissions.is_none() {
+            permissions = Some(serde_json::json!([]));
+        }
+        let rules = permissions.as_mut().and_then(|rules| rules.as_array_mut())
+            .context("Session permissions must be an array")?;
+        rules.push(serde_json::json!({"action":"question","resource":"*","effect":"deny"}));
+        rules.push(serde_json::json!({"action":factory_protocol::directs::INTENT_APPROVAL,"resource":"*","effect":"ask"}));
+    }
     if spec.profile.provider_id.trim().is_empty() || spec.profile.model_id.trim().is_empty() {
         return Ok(progress(&command, AgentPhase::Unknown, "Explicit project provider and model required; default model fallback is forbidden. No session or prompt sent."));
     }
@@ -408,6 +411,7 @@ async fn advance(
                 provider,
                 model,
                 permissions.clone(),
+                spec.role == factory_protocol::directs::ROLE,
             )
             .await?;
         return Ok(progress(
@@ -557,16 +561,7 @@ async fn advance(
                 "Supervisor tool permissions changed"
             );
         }
-        let current = tokio::task::block_in_place(|| {
-            workspace::existing(
-                journal,
-                &command,
-                args.repositories.as_deref(),
-                args.workspace_root
-                    .as_deref()
-                    .expect("workspace root initialized"),
-            )
-        })?;
+        let current = tokio::task::block_in_place(|| crate::publication::execution_workspace(journal, record, args, false))?;
         ensure!(
             current == execution.workspace,
             "Workspace identity changed before prompt"
@@ -718,6 +713,14 @@ async fn advance(
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
+            if !final_response_follows_form(last, &summary, crate::questions::last_form_reply_boundary(record)) {
+                let (phase, reason) = if crate::questions::recently_answered(record) {
+                    (AgentPhase::Running, "Waiting for OpenCode to continue after the form reply")
+                } else {
+                    (AgentPhase::Unknown, "No final OpenCode response confirmed after the form reply")
+                };
+                return Ok(progress(&command, phase, reason));
+            }
             // Byte-bound the wire result without splitting UTF-8 characters.
             let mut end = summary.len().min(24000);
             while !summary.is_char_boundary(end) {
@@ -740,6 +743,13 @@ async fn advance(
         AgentPhase::Unknown,
         "Session inactive without confirmed final result; no automatic resume",
     ))
+}
+
+fn final_response_follows_form(message: &serde_json::Value, summary: &str, boundary: Option<u64>) -> bool {
+    boundary.is_none_or(|boundary| {
+        !summary.trim().is_empty() && message.pointer("/time/created").and_then(|v| v.as_f64())
+            .is_some_and(|created| created >= boundary as f64)
+    })
 }
 
 fn continuation_permission_upgrade(
@@ -784,6 +794,17 @@ mod tests {
             Arc,
         },
     };
+
+    #[test]
+    fn a_form_reply_cannot_complete_an_intent_with_an_old_or_empty_response() {
+        let old = json!({"time":{"created":499,"completed":505}});
+        let fresh = json!({"time":{"created":502,"completed":510}});
+        assert!(!final_response_follows_form(&old, "Before the answer", Some(500)));
+        assert!(!final_response_follows_form(&fresh, " \n", Some(500)));
+        assert!(!final_response_follows_form(&json!({}), "No timestamp", Some(500)));
+        assert!(final_response_follows_form(&fresh, "Continued after your answer", Some(500)));
+        assert!(final_response_follows_form(&old, "No question in this turn", None));
+    }
 
     #[test]
     fn archived_continuation_can_narrow_known_legacy_skill_permissions_only() {

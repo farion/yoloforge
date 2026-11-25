@@ -37,7 +37,7 @@ pub(super) fn ensure_automatic(
     Ok(())
 }
 fn waiting_work(tx: &Transaction<'_>, project: ProjectId) -> Result<bool> {
-    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM tickets t WHERE t.project_id=?1 AND json_extract(t.data,'$.status') IN ('backlog','ready') AND NOT EXISTS(SELECT 1 FROM stream_tickets st WHERE st.ticket_id=t.id)) OR EXISTS(SELECT 1 FROM questions q JOIN commands c ON c.id=q.command_id JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(q.data,'$.state')='pending' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0)",[project.to_string()],|r|r.get(0))?)
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM tickets t WHERE t.project_id=?1 AND json_extract(t.data,'$.status') IN ('backlog','ready') AND NOT EXISTS(SELECT 1 FROM stream_tickets st WHERE st.ticket_id=t.id)) OR EXISTS(SELECT 1 FROM questions q JOIN commands c ON c.id=q.command_id JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(q.data,'$.state')='pending' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=c.stream_id))",[project.to_string()],|r|r.get(0))?)
 }
 fn load_command(tx: &Transaction<'_>, id: CommandId) -> Result<RunnerCommand> {
     let data: String = tx.query_row(
@@ -261,14 +261,14 @@ fn candidate(
     tx: &Transaction<'_>,
     p: &SupervisorPolicy,
 ) -> Result<Option<(RunnerCommand, Workstream)>> {
-    let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.stream_id!=?2 AND json_extract(c.data,'$.kind')='run_agent' AND c.rowid=(SELECT MAX(x.rowid) FROM commands x WHERE x.stream_id=c.stream_id AND json_extract(x.data,'$.kind')='run_agent') ORDER BY COALESCE((SELECT MAX(e.rowid) FROM supervisor_evaluations e WHERE e.target_command_id=c.id),0),c.rowid LIMIT 256")?;
+    let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.stream_id!=?2 AND NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=c.stream_id) AND json_extract(c.data,'$.kind')='run_agent' AND c.rowid=(SELECT MAX(x.rowid) FROM commands x WHERE x.stream_id=c.stream_id AND json_extract(x.data,'$.kind')='run_agent') ORDER BY COALESCE((SELECT MAX(e.rowid) FROM supervisor_evaluations e WHERE e.target_command_id=c.id),0),c.rowid LIMIT 256")?;
     let rows = stmt.query_map(
         params![p.project_id.to_string(), p.stream_id.to_string()],
         |r| r.get::<_, String>(0),
     )?;
     for row in rows {
         let c: RunnerCommand = serde_json::from_str(&row?)?;
-        if c.agent_spec.as_ref().is_some_and(|s| s.read_only)
+        if c.agent_spec.as_ref().is_some_and(|s| s.read_only || s.role == MERGER_ROLE)
             || super::sessions::closed(tx, c.session_root())?
         {
             continue;
@@ -287,6 +287,9 @@ fn candidate(
             continue;
         }
         let stream = super::work::stream(tx, c.stream_id)?;
+        if super::merger::owns_conflict(&c, &stream) {
+            continue;
+        }
         if !terminable
             && super::controls::load(tx, stream.id)?
                 .is_some_and(|c| c.state != PauseState::Released)
@@ -364,8 +367,7 @@ fn resolve(
     }
     e.decision = Some(decision.clone());
     let target = load_command(tx, e.target_command_id)?;
-    if decision.action == SupervisorAction::Close
-        && matches!(&target.result,Some(CommandOutput::Agent{agent}) if agent.summary.starts_with(PUBLICATION_CONFLICT_PREFIX))
+    if decision.action == SupervisorAction::Close && command_publication_blocked(&target)
     {
         e.outcome = "publication_conflict_preserves_session".into();
         return Ok(());
@@ -385,6 +387,10 @@ fn resolve(
         }
     }
     let stream = super::work::stream(tx, target.stream_id)?;
+    if super::merger::owns_conflict(&target, &stream) {
+        e.outcome = "publication_conflict_preserves_session".into();
+        return Ok(());
+    }
     if stream.revision != e.target_stream_revision {
         e.outcome = "stale_observation".into();
         return Ok(());

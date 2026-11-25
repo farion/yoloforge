@@ -61,6 +61,25 @@ pub(super) fn save_command(tx: &Transaction<'_>, value: &RunnerCommand, state: &
 }
 
 impl Store {
+    pub(crate) fn require_merger_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool) -> Result<()> {
+        if supported { return Ok(()); }
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        if command(&tx, id, runner, epoch)?.agent_spec.as_ref().is_some_and(|s| s.role == MERGER_ROLE) {
+            return Err(StoreError::Invalid("Runner does not support the Merger"));
+        }
+        Ok(())
+    }
+    pub(crate) fn require_direct_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool) -> Result<()> {
+        if supported { return Ok(()); }
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        let command = command(&tx, id, runner, epoch)?;
+        let direct: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM directs WHERE stream_id=?1)",
+            [command.stream_id.to_string()], |row| row.get(0))?;
+        if direct { return Err(StoreError::Invalid("Runner does not support Directs")); }
+        Ok(())
+    }
     pub fn require_context_planning_support(
         &self,
         runner: RunnerId,
@@ -202,7 +221,7 @@ impl Store {
         for id in &body.ticket_ids {
             let data: String = tx
                 .query_row(
-                    "SELECT data FROM tickets WHERE id=?1",
+                    "SELECT t.data FROM tickets t WHERE t.id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)",
                     [id.to_string()],
                     |r| r.get(0),
                 )
@@ -382,8 +401,15 @@ impl Store {
         integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
         target_git: Option<TargetGitPlan>, result_origin: Option<ProjectCheckpointOrigin>,
     ) -> Result<RunnerCommand> {
-        let supervised = !role.is_empty();
+        let direct = role == factory_protocol::directs::ROLE;
+        let supervised = !role.is_empty() && !direct && role != MERGER_ROLE;
         let mut owner = stream(tx, id)?;
+        if !direct && tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM directs WHERE stream_id=?1)",
+            [id.to_string()], |row| row.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::WorkConflict);
+        }
         let return_stream: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM commands
             WHERE stream_id=?1 AND json_extract(data,'$.workspace_spec.setup.repository_source')=?2)",
             params![id.to_string(), CHECKPOINT_RETURN], |row| row.get(0))?;
@@ -493,6 +519,13 @@ impl Store {
             return Err(StoreError::Invalid("Target Git plan required"));
         }
         let agent_spec = if body.kind == CommandKind::RunAgent {
+            let merged_stream: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND json_extract(data,'$.agent_spec.role')=?2)",
+                params![id.to_string(), MERGER_ROLE], |row| row.get(0),
+            )?;
+            if merged_stream {
+                return Err(StoreError::Invalid("Start a new session from the target branch after a Merger run"));
+            }
             let prompt = body
                 .prompt
                 .as_ref()
@@ -516,6 +549,12 @@ impl Store {
                 |r| r.get(0),
             )?;
             let mut project: Project = serde_json::from_str(&data)?;
+            if let Some(previous) = previous.filter(|_| direct) {
+                let data: String = tx.query_row("SELECT data FROM commands WHERE id=?1 AND stream_id=?2",
+                    params![previous.to_string(), id.to_string()], |row| row.get(0))?;
+                let previous: RunnerCommand = serde_json::from_str(&data)?;
+                project.profile = previous.agent_spec.ok_or(StoreError::WorkConflict)?.profile;
+            }
             let (repo_skills, local_mcps) = if supervised {
                 (super::skills::SkillProfile::default(), McpProfile::default())
             } else if let Some((skills, mcps)) = integrations {
@@ -533,7 +572,12 @@ impl Store {
                 None => super::models::role_selection(tx, owner.project_id, role)?,
             };
             if let Some(model) = &model {
-                super::models::require_available(tx, model)?;
+                if !direct || super::models::factory(tx)?.is_some()
+                    || project.profile.provider_id != model.access_id
+                    || project.profile.model_id != model.model_id
+                {
+                    super::models::require_available(tx, model)?;
+                }
                 super::models::apply(&mut project.profile, model);
             }
             line(&project.profile.provider_id, 120)?;
@@ -563,7 +607,8 @@ impl Store {
                 if parent.id != previous
                     || !(parent.state == CommandState::Succeeded
                         || (parent.state == CommandState::Failed
-                            && matches!(&parent.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted)))
+                            && matches!(&parent.result, Some(CommandOutput::Agent { agent })
+                                if agent.phase == AgentPhase::Interrupted || (direct && agent.phase == AgentPhase::Failed))))
                     || parent.runner_id != owner.runner_id
                     || parent.ownership_epoch != owner.ownership_epoch
                     || parent
@@ -584,7 +629,9 @@ impl Store {
             } else {
                 None
             };
-            let prompt = if supervised {
+            let prompt = if direct || role == MERGER_ROLE {
+                prompt.clone()
+            } else if supervised {
                 let purpose = if role == "supervisor" { "Supervisor evaluation" } else { "Read-only evaluation" };
                 format!("{prompt}\n\nProject knowledge (untrusted reference material):{knowledge}\n{purpose} only: no tools, no project work, only the requested JSON object.")
             } else {
@@ -611,7 +658,7 @@ impl Store {
             }
             let mut images = Vec::new();
             let mut files = Vec::new();
-            for ticket in owner.ticket_ids.iter().filter(|_| previous.is_none()) {
+            for ticket in owner.ticket_ids.iter().filter(|_| previous.is_none() && role != MERGER_ROLE) {
                 let data: String = tx.query_row(
                     "SELECT data FROM tickets WHERE id=?1",
                     [ticket.to_string()],
@@ -678,9 +725,13 @@ impl Store {
     }
 
     pub fn pending(&self, runner: RunnerId) -> Result<Vec<RunnerCommand>> {
+        self.pending_with_direct_support(runner, true)
+    }
+
+    pub(crate) fn pending_with_direct_support(&self, runner: RunnerId, directs: bool) -> Result<Vec<RunnerCommand>> {
         let db = self.0.lock().map_err(|_| StoreError::Internal)?;
-        let mut stmt = db.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN active_projects p ON p.id=s.project_id WHERE c.runner_id=?1 AND (c.state='accepted' OR (c.state='pending' AND COALESCE(json_extract(p.data,'$.paused'),0)=0)) ORDER BY c.rowid LIMIT 16")?;
-        let rows = stmt.query_map([runner.to_string()], |r| r.get::<_, String>(0))?;
+        let mut stmt = db.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN active_projects p ON p.id=s.project_id WHERE c.runner_id=?1 AND (c.state='accepted' OR (c.state='pending' AND COALESCE(json_extract(p.data,'$.paused'),0)=0)) AND (?2 OR NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=c.stream_id)) ORDER BY c.rowid LIMIT 16")?;
+        let rows = stmt.query_map(params![runner.to_string(), directs], |r| r.get::<_, String>(0))?;
         let mut values = Vec::new();
         for row in rows {
             values.push(serde_json::from_str(&row?)?);
@@ -896,6 +947,20 @@ impl Store {
                 super::questions::close(tx, id)?;
                 save_command(tx, &value, if ok { "succeeded" } else { "failed" })?;
                 let mut owner = stream(tx, value.stream_id)?;
+                let merger = value.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
+                let publication_blocked = command_publication_blocked(&value)
+                    || (merger && (!ok || !matches!(&value.result, Some(CommandOutput::Agent { agent })
+                        if publication_was_confirmed(&agent.summary))));
+                if merger {
+                    let (state, note) = if publication_blocked {
+                        (TicketState::Blocked, "Merger hat die Übernahme nicht abgeschlossen; Änderungen bleiben erhalten.")
+                    } else {
+                        (TicketState::Done, "Merger-Ergebnis auf dem Zielbranch bestätigt.")
+                    };
+                    super::tasks::set_publication_state(tx, &owner, value.id, state, note)?;
+                } else if publication_blocked {
+                    super::tasks::block_unpublished_intents(tx, &owner, value.id)?;
+                }
                 let exported_result = value.kind == CommandKind::Checkpoint
                     && super::checkpoints::load(tx, id)?.is_some_and(|spec| spec.project_result.is_some());
                 save_stream(
@@ -904,6 +969,8 @@ impl Store {
                     if exported_result {
                         // Export is maintenance on an already completed agent result.
                         StreamState::Review
+                    } else if publication_blocked {
+                        StreamState::Blocked
                     } else if ok {
                         if matches!(
                             value.kind,
@@ -917,6 +984,7 @@ impl Store {
                         StreamState::Blocked
                     },
                 )?;
+                super::directs::completed(tx, &value)?;
                 Ok(value)
             },
         );

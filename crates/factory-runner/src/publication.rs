@@ -29,6 +29,8 @@ struct Plan {
     /// Older journals used commit for both.
     #[serde(default)]
     snapshot: Option<String>,
+    #[serde(default)]
+    merger_target: Option<String>,
     stream: StreamId,
     epoch: u64,
     target: PathBuf,
@@ -40,6 +42,105 @@ struct Plan {
 }
 fn save(j: &Journal, id: CommandId, p: &Plan) -> Result<()> {
     j.db.execute("INSERT INTO publications(command_id,data) VALUES(?1,?2) ON CONFLICT(command_id) DO UPDATE SET data=excluded.data",params![id.to_string(),serde_json::to_string(p)?])?;
+    Ok(())
+}
+
+fn merger_parent(record: &Record) -> Result<Option<CommandId>> {
+    let Some(spec) = record.command.agent_spec.as_ref().filter(|s| s.role == MERGER_ROLE) else { return Ok(None); };
+    Ok(Some(spec.prompt.lines().next().and_then(|line| line.strip_prefix(MERGE_PARENT_PREFIX))
+        .context("Merger source command missing")?.parse().map_err(|_| anyhow::anyhow!("Invalid Merger source command"))?))
+}
+
+fn source_plan(j: &Journal, record: &Record, source: CommandId) -> Result<Plan> {
+    let raw: String = j.db.query_row("SELECT data FROM publications WHERE command_id=?1",
+        [source.to_string()], |r| r.get(0)).context("Original publication snapshot unavailable on this runner")?;
+    let plan: Plan = serde_json::from_str(&raw)?;
+    ensure!(!plan.published && plan.stream == record.command.stream_id && plan.epoch == record.command.ownership_epoch,
+        "Merger source no longer belongs to this execution");
+    Ok(plan)
+}
+
+fn prepare_merger(j: &Journal, record: &Record, source: CommandId) -> Result<()> {
+    let mut plan = source_plan(j, record, source)?;
+    let snapshot = plan.snapshot.as_deref().context("Original publication snapshot missing")?;
+    let snapshot_ref = format!("refs/yoloforge/publication-snapshots/{source}");
+    ensure!(git(&plan.repository, &["rev-parse", &snapshot_ref])? == snapshot, "Original publication snapshot changed");
+    let target_ref = format!("refs/yoloforge/merger-targets/{source}");
+    let managed = record.command.workspace_spec.as_ref().and_then(|s| s.setup.as_ref())
+        .is_some_and(|s| s.repository_source == "factory:managed");
+    let current = if managed {
+        git(&plan.repository, &["rev-parse", &format!("refs/heads/{}", plan.branch)])?
+    } else {
+        let current = git(&plan.target, &["rev-parse", "HEAD"])?;
+        unchanged_target(&plan.target, &plan.branch, &current)?;
+        git(&plan.repository, &["fetch", "--refmap=", "--no-tags", "--no-write-fetch-head", &git_path(&plan.target)?, &current])?;
+        current
+    };
+    match &plan.merger_target {
+        Some(pinned) => ensure!(pinned == &current, "Target branch changed after Merger was prepared"),
+        None => {
+            plan.merger_target = Some(current.clone());
+            save(j, source, &plan)?;
+        }
+    }
+    let pinned = git(&plan.repository, &["for-each-ref", "--format=%(objectname)", &target_ref])?;
+    if pinned.is_empty() {
+        git(&plan.repository, &["update-ref", &target_ref, &current, &"0".repeat(current.len())])?;
+    } else {
+        ensure!(pinned == current, "Target branch changed after Merger was prepared");
+    }
+    Ok(())
+}
+
+pub(crate) fn execution_workspace(j: &Journal, r: &Record, args: &Args, prepare: bool) -> Result<Workspace> {
+    let root = args.workspace_root.as_deref().context("Workspace root missing")?;
+    let Some(source) = merger_parent(r)? else {
+        return workspace::existing(j, &r.command, args.repositories.as_deref(), root);
+    };
+    let plan = source_plan(j, r, source)?;
+    let path = root.join(format!("m-{}", r.command.id));
+    if prepare {
+        prepare_merger(j, r, source)?;
+        if !path.exists() {
+            let snapshot = plan.snapshot.as_deref().context("Original publication snapshot missing")?;
+            git(&plan.repository, &["worktree", "add", "--detach", &git_path(&path)?, snapshot])?;
+        }
+    }
+    let path = fs::canonicalize(path)?;
+    let common = |directory: &Path| -> Result<PathBuf> {
+        Ok(fs::canonicalize(git(directory, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?)
+    };
+    ensure!(common(&path)? == common(&plan.repository)?
+        && fs::canonicalize(git(&path, &["rev-parse", "--show-toplevel"])?)? == path,
+        "Merger workspace identity changed");
+    ensure!(git(&path, &["symbolic-ref", "-q", "HEAD"]).is_err(), "Merger workspace must stay detached");
+    Ok(Workspace {
+        path: git_path(&path)?.into_owned(),
+        branch: r.command.workspace_spec.as_ref().context("Workspace specification missing")?.branch.clone(),
+        base_commit: plan.snapshot.context("Original publication snapshot missing")?,
+    })
+}
+
+fn verify_merger(j: &Journal, record: &Record, args: &Args) -> Result<()> {
+    let Some(source) = merger_parent(record)? else { return Ok(()); };
+    prepare_merger(j, record, source)?;
+    let workspace = execution_workspace(j, record, args, false)?;
+    let path = Path::new(&workspace.path);
+    ensure!(git(path, &["status", "--porcelain", "--untracked-files=normal"])?.is_empty(),
+        "Merger changes must be committed before publication");
+    for reference in [format!("refs/yoloforge/publication-snapshots/{source}"), format!("refs/yoloforge/merger-targets/{source}")] {
+        git(path, &["merge-base", "--is-ancestor", &reference, "HEAD"])
+            .context("Merger resolution must contain both original results")?;
+    }
+    Ok(())
+}
+
+fn check_merger_target(j: &Journal, r: &Record, current: &str, published: Option<&str>) -> Result<()> {
+    if let Some(source) = merger_parent(r)? {
+        let pinned = source_plan(j, r, source)?.merger_target.context("Merger target commit missing")?;
+        ensure!(current == pinned || published == Some(current),
+            "Target branch advanced after Merger preparation; resolution retained without publication");
+    }
     Ok(())
 }
 fn unchanged_target(target: &Path, branch: &str, parent: &str) -> Result<()> {
@@ -162,7 +263,7 @@ fn managed_commit(repository: &Path, args: &[&str]) -> Result<String> {
 fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
     let spec = r.command.workspace_spec.as_ref().context("Workspace specification missing")?;
     let root = args.workspace_root.as_deref().context("Workspace root missing")?;
-    let workspace = workspace::existing(j, &r.command, args.repositories.as_deref(), root)?;
+    let workspace = execution_workspace(j, r, args, false)?;
     let work = PathBuf::from(&workspace.path);
     let repository = workspace::repository(spec, args.repositories.as_deref(), root)?;
     let previous: Option<String> = j.db.query_row(
@@ -191,13 +292,18 @@ fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Resul
             .any(|line| line.starts_with("160000 ")),
             "Verschachtelte Repositories/Submodule werden nicht automatisch uebernommen");
         let tree = git_env(&work, &["write-tree"], &env)?;
-        let parent = workspace.base_commit.clone();
+        let (parent, snapshot_parent) = if let Some(source) = merger_parent(r)? {
+            let pin = source_plan(j, r, source)?.merger_target.context("Merger target commit missing")?;
+            (pin, git(&work, &["rev-parse", "HEAD"])?)
+        } else {
+            (workspace.base_commit.clone(), workspace.base_commit.clone())
+        };
         let message = summary_commit_message(summary).unwrap_or_else(|| "Record task result".into());
         let snapshot = managed_commit(&repository, &[
-            "commit-tree", &tree, "-p", &parent, "-m", &message,
+            "commit-tree", &tree, "-p", &snapshot_parent, "-m", &message,
         ])?;
         let plan = Plan {
-            snapshot: Some(snapshot.clone()), stream: r.command.stream_id,
+            snapshot: Some(snapshot.clone()), merger_target: None, stream: r.command.stream_id,
             epoch: r.command.ownership_epoch, target: work.clone(),
             repository: repository.clone(), branch: spec.base_branch.clone(),
             parent, commit: snapshot, published: false,
@@ -215,6 +321,7 @@ fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Resul
     }
     let base_ref = format!("refs/heads/{}", spec.base_branch);
     let current = git(&repository, &["rev-parse", &base_ref])?;
+    check_merger_target(j, r, &current, Some(&plan.commit))?;
     if current != plan.parent && current != plan.commit {
         ensure!(plan.commit == snapshot, "Managed base changed after result merge");
         git(&repository, &["merge-base", "--is-ancestor", &workspace.base_commit, &current])
@@ -246,9 +353,11 @@ fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Resul
         ensure!(current == plan.parent, "Managed project base changed during publication");
         git(&repository, &["update-ref", &base_ref, &plan.commit, &current])?;
     }
-    git(&work, &["reset", "--hard", &plan.commit])?;
-    ensure!(git(&work, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
-        "Managed result worktree is not clean after publication");
+    if merger_parent(r)?.is_none() {
+        git(&work, &["reset", "--hard", &plan.commit])?;
+        ensure!(git(&work, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
+            "Managed result worktree is not clean after publication");
+    }
     plan.published = true;
     save(j, r.command.id, &plan)?;
     Ok(Some(work))
@@ -273,6 +382,13 @@ pub(crate) fn commit_tree(target: &Path, repository: &Path, args: &[&str]) -> Re
 }
 
 pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
+    // Publication already journaled may be recovering after it advanced the
+    // target. In that case the existing plan is the durable proof.
+    let already_planned: bool = j.db.query_row("SELECT EXISTS(SELECT 1 FROM publications WHERE command_id=?1)",
+        [r.command.id.to_string()], |row| row.get(0))?;
+    if !already_planned {
+        verify_merger(j, r, args)?;
+    }
     let spec = r
         .command
         .workspace_spec
@@ -293,7 +409,7 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         .workspace_root
         .as_deref()
         .context("Workspace root missing")?;
-    let workspace = workspace::existing(j, &r.command, args.repositories.as_deref(), root)?;
+    let workspace = execution_workspace(j, r, args, false)?;
     let repository = workspace::repository(spec, args.repositories.as_deref(), root)?;
     let target = fs::canonicalize(source).context("Projektordner fehlt")?;
     ensure!(
@@ -321,8 +437,11 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         plan
     } else {
         let previous:Option<String>=j.db.query_row("SELECT COALESCE(json_extract(data,'$.snapshot'),json_extract(data,'$.commit')) FROM publications WHERE json_extract(data,'$.stream')=?1 AND json_extract(data,'$.epoch')=?2 AND json_extract(data,'$.published')=1 ORDER BY rowid DESC LIMIT 1",params![r.command.stream_id.to_string(),r.command.ownership_epoch],|row|row.get(0)).optional()?;
-        let parent = previous.unwrap_or_else(|| workspace.base_commit.clone());
         let current = git(&target, &["rev-parse", "HEAD"])?;
+        check_merger_target(j, r, &current, None)?;
+        let parent = if merger_parent(r)?.is_some() { current.clone() } else {
+            previous.unwrap_or_else(|| workspace.base_commit.clone())
+        };
         unchanged_target(&target, &spec.base_branch, &current)?;
         let work = Path::new(&workspace.path);
         ensure!(
@@ -371,6 +490,7 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         let commit = commit_tree(&target, work, &commit_args)?;
         let plan = Plan {
             snapshot: Some(commit.clone()),
+            merger_target: None,
             stream: r.command.stream_id,
             epoch: r.command.ownership_epoch,
             target: target.clone(),
@@ -404,6 +524,7 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
             ensure!(existing == *snapshot, "Publication snapshot ref changed");
         }
         let current = git(&target, &["rev-parse", "HEAD"])?;
+        check_merger_target(j, r, &current, Some(&plan.commit))?;
         if current != plan.parent && current != plan.commit {
             ensure!(
                 plan.commit == *snapshot,
@@ -516,6 +637,8 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         git(&target, &["symbolic-ref", "HEAD"])? == format!("refs/heads/{}", plan.branch),
         "Target branch changed during publication"
     );
+    git(&target, &["merge-base", "--is-ancestor", &plan.commit, "HEAD"])
+        .context("Target branch does not contain the published result")?;
     let base = format!("refs/heads/{}", plan.branch);
     let current = git(&repository, &["rev-parse", &base])?;
     if current != plan.commit {
@@ -545,6 +668,26 @@ pub(crate) fn published_commit(j: &Journal, id: CommandId) -> Result<String> {
         != git(&plan.target, &["rev-parse", &format!("{}^{{tree}}", plan.parent)])?,
         "Übernahme enthält keine Änderungen; kein Tag oder Push ausgelöst");
     Ok(plan.commit)
+}
+
+/// The Merger publishes from a detached worktree, not from the stream's
+/// original workspace. Export the confirmed commit rather than that old HEAD.
+pub(crate) fn managed_export_commit(j: &Journal, command: &RunnerCommand, repository: &Path) -> Result<Option<String>> {
+    let raw: Option<String> = j.db.query_row(
+        "SELECT data FROM publications WHERE json_extract(data,'$.stream')=?1
+         AND json_extract(data,'$.epoch')=?2 AND json_extract(data,'$.published')=1
+         ORDER BY rowid DESC LIMIT 1",
+        params![command.stream_id.to_string(), command.ownership_epoch],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(raw) = raw else { return Ok(None); };
+    let plan: Plan = serde_json::from_str(&raw)?;
+    let base = &command.workspace_spec.as_ref().context("Workspace specification missing")?.base_branch;
+    ensure!(plan.branch == *base && workspace::common_dir(&plan.repository)? == repository,
+        "Managed publication does not match the checkpoint repository");
+    git(repository, &["merge-base", "--is-ancestor", &plan.commit, &format!("refs/heads/{base}")])
+        .context("Published result is no longer on the managed base branch")?;
+    Ok(Some(plan.commit))
 }
 
 #[cfg(test)]
@@ -621,6 +764,18 @@ mod tests {
         };
         (record, PathBuf::from(workspace.path))
     }
+
+    fn merger_command(source: &RunnerCommand) -> RunnerCommand {
+        let mut command = source.clone();
+        command.id = CommandId::new();
+        command.agent_spec = Some(serde_json::from_value(serde_json::json!({
+            "prompt": format!("{MERGE_PARENT_PREFIX}{}", source.id),
+            "role": MERGER_ROLE,
+            "profile": ExecutionProfile::default(),
+        })).unwrap());
+        command
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn factory_managed_results_advance_the_base_and_leave_a_clean_checkpoint_source() {
         let dir = tempfile::tempdir().unwrap();
@@ -650,6 +805,16 @@ mod tests {
         ) else { panic!("managed workspace failed") };
         let work = PathBuf::from(workspace.path);
         fs::write(work.join("result.txt"), "remote result").unwrap();
+        let mut parallel = record.command.clone();
+        parallel.id = CommandId::new();
+        parallel.stream_id = StreamId::new();
+        parallel.workspace_spec.as_mut().unwrap().branch = format!("factory/{}", parallel.stream_id);
+        let source = journal.receive(parallel).unwrap();
+        let CommandOutput::Workspace { workspace: parallel_work } =
+            workspace::prepare(&journal, &source.command, None, &root)
+        else { panic!("parallel managed workspace failed") };
+        let original = Path::new(&parallel_work.path);
+        fs::write(original.join("result.txt"), "parallel result").unwrap();
         let published = publish_with_summary(&journal, &record, &args, "Remote result")
             .unwrap().unwrap();
         assert_eq!(published, work);
@@ -661,6 +826,20 @@ mod tests {
         assert_eq!(git(&work, &["rev-parse", "HEAD"]).unwrap(),
             git(&repository, &["rev-parse", "main"]).unwrap());
         assert!(publish_with_summary(&journal, &record, &args, "Remote result").is_ok());
+        assert!(publish(&journal, &source, &args).unwrap_err().is::<PublicationConflict>());
+        let merger = journal.receive(merger_command(&source.command)).unwrap();
+        let isolated = execution_workspace(&journal, &merger, &args, true).unwrap();
+        let isolated = Path::new(&isolated.path);
+        let target = git(&repository, &["rev-parse", "main"]).unwrap();
+        assert!(managed_commit(isolated, &["merge", "--no-edit", &target]).is_err());
+        fs::write(isolated.join("result.txt"), "merged result").unwrap();
+        git(isolated, &["add", "--", "result.txt"]).unwrap();
+        managed_commit(isolated, &["commit", "-m", "resolve conflict"]).unwrap();
+        publish(&journal, &merger, &args).unwrap();
+        assert_eq!(git(&repository, &["show", "main:result.txt"]).unwrap(), "merged result");
+        assert_eq!(fs::read_to_string(original.join("result.txt")).unwrap(), "parallel result");
+        assert_eq!(managed_export_commit(&journal, &merger.command, &workspace::common_dir(&repository).unwrap()).unwrap(),
+            Some(git(&repository, &["rev-parse", "main"]).unwrap()));
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn split_git_tags_the_published_commit_and_reconciles_without_a_second_tag() {
@@ -806,6 +985,34 @@ mod tests {
             }
         }
     }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn merger_publishes_both_parents_from_a_separate_worktree() {
+        let f = fixture().await;
+        let (source, original_work) = parallel(&f);
+        fs::write(original_work.join("result.txt"), "competing result").unwrap();
+        publish(&f.journal, &f.record, &f.args).unwrap();
+        let target = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        assert!(publish(&f.journal, &source, &f.args).unwrap_err().is::<PublicationConflict>());
+        let merger = f.journal.receive(merger_command(&source.command)).unwrap();
+        let workspace = execution_workspace(&f.journal, &merger, &f.args, true).unwrap();
+        let work = Path::new(&workspace.path);
+        assert_ne!(work, original_work);
+        assert!(publish(&f.journal, &merger, &f.args).unwrap_err().to_string().contains("both original results"));
+        assert_eq!(git(&f.target, &["rev-parse", "HEAD"]).unwrap(), target);
+        assert!(managed_commit(work, &["merge", "--no-edit", &target]).is_err());
+        fs::write(work.join("result.txt"), "combined result").unwrap();
+        git(work, &["add", "--", "result.txt"]).unwrap();
+        managed_commit(work, &["commit", "-m", "resolve conflict"]).unwrap();
+        publish(&f.journal, &merger, &f.args).unwrap();
+        publish(&f.journal, &merger, &f.args).unwrap();
+        let head = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        for commit in [&target, &workspace.base_commit] {
+            git(&f.target, &["merge-base", "--is-ancestor", commit, &head]).unwrap();
+        }
+        assert_eq!(fs::read_to_string(f.target.join("result.txt")).unwrap(), "combined result");
+        assert_eq!(fs::read_to_string(original_work.join("result.txt")).unwrap(), "competing result");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn parallel_conflict_retains_snapshot_and_explicit_followup_can_resolve_it() {
         let f = fixture().await;

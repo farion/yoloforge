@@ -359,6 +359,25 @@ JSON, vollständige Metadaten und Exportaktionen gehören nicht in diese Fenster
 Listen, lange Dialoge und Archive scrollen unabhängig. Technische Originaldaten
 bleiben in den jeweiligen Details zugänglich.
 
+### Directs
+
+**Directs** steht im Menü direkt unter **Fragen** und zeigt die offenen Directs
+des ausgewählten Projekts.
+`+` links neben der Suche legt ein Direct an und öffnet seinen Tab. Bis zum
+ersten Prompt sind Runner, Modell und MCPs wählbar. Der Runner braucht eine
+Projektzuordnung und eine aktualisierte, verwaltete OpenCode-Installation.
+
+Ein Direct benutzt einen eigenen Arbeitsbereich und erzeugt für seine Prompts
+keine Intents. Berechtigungen werden direkt im Tab entschieden. Das Tool
+`factory_save_intent` kann einen Entwurf anlegen oder einen formatierten
+Intent zur Bestätigung vorlegen: Erst **Intent einreihen** gibt den Auftrag an
+die Factory weiter. Orchestrator und Supervisor werten das Direct selbst nicht aus.
+
+Das Tab-X schließt nur die Ansicht. **Direct archivieren** lässt einen bereits
+angenommenen Prompt fertiglaufen, einschließlich ausstehender Freigaben.
+Im Archiv lässt sich das Direct mit demselben Verlauf, Runner, Modell und
+denselben MCPs wieder reaktivieren.
+
 ### Projekte
 
 **Neues Projekt …** und **Projekteinstellungen → Allgemein** zeigen Name,

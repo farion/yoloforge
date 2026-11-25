@@ -23,6 +23,7 @@ mod access;
 mod archive_routes;
 mod checkpoint_routes;
 mod compaction_routes;
+mod direct_routes;
 mod desktop;
 mod knowledge_routes;
 mod live;
@@ -93,7 +94,7 @@ pub fn router_with_shutdown(
         .route("/v1/desktop/events", get(desktop::desktop_events))
         .route("/v1/desktop/events/stream", get(live::desktop_event_stream))
         .route("/v1/events/{id}", get(desktop::event_payload))
-        .route("/v1/tasks/{id}", get(desktop::task_payload))
+        .route("/v1/tasks/{id}", get(desktop::task_payload).delete(desktop::delete_failed_task))
         .route("/v1/tasks/{id}/history", get(desktop::task_history))
         .route("/v1/tasks/{id}/models", get(model_routes::task))
         .route(
@@ -227,6 +228,10 @@ pub fn router_with_shutdown(
         )
         .route("/v1/notifications", get(desktop::notifications))
         .route("/v1/notifications/read", post(desktop::mark_notifications))
+        .route("/v1/projects/{id}/directs", get(direct_routes::list))
+        .route("/v1/directs", post(direct_routes::create))
+        .route("/v1/directs/{id}/prompt", post(direct_routes::prompt))
+        .route("/v1/directs/{id}/archive", post(direct_routes::archive))
         .route(
             "/v1/notifications/status",
             post(desktop::notification_states),
@@ -594,7 +599,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 17
+        || body.capabilities.len() > 18
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(
@@ -780,7 +785,7 @@ async fn runner_snapshot(State(app): State<App>, Path(id): Path<RunnerId>) -> Re
             || p.runner_bindings.contains_key(&id) || p.setup.as_ref().is_some_and(|setup| setup.runner_id == id));
         Ok(serde_json::json!({
             "protocol_version": PROTOCOL_VERSION, "server_version": env!("CARGO_PKG_VERSION"),
-            "server_capabilities": [TARGET_GIT_CAPABILITY, RUNNER_RESTART_CAPABILITY],
+            "server_capabilities": [TARGET_GIT_CAPABILITY, RUNNER_RESTART_CAPABILITY, factory_protocol::directs::CAPABILITY, DELETE_FAILED_TASK_CAPABILITY],
             "boot_id": boot, "revision": 0, "runners": [],
             "projects": snapshot.projects, "streams": snapshot.streams, "commands": snapshot.commands,
         }))
@@ -826,7 +831,8 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
     };
     let registry = app.registry.read().await;
     Json(Snapshot {
-        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into()],
+        directs: durable.directs,
+        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
         editable_tasks: durable.editable_tasks,

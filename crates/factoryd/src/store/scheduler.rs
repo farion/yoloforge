@@ -1530,7 +1530,7 @@ impl Store {
             if p.runner_ids.is_empty() {
                 continue;
             }
-            let mut stmt = tx.prepare("SELECT data FROM streams WHERE project_id=?1")?;
+            let mut stmt = tx.prepare("SELECT s.data FROM streams s WHERE s.project_id=?1 AND NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=s.id)")?;
             let streams = stmt
                 .query_map([p.project_id.to_string()], |r| r.get::<_, String>(0))?
                 .map(|r| Ok(serde_json::from_str::<Workstream>(&r?)?))

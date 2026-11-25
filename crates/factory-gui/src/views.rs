@@ -234,36 +234,30 @@ impl App {
                                 self.new_task();
                             }
                             ui.add_space(10.0);
-                            let project = self.settings.project;
-                            let question_count = snapshot
-                                .as_ref()
-                                .zip(project)
-                                .map_or(0, |(s, p)| question_groups(s, p, true).len());
-                             let (queue, waiting) = if self.online {
-                                 snapshot.as_ref().zip(project).map_or((0, 0), |(s,p)| task_queue_counts(s, p))
-                             } else {
-                                 (self.settings.offline_tasks.iter().filter(|t| t.draft.server == self.server && Some(t.draft.project) == project).count(), 0)
-                            };
-                            let work = self.session_counts(Page::Sessions);
-                            let controllers = self.session_counts(Page::Orchestrator);
-                            let supervisors = self.session_counts(Page::Supervisor);
-                            let memorizers = self.session_counts(Page::Memorizer);
-                            for (page, badges, hint) in [
-                                 (Page::Tasks, &[(queue, BLUE), (waiting, AMBER)][..], if self.online { crate::tr!("{queue} eingereiht · {waiting} wartend", queue = queue, waiting = waiting) } else { crate::tr!("{queue} lokal vorbereitet", queue = queue) }),
-                                (Page::Questions, &[(question_count, RED)][..], crate::tr!("{question_count} offen", question_count = question_count)),
-                                (Page::Sessions, &[(work.running, GREEN), (work.idle, BLUE), (work.failed, RED)][..],
-                                    crate::tr!("{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen", work.running, work.idle, work.failed)),
-                                (Page::Orchestrator, &[(controllers.running, GREEN)][..], crate::tr!("{} laufend", controllers.running)),
-                                (Page::Supervisor, &[(supervisors.running, GREEN)][..], crate::tr!("{} laufend", supervisors.running)),
-                                (Page::Memorizer, &[(memorizers.running, GREEN)][..], crate::tr!("{} laufend", memorizers.running)),
-                            ] {
-                                let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
+                             for page in [
+                                 Page::Tasks, Page::Questions, Page::Directs, Page::Sessions,
+                                 Page::Orchestrator, Page::Supervisor, Page::Memorizer, Page::Merger,
+                             ] {
+                                 let (badges, hint) = if page == Page::Tasks && !self.online {
+                                     let queue = self.settings.offline_tasks.iter().filter(|t|
+                                         t.draft.server == self.server && Some(t.draft.project) == self.settings.project).count();
+                                     (vec![(queue, BLUE)], crate::tr!("{queue} lokal vorbereitet", queue = queue))
+                                 } else {
+                                     snapshot.as_deref().zip(self.settings.project).map_or_else(
+                                         || (Vec::new(), String::new()),
+                                         |(s, project)| project_navigation_badges(s, project, page),
+                                     )
+                                 };
+                                 let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
                                     ui,
                                     Some(page.icon()),
                                     page.title(),
                                     self.page() == page,
-                                    badges,
-                                )).inner.on_hover_text(hint);
+                                     &badges,
+                                 )).inner;
+                                 let row = if hint.is_empty() { row } else { row.on_hover_text(hint) };
+                                 #[cfg(test)]
+                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-project-navigation", page)), row.rect));
                                 if reveal_selected && self.page() == page {
                                     row.scroll_to_me(Some(egui::Align::Center));
                                 }
@@ -273,24 +267,27 @@ impl App {
                             }
                             ui.add_space(16.0);
                             ui.separator();
-                            ui.add_space(10.0);
-                            ui.colored_label(MUTED, "FACTORY");
-                            for page in [
+                             ui.add_space(10.0);
+                             ui.colored_label(MUTED, "FACTORY");
+                             let working = self.online && snapshot.as_deref().is_some_and(crate::overview::factory_is_working);
+                             for page in [
                                 Page::Overview,
                                 Page::Notifications,
                                 Page::Infrastructure,
                                 Page::Diagnostics,
                             ] {
-                                let row = ui.add_enabled_ui(self.online, |ui| design::navigation_row_with_icon(
-                                    ui,
-                                    Some(page.icon()),
-                                    page.title(),
-                                    self.page() == page,
-                                    (page == Page::Notifications).then_some((
-                                        usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
-                                        AMBER,
-                                    )),
-                                )).inner;
+                                 let row = ui.add_enabled_ui(self.online, |ui| {
+                                     let selected = self.page() == page;
+                                     if page == Page::Overview && working {
+                                         design::navigation_row_with_activity(ui, page.icon(), page.title(), selected, self.factory_flow.motion)
+                                     } else {
+                                         let unread = (page == Page::Notifications).then(|| (
+                                             usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
+                                             AMBER,
+                                         ));
+                                         design::navigation_row_with_icon(ui, Some(page.icon()), page.title(), selected, unread)
+                                     }
+                                 }).inner;
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d| {
                                     d.insert_temp(
@@ -308,14 +305,18 @@ impl App {
                         });
                 });
         }
-        if self.active_tab > 0 {
+        let direct_tab = self.active_tab.checked_sub(1).and_then(|index| self.tabs.get(index))
+            .is_some_and(|tab| tab.direct_id.is_some());
+        if self.active_tab > 0 && !direct_tab {
             self.session_sidebar(ctx);
         }
         egui::TopBottomPanel::top("breadcrumb")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 12)))
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    let context = if self.active_tab > 0 {
+                    let context = if direct_tab {
+                        "OpenCode · Direct"
+                    } else if self.active_tab > 0 {
                         crate::tr!("OpenCode · schreibgeschützt")
                     } else {
                         self.page().title()
@@ -388,7 +389,8 @@ impl App {
                 match self.page() {
                     Page::Tasks => self.tasks(ui),
                     Page::Questions => self.questions(ui),
-                    Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer => {
+                    Page::Directs => crate::directs::list(ui, self),
+                    Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer | Page::Merger => {
                         self.session_list(ui, self.page())
                     }
                     Page::Diagnostics => self.diagnostics(ui),
@@ -542,12 +544,6 @@ impl App {
         });
     }
 
-    pub(crate) fn session_counts(&self, page: Page) -> SessionCounts {
-        let (Some(s), Some(project)) = (&self.snapshot, self.settings.project) else {
-            return SessionCounts::default();
-        };
-        sidebar_session_counts(s, project, page, self.online, &self.instances)
-    }
     pub fn new_task(&mut self) {
         if self.online && self.models.needs_setup() {
             self.dialog = Some(Dialog::ModelSetupRequired);
@@ -767,7 +763,9 @@ impl App {
                                 } else {
                                     vec![crate::tr!("Anzeigen")]
                                  };
-                                 let retryable = retryable_task(&s, t);
+                                  let retryable = retryable_task(&s, t);
+                                  let deletable = retryable && t.execution_command.is_some()
+                                      && s.server_capabilities.iter().any(|cap| cap == DELETE_FAILED_TASK_CAPABILITY);
                                  if retryable { labels.push(crate::tr!("Erneut einreihen")); }
                                 let reserved = labels
                                     .iter()
@@ -784,7 +782,8 @@ impl App {
                                             + 2.0
                                     })
                                     .sum::<f32>()
-                                    + labels.len() as f32 * ui.spacing().item_spacing.x;
+                                    + labels.len() as f32 * ui.spacing().item_spacing.x
+                                    + if deletable { design::ICON_BUTTON_SIZE + ui.spacing().item_spacing.x } else { 0.0 };
                                 let metadata_width = (ui.available_width() - reserved).max(100.0);
                                 let _date = ui
                                     .allocate_ui_with_layout(
@@ -838,8 +837,10 @@ impl App {
                                     egui::Layout::right_to_left(egui::Align::Max),
                                      |ui| {
                                          if retryable {
-                                             let path = format!("/v1/tasks/{}/retry", t.id);
-                                             let pending = self.settings.pending.iter().any(|r| r.server == self.server && r.path == path);
+                                              let path = format!("/v1/tasks/{}/retry", t.id);
+                                              let delete_path = format!("/v1/tasks/{}", t.id);
+                                              let pending = self.settings.pending.iter().any(|r| r.server == self.server
+                                                  && (r.path == path || (r.method == "DELETE" && r.path == delete_path)));
                                              if ui.add_enabled(self.online && !pending, egui::Button::new(crate::tr!("Erneut einreihen"))).clicked() {
                                                  self.requeue_task(t);
                                              }
@@ -882,9 +883,26 @@ impl App {
                                                 view.rect,
                                             )
                                         });
-                                        if view.clicked() {
-                                            self.view_task(t.id);
-                                        }
+                                         if view.clicked() {
+                                             self.view_task(t.id);
+                                         }
+                                         if let Some(command) = t.execution_command.filter(|_| deletable) {
+                                             let retry_path = format!("/v1/tasks/{}/retry", t.id);
+                                             let busy = self.settings.pending.iter().any(|r| r.server == self.server && r.path == retry_path);
+                                             let delete = design::icon_button(ui, egui_phosphor::regular::TRASH, crate::tr!("Intent löschen"), self.online && !busy)
+                                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                             #[cfg(test)]
+                                             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-delete", t.id)), delete.rect));
+                                             if delete.clicked() {
+                                                 self.dialog = Some(Dialog::form(
+                                                     crate::tr!("Intent löschen"),
+                                                     &crate::tr!("Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(t)),
+                                                     "DELETE", format!("/v1/tasks/{}", t.id), json!(DeleteFailedTask {
+                                                         request_id: RequestId::new(), expected_revision: t.revision, failed_command: command,
+                                                     }),
+                                                 ));
+                                             }
+                                         }
                                     },
                                 );
                                 #[cfg(test)]
@@ -1072,12 +1090,8 @@ impl App {
             .show(ui, |ui| {
                 for group in groups {
                     let command = group.command;
-                    let total: usize = group.questions.iter().map(|q| question_field_count(q).max(1)).sum();
-                    let answered: usize = group.questions.iter().filter(|q| q.state == QuestionState::Answered)
-                        .map(|q| question_field_count(q).max(1)).sum();
-                    let (status, color) = if answered == total { (crate::tr!("Beantwortet"), GREEN) }
-                        else if answered > 0 { (crate::tr!("Teilweise beantwortet"), BLUE) }
-                        else { (crate::tr!("Unbeantwortet"), AMBER) };
+                    let (total, answered) = question_group_progress(&group);
+                    let (status, color) = question_group_pill(total, answered);
                     ui.push_id(command.id, |ui| {
                         let row = design::task_row_frame().show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -1132,19 +1146,7 @@ impl App {
         };
         let mut sessions = sessions_for_page(&s, project, page);
         {
-            let archived = |c: &RunnerCommand| {
-                if controllers {
-                    if c.kind == CommandKind::PrepareWorkspace {
-                        c.state == CommandState::Failed && s.commands.iter().any(|later|
-                            later.stream_id == c.stream_id && later.kind == CommandKind::PrepareWorkspace
-                                && later.state == CommandState::Succeeded && later.created_unix_ms >= c.created_unix_ms)
-                    } else {
-                        controller_archived(&s, c)
-                    }
-                } else {
-                    session_closed(&s, c)
-                }
-            };
+            let archived = |c: &RunnerCommand| session_archived_for_page(&s, page, c);
             let closed = sessions.iter().filter(|c| archived(c)).count();
             let mut selected = usize::from(self.sessions_closed);
             design::section_toolbar(
@@ -1153,6 +1155,7 @@ impl App {
                     Page::Supervisor => "supervisor",
                     Page::Orchestrator => "controller",
                     Page::Memorizer => "memorizer",
+                    Page::Merger => "merger",
                     _ => "session",
                 },
                 &mut self.query,
@@ -1208,7 +1211,7 @@ impl App {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y=4.0;
                             ui.horizontal_top(|ui| {
-                                let status=if controllers && c.state == CommandState::Failed { crate::tr!("Fehlgeschlagen") } else { session_row_status(&s,&c) };
+                                let (status, color) = session_list_pill(&s, page, &c);
                                 let tokens=s.token_totals.by_session.get(&c.session_root()).copied();
                                 let badges_width=design::badge_width(ui,status)+design::badge_width(ui,&design::token_label(tokens));
                                 let width=(ui.available_width()-badges_width.max(185.0)).max(1.0);
@@ -1220,9 +1223,6 @@ impl App {
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-title",c.session_root())),_title.rect));
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min),|ui| {
-                                    let color=if status == crate::tr!("Fehlgeschlagen") { RED }
-                                        else if status == "Working" { GREEN }
-                                        else if status == crate::tr!("Offen") { BLUE } else { MUTED };
                                     ui.scope(|ui|badge(ui,status,color)).response.on_hover_text(session_status(&s,&c));
                                     design::token_pill(ui, tokens);
                                 });
@@ -1498,10 +1498,18 @@ impl App {
                         ui.horizontal_top(|ui| {
                             let width = (ui.available_width() - if read { 0.0 } else { 70.0 }).max(1.0);
                             ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                                let level = if n.kind == "scheduler.blocked" { TaskHistoryLevel::Error } else { task_routing_level(&n.title) };
+                                let publication = self.publication_notification_status(&n);
+                                let title = publication.unwrap_or(&n.title);
+                                let level = if n.kind == "scheduler.blocked" || publication == Some(crate::tr!("Übernahme blockiert")) {
+                                    TaskHistoryLevel::Error
+                                } else if publication.is_some() {
+                                    TaskHistoryLevel::Warning
+                                } else {
+                                    task_routing_level(title)
+                                };
                                 ui.visuals_mut().override_text_color = Some(design::history_color(level, ui.visuals().text_color()));
-                                design::ticket_title(ui, key, &n.title, egui::FontId::proportional(18.0), width)
-                                    .on_hover_text(&n.title);
+                                design::ticket_title(ui, key, title, egui::FontId::proportional(18.0), width)
+                                    .on_hover_text(title);
                             });
                             if !read {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -1670,15 +1678,29 @@ impl App {
             title.clone(),egui::FontId::monospace(20.0),ui.visuals().text_color(),
             ui.available_width(),1,
         ))).on_hover_text(&title);
+        let blocked = self.snapshot.as_ref().is_some_and(|s| s.commands.iter().rev()
+            .find(|c| c.kind == CommandKind::RunAgent && c.session_root() == root
+                && self.tabs[index].selected_execution.is_none_or(|id| id == c.id))
+            .is_some_and(command_publication_blocked));
+        if blocked {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(egui_phosphor::regular::WARNING_CIRCLE).color(RED));
+                ui.label(RichText::new(crate::tr!("Übernahme blockiert")).strong().color(RED));
+                ui.label(crate::tr!("Änderungen liegen im Worktree, nicht im Zielbranch."));
+            });
+        }
         #[cfg(test)]
         ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new("test-opencode-title"),_title.rect));
         let jump_to_start = self.tabs[index].scroll_to_start;
         self.tabs[index].scroll_to_start = false;
         let tab = &self.tabs[index];
-        let working = self.online && self.snapshot.as_ref()
-            .and_then(|s| working_session_command(s, root, tab.selected_execution))
-            .is_some_and(|id| tab.archives.get(&id)
-                .is_none_or(|entries| !conversation::current_turn_ended(entries)));
+        let working = self.online && self.snapshot.as_ref().is_some_and(|s| {
+            let preparing = tab.direct_id.and_then(|id| s.directs.iter().find(|d| d.id == id))
+                .is_some_and(|d| d.root_command_id.is_none() && d.current_command_id.is_some() && !d.preparation_failed);
+            preparing || working_session_command(s, root, tab.selected_execution)
+                .is_some_and(|id| tab.archives.get(&id)
+                    .is_none_or(|entries| !conversation::current_turn_ended(entries)))
+        });
         #[cfg(test)]
         ui.ctx().data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("test-opencode-working")));
         let mut entries = tab
@@ -1735,9 +1757,17 @@ impl App {
         let follow = tab.follow;
         let show_versions = tab.show_versions;
         let project = tab.project;
+        let direct = tab.direct_id.and_then(|id| self.snapshot.as_ref()?.directs.iter().find(|d| d.id == id)).cloned();
         let can_prompt = self.snapshot.as_ref().is_some_and(|s|
             can_prompt_session(s, project, root));
-        let rows = conversation::transcript_rows(entries, self.snapshot.as_deref(), root, tab.selected_execution);
+        let mut rows = conversation::transcript_rows(entries, self.snapshot.as_deref(), root, tab.selected_execution);
+        if direct.is_some() {
+            rows.retain(|row| !matches!(row, conversation::TranscriptRow::Question(q)
+                if needs_answer(q) || q.external.payload["action"] == factory_protocol::directs::INTENT_APPROVAL));
+        }
+        if let Some(direct) = direct.as_ref() {
+            crate::directs::tab_controls(ui, self, index, direct);
+        }
         if can_prompt {
             let panel = egui::TopBottomPanel::bottom(egui::Id::new(("session-prompt", root)))
                 .show_separator_line(false)
@@ -1753,7 +1783,7 @@ impl App {
             #[cfg(not(test))]
             let _ = panel;
         }
-        if self.online && rows.is_empty() && !working {
+        if self.online && rows.is_empty() && !working && direct.is_none() {
             ui.label(crate::tr!("Noch keine archivierten Nachrichten verfügbar."));
         }
         let list_key = format!("archive/{root}");
@@ -1791,7 +1821,7 @@ impl App {
                     }
                     DisplayRow::Original(TranscriptRow::Question(question)) => {
                         ui.push_id(("question", question.id), |ui| {
-                            conversation::question(ui, question);
+                            conversation::question(ui, question, Some(self));
                         });
                     }
                     DisplayRow::MessageSlice(command, entry, range, tail) => {
@@ -1971,8 +2001,75 @@ impl App {
     }
 }
 
+pub(crate) fn project_navigation_badges(
+    s: &Snapshot, project: ProjectId, page: Page,
+) -> (Vec<(usize, egui::Color32)>, String) {
+    let mut badges = [GREEN, BLUE, AMBER, RED, MUTED].map(|color| (0, color));
+    let mut statuses = BTreeMap::new();
+    let mut count = |(status, color)| {
+        if let Some((n, _)) = badges.iter_mut().find(|(_, badge_color)| *badge_color == color) {
+            *n += 1;
+        }
+        *statuses.entry(status).or_insert(0) += 1;
+    };
+    match page {
+        Page::Tasks => s.tickets.iter()
+            .filter(|t| t.project_id == project && task_bucket(s, t) == TaskBucket::Current)
+            .map(|t| {
+                let status = task_status(s, t);
+                (status, status_color(status))
+            }).for_each(&mut count),
+        Page::Questions => question_task_groups(s, project, false).iter()
+            .map(|group| {
+                let (total, answered) = question_group_progress(group);
+                question_group_pill(total, answered)
+            }).for_each(&mut count),
+        Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer | Page::Merger => {
+            sessions_for_page(s, project, page).iter()
+                .filter(|c| !session_archived_for_page(s, page, c))
+                .map(|c| session_list_pill(s, page, c))
+                .for_each(&mut count);
+        }
+        _ => {}
+    }
+    let hint = statuses.into_iter().map(|(status, n)| format!("{n} × {status}"))
+        .collect::<Vec<_>>().join("\n");
+    (badges.into_iter().filter(|(n, _)| *n > 0).collect(), hint)
+}
+
+fn question_group_progress(group: &QuestionTaskGroup<'_>) -> (usize, usize) {
+    group.questions.iter().fold((0, 0), |(total, answered), q| {
+        let fields = question_field_count(q).max(1);
+        (total + fields, answered + if q.state == QuestionState::Answered { fields } else { 0 })
+    })
+}
+
+fn question_group_pill(total: usize, answered: usize) -> (&'static str, egui::Color32) {
+    if answered == total { (crate::tr!("Beantwortet"), GREEN) }
+    else if answered > 0 { (crate::tr!("Teilweise beantwortet"), BLUE) }
+    else { (crate::tr!("Unbeantwortet"), AMBER) }
+}
+
+fn session_list_pill(s: &Snapshot, page: Page, c: &RunnerCommand) -> (&'static str, egui::Color32) {
+    if page == Page::Merger && command_publication_blocked(c) {
+        return (crate::tr!("Übernahme blockiert"), RED);
+    }
+    let phase = c.agent_progress.as_ref().map(|p| p.phase);
+    if (page != Page::Sessions && c.state == CommandState::Failed)
+        || (page == Page::Sessions && !session_closed(s, c)
+            && (phase == Some(AgentPhase::Failed)
+                || c.state == CommandState::Failed && phase != Some(AgentPhase::Interrupted)))
+    {
+        return (crate::tr!("Fehlgeschlagen"), RED);
+    }
+    let status = session_row_status(s, c);
+    let color = if status == "Working" { GREEN }
+        else if status == crate::tr!("Offen") { BLUE } else { MUTED };
+    (status, color)
+}
+
 pub(crate) fn status_color(status: &str) -> egui::Color32 {
-    if [crate::tr!("Fehlgeschlagen"), crate::tr!("Abgebrochen")].contains(&status) { RED }
+    if [crate::tr!("Fehlgeschlagen"), crate::tr!("Abgebrochen"), crate::tr!("Übernahme blockiert")].contains(&status) { RED }
     else if [
         crate::tr!("Braucht Antwort"), crate::tr!("Blockiert"), crate::tr!("Zustand ungeklärt"),
         crate::tr!("Unterbrochen"), crate::tr!("Pause noch unbestätigt"), crate::tr!("Beendigung ungeklärt"),
@@ -1980,6 +2077,7 @@ pub(crate) fn status_color(status: &str) -> egui::Color32 {
         crate::tr!("Antwort erforderlich"), crate::tr!("Antwort abgelehnt · erneut prüfen"),
         crate::tr!("Wartet auf Wiederholung"), crate::tr!("Orchestrator wartet"), crate::tr!("Zustellung ungeklärt"),
         crate::tr!("Wartend"), crate::tr!("Wartet auf Runner"), crate::tr!("Wartet auf Session"),
+        crate::tr!("Übernahme nicht bestätigt"),
         crate::tr!("Projekt pausiert"), crate::tr!("Verteilung pausiert"),
     ].contains(&status) { AMBER }
     else if [

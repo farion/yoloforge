@@ -108,11 +108,11 @@ pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
     if waiting {
         return Ok(());
     }
-    let working:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.state IN ('pending','accepted') AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0)",[p.project_id.to_string()],|r|r.get(0))?;
+    let working:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.state IN ('pending','accepted') AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=c.stream_id))",[p.project_id.to_string()],|r|r.get(0))?;
     if working {
         return Ok(());
     }
-    let source:Option<String>=tx.query_row("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN archive_status a ON a.command_id=c.id LEFT JOIN memory_evaluations e ON e.source_command_id=c.id WHERE s.project_id=?1 AND c.state='succeeded' AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND json_extract(a.data,'$.final_scan_complete')=1 AND e.source_command_id IS NULL ORDER BY c.rowid LIMIT 1",[p.project_id.to_string()],|r|r.get(0)).optional()?;
+    let source:Option<String>=tx.query_row("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN archive_status a ON a.command_id=c.id LEFT JOIN memory_evaluations e ON e.source_command_id=c.id WHERE s.project_id=?1 AND c.state='succeeded' AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=c.stream_id) AND json_extract(a.data,'$.final_scan_complete')=1 AND e.source_command_id IS NULL ORDER BY c.rowid LIMIT 1",[p.project_id.to_string()],|r|r.get(0)).optional()?;
     let Some(raw) = source else {
         return Ok(());
     };

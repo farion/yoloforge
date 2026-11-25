@@ -216,8 +216,21 @@ pub fn section_toolbar(
     tabs: &[(&str, usize)],
     selected: &mut usize,
 ) {
+    section_toolbar_with(ui, id, query, hint, tabs, selected, |_| {});
+}
+
+pub fn section_toolbar_with(
+    ui: &mut egui::Ui,
+    id: &str,
+    query: &mut String,
+    hint: &str,
+    tabs: &[(&str, usize)],
+    selected: &mut usize,
+    leading: impl FnOnce(&mut egui::Ui),
+) {
     ui.push_id(id, |ui| {
         let _row = ui.horizontal(|ui| {
+            leading(ui);
             let tab_width = tabs
                 .iter()
                 .map(|(title, count)| {
@@ -507,17 +520,57 @@ fn peon_prompt_hint(ui: &egui::Ui) -> &'static str {
 
 /// OpenCode-like composer. The editor grows with its content; the surrounding
 /// dialog owns scrolling, so this never creates a second scroll area.
-pub fn task_prompt(ui: &mut egui::Ui, text: &mut String, rows: usize) -> egui::Response {
-    task_prompt_buffer(ui, text, rows, peon_prompt_hint(ui))
+pub fn task_prompt(ui: &mut egui::Ui, text: &mut String, rows: usize) -> (egui::Response, bool) {
+    let response = task_prompt_buffer(ui, text, rows, peon_prompt_hint(ui), egui::Modifiers::SHIFT);
+    prompt_submit(ui, response)
 }
 
-pub fn question_answer_editor(ui: &mut egui::Ui, text: &mut String) -> egui::Response {
-    task_prompt_buffer(ui, text, 2, crate::tr!("Antwort eingeben …"))
+pub fn question_answer_editor(ui: &mut egui::Ui, text: &mut String) -> (egui::Response, bool) {
+    let response = task_prompt_buffer(ui, text, 2, crate::tr!("Antwort eingeben …"), egui::Modifiers::SHIFT);
+    prompt_submit(ui, response)
+}
+
+fn prompt_submit(ui: &mut egui::Ui, response: egui::Response) -> (egui::Response, bool) {
+    let ime_id = response.id.with("prompt-ime-composing");
+    let was_composing = ui.data(|data| data.get_temp::<bool>(ime_id)).unwrap_or(false);
+    if !response.enabled() || !response.has_focus() || !ui.memory(|m| m.allows_interaction(ui.layer_id())) {
+        if was_composing {
+            ui.data_mut(|data| data.remove::<bool>(ime_id));
+        }
+        return (response, false);
+    }
+    let (composing, submit) = ui.input_mut(|input| {
+        let mut composing = was_composing;
+        let mut ime_event = false;
+        for event in &input.events {
+            if let egui::Event::Ime(event) = event {
+                ime_event = true;
+                composing = matches!(event, egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_));
+            }
+        }
+        let mut submit = false;
+        if !was_composing && !ime_event {
+            input.events.retain(|event| {
+                if let egui::Event::Key { key: egui::Key::Enter, pressed: true, repeat, modifiers, .. } = event {
+                    if *modifiers == egui::Modifiers::NONE {
+                        submit |= !repeat;
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+        (composing, submit)
+    });
+    if was_composing != composing {
+        ui.data_mut(|data| data.insert_temp(ime_id, composing));
+    }
+    (response, submit)
 }
 
 pub fn task_prompt_read_only(ui: &mut egui::Ui, text: &str, rows: usize) -> egui::Response {
     let mut buffer = text;
-    task_prompt_buffer(ui, &mut buffer, rows, peon_prompt_hint(ui))
+    task_prompt_buffer(ui, &mut buffer, rows, peon_prompt_hint(ui), egui::Modifiers::NONE)
 }
 
 fn task_prompt_buffer(
@@ -525,6 +578,7 @@ fn task_prompt_buffer(
     text: &mut dyn egui::TextBuffer,
     rows: usize,
     hint: &str,
+    newline_modifiers: egui::Modifiers,
 ) -> egui::Response {
     let background = ui.painter().add(egui::epaint::Shape::Noop);
     let mut editor = None;
@@ -537,11 +591,13 @@ fn task_prompt_buffer(
             ui.add_space((height - INPUT_MARGIN.top as f32).max(0.0));
             editor = Some(
                 multiline(text)
+                    .return_key(egui::KeyboardShortcut::new(newline_modifiers, egui::Key::Enter))
                     .font(egui::FontId::monospace(crate::conversation::CLI_FONT_SIZE))
                     .frame(false)
                     .hint_text(input_hint(hint))
                     .desired_rows(rows)
-                    .desired_width(f32::INFINITY)
+                     .desired_width(f32::INFINITY)
+                     .return_key(egui::KeyboardShortcut::new(newline_modifiers, egui::Key::Enter))
                     .show(ui)
                     .response,
             );
@@ -778,6 +834,27 @@ pub fn navigation_row_with_icon(
 pub fn navigation_row_with_badges(
     ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool, counts: &[(usize, Color32)],
 ) -> egui::Response {
+    navigation_row_content(ui, icon, title, selected, counts, None)
+}
+
+pub fn navigation_row_with_activity(
+    ui: &mut egui::Ui, icon: &str, title: &str, selected: bool, animate: bool,
+) -> egui::Response {
+    let angle = if animate {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        (ui.input(|i| i.time) % 2.4 / 2.4) as f32 * std::f32::consts::TAU
+    } else {
+        0.0
+    };
+    navigation_row_content(ui, Some(icon), title, selected, &[], Some(angle))
+        .on_hover_text(crate::tr!("Factory arbeitet"))
+}
+
+fn navigation_row_content(
+    ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool,
+    counts: &[(usize, Color32)], activity_angle: Option<f32>,
+) -> egui::Response {
+    const BADGE_MIN_WIDTH: f32 = 24.0;
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), LIST_ROW_HEIGHT),
         egui::Sense::click(),
@@ -816,10 +893,11 @@ pub fn navigation_row_with_badges(
     };
     let badges: Vec<_> = counts.iter().copied().filter(|(n, _)| *n > 0).map(|(n, color)| {
         let text = ui.painter().layout_no_wrap(n.to_string(), egui::FontId::proportional(14.0), color);
-        let size = egui::vec2((text.size().x + 14.0).max(24.0), 22.0);
+        let size = egui::vec2((text.size().x + 14.0).max(BADGE_MIN_WIDTH), 22.0);
         (text, size, color)
     }).collect();
-    let badge_width = badges.iter().map(|(_, size, _)| size.x + 6.0).sum::<f32>();
+    let badge_width = badges.iter().map(|(_, size, _)| size.x + 6.0).sum::<f32>()
+        + activity_angle.map_or(0.0, |_| BADGE_MIN_WIDTH + 6.0);
     let icon_width = if icon.is_some() { 28.0 } else { 0.0 };
     if let Some(icon) = icon {
         ui.painter().text(
@@ -845,7 +923,19 @@ pub fn navigation_row_with_badges(
         ui.painter().galley(center - text.mesh_bounds.center().to_vec2(), text, color);
         right -= size.x + 6.0;
     }
+    if let Some(angle) = activity_angle {
+        paint_gear(ui, egui::pos2(right - BADGE_MIN_WIDTH / 2.0, rect.center().y),
+            18.0, crate::app::GREEN, angle);
+    }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub fn paint_gear(ui: &egui::Ui, center: egui::Pos2, size: f32, color: Color32, angle: f32) {
+    let gear = ui.painter().layout_no_wrap(
+        egui_phosphor::regular::GEAR_SIX.into(), egui::FontId::proportional(size), color,
+    );
+    let offset = egui::emath::Rot2::from_angle(angle) * gear.mesh_bounds.center().to_vec2();
+    ui.painter().add(egui::epaint::TextShape::new(center - offset, gear, color).with_angle(angle));
 }
 
 /// Flat full-width session choice, with a wrapping title and a separate status.
@@ -963,6 +1053,18 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, enabled: bool) ->
         data.insert_temp(egui::Id::new(("test-icon-button", label)), response.rect)
     });
     response.on_hover_text(label)
+}
+
+pub fn dialog_loading_overlay(dialog: &egui::Response, corners: egui::CornerRadius) {
+    const SPINNER_SIZE: f32 = 32.0;
+    let rect = dialog.rect;
+    let mut ui = egui::Ui::new(
+        dialog.ctx.clone(), dialog.id.with("loading-overlay"),
+        egui::UiBuilder::new().layer_id(dialog.layer_id).max_rect(rect),
+    );
+    ui.painter().rect_filled(rect, corners, Color32::from_black_alpha(200));
+    ui.put(egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(SPINNER_SIZE)),
+        egui::Spinner::new().size(SPINNER_SIZE));
 }
 
 pub fn dialog_content_size(viewport: egui::Vec2) -> egui::Vec2 {

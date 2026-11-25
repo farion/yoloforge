@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
                 .as_millis() as u64;
             if !matches!(
                 tokio::task::spawn_blocking(move || {
+                    store.merger_tick()?;
                     if periodic {
                         store.supervisor_tick(now)?;
                     }

@@ -6,6 +6,11 @@ automatisch dorthin, bevor er den Abschluss meldet. Der Projektordner erhält ei
 Git-Commit; der isolierte Arbeitsbereich samt Index bleibt unverändert erhalten.
 Eine nachfolgende Aufgabe startet von diesem veröffentlichten Stand.
 
+Im OpenCode-Verlauf der YoloForge-GUI zeigt ein Factory-Hinweis mit Uhrzeit,
+ob der ausführende Runner den Stand lokal oder auf dem verwalteten Basisbranch
+veröffentlicht hat. Der Hinweis bestätigt keine spätere Spiegelung oder
+Checkpoint-Rückübertragung auf andere Geräte.
+
 Die Übernahme erstellt mit einem separaten Git-Index einen unveränderlichen
 Snapshot einschließlich neuer, nicht ignorierter Dateien. Build-Ausgaben gemäß
 `.gitignore` werden nicht übernommen. Ungelöste Konflikte und Gitlinks werden
@@ -27,12 +32,20 @@ Bei echten Konflikten bleibt der Snapshot unter
 `refs/yoloforge/publication-snapshots/COMMAND_ID` erhalten. Der Abschluss zeigt
 Ziel-/Basis-/Snapshotcommit, betroffene Dateien und die nötige Nacharbeit. Keine
 Konfliktmarker oder Indexänderungen werden in den Projektordner geschrieben.
-Der Supervisor darf diese Session nicht schließen; er kann über `continue`
-gezielte Nacharbeit anfordern (Budget-, Interview- und Ownershipschutz gelten weiter).
-Die Nacharbeit mergt den angegebenen Zielcommit in den Ausführungsbranch, löst und
-committet Konflikte dort und führt die relevanten Tests aus. Der neue Folgeauftrag
-publiziert einen neuen Snapshot; der alte bleibt unveränderlich. Ein Replay des
-alten Auftrags übernimmt nie nachträglich veränderte Arbeitsdateien.
+Bei einem echten Konflikt in einem lokalen oder Factory-verwalteten Projekt
+startet die Factory einmalig einen **Merger**. Er arbeitet in einem eigenen
+Worktree, ausgehend vom eingefrorenen Ergebnissnapshot. Das Modell wird zuerst
+in den Projekt- und dann in den Factory-Einstellungen nachgeschlagen; ohne
+Rollenmodell gilt das Factory-Standardmodell. Laufende und abgeschlossene
+Versuche stehen unter **Merger** und **Archiv**.
+
+Der Merger soll die Auflösung testen und committen. Der Runner prüft, dass
+beide ursprünglichen Commits in der Historie liegen, und veröffentlicht nur
+gegen den unveränderten Zielstand. Ein schmutziger Zielordner löst keinen
+Merger aus. Schlägt die Auflösung oder Veröffentlichung fehl, bleibt der
+Intent offen; es startet keine automatische Wiederholung. Neue Intent-Arbeit
+nach einer Übernahme beginnt in einer neuen Session vom Zielbranch, nicht im
+alten Ausführungs-Worktree.
 
 Die automatische Kombination ist keine erneute Testausführung des Gesamtstands.
 Für verpflichtende Tests vor Integration bleibt der getrennte Review-Ablauf vorgesehen.

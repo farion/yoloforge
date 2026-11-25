@@ -102,7 +102,7 @@ impl Store {
                     save(&tx, value)?;
                 }
             } else {
-                let value = Question {
+                let mut value = Question {
                     orchestration_note: String::new(),
                     id: QuestionId::new(),
                     command_id: id,
@@ -115,6 +115,15 @@ impl Store {
                 };
                 tx.execute("INSERT INTO questions(id,command_id,kind,external_id,data) VALUES(?1,?2,?3,?4,?5)",params![value.id.to_string(),id.to_string(),kind,external.external_id,serde_json::to_string(&value)?])?;
                 event(&tx, "question.created", value.id.to_string(), &value)?;
+                if let Some(intent) = super::directs::intent_request(&tx, &command, &value)? {
+                    if !intent.enqueue {
+                        super::directs::save_intent(&tx, &command, &value, &intent)?;
+                        value.answer = Some(serde_json::json!({"decision":"once"}));
+                        value.answer_request = Some(RequestId::new());
+                        value.state = QuestionState::AnswerQueued;
+                        save(&tx, &mut value)?;
+                    }
+                }
                 existing.push(value);
             }
         }
@@ -134,12 +143,18 @@ impl Store {
     }
 
     pub fn answer_question(&self, id: QuestionId, body: AnswerQuestion) -> Result<Question> {
-        self.mutate(
+        let result = self.mutate(
             body.request_id,
             &format!("question.answer/{id}"),
             &body,
             |tx| Self::queue_answer(tx, id, &body),
-        )
+        );
+        if result.as_ref().is_ok_and(|q| factory_protocol::directs::DirectIntent::from_permission(&q.external)
+            .is_some_and(|intent| intent.enqueue) && body.answer["decision"] == "once")
+        {
+            self.wake_scheduler();
+        }
+        result
     }
 
     pub(super) fn queue_answer(
@@ -184,6 +199,14 @@ impl Store {
             return Err(StoreError::Invalid(
                 "Permission decision must be once, always or reject",
             ));
+        }
+        if let Some(intent) = super::directs::intent_request(tx, &command, &value)? {
+            if body.answer["decision"] == "always" {
+                return Err(StoreError::Invalid("Each Direct Intent requires individual approval"));
+            }
+            if body.answer["decision"] == "once" {
+                super::directs::save_intent(tx, &command, &value, &intent)?;
+            }
         }
         value.answer = Some(body.answer.clone());
         value.answer_request = Some(body.request_id);

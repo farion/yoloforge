@@ -51,6 +51,12 @@ pub(super) async fn retry_task(
     db_call(body.request_id, move || app.store.retry_task(id, body)).await
 }
 
+pub(super) async fn delete_failed_task(
+    State(app): State<App>, Path(id): Path<TicketId>, Json(body): Json<DeleteFailedTask>,
+) -> Response {
+    db_call(body.request_id, move || app.store.delete_failed_task(id, body)).await
+}
+
 pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &HeaderMap, ip: Option<std::net::IpAddr>) {
     if principal.role == DeviceRole::Runner {
         return;

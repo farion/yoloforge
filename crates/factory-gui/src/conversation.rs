@@ -1,6 +1,7 @@
 //! A native CLI-style transcript, not an archive-card inspector or terminal emulator.
 use crate::{
     app::{App, AMBER, BLUE, MUTED, RED},
+    design,
     dialogs::{json_read, read_text, Dialog},
     model::timestamp,
     patch_view,
@@ -18,6 +19,7 @@ const TOOL_CALL: Color32 = Color32::from_rgb(183, 188, 197);
 const TOOL_OUTPUT: Color32 = Color32::from_rgb(145, 151, 161);
 const USER_BACKGROUND: Color32 = Color32::from_rgb(30, 35, 43);
 const USER_MARKER_WIDTH: f32 = 6.0;
+const ANSWER_BACKGROUND: Color32 = Color32::from_rgb(29, 36, 45);
 
 #[derive(Clone)]
 pub enum TranscriptRow {
@@ -91,8 +93,18 @@ pub fn display_rows(rows: &[TranscriptRow], versions: bool) -> Vec<DisplayRow<'_
                     flush(&mut display, &mut pending);
                 }
                 let message = &entry.message;
-                let kind = match message["type"].as_str() {
+                let kind = match message["type"].as_str().or(message["role"].as_str()) {
                     Some("system" | "skill") => Some(ActivityKind::Instruction),
+                    // OpenCode injects instructions discovered during tool calls as synthetic
+                    // messages. Other synthetic entries (e.g. background results) stay visible.
+                    Some("synthetic")
+                        if message["metadata"]["instruction"].is_object()
+                            || message["text"]
+                                .as_str()
+                                .is_some_and(|text| text.starts_with("Instructions from: ")) =>
+                    {
+                        Some(ActivityKind::Instruction)
+                    }
                     Some("shell") => Some(ActivityKind::Command),
                     _ => None,
                 };
@@ -156,15 +168,39 @@ pub fn activity_group(ui: &mut egui::Ui, items: &[Activity<'_>]) -> egui::Respon
     let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or_default();
     let marker = if open { "-" } else { "+" };
     let summary = activity_summary(items);
-    let response = egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0))
-        .show(ui, |ui| {
-            ui.spacing_mut().button_padding = egui::Vec2::ZERO;
-            ui.spacing_mut().interact_size.y = line_height(ui);
-            ui.add(egui::Button::new(RichText::new(format!("{marker} {summary}")).monospace().color(MUTED))
-                .wrap().frame_when_inactive(false))
-        }).inner
+    let action = if open {
+        crate::tr!("Aktivität einklappen")
+    } else {
+        crate::tr!("Aktivität aufklappen")
+    };
+    let width = ui.available_width();
+    let inset = 22.0;
+    let galley = ui.painter().layout(
+        format!("{marker} {summary}"),
+        FontId::monospace(CLI_FONT_SIZE),
+        MUTED,
+        (width - 2.0 * inset).max(1.0),
+    );
+    let height = line_height(ui).max(galley.size().y);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("{action}: {summary}"),
+        )
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 4, crate::design::HOVER_FILL);
+    }
+    ui.painter().galley(
+        rect.left_top() + egui::vec2(inset, (height - galley.size().y) / 2.0),
+        galley,
+        MUTED,
+    );
+    let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if open { crate::tr!("Aktivität einklappen") } else { crate::tr!("Aktivität aufklappen") });
+        .on_hover_text(action);
     if response.clicked() {
         ui.data_mut(|data| data.insert_temp(id, !open));
         ui.ctx().request_repaint();
@@ -210,24 +246,48 @@ pub fn transcript_rows(
             && s.commands.iter().any(|c| c.id == q.command_id && c.session_root() == root)
     ).cloned().collect::<Vec<_>>()).unwrap_or_default();
     let last_entries: std::collections::BTreeMap<_, _> = entries.iter().enumerate()
+        .filter(|(_, (_, entry))| entry.message["type"] != PUBLICATION_ARCHIVE_TYPE)
         .map(|(index, (command, _))| (*command, index)).collect();
+    let anchors: std::collections::BTreeMap<_, _> = questions.iter().filter_map(|q| {
+        let mut exact = None;
+        let mut by_header = None;
+        let mut ambiguous = false;
+        for (index, (_, entry)) in entries.iter().enumerate().filter(|(_, (command, _))| *command == q.command_id) {
+            let message = &entry.message;
+            let source = &q.external.payload["source"];
+            if matches!(source["type"].as_str(), Some("tool"))
+                && source["messageID"].as_str().is_some_and(|id| message["id"] == id)
+            {
+                exact = Some(index);
+                break;
+            }
+            for part in parts(message) {
+                let Part::Tool(tool) = part else { continue };
+                let id = q.external.external_id.as_str();
+                if tool["id"] == id || tool["callID"] == id || tool_input(tool)["id"] == id
+                    || tool["state"]["metadata"]["formID"] == id
+                {
+                    exact = Some(index);
+                    break;
+                }
+                if q.external.kind == QuestionKind::Form && tool_name(tool) == "question"
+                    && matching_question_header(&q.external.payload, tool_input(tool))
+                {
+                    ambiguous |= by_header.is_some_and(|previous| previous != index);
+                    by_header = Some(index);
+                }
+            }
+            if exact.is_some() { break; }
+        }
+        exact.or(if ambiguous { None } else { by_header }).map(|index| (q.id, index))
+    }).collect();
     let mut rows = Vec::new();
     for (index, (command, entry)) in entries.iter().enumerate() {
         rows.push(TranscriptRow::Message(*command, entry.clone()));
-        // Prefer the matching native question/permission tool as an anchor.
-        // Otherwise retain server question order at the end of the execution.
         let last = last_entries.get(command) == Some(&index);
         let mut remaining = Vec::new();
         for q in questions {
-            let anchored = parts(&entry.message).iter().any(|part| match part {
-                Part::Tool(tool) => {
-                    tool["id"].as_str() == Some(q.external.external_id.as_str())
-                        || tool["callID"].as_str() == Some(q.external.external_id.as_str())
-                        || tool_input(tool)["id"].as_str() == Some(q.external.external_id.as_str())
-                }
-                _ => false,
-            });
-            if q.command_id == *command && (anchored || last) {
+            if q.command_id == *command && anchors.get(&q.id).map_or(last, |anchor| *anchor == index) {
                 rows.push(TranscriptRow::Question(q));
             } else {
                 remaining.push(q);
@@ -239,46 +299,121 @@ pub fn transcript_rows(
     rows
 }
 
-pub fn question(ui: &mut egui::Ui, question: &Question) {
+fn matching_question_header(form: &Value, input: &Value) -> bool {
+    input["questions"].as_array().is_some_and(|items| items.iter().any(|item| {
+        let Some(header) = item["header"].as_str().filter(|title| !title.trim().is_empty()
+            && !crate::model::generic_question_title(title)) else { return false };
+        form["title"] == header || form["fields"].as_array().is_some_and(|fields|
+            fields.iter().any(|field| field["title"] == header))
+    }))
+}
+
+pub fn question(ui: &mut egui::Ui, question: &Question, app: Option<&mut App>) {
     let width = ui.available_width();
     egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0)).show(ui, |ui| {
         ui.set_min_width((width - 44.0).max(1.0));
         transcript_style(ui);
         let payload = &question.external.payload;
-        let title = payload["title"].as_str().unwrap_or(
-            if question.external.kind == QuestionKind::Permission { crate::tr!("Berechtigung") } else { crate::tr!("Rückfrage") });
-        read_text(ui, crate::tr!("Frage"), true);
-        if !crate::model::generic_question_title(title) { read_text(ui, title, true); }
-        if let Some(description) = payload["description"].as_str() { read_text(ui, description, true); }
-        if question.external.kind == QuestionKind::Permission {
+        let permission = question.external.kind == QuestionKind::Permission;
+        let title = payload["title"].as_str().filter(|title| !title.trim().is_empty()
+            && !crate::model::generic_question_title(title));
+        let description = payload["description"].as_str().filter(|text| !text.trim().is_empty()
+            && Some(*text) != title);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+            let (icon, label) = if permission {
+                (egui_phosphor::regular::SHIELD_CHECK, crate::tr!("Berechtigung"))
+            } else {
+                (egui_phosphor::regular::CHAT_CIRCLE_TEXT, crate::tr!("Frage"))
+            };
+            ui.label(RichText::new(icon).size(15.0).color(MUTED));
+            question_caption(ui, label);
+            let status = crate::model::question_status(question.state);
+            let color = match question.state {
+                QuestionState::Answered => crate::app::GREEN,
+                QuestionState::AnswerQueued => BLUE,
+                QuestionState::Pending | QuestionState::Unknown => AMBER,
+                QuestionState::Rejected => RED,
+            };
+            design::compact_status_pill(ui, status, color, ui.available_width());
+        });
+        ui.add_space(6.0);
+        if let Some(title) = title {
+            question_title(ui, title);
+            if description.is_some() { ui.add_space(4.0); }
+        }
+        if let Some(description) = description {
+            ui.push_id("question-description", |ui| read_text(ui, description, true));
+        }
+        if permission {
             for (key, label) in [
                 ("action", crate::tr!("Aktion")), ("permission", crate::tr!("Berechtigung")),
-                ("resource", crate::tr!("Ziel")), ("patterns", crate::tr!("Geltungsbereich")),
+                ("resource", crate::tr!("Ziel")), ("resources", crate::tr!("Ziel")),
+                ("patterns", crate::tr!("Geltungsbereich")),
                 ("command", crate::tr!("Befehl")),
             ] {
                 if let Some(value) = payload.get(key).filter(|v| !v.is_null()) {
-                    read_text(ui, &format!("{label}: {}", crate::dialogs::answer_text(value, None)), true);
+                    ui.push_id(key, |ui| read_text(ui, &format!("{label}: {}", crate::dialogs::answer_text(value, None)), true));
                 }
             }
-            if let Some(command) = payload["metadata"]["command"].as_str() {
-                read_text(ui, &crate::tr!("Befehl: {command}", command = command), true);
+            if let Some(command) = payload["metadata"]["command"].as_str().filter(|command| payload["command"].as_str() != Some(*command)) {
+                ui.push_id("metadata-command", |ui| read_text(ui, &crate::tr!("Befehl: {command}", command = command), true));
             }
         }
-        let fields: Vec<_> = payload["fields"].as_array().into_iter().flatten()
-            .filter(|field| field["hidden"] != true).collect();
-        if fields.is_empty() && payload["fields"].as_array().is_none_or(Vec::is_empty) {
-            read_text(ui, crate::tr!("Antwort"), true);
-            read_text(ui, &crate::dialogs::question_answer_text(question, None), true);
-        } else {
-            for field in fields {
-                if let Some(label) = field["title"].as_str().filter(|label| *label != title) { read_text(ui, label, true); }
-                if let Some(description) = field["description"].as_str() { read_text(ui, description, true); }
-                read_text(ui, crate::tr!("Antwort"), true);
-                read_text(ui, &crate::dialogs::question_answer_text(question, Some(field)), true);
-            }
+        if let Some(app) = app.filter(|_| crate::model::needs_answer(question)) {
+            ui.add_space(9.0);
+            crate::dialogs::inline_question_answer(ui, app, question);
+            return;
         }
-        ui.colored_label(MUTED, crate::model::question_status(question.state));
+        let fields = payload["fields"].as_array().map_or(&[][..], Vec::as_slice);
+        if fields.is_empty() {
+            question_answer(ui, question, None);
+        }
+        for (index, field) in fields.iter().filter(|field| field["hidden"] != true).enumerate() {
+            ui.push_id(("question-field", index), |ui| {
+                let label = field["title"].as_str().filter(|text| !text.trim().is_empty() && Some(*text) != title);
+                let detail = field["description"].as_str().filter(|text| !text.trim().is_empty()
+                    && Some(*text) != description && Some(*text) != label);
+                if (index > 0 || title.is_some() || description.is_some()) && (label.is_some() || detail.is_some()) {
+                    ui.add_space(10.0);
+                }
+                if let Some(label) = label {
+                    question_title(ui, label);
+                    if detail.is_some() { ui.add_space(4.0); }
+                }
+                if let Some(detail) = detail {
+                    ui.push_id("field-description", |ui| read_text(ui, detail, true));
+                }
+                question_answer(ui, question, Some(field));
+            });
+        }
     });
+}
+
+fn question_caption(ui: &mut egui::Ui, text: &str) {
+    ui.label(RichText::new(text).monospace().size(12.0).color(MUTED));
+}
+
+fn question_title(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).monospace().strong()).wrap().selectable(true));
+}
+
+fn question_answer(ui: &mut egui::Ui, question: &Question, field: Option<&Value>) {
+    ui.add_space(9.0);
+    let width = ui.available_width();
+    egui::Frame::new()
+        .fill(ANSWER_BACKGROUND)
+        .corner_radius(5)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_min_width((width - 24.0).max(1.0));
+            question_caption(ui, crate::tr!("Antwort"));
+            ui.add_space(4.0);
+            ui.push_id("question-answer", |ui| {
+                read_text(ui, &crate::dialogs::question_answer_text(question, field), true);
+            });
+        });
 }
 
 pub fn line_height(ui: &mut egui::Ui) -> f32 {
@@ -507,7 +642,7 @@ pub fn transcript_style(ui: &mut egui::Ui) {
     style.url_in_tooltip = true;
 }
 
-fn markdown(ui: &mut egui::Ui, app: &mut App, text: &str) {
+pub(crate) fn markdown(ui: &mut egui::Ui, app: &mut App, text: &str) {
     if text.len() > 64 * 1024 {
         // Explicit, lossless sections keep pathological tool/assistant payloads bounded.
         read_text(ui, text, true);
@@ -587,6 +722,9 @@ fn message_content(
         .unwrap_or("unknown");
     let user = role == "user";
     let width = ui.available_width();
+    if role == PUBLICATION_ARCHIVE_TYPE {
+        return publication_notice(ui, command, value);
+    }
     if role == "idle" {
         let failure = matches!(value["outcome"].as_str(), Some("error" | "failed"));
         let message = if failure && !value["error"].is_null() {
@@ -715,6 +853,27 @@ fn message_content(
 
 fn design_error_line(error: &Value) -> String {
     crate::tr!("Fehler: {}", crate::design::elide_first_line(error_message(error), 240))
+}
+
+fn publication_notice(ui: &mut egui::Ui, command: CommandId, value: &Value) -> egui::Response {
+    let width = ui.available_width();
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0)).show(ui, |ui| {
+        ui.set_min_width((width - 44.0).max(1.0));
+        if value["id"] != format!("factory_publication_{command}") { return; }
+        let Ok(notice) = serde_json::from_value::<PublicationNotice>(value["publication"].clone()) else { return; };
+        let (label, color, icon) = match notice.outcome {
+            PublicationOutcome::Local => (crate::tr!("In den Projektordner übernommen"), crate::app::GREEN, egui_phosphor::regular::CHECK_CIRCLE),
+            PublicationOutcome::Managed => (crate::tr!("Auf dem Factory-Basisbranch veröffentlicht"), crate::app::GREEN, egui_phosphor::regular::CHECK_CIRCLE),
+            PublicationOutcome::Blocked => (crate::tr!("Übernahme blockiert · Details in der Diagnose"), AMBER, egui_phosphor::regular::WARNING_CIRCLE),
+            PublicationOutcome::NotPublished => (crate::tr!("Keine direkte Übernahme am ausführenden Runner"), MUTED, egui_phosphor::regular::INFO),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+            ui.label(RichText::new(icon).size(15.0).color(color));
+            ui.label(RichText::new(label).monospace().color(color));
+            ui.label(RichText::new(timestamp(notice.unix_ms)).monospace().size(12.0).color(MUTED));
+        });
+    }).response
 }
 
 fn native_activity(ui: &mut egui::Ui, value: &Value) {
@@ -1262,24 +1421,50 @@ mod tests {
     }
 
     #[test]
-    fn activity_group_starts_closed_and_toggles_individual_tool_blocks() {
+    fn synthetic_instruction_messages_join_tools_without_hiding_other_synthetic_messages() {
+        let command = CommandId::new();
+        let row = |sequence, message| TranscriptRow::Message(command, std::sync::Arc::new(
+            ArchivedMessage { sequence, sample_revision: 1, captured_unix_ms: sequence, message }
+        ));
+        let rows = [
+            row(1, json!({"id":"tool","type":"assistant","content":[{"type":"tool","name":"read"}]})),
+            row(2, json!({"id":"injected","type":"synthetic","text":"Loaded repository instructions",
+                "metadata":{"instruction":{"paths":["/repo/AGENTS.md"]}}})),
+            row(3, json!({"id":"prefix","type":"synthetic","text":"Instructions from: /repo/src/AGENTS.md\nRules"})),
+            row(4, json!({"id":"result","type":"synthetic","text":"Background job completed"})),
+            row(5, json!({"id":"user","type":"user","text":"Instructions from: my message"})),
+        ];
+        let display = display_rows(&rows, false);
+        let [DisplayRow::Activity(items), DisplayRow::Original(_), DisplayRow::Original(_)] = display.as_slice()
+        else { panic!("Only instruction messages should join the tool group"); };
+        assert_eq!(activity_summary(items), "1 Lesezugriff, 2 Anweisungen");
+    }
+
+    #[test]
+    fn activity_group_toggles_tools_and_instructions_across_the_full_row() {
         let ctx = egui::Context::default();
         let command = CommandId::new();
-        let rows = [TranscriptRow::Message(command, std::sync::Arc::new(ArchivedMessage {
-            sequence: 1, sample_revision: 1, captured_unix_ms: 1,
-            message: json!({"id":"tools","type":"assistant","content":[
+        let row = |sequence, message| TranscriptRow::Message(command, std::sync::Arc::new(
+            ArchivedMessage { sequence, sample_revision: 1, captured_unix_ms: sequence, message }
+        ));
+        let rows = [
+            row(1, json!({"id":"tools","type":"assistant","content":[
                 {"type":"tool","name":"bash","state":{"status":"completed","input":{"command":"check-first"}}},
                 {"type":"tool","name":"bash","state":{"status":"completed","input":{"command":"check-second"}}}
-            ]}),
-        }))];
+            ]})),
+            row(2, json!({"id":"instructions","type":"synthetic","text":"Instructions from: /repo/AGENTS.md\nRepository rules"})),
+        ];
         let display = display_rows(&rows, false);
         let DisplayRow::Activity(items) = &display[0] else { panic!("Expected activity group"); };
         let render = |events| {
             let mut rect = egui::Rect::NOTHING;
             let frame = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_width(600.0);
                     transcript_style(ui);
+                    let width = ui.available_width();
                     rect = activity_group(ui, items).rect;
+                    assert_eq!(rect.width(), width);
                 });
             });
             fn inspect(shape: &egui::epaint::Shape, texts: &mut Vec<String>, blocks: &mut usize) {
@@ -1295,26 +1480,107 @@ mod tests {
             let mut texts = Vec::new();
             let mut blocks = 0;
             for shape in &frame.shapes { inspect(&shape.shape, &mut texts, &mut blocks); }
-            (rect, texts, blocks)
+            let hover_rect = frame.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Rect(rect) if rect.fill == crate::design::HOVER_FILL => Some(rect.rect),
+                _ => None,
+            });
+            (rect, texts, blocks, hover_rect)
         };
-        let (rect, texts, blocks) = render(vec![]);
-        assert!(texts.iter().any(|text| text == "+ 2 Befehle"));
+        let (rect, texts, blocks, hover_rect) = render(vec![]);
+        assert_eq!(hover_rect, None);
+        assert!(texts.iter().any(|text| text == "+ 2 Befehle, 1 Anweisung"));
+        assert!(!texts.iter().any(|text| text.contains("Repository rules")));
         assert_eq!(blocks, 0);
+        let edge = egui::pos2(rect.right() - 10.0, rect.center().y);
+        let (_, _, _, hover_rect) = render(vec![egui::Event::PointerMoved(edge)]);
+        assert_eq!(hover_rect, Some(rect));
         let click = |pressed| egui::Event::PointerButton {
-            pos: rect.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            pos: edge, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
         };
-        render(vec![egui::Event::PointerMoved(rect.center()), click(true)]);
-        render(vec![click(false)]);
-        let (_, texts, blocks) = render(vec![]);
-        assert!(texts.iter().any(|text| text == "- 2 Befehle"));
-        assert!(texts.iter().any(|text| text == "$ check-first"));
-        assert!(texts.iter().any(|text| text == "$ check-second"));
-        assert_eq!(blocks, 2);
         render(vec![click(true)]);
         render(vec![click(false)]);
-        let (_, texts, blocks) = render(vec![]);
-        assert!(texts.iter().any(|text| text == "+ 2 Befehle"));
+        let (_, texts, blocks, _) = render(vec![]);
+        assert!(texts.iter().any(|text| text == "- 2 Befehle, 1 Anweisung"));
+        assert!(texts.iter().any(|text| text == "$ check-first"));
+        assert!(texts.iter().any(|text| text == "$ check-second"));
+        assert!(texts.iter().any(|text| text.contains("Repository rules")));
+        assert_eq!(blocks, 3);
+        render(vec![click(true)]);
+        render(vec![click(false)]);
+        let (_, texts, blocks, _) = render(vec![]);
+        assert!(texts.iter().any(|text| text == "+ 2 Befehle, 1 Anweisung"));
+        assert!(!texts.iter().any(|text| text.contains("Repository rules")));
         assert_eq!(blocks, 0);
+    }
+
+    #[test]
+    fn transcript_question_separates_header_body_and_answer_on_a_narrow_view() {
+        let app = crate::tests::fixture();
+        let mut entry = app.snapshot.as_ref().unwrap().questions[0].clone();
+        entry.state = QuestionState::Answered;
+        entry.answer = Some(json!({"app":"cargo run --locked"}));
+        entry.external.payload = json!({
+            "title":"Getestete App",
+            "description":"Wie hast du die GUI gestartet, in der Enter noch eine neue Zeile macht?",
+            "fields":[{"key":"app","title":"Getestete App","type":"string"}]
+        });
+        let ctx = egui::Context::default();
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(360.0, 300.0))),
+            ..Default::default()
+        }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| question(ui, &entry, None));
+        });
+        fn inspect(shape: &egui::epaint::Shape, text: &mut Vec<(String, egui::Rect)>, panels: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::epaint::Shape::Text(s) => text.push((s.galley.job.text.clone(), s.galley.rect.translate(s.pos.to_vec2()))),
+                egui::epaint::Shape::Rect(s) if s.fill == ANSWER_BACKGROUND => panels.push(s.rect),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes { inspect(shape, text, panels); }
+                }
+                _ => {}
+            }
+        }
+        let (mut text, mut panels) = (vec![], vec![]);
+        for shape in &output.shapes { inspect(&shape.shape, &mut text, &mut panels); }
+        let find = |needle| text.iter().find(|(line, _)| line.as_str() == needle).unwrap().1;
+        let title = find("Getestete App");
+        assert_eq!(text.iter().filter(|(line, _)| line == "Getestete App").count(), 1);
+        assert!(find(crate::tr!("Beantwortet")).bottom() <= title.top());
+        assert_eq!(panels.len(), 1);
+        let answer = panels[0];
+        assert!(title.bottom() < answer.top() && answer.right() <= 360.0);
+        assert!(answer.contains_rect(find(crate::tr!("Antwort"))));
+        assert!(answer.contains_rect(find("cargo run --locked")));
+    }
+
+    #[test]
+    fn publication_result_is_a_separate_timestamped_notice() {
+        let mut app = crate::tests::fixture();
+        let command = app.snapshot.as_ref().unwrap().commands[0].id;
+        let at = 1_760_000_000_000;
+        let ctx = app.backend.context().clone();
+        for (outcome, expected) in [
+            (PublicationOutcome::Local, crate::tr!("In den Projektordner übernommen")),
+            (PublicationOutcome::Managed, crate::tr!("Auf dem Factory-Basisbranch veröffentlicht")),
+            (PublicationOutcome::Blocked, crate::tr!("Übernahme blockiert · Details in der Diagnose")),
+        ] {
+            let entry = ArchivedMessage {
+                sequence: 1, sample_revision: 1, captured_unix_ms: at,
+                message: json!({"id":format!("factory_publication_{command}"),"type":PUBLICATION_ARCHIVE_TYPE,
+                    "publication":PublicationNotice {unix_ms: at, outcome},"text":"Not assistant text"}),
+            };
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    message(ui, &mut app, command, &entry, false);
+                });
+            });
+            let mut text = vec![];
+            for shape in &output.shapes { crate::tests::shape_text(&shape.shape, &mut text); }
+            assert!(text.iter().any(|line| line == expected), "{text:?}");
+            assert!(text.contains(&timestamp(at)), "{text:?}");
+            assert!(!text.iter().any(|line| line == "Not assistant text"));
+        }
     }
 
     #[test]

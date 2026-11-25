@@ -112,7 +112,7 @@ impl Models {
                                 draft.accesses.clone_from(&saved.accesses);
                                 for model in [&mut draft.default_model, &mut draft.roles.orchestrator,
                                     &mut draft.roles.implementer, &mut draft.roles.supervisor,
-                                    &mut draft.roles.memorizer] {
+                                     &mut draft.roles.memorizer, &mut draft.roles.merger] {
                                     if model.as_ref().is_some_and(|model| model.access_id == id) {
                                         *model = None;
                                     }
@@ -323,6 +323,7 @@ fn roles(ui: &mut egui::Ui, scope: &str, catalog: &[ModelAccess], models: &mut R
         ("Implementer", &mut models.implementer),
         ("Supervisor", &mut models.supervisor),
         ("Memorizer", &mut models.memorizer),
+        ("Merger", &mut models.merger),
     ] {
         design::settings_field(ui, name, |ui| {
             choice(ui, (scope, name), catalog, selection, "Default");
@@ -1291,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn memorizer_model_selection_is_visible_in_factory_and_project_settings() {
+    fn memorizer_and_merger_model_selections_are_visible_in_factory_and_project_settings() {
         let mut app = crate::tests::fixture();
         seed(&mut app, true);
         let project = app.project().unwrap().id;
@@ -1311,9 +1312,11 @@ mod tests {
             }, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| pane.show(ui, &mut app, 730.0));
             });
-            assert!(output.shapes.iter().any(|s| matches!(
-                &s.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == "Memorizer"
-            )));
+            for role in ["Memorizer", "Merger"] {
+                assert!(output.shapes.iter().any(|s| matches!(
+                    &s.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == role
+                )), "{role} not visible");
+            }
         }
     }
 

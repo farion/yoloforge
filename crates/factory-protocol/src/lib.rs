@@ -1,5 +1,6 @@
 //! Factory v1 wire contract, separate from the OpenCode API contract.
 use factory_core::*;
+pub mod directs;
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -198,6 +199,8 @@ pub struct RunnerRestartStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directs: Vec<directs::Direct>,
     /// Optional feature metadata; an older server may omit this entirely.
     #[serde(default)]
     pub server_capabilities: Vec<String>,
@@ -254,6 +257,16 @@ pub struct RetryTask {
     pub request_id: RequestId,
     pub expected_revision: Revision,
     pub previous_command: CommandId,
+}
+
+pub const DELETE_FAILED_TASK_CAPABILITY: &str = "delete-failed-intent-v1";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteFailedTask {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub failed_command: CommandId,
 }
 
 /// A user-directed follow-up. All execution settings come from the target session.

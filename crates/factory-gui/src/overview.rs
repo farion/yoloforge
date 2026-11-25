@@ -20,6 +20,22 @@ pub(crate) fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Global activity, independent of the project selected in the Overview.
+pub(crate) fn factory_is_working(s: &Snapshot) -> bool {
+    s.commands.iter().any(|c| {
+        c.kind != CommandKind::CheckOpenCode
+            && c.state == CommandState::Accepted
+            && c.agent_progress.as_ref().is_none_or(|p| {
+                matches!(p.phase, AgentPhase::Starting | AgentPhase::Running | AgentPhase::Finalizing)
+            })
+            && s.runners.iter().any(|r| r.id == c.runner_id && r.connection == ConnectionState::Online)
+            && !crate::model::session_closed(s, c)
+            && !s.runtime_terminations.iter().any(|t| t.command_id == c.id)
+            && !s.controls.iter().any(|control| control.stream_id == c.stream_id && control.state != PauseState::Released)
+            && !crate::model::command_waits_for_answer(s, c)
+    })
+}
+
 pub struct FlowState {
     pub project_only: bool,
     pub motion: bool,
@@ -155,7 +171,7 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     let command = task_command(s, ticket);
     let waiting = command.is_some_and(|c| crate::model::command_waits_for_answer(s, c));
     let failed = command.is_some_and(|c| {
-        c.state == CommandState::Failed
+        c.state == CommandState::Failed || command_publication_blocked(c)
             || c.agent_progress
                 .as_ref()
                 .is_some_and(|p| matches!(p.phase, AgentPhase::Failed | AgentPhase::Interrupted))
@@ -183,7 +199,8 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
             Stage::Routing
         }
     } else if success
-        || matches!(ticket.status, TicketState::Review | TicketState::Done)
+        || (matches!(ticket.status, TicketState::Review | TicketState::Done)
+            && !command.is_some_and(command_publication_unconfirmed))
     {
         Stage::Result
     } else if let Some(c) = command {
@@ -1034,13 +1051,7 @@ fn pill(
     );
     ui.painter().rect_filled(rect, 6, fill);
     if let Some(angle) = gear_angle {
-        let gear =
-            ui.painter()
-                .layout_no_wrap(icons::GEAR_SIX.into(), FontId::proportional(14.0), color);
-        let center = rect.left_center() + egui::vec2(15.0, 0.0);
-        let offset = egui::emath::Rot2::from_angle(angle) * gear.mesh_bounds.center().to_vec2();
-        ui.painter()
-            .add(egui::epaint::TextShape::new(center - offset, gear, color).with_angle(angle));
+        design::paint_gear(ui, rect.left_center() + egui::vec2(15.0, 0.0), 14.0, color, angle);
     }
     ui.painter().galley(
         position + egui::vec2(8.0 + icon_space, (24.0 - galley.size().y) * 0.5),

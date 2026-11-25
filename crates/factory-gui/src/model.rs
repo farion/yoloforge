@@ -1,5 +1,5 @@
 use factory_core::*;
-use factory_protocol::{OpenCodeInstance, Snapshot};
+use factory_protocol::Snapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub fn hash_of(value: impl std::hash::Hash) -> u64 {
@@ -26,10 +26,12 @@ pub enum Page {
     #[default]
     Tasks,
     Questions,
+    Directs,
     Sessions,
     Orchestrator,
     Supervisor,
     Memorizer,
+    Merger,
     Diagnostics,
     Notifications,
     Settings,
@@ -45,10 +47,12 @@ impl Page {
         match self {
             Self::Tasks => icons::LIST_CHECKS,
             Self::Questions => icons::CHAT_CIRCLE_TEXT,
+            Self::Directs => icons::CHAT_TEARDROP,
             Self::Sessions => icons::TERMINAL_WINDOW,
             Self::Orchestrator => icons::FLOW_ARROW,
             Self::Supervisor => icons::EYE,
             Self::Memorizer => icons::BRAIN,
+            Self::Merger => icons::GIT_MERGE,
             Self::Diagnostics => icons::CHART_LINE,
             Self::Notifications => icons::BELL,
             Self::Settings => icons::GEAR,
@@ -60,10 +64,12 @@ impl Page {
         match self {
             Self::Tasks => crate::tr!("Aufgaben"),
             Self::Questions => crate::tr!("Fragen"),
+            Self::Directs => "Directs",
             Self::Sessions => "Implementer",
             Self::Orchestrator => "Orchestrator",
             Self::Supervisor => "Supervisor",
             Self::Memorizer => "Memorizer",
+            Self::Merger => "Merger",
             Self::Diagnostics => crate::tr!("Diagnose"),
             Self::Notifications => crate::tr!("Benachrichtigungen"),
             Self::Settings => crate::tr!("Einstellungen"),
@@ -156,6 +162,8 @@ pub fn task_session_command<'a>(s: &'a Snapshot, t: &Ticket) -> Option<&'a Runne
 }
 
 pub fn command_status(c: &RunnerCommand) -> &'static str {
+    if command_publication_blocked(c) { return crate::tr!("Übernahme blockiert"); }
+    if command_publication_unconfirmed(c) { return crate::tr!("Übernahme nicht bestätigt"); }
     if let Some(p) = &c.agent_progress {
         return match p.phase {
             AgentPhase::Starting => crate::tr!("Wird gestartet"),
@@ -344,6 +352,9 @@ pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
             TaskBucket::Current
         };
     };
+    if command_publication_blocked(command) || command_publication_unconfirmed(command) {
+        return TaskBucket::Current;
+    }
     let progress = command.agent_progress.as_ref().or(match &command.result {
         Some(CommandOutput::Agent { agent }) => Some(agent),
         _ => None,
@@ -374,7 +385,7 @@ pub fn needs_answer(q: &Question) -> bool {
 
 pub fn retryable_task(snapshot: &Snapshot, ticket: &Ticket) -> bool {
     !ticket.draft && matches!(ticket.status, TicketState::InProgress | TicketState::Blocked)
-        && task_command(snapshot, ticket).is_some_and(|c| c.state == CommandState::Failed
+        && task_command(snapshot, ticket).is_some_and(|c| !is_merger(c) && c.state == CommandState::Failed
             && matches!(c.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit))
 }
 
@@ -496,7 +507,7 @@ pub fn question_groups(
         }
         if s.commands
             .iter()
-            .any(|c| c.id == q.command_id && command_project(s, c) == Some(project))
+            .any(|c| c.id == q.command_id && !is_direct(c) && command_project(s, c) == Some(project))
         {
             groups
                 .entry(q.session_id.clone())
@@ -510,7 +521,7 @@ pub fn question_groups(
 pub fn sessions(s: &Snapshot, project: ProjectId, controller: bool) -> Vec<RunnerCommand> {
     let mut latest = BTreeMap::new();
     for c in &s.commands {
-        if c.kind != CommandKind::RunAgent || command_project(s, c) != Some(project) {
+        if c.kind != CommandKind::RunAgent || is_direct(c) || is_merger(c) || command_project(s, c) != Some(project) {
             continue;
         }
         if c.agent_spec.as_ref().is_some_and(|a| a.read_only) != controller {
@@ -526,7 +537,18 @@ pub fn sessions(s: &Snapshot, project: ProjectId, controller: bool) -> Vec<Runne
     v
 }
 
+pub fn is_direct(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|a| a.role == factory_protocol::directs::ROLE)
+}
+
+pub fn is_merger(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|a| a.role == MERGER_ROLE)
+}
+
 pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<RunnerCommand> {
+    if page == Page::Merger {
+        return s.commands.iter().rev().filter(|c| is_merger(c) && command_project(s, c) == Some(project)).cloned().collect();
+    }
     let controllers = page != Page::Sessions;
     let mut commands: Vec<_> = sessions(s, project, controllers)
         .into_iter()
@@ -553,77 +575,16 @@ pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<Ru
     commands
 }
 
-pub fn task_queue_counts(s: &Snapshot, project: ProjectId) -> (usize, usize) {
-    let queued = s.tickets.iter().filter(|t| {
-        if t.project_id != project || t.draft {
-            return false;
-        }
-        match t.status {
-            TicketState::Backlog | TicketState::Ready => true,
-            TicketState::InProgress => task_command(s, t).is_some_and(|c|
-                c.state == CommandState::Pending || c.kind == CommandKind::PrepareWorkspace
-                    && matches!(c.state, CommandState::Accepted | CommandState::Succeeded)),
-            _ => false,
-        }
-    });
-    queued.fold((0, 0), |(ready, waiting), ticket| {
-        let status = task_status(s, ticket);
-        if [
-            crate::tr!("Wartend"), crate::tr!("Wartet auf Session"),
-            crate::tr!("Wartet auf Wiederholung"), crate::tr!("Orchestrator wartet"),
-            crate::tr!("Projekt pausiert"), crate::tr!("Verteilung pausiert"),
-            crate::tr!("Blockiert"),
-        ].contains(&status) {
-            (ready, waiting + 1)
-        } else {
-            (ready + 1, waiting)
-        }
-    })
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct SessionCounts {
-    pub running: usize,
-    pub idle: usize,
-    pub failed: usize,
-}
-
-pub fn sidebar_session_counts(
-    s: &Snapshot,
-    project: ProjectId,
-    page: Page,
-    online: bool,
-    instances: &[OpenCodeInstance],
-) -> SessionCounts {
-    let mut counts = SessionCounts::default();
-    for command in sessions_for_page(s, project, page) {
-        if command.kind != CommandKind::RunAgent || session_closed(s, &command) {
-            continue;
-        }
-        let phase = command.agent_progress.as_ref().map(|p| p.phase);
-        let active = command.state == CommandState::Accepted
-            && matches!(phase, Some(AgentPhase::Starting | AgentPhase::Running))
-            && [crate::tr!("Wird gestartet"), crate::tr!("In Bearbeitung")].contains(&session_status(s, &command));
-        let runner_online = online && s.runners.iter().any(|runner|
-            runner.id == command.runner_id && runner.connection == ConnectionState::Online);
-        if page != Page::Sessions {
-            counts.running += usize::from(active && runner_online);
-            continue;
-        }
-        let present = instances.iter().any(|instance|
-            instance.runner_id == command.runner_id && instance.commands.contains(&command.id));
-        if phase == Some(AgentPhase::Failed)
-            || command.state == CommandState::Failed && phase != Some(AgentPhase::Interrupted) {
-            counts.failed += 1;
-        } else if active && phase == Some(AgentPhase::Running) && runner_online && present {
-            counts.running += 1;
-        } else if present || phase.is_some() || command.state == CommandState::Succeeded
-            || command.session_root() != command.id {
-            // A reusable session stays open between runs, even when a follow-up is queued.
-            counts.idle += 1;
-        }
+pub fn session_archived_for_page(s: &Snapshot, page: Page, c: &RunnerCommand) -> bool {
+    if page == Page::Sessions {
+        session_closed(s, c)
+    } else if c.kind == CommandKind::PrepareWorkspace {
+        c.state == CommandState::Failed && s.commands.iter().any(|later|
+            later.stream_id == c.stream_id && later.kind == CommandKind::PrepareWorkspace
+                && later.state == CommandState::Succeeded && later.created_unix_ms >= c.created_unix_ms)
+    } else {
+        controller_archived(s, c)
     }
-    counts
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -696,7 +657,7 @@ pub struct QuestionTaskGroup<'a> {
 pub fn question_task_groups(s: &Snapshot, project: ProjectId, archived: bool) -> Vec<QuestionTaskGroup<'_>> {
     let mut groups: Vec<QuestionTaskGroup<'_>> = Vec::new();
     for q in &s.questions {
-        let Some(command) = s.commands.iter().find(|c| c.id == q.command_id
+        let Some(command) = s.commands.iter().find(|c| c.id == q.command_id && !is_direct(c)
             && command_project(s, c) == Some(project)) else { continue };
         if let Some(group) = groups.iter_mut().find(|group| group.command.id == command.id) {
             group.questions.push(q.clone());
@@ -740,6 +701,7 @@ pub fn assignable_sessions(s: &Snapshot, project: ProjectId) -> Vec<RunnerComman
                 .iter()
                 .any(|v| v.root_command_id == c.session_root())
                 && !s.runtime_terminations.iter().any(|v| v.command_id == c.id)
+                && !s.commands.iter().any(|v| v.stream_id == c.stream_id && is_merger(v))
         })
         .collect()
 }
@@ -747,8 +709,9 @@ pub fn assignable_sessions(s: &Snapshot, project: ProjectId) -> Vec<RunnerComman
 /// A normal closure retires scheduling but can be reopened by a user prompt.
 /// An explicitly terminated runtime must not be restarted through this editor.
 pub fn can_prompt_session(s: &Snapshot, project: ProjectId, root: CommandId) -> bool {
-    s.commands.iter().any(|c| c.kind == CommandKind::RunAgent && c.session_root() == root
+    s.commands.iter().any(|c| c.kind == CommandKind::RunAgent && !is_direct(c) && !is_merger(c) && c.session_root() == root
         && command_project(s, c) == Some(project)
+        && !s.commands.iter().any(|v| v.stream_id == c.stream_id && is_merger(v))
         && c.agent_spec.as_ref().is_some_and(|agent| !agent.read_only))
         && !s.runtime_terminations.iter().any(|termination| s.commands.iter().any(|c|
             c.id == termination.command_id && c.session_root() == root))

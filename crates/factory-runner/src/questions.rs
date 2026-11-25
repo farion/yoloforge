@@ -16,6 +16,8 @@ pub struct Receipt {
     reported: bool,
     #[serde(default)]
     answered_at_ms: Option<u64>,
+    #[serde(default)]
+    reply_started_at_ms: Option<u64>,
 }
 
 fn now_ms() -> u64 {
@@ -28,6 +30,17 @@ fn now_ms() -> u64 {
 pub(crate) fn recently_answered(record: &Record) -> bool {
     let now = now_ms();
     record.replies.values().any(|receipt| receipt.is_recently_answered(now))
+}
+
+/// A sent form reply is not evidence that the model continued.
+/// Use the timestamp before sending it so a fast continuation can count even
+/// when its first token arrives before the HTTP acknowledgement.
+pub(crate) fn last_form_reply_boundary(record: &Record) -> Option<u64> {
+    record.replies.values().filter(|receipt|
+        receipt.question.external.kind == QuestionKind::Form && receipt.state != Some(QuestionState::Rejected)
+    ).filter_map(|receipt| receipt.reply_started_at_ms.or_else(|| {
+        (receipt.state == Some(QuestionState::Answered)).then(|| receipt.answered_at_ms.unwrap_or(u64::MAX))
+    })).max()
 }
 
 impl Receipt {
@@ -162,6 +175,7 @@ pub async fn process(
             state: None,
             reported: false,
             answered_at_ms: None,
+            reply_started_at_ms: valid.then(now_ms),
         };
         if !valid {
             receipt.state = Some(QuestionState::Unknown);
@@ -352,6 +366,7 @@ mod tests {
             .unwrap();
         assert_eq!(fake.question.lock().unwrap().state, QuestionState::Unknown);
         assert!(!recently_answered(&record));
+        let boundary = last_form_reply_boundary(&record).unwrap();
         assert_eq!(fake.posts.load(Ordering::SeqCst), 1);
         drop(journal);
         let journal = Journal::open(&path, &endpoint, runner).unwrap();
@@ -363,6 +378,7 @@ mod tests {
         let receipt = &record.replies[&answer_request];
         let confirmed_at = receipt.answered_at_ms.unwrap();
         assert!(receipt.is_recently_answered(confirmed_at));
+        assert_eq!(last_form_reply_boundary(&record), Some(boundary));
         assert!(!receipt.is_recently_answered(confirmed_at + 5_000));
         assert_eq!(fake.posts.load(Ordering::SeqCst), 1);
         server.abort();

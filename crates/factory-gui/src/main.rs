@@ -5,6 +5,7 @@ mod connection_info;
 mod conversation;
 mod design;
 mod dialogs;
+mod directs;
 mod infrastructure;
 mod i18n;
 pub(crate) use i18n::tr;

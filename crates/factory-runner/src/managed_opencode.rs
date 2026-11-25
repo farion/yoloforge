@@ -234,12 +234,24 @@ async fn write_config(settings: &Settings, output: &Path, factory_url: &str) -> 
         .unwrap_or_else(|| b"{}".to_vec());
     let mut content = parse_jsonc(&raw).context("Ungültige Runner-OpenCode-Konfiguration")?;
     if let Some(key_file) = &settings.model_key_file {
-        ensure!(
-            key_file.is_absolute(),
-            "Model key file path must be absolute"
-        );
+        ensure!(key_file.is_absolute(), "Model key file path must be absolute");
         add_gateway_config(factory_url, key_file, &mut content).await?;
     }
+    let plugin = owned_dir(&output.parent().context("Missing configuration directory")?.join("yoloforge-direct-intents"))?;
+    for (name, bytes) in [
+        ("package.json", br#"{"name":"yoloforge-direct-intents","type":"module","exports":"./index.js"}"#.as_slice()),
+        ("index.js", include_bytes!("direct_intent_tool.js").as_slice()),
+    ] {
+        let file = plugin.join(name);
+        if !fs::read(&file).is_ok_and(|content| content == bytes) {
+            replace_private(&file, bytes)?;
+        }
+    }
+    if content["plugins"].is_null() {
+        content["plugins"] = serde_json::json!([]);
+    }
+    content["plugins"].as_array_mut().context("Managed OpenCode plugins must be an array")?
+        .push(serde_json::json!(plugin));
     let content = serde_json::to_vec(&content)?;
     if fs::read(output).is_ok_and(|existing| existing == content) {
         return Ok(());

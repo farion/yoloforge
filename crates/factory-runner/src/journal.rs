@@ -45,6 +45,8 @@ pub struct Record {
     pub ack_request: RequestId,
     pub result_request: RequestId,
     pub result: Option<CommandOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_notice: Option<PublicationNotice>,
     pub reported: bool,
     #[serde(default)]
     pub agent: Option<crate::agent::Execution>,
@@ -162,6 +164,7 @@ impl Journal {
             ack_request: RequestId::new(),
             result_request: RequestId::new(),
             result: None,
+            publication_notice: None,
             reported: false,
             agent: None,
             question_snapshot: None,

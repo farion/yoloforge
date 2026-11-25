@@ -410,6 +410,39 @@ pub const REVIEW_CAPABILITY: &str = "git-review-v1";
 /// Runner-generated status prefix; preserves a blocked publication in the
 /// supervisor's bounded evidence rather than burying it after the model summary.
 pub const PUBLICATION_CONFLICT_PREFIX: &str = "[yoloforge:publication-conflict]";
+pub const PUBLICATION_BLOCKED_PREFIX: &str = "[yoloforge:publication-blocked]";
+pub const PUBLICATION_CONFIRMED_PREFIX: &str = "[yoloforge:publication-confirmed]";
+pub const MERGER_ROLE: &str = "merger";
+pub const MERGER_CAPABILITY: &str = "merger-v1";
+pub const MERGE_PARENT_PREFIX: &str = "factory_merge_parent=";
+
+/// Legacy runners appended the publication error to an otherwise successful
+/// agent result. It still means the Intent did not land on its target branch.
+pub fn publication_was_blocked(summary: &str) -> bool {
+    summary.starts_with(PUBLICATION_CONFLICT_PREFIX)
+        || summary.starts_with(PUBLICATION_BLOCKED_PREFIX)
+        || summary.lines().any(|line| line.starts_with(
+            "Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:",
+        ))
+}
+
+pub fn publication_was_confirmed(summary: &str) -> bool {
+    summary.starts_with(PUBLICATION_CONFIRMED_PREFIX)
+        || summary.rsplit_once("\n\n").is_some_and(|(_, tail)|
+            tail.starts_with("Ergebnis automatisch im Projektordner bereitgestellt: "))
+}
+
+pub fn command_publication_blocked(command: &RunnerCommand) -> bool {
+    matches!(&command.result, Some(CommandOutput::Agent { agent }) if publication_was_blocked(&agent.summary))
+}
+
+pub fn command_publication_unconfirmed(command: &RunnerCommand) -> bool {
+    command.state == CommandState::Succeeded
+        && command.workspace_spec.as_ref().is_some_and(|spec| spec.setup.is_some())
+        && !command.requires_target_git()
+        && command.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && spec.role != "direct")
+        && matches!(&command.result, Some(CommandOutput::Agent { agent }) if !publication_was_confirmed(&agent.summary))
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReviewJob {
@@ -765,6 +798,23 @@ pub struct AgentProgress {
     pub message_id: String,
     pub phase: AgentPhase,
     pub summary: String,
+}
+
+pub const PUBLICATION_ARCHIVE_TYPE: &str = "factory_publication";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationOutcome {
+    Local,
+    Managed,
+    Blocked,
+    NotPublished,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PublicationNotice {
+    pub unix_ms: u64,
+    pub outcome: PublicationOutcome,
 }
 
 pub fn agent_session_id(id: CommandId) -> String {

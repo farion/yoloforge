@@ -1,4 +1,29 @@
 {
+  "Gespeicherte Factory-Verbindung konnte nicht geladen werden.": ["Gespeicherte Factory-Verbindung konnte nicht geladen werden.", "Could not load the saved Factory connection."],
+  "Änderungen liegen im Worktree, nicht im Zielbranch.": ["Änderungen liegen im Worktree, nicht im Zielbranch.", "Changes are in the worktree, not on the target branch."],
+  "{key} abgeschlossen": ["{key} abgeschlossen", "{key} completed"],
+  "Intent abgeschlossen": ["Intent abgeschlossen", "Intent completed"],
+  "Übernahme blockiert": ["Übernahme blockiert", "Publication blocked"],
+  "Übernahme nicht bestätigt": ["Übernahme nicht bestätigt", "Publication not confirmed"],
+  "In den Projektordner übernommen": ["In den Projektordner übernommen", "Published to the project checkout"],
+  "Auf dem Factory-Basisbranch veröffentlicht": ["Auf dem Factory-Basisbranch veröffentlicht", "Published to the Factory base branch"],
+  "Übernahme blockiert · Details in der Diagnose": ["Übernahme blockiert · Details in der Diagnose", "Publication blocked · see Diagnostics"],
+  "Keine direkte Übernahme am ausführenden Runner": ["Keine direkte Übernahme am ausführenden Runner", "No direct publication on the executing runner"],
+  "Intent löschen": ["Intent löschen", "Delete intent"],
+  "Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.": ["Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", "Delete failed intent “{}”? OpenCode history and files will be kept."],
+  "Intent gelöscht.": ["Intent gelöscht.", "Intent deleted."],
+  "Löschen nicht bestätigt. Details stehen in der Diagnose.": ["Löschen nicht bestätigt. Details stehen in der Diagnose.", "Deletion not confirmed. See Diagnostics for details."],
+  "Direct-Aktion nicht bestätigt. Details stehen in der Diagnose.": ["Direct-Aktion nicht bestätigt. Details stehen in der Diagnose.", "Direct action not confirmed. See Diagnostics for details."],
+  "Direct konnte nicht gestartet werden. Details stehen in der Diagnose.": ["Direct konnte nicht gestartet werden. Details stehen in der Diagnose.", "Direct could not be started. See Diagnostics for details."],
+  "Directs durchsuchen …": ["Directs durchsuchen …", "Search Directs …"],
+  "Neues Direct": ["Neues Direct", "New Direct"],
+  "Diese Factory unterstützt keine Directs.": ["Diese Factory unterstützt keine Directs.", "This Factory does not support Directs."],
+  "Keine passenden Directs": ["Keine passenden Directs", "No matching Directs"],
+  "Direct archivieren": ["Direct archivieren", "Archive Direct"],
+  "Archiviert nach der Antwort": ["Archiviert nach der Antwort", "Archives after the response"],
+  "Direct reaktivieren": ["Direct reaktivieren", "Reactivate Direct"],
+  "Kein verfügbarer Runner": ["Kein verfügbarer Runner", "No available runner"],
+  "Factory arbeitet": ["Factory arbeitet", "Factory is working"],
   "1 Lesezugriff": ["1 Lesezugriff", "1 read"],
   "{} Lesezugriffe": ["{} Lesezugriffe", "{} reads"],
   "1 Befehl": ["1 Befehl", "1 command"],
@@ -856,13 +881,17 @@
     "Exportieren …",
     "Export …"
   ],
-  "Vorschau auf maximal 4096 × 4096 Pixel skaliert. Originalbytes bleiben unverändert.": [
-    "Vorschau auf maximal 4096 × 4096 Pixel skaliert. Originalbytes bleiben unverändert.",
-    "Preview scaled to a maximum of 4096 × 4096 pixels. Original bytes remain unchanged."
+  "Vorschau an die maximale Texturgröße des Geräts angepasst. Originalbytes bleiben unverändert.": [
+    "Vorschau an die maximale Texturgröße des Geräts angepasst. Originalbytes bleiben unverändert.",
+    "Preview adjusted to the device's maximum texture size. Original bytes remain unchanged."
   ],
   "Originalbild speichern …": [
     "Originalbild speichern …",
     "Save original image …"
+  ],
+  "Bildvorschau überschreitet die maximale Texturgröße des Geräts.": [
+    "Bildvorschau überschreitet die maximale Texturgröße des Geräts.",
+    "Image preview exceeds the device's maximum texture size."
   ],
   "Verbrauch konnte nicht geladen werden.": [
     "Verbrauch konnte nicht geladen werden.",

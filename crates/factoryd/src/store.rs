@@ -20,7 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
-pub const SCHEMA_VERSION: u32 = 42;
+pub const SCHEMA_VERSION: u32 = 44;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -36,6 +36,7 @@ impl From<serde_json::Error> for StoreError {
 pub struct Store(Arc<Mutex<Connection>>, Arc<tokio::sync::Notify>);
 
 pub struct DurableSnapshot {
+    pub directs: Vec<factory_protocol::directs::Direct>,
     pub token_totals: ObservedTokenTotals,
     pub session_activity_unix_ms: std::collections::BTreeMap<String, u64>,
     pub editable_tasks: std::collections::BTreeMap<TicketId, Revision>,
@@ -210,6 +211,12 @@ impl Store {
         }
         if version < 42 {
             tx.execute_batch(include_str!("../migrations/042_runner_restart.sql"))?;
+        }
+        if version < 43 {
+            tx.execute_batch(include_str!("../migrations/043_directs.sql"))?;
+        }
+        if version < 44 {
+            tx.execute_batch(include_str!("../migrations/044_deleted_intents.sql"))?;
         }
         tx.commit()?;
         // Connection-local view centralizes fencing of removed projects without
@@ -467,7 +474,7 @@ impl Store {
             |tx| {
                 let data: Option<String> = tx
                     .query_row(
-                        "SELECT data FROM tickets WHERE id=?1",
+                        "SELECT t.data FROM tickets t WHERE t.id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)",
                         [id.to_string()],
                         |r| r.get(0),
                     )
@@ -544,7 +551,7 @@ impl Store {
             r.get(0)
         })?;
         let projects = records(&tx, "SELECT data FROM active_projects ORDER BY rowid")?;
-        let tickets: Vec<Ticket> = records(&tx, "SELECT data FROM tickets ORDER BY rowid")?;
+        let tickets: Vec<Ticket> = records(&tx, "SELECT t.data FROM tickets t WHERE NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id) ORDER BY t.rowid")?;
         let mut editable_tasks = std::collections::BTreeMap::new();
         for ticket in &tickets {
             if tasks::editable(&tx, ticket)? {
@@ -612,8 +619,10 @@ impl Store {
         } else {
             ObservedTokenTotals::default()
         };
+        let directs = directs::list(&tx, None)?;
         tx.commit()?;
         Ok(DurableSnapshot {
+            directs,
             token_totals,
             session_activity_unix_ms,
             editable_tasks,
@@ -690,6 +699,8 @@ mod routing;
 mod runner_restart;
 mod scheduler;
 mod sessions;
+mod directs;
+mod merger;
 mod setup;
 mod supervisor;
 mod tasks;
