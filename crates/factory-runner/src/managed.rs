@@ -127,7 +127,25 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
             })?;
         }
         ensure!(!plan.attempted,"Repository creation outcome unconfirmed; retry preparation as a new command (previous attempt retained)");
-        fs::create_dir(&plan.path)
+        #[cfg(windows)]
+        let checkpoint_staging = if plan.source == CHECKPOINT_REPOSITORY {
+            let parent = root.join(".repository-attempts");
+            fs::create_dir_all(&parent)?;
+            ensure!(
+                fs::canonicalize(&parent)? == parent,
+                "Managed repository attempt directory is a symlink"
+            );
+            Some((parent.clone(), parent.join(r.command.id.to_string())))
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let checkpoint_staging: Option<(PathBuf, PathBuf)> = None;
+        let destination = checkpoint_staging
+            .as_ref()
+            .map(|(_, path)| path)
+            .unwrap_or(&plan.path);
+        fs::create_dir(destination)
             .context("Managed repository destination already occupied; nothing overwritten")?;
         plan.attempted = true;
         save(j, r, &plan)?;
@@ -138,12 +156,18 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                 64 => "--object-format=sha256",
                 _ => anyhow::bail!("Invalid checkpoint commit hash"),
             };
-            tokio::task::block_in_place(|| git(&plan.path, &["init", "--bare", hash]))
+            tokio::task::block_in_place(|| git(destination, &["init", "--bare", hash]))
                 .context("Cannot initialize checkpoint repository")?;
             tokio::task::block_in_place(|| {
-                crate::checkpoint::import_objects(&plan.path, &root, import)
+                crate::checkpoint::import_objects(destination, &root, import)
             })
             .context("Cannot import checkpoint repository objects")?;
+            if let Some((attempts, staging)) = &checkpoint_staging {
+                fs::rename(staging, &plan.path)
+                    .context("Cannot publish initialized checkpoint repository")?;
+                factory_platform::sync_dir(attempts)?;
+                factory_platform::sync_dir(&dir)?;
+            }
         } else if plan.source == "factory:managed" {
             tokio::task::block_in_place(|| -> Result<()> {
                 git(
