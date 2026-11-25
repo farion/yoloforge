@@ -66,6 +66,7 @@ Models, Provider, Skills, Sessions und Tools bleiben englisch.
   anzeigen. Bilder direkt darstellen, Textdateien als begrenzte, passive
   Textvorschau in gleicher Größe; sonst Dateisymbol. Entfernen-X oben rechts
   auf der Vorschau, Dateiname/Typ/Größe nur im Hover-Tooltip.
+  Nach dem Anpinnen eines Anhangs erhält das Promptfeld wieder den Fokus.
   Der Dialog wächst mit dem Inhalt bis zur verfügbaren Fensterhöhe, erst dann scrollt der Inhalt.
   Unter der Trennlinie stehen zwei feste Zeilen außerhalb des Scrollbereichs:
   zuerst breite Modellauswahl („Default (<Modell / Provider>)“ ohne Begleittext),
@@ -85,6 +86,10 @@ Models, Provider, Skills, Sessions und Tools bleiben englisch.
    „Einreihen & neu“ öffnet einen leeren Auftrag im selben Projekt. Die
    Bestätigung erscheint als Toast, nicht im Dialog. Zuordnung
   zeigt nur offene, nicht beendete Sessions mit ihrem OpenCode-Titel statt IDs.
+  Während der Übertragung deckt ein Overlay den gesamten Dialog ab und zeigt
+  einen mittigen Spinner. Keine Inline-Ladeanzeige.
+  Im Promptfeld löst Enter die aktuelle Sendeaktion aus; Shift+Enter fügt
+  einen Zeilenumbruch ein. Das gilt auch für die OpenCode-Session-Promptleiste.
   Das geöffnete Zuordnungsmenü nutzt gleich breite, mehrzeilige Auswahlzeilen:
    Titel in normaler Schriftgröße umbrechen; einzeilige Optionen vertikal
    zentrieren. Status als separate farbige Pill anzeigen, bei mehrzeiligen
@@ -99,6 +104,9 @@ Models, Provider, Skills, Sessions und Tools bleiben englisch.
   zugängliche Namen. Icons nur einsetzen, wenn sie eine Funktion unterstützen.
 - Gemeinsame Abstände und Komponenten zentral ändern und mit Geometrie- und
   Interaktionstests absichern, statt einzelne Ansichten unterschiedlich zu stylen.
+- Toasts nutzen die Statusfarben der Pills: Erfolg grün, Fragen und Hinweise
+  mit Handlungsbedarf orange, Fehler rot und Informationen blau. Bei zugehörigem
+  Projekt mit Logo steht dieses links im Toast; globale Toasts haben kein Logo.
 - **Hover und Linien:** Buttons (auch farbige Hauptaktionen), Tabs und Menüs
   verwenden dieselbe Hoverfarbe aus `design::HOVER_FILL`. Buttons haben keine
   Rahmenlinie. Horizontale/vertikale Trennlinien und neutrale Flächenrahmen
@@ -120,6 +128,8 @@ Models, Provider, Skills, Sessions und Tools bleiben englisch.
    haben unter dem Verlauf den gemeinsamen Prompt-Editor mit Anhängen und
    „Prompten“: Er erzeugt eine fest zugeordnete Factory-Folgeaufgabe ohne
    Orchestrator, keine direkte OpenCode-Ausführung. Runner/MCP/Modell werden geerbt.
+  Gesendete Prompts sofort als Nutzernachricht im Verlauf anzeigen; ihren
+  Zustellstatus kenntlich machen und sie durch die echte Archivnachricht ersetzen.
   CLI-Zeilen ohne zusätzlichen vertikalen Widgetabstand rendern. Keine vertikalen
   Pixel-Polster an Nachrichten: zwischen Nachrichten genau eine Leerzeile in
   tatsächlicher Monospace-Zeilenhöhe, sonst normale Folgezeilen. Keine Fußzeilen

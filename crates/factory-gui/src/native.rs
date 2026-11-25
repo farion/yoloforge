@@ -139,12 +139,12 @@ pub fn run(server: String, screenshot: Option<PathBuf>, exit_after_ms: Option<u6
             match command {
                 egui::OutputCommand::CopyText(text) => {
                     if let Err(error) = copy_text(text, &video) {
-                        app.notice(crate::tr!("Text konnte nicht kopiert werden: {error}", error = error));
+                        app.notice_error(crate::tr!("Text konnte nicht kopiert werden: {error}", error = error));
                     }
                 }
                 egui::OutputCommand::OpenUrl(url) => {
                     if webbrowser::open(&url.url).is_err() {
-                        app.notice(crate::tr!("Der Browser konnte nicht geöffnet werden."));
+                        app.notice_error(crate::tr!("Der Browser konnte nicht geöffnet werden."));
                     }
                 }
                 egui::OutputCommand::CopyImage(_) => {}
@@ -301,7 +301,7 @@ fn deliver_clipboard_image(
 ) {
     match image {
         Ok(image) => app.backend.attach_clipboard_image(target, image.name, image.bytes),
-        Err(error) => app.notice(error),
+        Err(error) => app.notice_error(error),
     }
 }
 

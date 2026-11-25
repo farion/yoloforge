@@ -65,7 +65,7 @@ pub fn load(app: &mut App) {
             app.factory_skills.entries = Some(entries);
         } else {
             app.factory_skills.failed = true;
-            app.notice(crate::tr!("Factory-Skills konnten nicht geladen werden."));
+            app.notice_error(crate::tr!("Factory-Skills konnten nicht geladen werden."));
         }
     }
     if app.online
@@ -125,10 +125,10 @@ impl Catalog {
                     sort(entries);
                     self.open = false;
                     self.draft = None;
-                    app.notice(crate::tr!("Skill importiert."));
+                    app.notice_success(crate::tr!("Skill importiert."));
                 }
                 None => {
-                    app.notice(crate::tr!("Skill konnte nicht importiert werden. Der Entwurf bleibt erhalten."))
+                    app.notice_error(crate::tr!("Skill konnte nicht importiert werden. Der Entwurf bleibt erhalten."))
                 }
             }
         }
@@ -151,7 +151,7 @@ impl Catalog {
                         }
                         Ok(Ok(None)) => {}
                         Ok(Err(PickError::Metadata)) => app.notice(crate::tr!("Die SKILL.md braucht einen gültigen Namen und eine Beschreibung im YAML-Kopf.")),
-                        _ => app.notice(crate::tr!("Skill-Dateien konnten nicht gelesen werden. Erlaubt sind SKILL.md und bis zu 64 UTF-8-Dateien ohne Symlinks, zusammen höchstens 256 KiB.")),
+                        _ => app.notice_error(crate::tr!("Skill-Dateien konnten nicht gelesen werden. Erlaubt sind SKILL.md und bis zu 64 UTF-8-Dateien ohne Symlinks, zusammen höchstens 256 KiB.")),
                     }
                 }
             }

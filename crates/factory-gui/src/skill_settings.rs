@@ -169,7 +169,7 @@ impl Pane {
                 }
                 None => {
                     self.load_failed = true;
-                    app.notice(crate::tr!("Skill-Freigaben konnten nicht geladen werden."));
+                    app.notice_error(crate::tr!("Skill-Freigaben konnten nicht geladen werden."));
                 }
             }
         }

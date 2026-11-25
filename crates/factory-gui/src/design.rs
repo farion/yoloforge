@@ -6,6 +6,7 @@ pub const ICON_BUTTON_SIZE: f32 = 36.0;
 pub const FOOTER_MARGIN: egui::Margin = egui::Margin::symmetric(10, 10);
 pub const DIALOG_PADDING: i8 = 24;
 pub const DIALOG_OUTER_GAP: f32 = 32.0;
+const DIALOG_LOADING_SCRIM: Color32 = Color32::from_black_alpha(200);
 pub const LIST_ROW_HEIGHT: f32 = 44.0;
 pub const MAIN_MENU_ITEM_GAP: f32 = 4.0;
 pub const RUNNER_ICON: &str = egui_phosphor::regular::CPU;
@@ -507,17 +508,34 @@ fn peon_prompt_hint(ui: &egui::Ui) -> &'static str {
 
 /// OpenCode-like composer. The editor grows with its content; the surrounding
 /// dialog owns scrolling, so this never creates a second scroll area.
-pub fn task_prompt(ui: &mut egui::Ui, text: &mut String, rows: usize) -> egui::Response {
-    task_prompt_buffer(ui, text, rows, peon_prompt_hint(ui))
+pub fn task_prompt(ui: &mut egui::Ui, text: &mut String, rows: usize) -> (egui::Response, bool) {
+    let id = ui.make_persistent_id("task-prompt-editor");
+    let response = task_prompt_buffer(ui, text, rows, peon_prompt_hint(ui), egui::Modifiers::SHIFT, Some(id));
+    let mut submit = false;
+    if response.enabled() && response.has_focus() && ui.memory(|m| m.allows_interaction(ui.layer_id())) {
+        // The editor takes Shift+Enter for newlines. Consume bare Enter here
+        // after the editor has applied the rest of the input for this frame.
+        ui.input_mut(|input| input.events.retain(|event| {
+            if let egui::Event::Key {
+                key: egui::Key::Enter, pressed: true, modifiers: egui::Modifiers::NONE, repeat, ..
+            } = event {
+                submit |= !repeat;
+                false
+            } else {
+                true
+            }
+        }));
+    }
+    (response, submit)
 }
 
 pub fn question_answer_editor(ui: &mut egui::Ui, text: &mut String) -> egui::Response {
-    task_prompt_buffer(ui, text, 2, crate::tr!("Antwort eingeben …"))
+    task_prompt_buffer(ui, text, 2, crate::tr!("Antwort eingeben …"), egui::Modifiers::NONE, None)
 }
 
 pub fn task_prompt_read_only(ui: &mut egui::Ui, text: &str, rows: usize) -> egui::Response {
     let mut buffer = text;
-    task_prompt_buffer(ui, &mut buffer, rows, peon_prompt_hint(ui))
+    task_prompt_buffer(ui, &mut buffer, rows, peon_prompt_hint(ui), egui::Modifiers::NONE, None)
 }
 
 fn task_prompt_buffer(
@@ -525,6 +543,8 @@ fn task_prompt_buffer(
     text: &mut dyn egui::TextBuffer,
     rows: usize,
     hint: &str,
+    newline_modifiers: egui::Modifiers,
+    editor_id: Option<egui::Id>,
 ) -> egui::Response {
     let background = ui.painter().add(egui::epaint::Shape::Noop);
     let mut editor = None;
@@ -535,16 +555,15 @@ fn task_prompt_buffer(
             ui.set_min_width((width - 24.0).max(1.0));
             let height = crate::conversation::line_height(ui);
             ui.add_space((height - INPUT_MARGIN.top as f32).max(0.0));
-            editor = Some(
-                multiline(text)
+            let editor_widget = multiline(text)
+                    .return_key(egui::KeyboardShortcut::new(newline_modifiers, egui::Key::Enter))
                     .font(egui::FontId::monospace(crate::conversation::CLI_FONT_SIZE))
                     .frame(false)
                     .hint_text(input_hint(hint))
                     .desired_rows(rows)
-                    .desired_width(f32::INFINITY)
-                    .show(ui)
-                    .response,
-            );
+                    .desired_width(f32::INFINITY);
+            let editor_widget = if let Some(id) = editor_id { editor_widget.id(id) } else { editor_widget };
+            editor = Some(editor_widget.show(ui).response);
             ui.add_space(height);
         });
     ui.painter().set(
@@ -564,7 +583,10 @@ fn task_prompt_buffer(
     let response = editor.expect("Prompt editor rendered");
     #[cfg(test)]
     ui.ctx()
-        .data_mut(|data| data.insert_temp(egui::Id::new("test-task-prompt"), response.rect));
+        .data_mut(|data| {
+            data.insert_temp(egui::Id::new("test-task-prompt"), response.rect);
+            data.insert_temp(egui::Id::new("test-task-prompt-id"), response.id);
+        });
     response
 }
 
@@ -963,6 +985,20 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, enabled: bool) ->
         data.insert_temp(egui::Id::new(("test-icon-button", label)), response.rect)
     });
     response.on_hover_text(label)
+}
+
+/// Paint on the dialog's layer without affecting its size or position.
+pub fn dialog_loading_overlay(dialog: &egui::Response, corner_radius: egui::CornerRadius) {
+    const SPINNER_SIZE: f32 = 32.0;
+    let rect = dialog.rect;
+    let mut ui = egui::Ui::new(
+        dialog.ctx.clone(),
+        dialog.id.with("loading-overlay"),
+        egui::UiBuilder::new().layer_id(dialog.layer_id).max_rect(rect),
+    );
+    ui.painter().rect_filled(rect, corner_radius, DIALOG_LOADING_SCRIM);
+    let spinner = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(SPINNER_SIZE));
+    ui.put(spinner, egui::Spinner::new().size(SPINNER_SIZE));
 }
 
 pub fn dialog_content_size(viewport: egui::Vec2) -> egui::Vec2 {

@@ -14,6 +14,16 @@ pub(crate) fn click_events(pos: egui::Pos2) -> Vec<egui::Event> {
     vec![egui::Event::PointerMoved(pos), button(true), button(false)]
 }
 
+fn enter_events(modifiers: egui::Modifiers) -> Vec<egui::Event> {
+    [true, false].into_iter().map(|pressed| egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers,
+    }).collect()
+}
+
 pub(crate) fn fixture() -> App {
     let ctx = egui::Context::default();
     let mut app = App::new(&ctx, "http://127.0.0.1:1".into(), None, None);
@@ -152,8 +162,7 @@ fn task_action_checkboxes_persist_and_offline_has_one_action_without_mcps() {
     assert!(text.iter().any(|t| t == "Nicht schließen"));
     assert!(text.iter().any(|t| t == "Vorbereiten & neu"));
     assert!(!text.iter().any(|t| t == "Entwurf" || t == "MCPs" || t == "Lokal vorbereiten"));
-    let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-action", offline_id, false)))).unwrap();
-    let _ = render(&mut offline, &mut restored, click_events(submit.center()));
+    let _ = render(&mut offline, &mut restored, enter_events(egui::Modifiers::NONE));
     let _ = render(&mut offline, &mut restored, vec![]);
     assert!(matches!(&offline, Dialog::Task(task) if task.id != offline_id && task.draft.prompt.is_empty()));
     assert_eq!(restored.settings.offline_tasks.len(), 1);
@@ -400,7 +409,7 @@ fn offline_tasks_keep_missing_projects_and_definite_rejections_locally() {
     app.sync_offline_tasks(false);
     assert!(app.settings.pending.is_empty(), "Definite rejections must not loop");
     assert!(app.action_errors.iter().any(|(_, e)| e.contains("Forbidden HTTP details")));
-    assert!(!app.notices.iter().any(|(message, _)| message.contains("Forbidden HTTP")));
+    assert!(!app.notices.iter().any(|toast| toast.0.contains("Forbidden HTTP")));
 }
 
 #[test]
@@ -433,6 +442,98 @@ fn native_image_drop_and_clipboard_target_work_in_an_open_session() {
     let _ = ctx.run(egui::RawInput::default(), |ctx| app.draw_shell(ctx));
     let restored = crate::dialogs::TaskDialog::session(&app, project, root);
     assert_eq!(restored.draft.images.len(), 1);
+}
+
+#[test]
+fn notification_toasts_use_pill_colors_and_the_originating_project_logo() {
+    use crate::app::{ToastKind, AMBER, BLUE, GREEN, RED};
+    fn has_stroke(shape: &egui::Shape, color: egui::Color32) -> bool {
+        match shape {
+            egui::Shape::Rect(rect) => rect.stroke.color == color,
+            egui::Shape::Vec(shapes) => shapes.iter().any(|shape| has_stroke(shape, color)),
+            _ => false,
+        }
+    }
+    let mut app = fixture();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(128, 128).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let logo = ProjectLogo::from_png(png.get_ref()).unwrap();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let mut other_project = snapshot.projects[0].clone();
+    other_project.id = ProjectId::new();
+    other_project.logo = Some(logo.clone());
+    let project = other_project.id;
+    snapshot.projects.push(other_project);
+    let ctx = app.backend.context().clone();
+    app.notifications_initialized = true;
+    for (index, (kind, title, expected, color)) in [
+        ("other", "Hinweis", ToastKind::Info, BLUE),
+        ("question.created", "Antwort erforderlich", ToastKind::Warning, AMBER),
+        ("command.updated", "Aufgabe abgeschlossen", ToastKind::Success, GREEN),
+        ("command.updated", "Aufgabe fehlgeschlagen", ToastKind::Error, RED),
+    ].into_iter().enumerate() {
+        app.notices.clear();
+        app.backend.emit_for_test(crate::backend::Event::Notifications(Ok(NotificationPage {
+            entries: vec![Notification { id: index as u64 + 1, project_id: Some(project), command_id: None,
+                question_id: None, ticket_id: None, title: title.into(), kind: kind.into(), created_unix_ms: 0, read: false }],
+            unread: 1, next_before: None,
+        }), false));
+        app.receive();
+        assert_eq!(app.notices[0].2, expected);
+        assert_eq!(app.notices[0].3.as_ref(), Some(&logo));
+        let time = (index * 2) as f64;
+        let _ = ctx.run(egui::RawInput { time: Some(time), ..Default::default() }, |ctx| app.draw_toasts(ctx));
+        let output = ctx.run(egui::RawInput { time: Some(time + 1.0), ..Default::default() }, |ctx| app.draw_toasts(ctx));
+        assert!(output.shapes.iter().any(|shape| has_stroke(&shape.shape, color)), "{kind}: missing status color");
+    }
+    app.notice("Global notice");
+    assert!(app.notices.last().unwrap().3.is_none());
+}
+
+#[test]
+fn accepted_attachments_return_keyboard_focus_to_the_intent_and_session_prompts() {
+    use crate::backend::{Event, InputAttachment};
+
+    for session in [false, true] {
+        let mut app = fixture();
+        let project = app.settings.project.unwrap();
+        let root = app.snapshot.as_ref().unwrap().commands[0].session_root();
+        if session { app.open_session(project, root); } else { app.new_task(); }
+        let ctx = app.backend.context().clone();
+        let draw = |app: &mut App, events| {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+                events, ..Default::default()
+            }, |ctx| {
+                app.draw_shell(ctx);
+                app.draw_dialog(ctx);
+            });
+        };
+        for _ in 0..4 { draw(&mut app, vec![]); }
+        let target = app.clipboard_image_target().unwrap();
+        let editor_id = || ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new("test-task-prompt-id"))).unwrap();
+        let original_id = editor_id();
+
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let image = PromptImage::from_bytes("screenshot.png".into(), png.get_ref()).unwrap();
+        let file = PromptFile::from_bytes("notes.txt".into(), b"Anhang").unwrap();
+        for (attachment, text) in [(InputAttachment::Image(image), "a"), (InputAttachment::File(file), "b")] {
+            ctx.memory_mut(|m| m.surrender_focus(original_id));
+            app.backend.emit_for_test(Event::Attachment(target, Ok(attachment)));
+            app.receive();
+            draw(&mut app, vec![]);
+            assert_eq!(editor_id(), original_id, "Attachments must not change the editor ID");
+            assert!(ctx.memory(|m| m.has_focus(original_id)), "The prompt must regain focus without a click");
+            draw(&mut app, vec![egui::Event::Text(text.into())]);
+        }
+        let draft = if session { &app.session_prompts[&root].draft } else {
+            let Some(Dialog::Task(task)) = &app.dialog else { unreachable!() };
+            &task.draft
+        };
+        assert_eq!(draft.prompt, "ab");
+        assert_eq!((draft.images.len(), draft.files.len()), (1, 1));
+    }
 }
 
 #[test]
@@ -519,19 +620,26 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     assert!(panel.contains_rect(submit));
     assert!(panel.bottom() <= footer.top());
     assert!(footer.top() - panel.bottom() < 32.0);
-    let pos = submit.center();
-    let _ = render(&mut app, vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
-        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
-    ]);
-    assert_eq!(app.settings.pending.len(), 1);
+    let editor: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-task-prompt"))).unwrap();
+    let mut visible_editor = editor.intersect(panel);
+    visible_editor.max.y = visible_editor.max.y.min(submit.top());
+    assert!(visible_editor.is_positive());
+    let _ = render(&mut app, click_events(visible_editor.center()));
+    let _ = render(&mut app, enter_events(egui::Modifiers::SHIFT));
+    assert!(app.settings.pending.is_empty());
+    let prompt_with_newline = app.session_prompts[&root].draft.prompt.clone();
+    assert_eq!(prompt_with_newline.len(), prompt.len() + 1);
+    assert_eq!(prompt_with_newline.matches('\n').count(), prompt.matches('\n').count() + 1);
+    let _ = render(&mut app, enter_events(egui::Modifiers::NONE));
+    assert_eq!(app.settings.pending.len(), 1, "One Enter press must submit the prompt");
+    let _ = render(&mut app, enter_events(egui::Modifiers::NONE));
+    assert_eq!(app.settings.pending.len(), 1, "Enter must not submit again while waiting");
     let pending = app.settings.pending[0].clone();
     assert_eq!(pending.path, format!("/v1/commands/{root}/prompt"));
     let body: PromptSession = serde_json::from_value(pending.body.clone()).unwrap();
     assert_eq!(body.request_id, target);
     assert_eq!(body.files, vec![file]);
-    assert_eq!(body.prompt, prompt);
+    assert_eq!(body.prompt, prompt_with_newline);
     assert_eq!(app.clipboard_image_target(), None);
     // A restored outbox entry has no live request after restarting the GUI.
     app.in_flight.clear();
@@ -565,6 +673,75 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     assert_ne!(app.session_prompts[&root].id, target);
     assert!(app.settings.session_prompts.is_empty());
     assert_eq!(app.notices.last().unwrap().0, "Prompt in die Session eingereiht.");
+}
+
+#[test]
+fn session_prompt_appears_on_submit_and_is_replaced_by_its_archived_message() {
+    use crate::backend::{ArchiveRead, Event};
+    let mut app = fixture();
+    let snapshot = app.snapshot.clone().unwrap();
+    let root = snapshot.commands[0].session_root();
+    let project = app.settings.project.unwrap();
+    app.open_intent_execution(project, root, root);
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, events| {
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            events, ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let mut text = vec![];
+        for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+        text
+    };
+    let _ = render(&mut app, vec![]);
+    let prompt = "Bitte sofort im Verlauf anzeigen.";
+    app.session_prompts.get_mut(&root).unwrap().draft.prompt = prompt.into();
+    let _ = render(&mut app, vec![]);
+    let button: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-session-prompt-submit", root)))).unwrap();
+    let text = render(&mut app, click_events(button.center()));
+    assert!(text.iter().any(|line| line == crate::tr!("Wird gesendet …")), "{text:?}");
+    assert!(text.iter().any(|line| line == prompt), "{text:?}");
+    assert!(app.tabs[0].selected_execution.is_none());
+
+    let mut ticket = snapshot.tickets[0].clone();
+    ticket.id = TicketId::new();
+    ticket.requested_session = Some(root);
+    ticket.execution_command = None;
+    let request = app.settings.pending[0].id;
+    app.backend.emit_for_test(Event::Request(request, Ok(json!(ticket))));
+    app.receive();
+    let text = render(&mut app, vec![]);
+    assert!(text.iter().any(|line| line == crate::tr!("Eingereiht")), "{text:?}");
+    assert!(text.iter().any(|line| line == prompt), "{text:?}");
+    assert!(app.session_prompts[&root].draft.prompt.is_empty());
+
+    let command = CommandId::new();
+    ticket.execution_command = Some(command);
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).tickets.push(ticket);
+    app.tabs[0].loading.insert(command, 999);
+    app.backend.emit_for_test(Event::Archive(command, 999, ArchiveRead::Recent, Ok(Box::new(ArchiveWindow {
+        status: None, next_after: 1, next_before: None, latest_sequence: 1, more_newer: false,
+        entries: vec![ArchivedMessage { sequence: 1, sample_revision: 1, captured_unix_ms: 1,
+            message: json!({"id":agent_message_id(command),"type":"user","text":prompt}),
+        }],
+    }))));
+    app.receive();
+    let text = render(&mut app, vec![]);
+    assert_eq!(text.iter().filter(|line| line.as_str() == prompt).count(), 1, "{text:?}");
+    assert!(app.queued_session_prompts.is_empty());
+
+    app.session_prompts.get_mut(&root).unwrap().draft.prompt = "Nicht angenommener Prompt".into();
+    let _ = render(&mut app, vec![]);
+    let button: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-session-prompt-submit", root)))).unwrap();
+    let _ = render(&mut app, click_events(button.center()));
+    let request = app.settings.pending[0].id;
+    app.backend.emit_for_test(Event::Request(request, Err(crate::backend::Failure {
+        message: "Request rejected".into(), uncertain: false,
+    })));
+    app.receive();
+    let _ = render(&mut app, vec![]);
+    assert!(app.submitted_session_prompts(0).is_empty());
+    assert_eq!(app.session_prompts[&root].draft.prompt, "Nicht angenommener Prompt");
 }
 
 #[test]
@@ -766,6 +943,7 @@ fn task_history_dialog_opens_the_associated_opencode_tab() {
     let mut app = fixture();
     let snapshot = app.snapshot.as_ref().unwrap();
     let root = snapshot.commands[0].session_root();
+    let execution = snapshot.commands[0].id;
     let ticket = snapshot.tickets[0].id;
     app.view_task(ticket);
     let mut dialog = app.dialog.take().unwrap();
@@ -789,6 +967,7 @@ fn task_history_dialog_opens_the_associated_opencode_tab() {
     ]);
     assert!(closed);
     assert_eq!(app.tabs[app.active_tab - 1].root, root);
+    assert_eq!(app.tabs[app.active_tab - 1].selected_execution, Some(execution));
 }
 
 #[test]
@@ -2051,42 +2230,76 @@ fn task_actions_wait_for_confirmation_then_toast_and_close_or_start_fresh() {
         }
         let button_id = egui::Id::new(("test-task-action", task_id, false));
         let button_rect = ctx.data_mut(|d| d.get_temp::<egui::Rect>(button_id)).unwrap();
+        let modal_id = egui::Id::new(("factory-task", task_id));
         assert!((button_rect.width() - 200.0).abs() < 1.0, "{action}: {button_rect:?}");
-        let pos = button_rect.center();
-        for pressed in [true, false] {
-            assert!(!draw(&mut dialog, &mut app, vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
-                },
-            ]).0);
-        }
+        assert!(!draw(&mut dialog, &mut app, enter_events(egui::Modifiers::SHIFT)).0);
+        assert!(app.settings.pending.is_empty());
+        let Dialog::Task(task) = &dialog else { unreachable!() };
+        assert_eq!(task.draft.prompt, "Erste Aufgabe\n");
+        assert!(!draw(&mut dialog, &mut app, vec![]).0);
+        let dialog_rect = ctx.memory(|m| m.area_rect(modal_id)).unwrap();
+        let close_rect = ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-dialog-close-rect"))).unwrap();
+        let advanced_rect = ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-task-advanced", task_id)))).unwrap();
+        assert!(!draw(&mut dialog, &mut app, enter_events(egui::Modifiers::NONE)).0);
         assert_eq!(app.settings.pending.len(), 1, "{action}");
         assert!(app.notices.is_empty());
         let request = &app.settings.pending[0];
         assert_eq!(request.body["draft"], draft);
-        assert_eq!(request.body["task"]["prompt"], "Erste Aufgabe");
+        assert_eq!(request.body["task"]["prompt"], "Erste Aufgabe\n");
         let request_id = request.id;
         for _ in 0..2 {
             assert!(!draw(&mut dialog, &mut app, vec![]).0);
         }
+        let (closed, output) = draw(&mut dialog, &mut app, vec![]);
+        assert!(!closed);
+        assert_eq!(ctx.memory(|m| m.area_rect(modal_id)), Some(dialog_rect));
+        let cover = output.shapes.iter().position(|shape| matches!(&shape.shape,
+            egui::Shape::Rect(rect) if rect.rect == dialog_rect && rect.fill == egui::Color32::from_black_alpha(200)
+        )).expect("the entire dialog is dimmed");
+        assert!(output.shapes[cover + 1..].iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Path(path) if !path.points.is_empty() && path.points.iter().all(|point|
+                (point.distance(dialog_rect.center()) - 14.0).abs() < 0.1)
+        )), "spinner must be centered over the dimmed dialog");
+        let mut text = vec![];
+        for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+        assert!(!text.iter().any(|t| t == crate::tr!("Wird übertragen …")));
+        assert!(!draw(&mut dialog, &mut app, click_events(close_rect.center())).0);
+        assert!(!draw(&mut dialog, &mut app, click_events(advanced_rect.center())).0);
+        assert!(matches!(&dialog, Dialog::Task(task) if !task.advanced));
+        assert!(!draw(&mut dialog, &mut app, vec![egui::Event::Key {
+            key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]).0);
         if stays_open {
             app.backend.emit_for_test(crate::backend::Event::Request(
                 request_id,
                 Err(crate::backend::Failure { message: "Keine Bestätigung".into(), uncertain: true }),
             ));
             app.receive();
-            assert!(!draw(&mut dialog, &mut app, vec![]).0);
+            let (closed, output) = draw(&mut dialog, &mut app, vec![]);
+            assert!(!closed);
+            let mut text = vec![];
+            for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+            assert!(text.iter().any(|t| t == crate::tr!("Identische Anfrage abgleichen")));
             assert!(app.notices.is_empty());
-            assert!(matches!(&dialog, Dialog::Task(task) if task.draft.prompt == "Erste Aufgabe"));
+            assert!(matches!(&dialog, Dialog::Task(task) if task.draft.prompt == "Erste Aufgabe\n"));
         }
-        app.backend.emit_for_test(crate::backend::Event::Request(request_id, Ok(json!({}))));
+        let (response, queued_notice) = if action == "queue" {
+            (json!({}), crate::tr!("Aufgabe eingereiht."))
+        } else {
+            let mut ticket = app.snapshot.as_ref().unwrap().tickets[0].clone();
+            ticket.id = TicketId::new();
+            ticket.key = "YOLO-8".into();
+            ticket.draft = draft;
+            (json!(ticket), "Intent YOLO-8 eingereiht.")
+        };
+        app.backend.emit_for_test(crate::backend::Event::Request(request_id, Ok(response)));
         app.receive();
         let (closed, output) = draw(&mut dialog, &mut app, vec![]);
         assert_eq!(closed, !stays_open);
         assert!(app.settings.pending.is_empty());
         assert_eq!(app.notices.len(), 1);
-        assert_eq!(app.notices[0].0, if draft { crate::tr!("Entwurf gespeichert.") } else { crate::tr!("Aufgabe eingereiht.") });
+        assert_eq!(app.notices[0].0, if draft { crate::tr!("Entwurf gespeichert.") } else { queued_notice });
         let mut text = vec![];
         for shape in &output.shapes {
             shape_text(&shape.shape, &mut text);
@@ -5156,6 +5369,64 @@ fn opencode_points_only_show_while_working_and_archived_errors_are_readable() {
     assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(indicator)).is_none());
     assert!(text.iter().any(|s| s.contains("ChatGPT hat keinen Model-Stream geliefert")), "{text:?}");
     assert!(!text.iter().any(|s| s.contains("RAW_GATEWAY_JSON") || s.contains("Noch kein Nachrichtentext") || s.contains("Ausführung mit Fehler beendet")));
+}
+
+#[test]
+fn completed_intent_shows_its_result_without_the_followup_working_indicator() {
+    let mut app = fixture();
+    let project = app.settings.project.unwrap();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.questions.clear();
+    let command = &mut snapshot.commands[0];
+    let root = command.id;
+    let mut followup = command.clone();
+    followup.id = CommandId::new();
+    followup.agent_spec.as_mut().unwrap().continuation = Some(SessionContinuation {
+        root_command_id: root, previous_command_id: root,
+    });
+    followup.agent_progress.as_mut().unwrap().phase = AgentPhase::Running;
+    let followup_id = followup.id;
+    let answer = "Die vereinbarte Änderung ist umgesetzt.";
+    // The terminal result can arrive before the final archive page, and the
+    // cached progress can still say Running.
+    command.agent_progress.as_mut().unwrap().phase = AgentPhase::Running;
+    command.state = CommandState::Succeeded;
+    command.result = Some(CommandOutput::Agent { agent: AgentProgress {
+        phase: AgentPhase::Succeeded, summary: answer.into(),
+        ..command.agent_progress.clone().unwrap()
+    }});
+    snapshot.commands.push(followup);
+    app.open_intent_execution(project, root, root);
+    let ctx = app.backend.context().clone();
+    let frame = |app: &mut App| {
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 850.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let mut text = Vec::new();
+        for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+        text
+    };
+    let indicator = egui::Id::new("test-opencode-working");
+    let text = frame(&mut app);
+    assert!(text.iter().any(|s| s == crate::tr!("Abgeschlossen")), "{text:?}");
+    assert!(text.iter().any(|s| s == answer), "{text:?}");
+    assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(indicator)).is_none());
+    app.tabs[0].archives.insert(root, vec![Arc::new(ArchivedMessage {
+        sequence: 1, sample_revision: 1, captured_unix_ms: 1,
+        message: json!({"id":"answer","type":"assistant","finish":"stop","text":answer}),
+    })]);
+    let text = frame(&mut app);
+    assert_eq!(text.iter().filter(|s| s.as_str() == answer).count(), 1, "{text:?}");
+
+    app.open_session(project, root);
+    let _ = frame(&mut app);
+    assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(indicator)).is_some());
+    app.tabs[0].statuses.insert(followup_id, ArchiveStatus {
+        session_id: agent_session_id(root), revision: 1, captured_unix_ms: 1, final_scan_complete: true,
+    });
+    let _ = frame(&mut app);
+    assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(indicator)).is_none());
 }
 
 #[test]

@@ -359,7 +359,7 @@ impl ProjectSettings {
                     self.batch = Some(SaveBatch { remaining, current: (write, id), retry_needed: false, saved: 0 });
                 }
             }
-            Err(error) => app.notice(error),
+            Err(error) => app.project_notice(crate::app::ToastKind::Error, self.project, error),
         }
     }
 
@@ -388,18 +388,18 @@ impl ProjectSettings {
                     self.batch = Some(batch);
                     false
                 } else {
-                    app.notice(crate::tr!("Projekteinstellungen gespeichert."));
+                    app.project_notice(crate::app::ToastKind::Success, self.project, crate::tr!("Projekteinstellungen gespeichert."));
                     true
                 }
             }
             Err(error) if error.uncertain => {
-                app.notice(crate::tr!("Speichern nicht bestätigt. Mit „Speichern“ dieselbe Anfrage erneut prüfen."));
+                app.project_notice(crate::app::ToastKind::Warning, self.project, crate::tr!("Speichern nicht bestätigt. Mit „Speichern“ dieselbe Anfrage erneut prüfen."));
                 batch.retry_needed = true;
                 self.batch = Some(batch);
                 false
             }
             _ => {
-                app.notice(if batch.saved == 0 {
+                app.project_notice(crate::app::ToastKind::Error, self.project, if batch.saved == 0 {
                     crate::tr!("„{}“ konnte nicht gespeichert werden. Änderungen bleiben erhalten.", write.label)
                 } else {
                     crate::tr!("Nicht alle Änderungen gespeichert: „{}“. Die übrigen Änderungen bleiben erhalten.", write.label)
@@ -603,7 +603,7 @@ impl ProjectSettings {
                                         let shown = egui::Id::new(("devices-load-error", *request));
                                         if !ui.ctx().data_mut(|d| d.get_temp::<bool>(shown).unwrap_or(false)) {
                                             ui.ctx().data_mut(|d| d.insert_temp(shown, true));
-                                            app.notice(crate::tr!("Gerätezugänge konnten nicht geladen werden."));
+                                            app.notice_error(crate::tr!("Gerätezugänge konnten nicht geladen werden."));
                                             app.action_errors.push((crate::overview::now_ms(), error.message));
                                         }
                                     } else { ui.colored_label(crate::app::RED,error.message); }
