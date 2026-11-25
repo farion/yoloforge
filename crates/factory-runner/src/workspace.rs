@@ -127,12 +127,22 @@ fn git_status(
     // Managed checkpoint repositories are nested under project, checkpoint,
     // and command IDs. Git's worktree metadata can exceed MAX_PATH even when
     // the checkout itself is short. Passing that directory to CreateProcess
-    // fails before Git can apply core.longpaths, so let Git change into it.
+    // fails before Git can apply core.longpaths. Git also processes -C before
+    // long-path repository setup, so address bare repositories directly.
     // Do not modify the user's Git config.
     #[cfg(windows)]
-    command
-        .args(["-c", "core.longpaths=true", "-C"])
-        .arg(git_path(repository)?.as_ref());
+    {
+        command.args(["-c", "core.longpaths=true"]);
+        let bare = (args.first() == Some(&"init") && args.contains(&"--bare"))
+            || (!repository.join(".git").exists()
+                && repository.join("HEAD").is_file()
+                && repository.join("objects").is_dir());
+        if bare {
+            command.arg(format!("--git-dir={}", git_path(repository)?));
+        } else {
+            command.arg("-C").arg(git_path(repository)?.as_ref());
+        }
+    }
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);

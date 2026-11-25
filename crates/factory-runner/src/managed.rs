@@ -138,8 +138,12 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                 64 => "--object-format=sha256",
                 _ => anyhow::bail!("Invalid checkpoint commit hash"),
             };
-            tokio::task::block_in_place(|| git(&plan.path, &["init", "--bare", hash]))?;
-            tokio::task::block_in_place(|| crate::checkpoint::import_objects(&plan.path, &root, import))?;
+            tokio::task::block_in_place(|| git(&plan.path, &["init", "--bare", hash]))
+                .context("Cannot initialize checkpoint repository")?;
+            tokio::task::block_in_place(|| {
+                crate::checkpoint::import_objects(&plan.path, &root, import)
+            })
+            .context("Cannot import checkpoint repository objects")?;
         } else if plan.source == "factory:managed" {
             tokio::task::block_in_place(|| -> Result<()> {
                 git(
