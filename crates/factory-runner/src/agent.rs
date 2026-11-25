@@ -789,7 +789,7 @@ mod tests {
     fn archived_continuation_can_narrow_known_legacy_skill_permissions_only() {
         let mut spec = AgentSpec {
             repo_skills: Some(vec![]), factory_skills: vec![], local_mcps: vec![], remote_mcps: vec![],
-            files: vec![], images: vec![], role: String::new(), read_only: false,
+            files: vec![], images: vec![], role: String::new(), review_of: None, read_only: false,
             continuation: Some(SessionContinuation {
                 root_command_id: CommandId::new(), previous_command_id: CommandId::new(),
             }),
@@ -892,6 +892,7 @@ mod tests {
                 role: String::new(),
                 images: vec![],
                 read_only: false,
+                review_of: None,
                 continuation: None,
                 prompt: "Implement it".into(),
                 profile: ExecutionProfile {

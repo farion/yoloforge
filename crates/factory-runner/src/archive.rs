@@ -83,7 +83,7 @@ pub async fn archive_decision(journal: &Journal, record: &mut Record, args: &Arg
             spec.read_only
                 && matches!(
                     spec.role.as_str(),
-                    "orchestrator" | "orchestrator-question" | "orchestrator-memory" | "supervisor" | "memorizer"
+                    "orchestrator" | "orchestrator-question" | "orchestrator-memory" | "supervisor" | "memorizer" | "reviewer"
                 )
         })
     {

@@ -191,9 +191,34 @@ fn concurrent_ticks_respect_parallelism_and_resume_after_migrating_a_spent_legac
             },
         },
     }).unwrap();
-    status(&s, tickets[0].id, TicketState::Done);
     s.scheduler_tick().unwrap();
-    assert_eq!(s.snapshot().unwrap().streams.len(), 3);
+    let review_pending = s.snapshot().unwrap();
+    assert_eq!(review_pending.tickets.iter().find(|t| t.id == tickets[0].id).unwrap().status,
+        TicketState::Validating);
+    assert!(review_pending.tickets.iter().find(|t| t.id == tickets[2].id).unwrap().execution_command.is_none());
+    let workspace = review_pending.commands.iter().find(|c|
+        c.kind == CommandKind::PrepareWorkspace && c.state == CommandState::Pending).unwrap();
+    let finish = |c: &RunnerCommand, result| {
+        s.acknowledge(c.runner_id, c.id, AckCommand {
+            request_id: RequestId::new(), ownership_epoch: c.ownership_epoch,
+        }).unwrap();
+        s.complete(c.runner_id, c.id, CommandResult {
+            request_id: RequestId::new(), ownership_epoch: c.ownership_epoch, result,
+        }).unwrap();
+    };
+    finish(workspace, CommandOutput::Workspace { workspace: Workspace {
+        path: "/work/reviewer".into(), branch: workspace.workspace_spec.as_ref().unwrap().branch.clone(),
+        base_commit: "a".repeat(40),
+    }});
+    s.scheduler_tick().unwrap();
+    let reviewer = s.snapshot().unwrap().commands.into_iter()
+        .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
+    finish(&reviewer, CommandOutput::Agent { agent: AgentProgress {
+        session_id: reviewer.session_id(), message_id: agent_message_id(reviewer.id),
+        phase: AgentPhase::Succeeded, summary: r#"{"action":"approve"}"#.into(),
+    }});
+    s.scheduler_tick().unwrap();
+    assert_eq!(s.snapshot().unwrap().streams.iter().filter(|w| !w.ticket_ids.is_empty()).count(), 3);
     assert_eq!(
         s.snapshot()
             .unwrap()

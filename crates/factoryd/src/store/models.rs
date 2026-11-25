@@ -82,7 +82,7 @@ fn check_selection(catalog: &FactoryModelSettings, selection: &ModelSelection) -
 }
 
 fn check_roles(catalog: &FactoryModelSettings, roles: &RoleModels) -> Result<()> {
-    for model in [&roles.orchestrator, &roles.implementer, &roles.supervisor, &roles.memorizer]
+    for model in [&roles.orchestrator, &roles.implementer, &roles.reviewer, &roles.supervisor, &roles.memorizer]
         .into_iter()
         .flatten()
     {
@@ -93,7 +93,7 @@ fn check_roles(catalog: &FactoryModelSettings, roles: &RoleModels) -> Result<()>
 
 fn clear_role_accesses(roles: &mut RoleModels, alias: &str) -> bool {
     let mut changed = false;
-    for model in [&mut roles.orchestrator, &mut roles.implementer, &mut roles.supervisor, &mut roles.memorizer] {
+    for model in [&mut roles.orchestrator, &mut roles.implementer, &mut roles.reviewer, &mut roles.supervisor, &mut roles.memorizer] {
         if model.as_ref().is_some_and(|m| m.access_id == alias) {
             *model = None;
             changed = true;
@@ -108,6 +108,7 @@ fn role(roles: &RoleModels, role: &str) -> Option<ModelSelection> {
             roles.orchestrator.clone()
         }
         "supervisor" => roles.supervisor.clone(),
+        "reviewer" => roles.reviewer.clone(),
         "memorizer" => roles.memorizer.clone(),
         _ => roles.implementer.clone(),
     }
@@ -173,6 +174,7 @@ pub(super) fn for_task(
             implementer_override: chosen,
             orchestrator: None,
             implementer: None,
+            reviewer: None,
             supervisor: None,
             memorizer: None,
         }));
@@ -195,15 +197,18 @@ pub(super) fn for_task(
             .or_else(|| resolve(&factory, &roles, "implementer")),
     )?;
     let supervisor = required(resolve(&factory, &roles, "supervisor"))?;
+    let reviewer = required(resolve(&factory, &roles, "reviewer"))?;
     let memorizer = required(resolve(&factory, &roles, "memorizer"))?;
     check_selection(&factory, &orchestrator)?;
     check_selection(&factory, &implementer)?;
     check_selection(&factory, &supervisor)?;
+    check_selection(&factory, &reviewer)?;
     check_selection(&factory, &memorizer)?;
     Ok(Some(TaskModels {
         implementer_override: chosen,
         orchestrator: Some(orchestrator),
         implementer: Some(implementer),
+        reviewer: Some(reviewer),
         supervisor: Some(supervisor),
         memorizer: Some(memorizer),
     }))
@@ -227,6 +232,7 @@ fn pin_legacy_tasks(tx: &Transaction<'_>, default: &ModelSelection) -> Result<()
         implementer_override: None,
         orchestrator: Some(default.clone()),
         implementer: Some(default.clone()),
+        reviewer: Some(default.clone()),
         supervisor: Some(default.clone()),
         memorizer: Some(default.clone()),
     };
@@ -311,7 +317,7 @@ mod tests {
         drop(store);
         let settings = Store::open(&path).unwrap().factory_models().unwrap();
         assert_eq!(settings.default_model, Some(first.clone()));
-        for role in ["orchestrator", "implementer", "supervisor", "memorizer"] {
+        for role in ["orchestrator", "implementer", "reviewer", "supervisor", "memorizer"] {
             assert_eq!(
                 resolve(&settings, &RoleModels::default(), role),
                 Some(first.clone())

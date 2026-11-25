@@ -58,6 +58,7 @@ impl Store {
         let archived:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1 AND json_extract(data,'$.final_scan_complete')=1)",[id.to_string()],|r|r.get(0))?;
         if latest != id.to_string()
             || busy
+            || super::validation::awaiting(tx, owner.id)?
             || !archived
             || closed(tx, command.session_root())?
             || super::controls::load(tx, owner.id)?.is_some_and(|c| c.state != PauseState::Released)

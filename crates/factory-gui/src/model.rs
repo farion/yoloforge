@@ -27,6 +27,7 @@ pub enum Page {
     Tasks,
     Questions,
     Sessions,
+    Reviewer,
     Orchestrator,
     Supervisor,
     Memorizer,
@@ -46,6 +47,7 @@ impl Page {
             Self::Tasks => icons::LIST_CHECKS,
             Self::Questions => icons::CHAT_CIRCLE_TEXT,
             Self::Sessions => icons::TERMINAL_WINDOW,
+            Self::Reviewer => icons::CLIPBOARD_TEXT,
             Self::Orchestrator => icons::FLOW_ARROW,
             Self::Supervisor => icons::EYE,
             Self::Memorizer => icons::BRAIN,
@@ -61,6 +63,7 @@ impl Page {
             Self::Tasks => crate::tr!("Aufgaben"),
             Self::Questions => crate::tr!("Fragen"),
             Self::Sessions => "Implementer",
+            Self::Reviewer => "Reviewer",
             Self::Orchestrator => "Orchestrator",
             Self::Supervisor => "Supervisor",
             Self::Memorizer => "Memorizer",
@@ -183,6 +186,12 @@ pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
     if t.draft {
         return crate::tr!("Entwurf");
     }
+    match t.status {
+        TicketState::Validating => return crate::tr!("In Validierung"),
+        TicketState::ReworkQueued => return crate::tr!("Nacharbeit hat Vorrang"),
+        TicketState::Blocked if validation_blocked(t) => return crate::tr!("Validierung blockiert"),
+        _ => {}
+    }
     let paused = s.projects.iter().any(|p| p.id == t.project_id && p.paused);
     if let Some(c) = task_command(s, t) {
         if c.state == CommandState::Pending && paused {
@@ -232,6 +241,7 @@ pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
         TicketState::Review => crate::tr!("Ergebnis vorhanden"),
         TicketState::Done => crate::tr!("Abgeschlossen"),
         TicketState::Cancelled => crate::tr!("Abgebrochen"),
+        TicketState::Validating | TicketState::ReworkQueued => unreachable!(),
     }
 }
 
@@ -334,7 +344,7 @@ pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
     if ticket.draft {
         return TaskBucket::Draft;
     }
-    if ticket.status == TicketState::Blocked {
+    if matches!(ticket.status, TicketState::Blocked | TicketState::Validating | TicketState::ReworkQueued) {
         return TaskBucket::Current;
     }
     let Some(command) = task_command(snapshot, ticket) else {
@@ -374,8 +384,15 @@ pub fn needs_answer(q: &Question) -> bool {
 
 pub fn retryable_task(snapshot: &Snapshot, ticket: &Ticket) -> bool {
     !ticket.draft && matches!(ticket.status, TicketState::InProgress | TicketState::Blocked)
-        && task_command(snapshot, ticket).is_some_and(|c| c.state == CommandState::Failed
-            && matches!(c.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit))
+        && task_command(snapshot, ticket).is_some_and(|c|
+            (c.state == CommandState::Failed
+                && matches!(c.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit))
+            || (c.kind == CommandKind::RunAgent && c.state == CommandState::Succeeded
+                && validation_blocked(ticket)))
+}
+
+pub fn validation_blocked(ticket: &Ticket) -> bool {
+    ticket.status == TicketState::Blocked && ticket.routing_note == "Reviewer: Validierung blockiert"
 }
 
 pub fn generic_question_title(title: &str) -> bool {
@@ -535,6 +552,7 @@ pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<Ru
                 || c.agent_spec.as_ref().is_some_and(|a| {
                     let owner = match a.role.as_str() {
                         "supervisor" => Page::Supervisor,
+                        "reviewer" => Page::Reviewer,
                         "memorizer" | "orchestrator-memory" => Page::Memorizer,
                         _ => Page::Orchestrator,
                     };
@@ -559,7 +577,7 @@ pub fn task_queue_counts(s: &Snapshot, project: ProjectId) -> (usize, usize) {
             return false;
         }
         match t.status {
-            TicketState::Backlog | TicketState::Ready => true,
+            TicketState::Backlog | TicketState::Ready | TicketState::ReworkQueued => true,
             TicketState::InProgress => task_command(s, t).is_some_and(|c|
                 c.state == CommandState::Pending || c.kind == CommandKind::PrepareWorkspace
                     && matches!(c.state, CommandState::Accepted | CommandState::Succeeded)),
@@ -758,6 +776,10 @@ pub fn session_title(s: &Snapshot, c: &RunnerCommand) -> String {
     if c.kind == CommandKind::PrepareWorkspace {
         return crate::tr!("Orchestrator-Vorbereitung").into();
     }
+    if let Some(ticket) = c.agent_spec.as_ref().and_then(|a| a.review_of)
+        .and_then(|id| s.tickets.iter().find(|t| t.id == id)) {
+        return task_summary(ticket);
+    }
     s.session_titles
         .get(&c.session_id())
         .map(|v| v.trim())
@@ -772,6 +794,7 @@ pub fn session_title(s: &Snapshot, c: &RunnerCommand) -> String {
                     "orchestrator" => Some(crate::tr!("Orchestrator-Auswertung")),
                     "orchestrator-question" => Some(crate::tr!("Orchestrator-Rückfragenauswertung")),
                     "memorizer" | "orchestrator-memory" => Some(crate::tr!("Memorizer-Wissensauswertung")),
+                    "reviewer" => Some(crate::tr!("Reviewer-Validierung")),
                     _ => None,
                 }
             })
@@ -788,6 +811,9 @@ pub fn session_title(s: &Snapshot, c: &RunnerCommand) -> String {
 }
 
 pub fn session_last_task<'a>(s: &'a Snapshot, c: &RunnerCommand) -> Option<&'a Ticket> {
+    if let Some(id) = c.agent_spec.as_ref().and_then(|a| a.review_of) {
+        return s.tickets.iter().find(|t| t.id == id);
+    }
     s.tickets
         .iter()
         .filter_map(|ticket| {

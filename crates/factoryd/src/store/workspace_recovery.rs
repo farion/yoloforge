@@ -171,7 +171,8 @@ pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
                     .execution_command
                     .map(|id| command(tx, id))
                     .transpose()?;
-                let succeeded = execution.as_ref().is_some_and(|c| c.state == CommandState::Succeeded
+                let succeeded = matches!(repair.status, TicketState::Done | TicketState::InProgress)
+                    && execution.as_ref().is_some_and(|c| c.state == CommandState::Succeeded
                     && matches!(&c.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Succeeded));
                 if repair.status == TicketState::Cancelled
                     || execution

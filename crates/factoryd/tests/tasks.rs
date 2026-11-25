@@ -298,10 +298,13 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
             },
         );
         s.scheduler_tick().unwrap();
-        assert!(
-            s.pending(runner).unwrap().is_empty(),
-            "Memory must wait for final archive"
-        );
+        prepare(&s, &s.pending(runner).unwrap()[0]);
+        s.scheduler_tick().unwrap();
+        let review = s.pending(runner).unwrap().pop().unwrap();
+        assert_eq!(review.agent_spec.as_ref().unwrap().role, "reviewer");
+        agent_reply(&s, &review, r#"{"action":"approve"}"#);
+        s.scheduler_tick().unwrap();
+        assert!(s.pending(runner).unwrap().is_empty(), "Memory must wait for final archive");
         s.report_archive(
             runner,
             work.id,
@@ -317,8 +320,6 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
             },
         )
         .unwrap();
-        s.scheduler_tick().unwrap();
-        prepare(&s, &s.pending(runner).unwrap()[0]);
         s.scheduler_tick().unwrap();
         let eval = s.pending(runner).unwrap()[0].clone();
         assert_eq!(
@@ -375,7 +376,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
         } else {
             assert!(notes.is_empty());
         }
-        assert_eq!(s.snapshot().unwrap().commands.len(), 4);
+        assert_eq!(s.snapshot().unwrap().commands.len(), 5);
         if output.contains("calculator implementation") {
             let old = notes[0].clone();
             s.save_task(SaveTask {
@@ -425,6 +426,10 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
                 },
             )
             .unwrap();
+            s.scheduler_tick().unwrap();
+            let review = s.pending(runner).unwrap().pop().unwrap();
+            assert_eq!(review.agent_spec.as_ref().unwrap().role, "reviewer");
+            agent_reply(&s, &review, r#"{"action":"approve"}"#);
             s.scheduler_tick().unwrap();
             let evaluation = s
                 .pending(runner)
@@ -695,6 +700,106 @@ fn prepare(s: &Store, c: &RunnerCommand) {
         },
     );
 }
+fn agent_reply(s: &Store, c: &RunnerCommand, text: &str) {
+    complete(s, c, CommandOutput::Agent { agent: AgentProgress {
+        session_id: c.session_id(), message_id: agent_message_id(c.id),
+        phase: AgentPhase::Succeeded, summary: text.into(),
+    }});
+}
+
+fn final_archive(s: &Store, c: &RunnerCommand) {
+    s.report_archive(c.runner_id, c.id, ReportArchive {
+        ownership_epoch: c.ownership_epoch,
+        batch: ArchiveBatch { session_id: c.session_id(), revision: 1,
+            captured_unix_ms: 1, final_scan_complete: true, messages: vec![] },
+    }).unwrap();
+}
+
+#[test]
+fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let s = Store::open(&path).unwrap();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Validation".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    s.set_session_limit(project.id, SetSessionLimit {
+        request_id: RequestId::new(), expected_revision: project.revision, max_sessions: 1,
+    }).unwrap();
+    configure_models(&s);
+    let create = |s: &Store, text: &str, priority| s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: text.into(),
+        description: text.into(), acceptance_criteria: String::new(), priority,
+    }).unwrap();
+    let intent = create(&s, "Implement all three steps", 1);
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let first = s.pending(runner).unwrap().pop().unwrap();
+    agent_reply(&s, &first, "I implemented step one.");
+    let current = |s: &Store, id| s.snapshot().unwrap().tickets.into_iter().find(|t| t.id == id).unwrap();
+    assert_eq!(current(&s, intent.id).status, TicketState::Validating);
+    let owner = s.snapshot().unwrap().streams.into_iter().find(|w| w.id == first.stream_id).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let review = s.pending(runner).unwrap().pop().unwrap();
+    let spec = review.agent_spec.as_ref().unwrap();
+    assert_eq!(spec.role, "reviewer");
+    assert_eq!(spec.review_of, Some(intent.id));
+    assert!(spec.read_only && spec.images.is_empty() && spec.files.is_empty());
+    assert!(spec.prompt.contains("Implement all three steps"));
+    assert!(spec.prompt.contains("I implemented step one."));
+    agent_reply(&s, &review, r#"{"action":"rework","followup":"Implement steps two and three."}"#);
+    s.scheduler_tick().unwrap();
+    assert_eq!(current(&s, intent.id).status, TicketState::ReworkQueued);
+    assert!(s.pending(runner).unwrap().is_empty(), "Do not resume before the final archive");
+    final_archive(&s, &first);
+    assert!(s.continue_agent(first.stream_id, ContinueAgent {
+        request_id: RequestId::new(), expected_revision: owner.revision,
+        previous_command_id: first.id, prompt: "Unrelated work".into(),
+    }).is_err(), "Only the queued Reviewer handoff may resume this session");
+    let fresh = create(&s, "A high-priority new intent", 3);
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    s.scheduler_tick().unwrap();
+    s.scheduler_tick().unwrap();
+    let pending = s.pending(runner).unwrap();
+    assert_eq!(pending.len(), 1);
+    let rework = &pending[0];
+    assert_eq!(rework.stream_id, first.stream_id);
+    assert_eq!(rework.session_id(), first.session_id());
+    assert_eq!(rework.agent_spec.as_ref().unwrap().continuation.as_ref().unwrap().previous_command_id, first.id);
+    assert!(rework.agent_spec.as_ref().unwrap().prompt.contains("Implement steps two and three."));
+    assert_eq!(current(&s, intent.id).execution_command, Some(rework.id));
+    assert_eq!(current(&s, fresh.id).execution_command, None);
+    agent_reply(&s, rework, "I implemented steps two and three.");
+    s.scheduler_tick().unwrap();
+    let reviewer = s.pending(runner).unwrap().into_iter().find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
+    let prompt = &reviewer.agent_spec.as_ref().unwrap().prompt;
+    assert!(prompt.contains("I implemented step one.") && prompt.contains("I implemented steps two and three."));
+    agent_reply(&s, &reviewer, "Not a valid verdict");
+    s.scheduler_tick().unwrap();
+    let blocked = current(&s, intent.id);
+    assert_eq!(blocked.status, TicketState::Blocked);
+    let retried = s.retry_task(intent.id, RetryTask {
+        request_id: RequestId::new(), expected_revision: blocked.revision, previous_command: rework.id,
+    }).unwrap();
+    assert_eq!(retried.status, TicketState::Validating);
+    assert_eq!(retried.execution_command, Some(rework.id), "Retry only the Reviewer, not the Implementer");
+    s.scheduler_tick().unwrap();
+    let new_review = s.pending(runner).unwrap().into_iter().find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
+    assert_ne!(new_review.id, reviewer.id);
+    assert!(s.snapshot().unwrap().commands.iter().any(|c| c.id == reviewer.id));
+    agent_reply(&s, &new_review, r#"{"action":"approve"}"#);
+    s.scheduler_tick().unwrap();
+    assert_eq!(current(&s, intent.id).status, TicketState::Done);
+    assert!(s.task_history(intent.id, None).unwrap().entries.iter().any(|e| e.message.contains("Nacharbeit")));
+}
+
 fn decide(s: &Store, c: &RunnerCommand, text: &str) {
     assert_eq!(c.agent_spec.as_ref().unwrap().role, "orchestrator");
     assert!(c.agent_spec.as_ref().unwrap().read_only);
@@ -729,11 +834,21 @@ fn route_new(s: &Store, task: TicketId) {
             .unwrap();
         if c.kind == CommandKind::PrepareWorkspace {
             prepare(s, c);
+        } else if c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer") {
+            agent_reply(s, c, r#"{"action":"approve"}"#);
         } else {
             decide(s, c, r#"{"action":"new","reason":"Independent task"}"#);
         }
     }
     panic!("routing did not assign task");
+}
+
+fn approve_review(s: &Store, runner: RunnerId) {
+    s.scheduler_tick().unwrap();
+    let review = s.pending(runner).unwrap().into_iter()
+        .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
+    agent_reply(s, &review, r#"{"action":"approve"}"#);
+    s.scheduler_tick().unwrap();
 }
 
 #[test]
@@ -872,6 +987,7 @@ fn archived_session_with_new_skill_grants_queues_and_sends_to_same_root() {
             final_scan_complete: true, messages: vec![],
         },
     }).unwrap();
+    approve_review(&store, runner);
     let owner = store.snapshot().unwrap().streams.into_iter()
         .find(|w| w.id == original.stream_id).unwrap();
     store.close_session(original.id, CloseSession {
@@ -1003,8 +1119,7 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
         },
     )
     .unwrap();
-    s.scheduler_tick().unwrap();
-    s.scheduler_tick().unwrap();
+    approve_review(&s, runner);
     let continued = s
         .pending(runner)
         .unwrap()
@@ -1062,7 +1177,7 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
     )
     .unwrap();
     let automatic = s.save_task(task("Add division", None)).unwrap();
-    s.scheduler_tick().unwrap();
+    approve_review(&s, runner);
     let routing = s
         .pending(runner)
         .unwrap()

@@ -112,7 +112,7 @@ impl Models {
                                 draft.accesses.clone_from(&saved.accesses);
                                 for model in [&mut draft.default_model, &mut draft.roles.orchestrator,
                                     &mut draft.roles.implementer, &mut draft.roles.supervisor,
-                                    &mut draft.roles.memorizer] {
+                                    &mut draft.roles.memorizer, &mut draft.roles.reviewer] {
                                     if model.as_ref().is_some_and(|model| model.access_id == id) {
                                         *model = None;
                                     }
@@ -321,6 +321,7 @@ fn roles(ui: &mut egui::Ui, scope: &str, catalog: &[ModelAccess], models: &mut R
     for (name, selection) in [
         ("Orchestrator", &mut models.orchestrator),
         ("Implementer", &mut models.implementer),
+        ("Reviewer", &mut models.reviewer),
         ("Supervisor", &mut models.supervisor),
         ("Memorizer", &mut models.memorizer),
     ] {
@@ -1291,7 +1292,7 @@ mod tests {
     }
 
     #[test]
-    fn memorizer_model_selection_is_visible_in_factory_and_project_settings() {
+    fn reviewer_and_memorizer_model_selections_are_visible_in_both_settings() {
         let mut app = crate::tests::fixture();
         seed(&mut app, true);
         let project = app.project().unwrap().id;
@@ -1311,9 +1312,11 @@ mod tests {
             }, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| pane.show(ui, &mut app, 730.0));
             });
-            assert!(output.shapes.iter().any(|s| matches!(
-                &s.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == "Memorizer"
-            )));
+            for role in ["Reviewer", "Memorizer"] {
+                assert!(output.shapes.iter().any(|s| matches!(
+                    &s.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == role
+                )));
+            }
         }
     }
 

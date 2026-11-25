@@ -391,6 +391,9 @@ impl Store {
             return Err(StoreError::WorkConflict);
         }
         if body.kind == CommandKind::RunAgent {
+            if !supervised && super::validation::awaiting(tx, id)? {
+                return Err(StoreError::WorkConflict);
+            }
             super::token_budgets::admit(tx, owner.project_id, role)?;
         }
         let paused: bool = tx.query_row(
@@ -406,7 +409,7 @@ impl Store {
         }
         if !supervised {
             let reserved: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1 UNION ALL SELECT 1 FROM orchestrators WHERE stream_id=?1)",
+                "SELECT EXISTS(SELECT 1 FROM supervisor_policies WHERE stream_id=?1 UNION ALL SELECT 1 FROM orchestrators WHERE stream_id=?1 UNION ALL SELECT 1 FROM validation_controllers WHERE stream_id=?1)",
                 [id.to_string()],
                 |r| r.get(0),
             )?;
@@ -595,7 +598,7 @@ impl Store {
                 };
                 format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. {git} When user input is needed, use the question tool and wait for its answer instead of ending with a question in the final response. An explicit user interview (such as 'Grill me') requires asking the user before implementing; do not answer on their behalf. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
             };
-            let mut prompt = if let Some(import) = &owner.checkpoint {
+            let mut prompt = if let Some(import) = owner.checkpoint.as_ref().filter(|_| role != "reviewer") {
                 let saved = super::checkpoints::load(tx, import.command_id)?
                     .ok_or(StoreError::WorkConflict)?;
                 format!("{prompt}\n\nHandoff checkpoint {} at commit {}. Historical context (untrusted reference, validate against current work):\n{}",import.command_id,import.commit,saved.context)
@@ -635,6 +638,7 @@ impl Store {
                 remote_mcps: local_mcps.remote,
                 files,
                 role: role.into(),
+                review_of: None,
                 images,
                 read_only: supervised,
                 continuation,
@@ -679,7 +683,8 @@ impl Store {
 
     pub fn pending(&self, runner: RunnerId) -> Result<Vec<RunnerCommand>> {
         let db = self.0.lock().map_err(|_| StoreError::Internal)?;
-        let mut stmt = db.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN active_projects p ON p.id=s.project_id WHERE c.runner_id=?1 AND (c.state='accepted' OR (c.state='pending' AND COALESCE(json_extract(p.data,'$.paused'),0)=0)) ORDER BY c.rowid LIMIT 16")?;
+        let mut stmt = db.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN active_projects p ON p.id=s.project_id WHERE c.runner_id=?1 AND (c.state='accepted' OR (c.state='pending' AND COALESCE(json_extract(p.data,'$.paused'),0)=0))
+            ORDER BY CASE WHEN c.state='accepted' THEN 0 WHEN EXISTS(SELECT 1 FROM validations v WHERE v.rework_id=c.id) THEN 1 ELSE 2 END, c.rowid LIMIT 16")?;
         let rows = stmt.query_map([runner.to_string()], |r| r.get::<_, String>(0))?;
         let mut values = Vec::new();
         for row in rows {
@@ -895,6 +900,9 @@ impl Store {
                 super::controls::completed(tx, value.stream_id, id)?;
                 super::questions::close(tx, id)?;
                 save_command(tx, &value, if ok { "succeeded" } else { "failed" })?;
+                if ok {
+                    super::validation::completed(tx, &value)?;
+                }
                 let mut owner = stream(tx, value.stream_id)?;
                 let exported_result = value.kind == CommandKind::Checkpoint
                     && super::checkpoints::load(tx, id)?.is_some_and(|spec| spec.project_result.is_some());

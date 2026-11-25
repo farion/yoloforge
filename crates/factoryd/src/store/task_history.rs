@@ -18,6 +18,7 @@ impl Store {
                 UNION SELECT agent_id FROM scheduler_runs WHERE ticket_id=?1 AND agent_id IS NOT NULL
                  UNION SELECT json_extract(data,'$.execution_command') FROM tickets WHERE id=?1
                  UNION SELECT json_extract(payload,'$.previous_command') FROM events WHERE aggregate_id=?1 AND kind='task.retried'
+                 UNION SELECT source_id FROM validations WHERE ticket_id=?1
              ), related(id) AS (
                 SELECT id FROM assigned_commands WHERE id IS NOT NULL
                 UNION SELECT id FROM questions WHERE command_id IN (SELECT id FROM assigned_commands)
@@ -27,7 +28,8 @@ impl Store {
              WHERE aggregate_id IN (SELECT id FROM related) AND sequence<?2
                AND kind IN ('ticket.created','ticket.updated','task.saved','task.edit_started',
                     'task.routing','task.retried','scheduler.blocked','command.created','command.updated',
-                   'question.created','question.updated')
+                    'question.created','question.updated','validation.rework_queued',
+                    'validation.failed','validation.uncertain','validation.limit')
              ORDER BY sequence DESC LIMIT 101",
         )?;
         let rows = statement.query_map(
@@ -64,6 +66,10 @@ fn summarize(kind: &str, data: &serde_json::Value) -> Option<(String, TaskHistor
         "task.saved" => line("Aufgabe eingereiht", Info),
         "task.retried" => line("Intent erneut eingereiht", Info),
         "task.edit_started" => line("Aufgabe zur Bearbeitung geöffnet", Info),
+        "validation.rework_queued" => line("Reviewer hat Nacharbeit mit Vorrang eingereiht", Warning),
+        "validation.failed" => line("Reviewer konnte kein gültiges Urteil abgeben", Error),
+        "validation.uncertain" => line("Reviewer konnte die Erfüllung anhand des Textes nicht beurteilen", Warning),
+        "validation.limit" => line("Limit für automatische Nacharbeit erreicht", Warning),
         "task.routing" => {
             let note = data["routing_note"].as_str()?;
             line(note, task_routing_level(note))
@@ -74,6 +80,7 @@ fn summarize(kind: &str, data: &serde_json::Value) -> Option<(String, TaskHistor
         "ticket.updated" => match data["status"].as_str()? {
             "done" => line("Aufgabe abgeschlossen", Success),
             "review" => line("Ergebnis liegt vor", Success),
+            "validating" => line("Intent wartet auf Textprüfung durch den Reviewer", Info),
             "blocked" => line("Aufgabe blockiert", Error),
             "cancelled" => line("Aufgabe abgebrochen", Warning),
             _ => line("Aufgabe aktualisiert", Info),

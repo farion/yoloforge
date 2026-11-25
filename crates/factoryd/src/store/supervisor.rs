@@ -287,6 +287,9 @@ fn candidate(
             continue;
         }
         let stream = super::work::stream(tx, c.stream_id)?;
+        if super::validation::awaiting(tx, stream.id)? {
+            continue;
+        }
         if !terminable
             && super::controls::load(tx, stream.id)?
                 .is_some_and(|c| c.state != PauseState::Released)

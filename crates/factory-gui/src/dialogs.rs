@@ -432,7 +432,7 @@ impl Dialog {
                  if let Self::ModelDefaultsConfigured { model } = self {
                      ui.label(crate::tr!("Die Factory hat deine Default-Modelle automatisch eingerichtet."));
                      ui.label(crate::tr!("Standardmodell: {model}", model = model));
-                     ui.label(crate::tr!("Orchestrator, Implementer und Supervisor verwenden dieses Modell, solange kein eigenes Rollenmodell gewählt ist."));
+                     ui.label(crate::tr!("Alle Rollen verwenden dieses Modell, solange kein eigenes Rollenmodell gewählt ist."));
                      ui.add_space(8.0);
                      ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                          if design::accent_button(ui, egui::Button::new(crate::tr!("Zu den Default-Modellen")), true, BLUE.gamma_multiply(0.7)).clicked() {

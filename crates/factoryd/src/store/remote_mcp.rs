@@ -262,6 +262,7 @@ mod tests {
                 files: vec![],
                 images: vec![],
                 role: String::new(),
+                review_of: None,
                 read_only: false,
                 continuation: None,
                 prompt: "Read docs".into(),

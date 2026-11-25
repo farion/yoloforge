@@ -325,11 +325,16 @@ fn completed_repair_retries_original_without_requiring_manual_ticket_completion(
         .unwrap();
     decision(&s, worker, "Verified safe repair completed");
     s.scheduler_tick().unwrap();
+    let reviewing = s.snapshot().unwrap();
+    assert_eq!(reviewing.tickets.iter().find(|t| t.id == repair).unwrap().status, TicketState::Validating);
+    let reviewer = reviewing.commands.iter().find(|c| c.state == CommandState::Pending
+        && c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
+    decision(&s, reviewer, r#"{"action":"approve"}"#);
     s.scheduler_tick().unwrap();
     let snap = s.snapshot().unwrap();
     assert_eq!(
         snap.tickets.iter().find(|t| t.id == repair).unwrap().status,
-        TicketState::InProgress
+        TicketState::Done
     );
     assert_eq!(
         snap.commands

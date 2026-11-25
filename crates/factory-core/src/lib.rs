@@ -564,6 +564,9 @@ pub struct AgentSpec {
     pub files: Vec<PromptFile>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
+    /// Intent evaluated by a standalone text Reviewer session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_of: Option<TicketId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<PromptImage>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -1009,6 +1012,8 @@ pub enum TicketState {
     InProgress,
     Blocked,
     Review,
+    Validating,
+    ReworkQueued,
     Done,
     Cancelled,
 }

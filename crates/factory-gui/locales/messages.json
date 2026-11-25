@@ -1,4 +1,10 @@
 {
+  "Validierung": ["Validierung", "Validation"],
+  "In Validierung": ["In Validierung", "In validation"],
+  "Validierung blockiert": ["Validierung blockiert", "Validation blocked"],
+  "Nacharbeit hat Vorrang": ["Nacharbeit hat Vorrang", "Priority rework"],
+  "Reviewer-Validierung": ["Reviewer-Validierung", "Reviewer validation"],
+  "Textprüfung vor dem Ergebnis": ["Textprüfung vor dem Ergebnis", "Text review before results"],
   "1 Lesezugriff": ["1 Lesezugriff", "1 read"],
   "{} Lesezugriffe": ["{} Lesezugriffe", "{} reads"],
   "1 Befehl": ["1 Befehl", "1 command"],
@@ -756,9 +762,9 @@
     "Default Model: {model}",
     "Default Model: {model}"
   ],
-  "Orchestrator, Implementer und Supervisor verwenden dieses Modell, solange kein eigenes Rollenmodell gewählt ist.": [
-    "Orchestrator, Implementer und Supervisor verwenden dieses Model, solange kein eigenes Rollenmodel gewählt ist.",
-    "Orchestrator, Implementer and Supervisor use this Model unless a role-specific Model is selected."
+  "Alle Rollen verwenden dieses Modell, solange kein eigenes Rollenmodell gewählt ist.": [
+    "Alle Rollen verwenden dieses Model, solange kein eigenes Rollenmodel gewählt ist.",
+    "All roles use this Model unless a role-specific Model is selected."
   ],
   "Zu den Default-Modellen": [
     "Zu den Default Models",

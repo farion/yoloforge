@@ -137,6 +137,8 @@ impl KeyModelProvider {
 pub struct RoleModels {
     pub orchestrator: Option<ModelSelection>,
     pub implementer: Option<ModelSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<ModelSelection>,
     pub supervisor: Option<ModelSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memorizer: Option<ModelSelection>,
@@ -189,6 +191,8 @@ pub struct TaskModels {
     pub implementer_override: Option<ModelSelection>,
     pub orchestrator: Option<ModelSelection>,
     pub implementer: Option<ModelSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<ModelSelection>,
     #[serde(default)]
     pub supervisor: Option<ModelSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
