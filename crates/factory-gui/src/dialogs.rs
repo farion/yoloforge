@@ -686,6 +686,12 @@ fn german_count(value: u128) -> String {
 }
 
 impl TaskDialog {
+    fn has_prompt_content(&self) -> bool {
+        !self.draft.prompt.trim().is_empty()
+            || !self.draft.images.is_empty()
+            || !self.draft.files.is_empty()
+    }
+
     pub(crate) fn offline(draft: TaskDraft, id: RequestId) -> Box<Self> {
         let Dialog::Task(mut task) = Dialog::task(draft.server.clone(), draft.project, None) else { unreachable!() };
         task.draft = draft;
@@ -698,8 +704,8 @@ impl TaskDialog {
             app.notice(crate::tr!("Bestehende Serveraufgaben können erst nach Wiederverbindung geändert werden."));
             return;
         }
-        if self.draft.prompt.len() > 12000 || (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty()) {
-            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+        if !self.has_prompt_content() {
+            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben.").into());
             return;
         }
         if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
@@ -758,8 +764,12 @@ impl TaskDialog {
                 _ => {},
             }
         }
+        let editor_height = (ui.ctx().content_rect().height() * 0.35).clamp(100.0, 280.0);
         egui::ScrollArea::vertical().id_salt(("session-prompt-editor", root))
-            .max_height((ui.ctx().content_rect().height() * 0.35).clamp(100.0, 280.0))
+            .max_height(editor_height)
+            // Measure against the editor budget, not the bottom panel's cached
+            // height. Auto-shrink still fits short prompts to their content.
+            .min_scrolled_height(editor_height)
             .auto_shrink([false, true])
             .show(ui, |ui| self.show_body(ui, app));
         ui.horizontal(|ui| {
@@ -769,9 +779,8 @@ impl TaskDialog {
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-prompt-submit", root)), submit.rect));
                 if submit.clicked() {
-                    if self.draft.prompt.len() > 12000 ||
-                        (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty()) {
-                        self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+                    if !self.has_prompt_content() {
+                        self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben.").into());
                     } else if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
                         self.error = Some(error.into());
                     } else {
@@ -1268,10 +1277,8 @@ impl TaskDialog {
             self.error = Some(crate::tr!("Die zugeordnete Session ist nicht mehr verfügbar. Bitte eine offene Session oder Auto Runner wählen.").into());
             return;
         }
-        if self.draft.prompt.len() > 12000
-            || (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty())
-        {
-            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+        if !self.has_prompt_content() {
+            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben.").into());
             return;
         }
         if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {

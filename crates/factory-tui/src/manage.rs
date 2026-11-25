@@ -701,6 +701,7 @@ impl Dialog {
         if self.state != State::Editing {
             return;
         }
+        let is_task = self.is_task();
         let f = &mut self.fields[self.focus];
         if f.selectable {
             return;
@@ -709,7 +710,7 @@ impl Dialog {
             .chars()
             .filter(|c| !c.is_control() || (f.multiline && matches!(c, '\n' | '\t')))
             .collect();
-        if f.text.len() + text.len() <= 32768 {
+        if is_task || f.text.len() + text.len() <= 32768 {
             f.text.insert_str(f.cursor, &text);
             f.cursor += text.len();
         }
@@ -1538,6 +1539,18 @@ mod tests {
         d.response(first.id(), Ok(()));
         assert!(d.task_submitted());
     }
+    #[test]
+    fn task_editor_submits_long_pasted_prompt_without_truncation() {
+        let s = snapshot();
+        let mut d = Dialog::new(Target::NewTicket(s.projects[0].id), &s).unwrap();
+        let prompt = format!("{}Last requirement.", "Details: ä, ö, ü.\n".repeat(3_000));
+        d.paste(&prompt);
+        let Request::Task(body) = send(&mut d, &s) else {
+            panic!("expected task submission");
+        };
+        assert_eq!(body.prompt, prompt);
+    }
+
     #[test]
     fn prompt_editor_removes_attachments_and_moves_across_unicode_lines() {
         let s = snapshot();

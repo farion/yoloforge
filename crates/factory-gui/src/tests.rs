@@ -502,7 +502,8 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     }
     let target = app.clipboard_image_target().unwrap();
     assert_eq!(target, app.session_prompts[&root].id);
-    app.session_prompts.get_mut(&root).unwrap().draft.prompt = "Bitte direkt hier fortsetzen".into();
+    let prompt = format!("Bitte direkt hier fortsetzen\n{}Letzte Anforderung.", "Details: ä, ö, ü.\n".repeat(3_000));
+    app.session_prompts.get_mut(&root).unwrap().draft.prompt = prompt.clone();
     let file = PromptFile::from_bytes("notes.txt".into(), b"Session attachment").unwrap();
     app.backend.emit_for_test(crate::backend::Event::Attachment(target, Ok(crate::backend::InputAttachment::File(file.clone()))));
     app.receive();
@@ -530,7 +531,7 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     let body: PromptSession = serde_json::from_value(pending.body.clone()).unwrap();
     assert_eq!(body.request_id, target);
     assert_eq!(body.files, vec![file]);
-    assert_eq!(body.prompt, "Bitte direkt hier fortsetzen");
+    assert_eq!(body.prompt, prompt);
     assert_eq!(app.clipboard_image_target(), None);
     // A restored outbox entry has no live request after restarting the GUI.
     app.in_flight.clear();

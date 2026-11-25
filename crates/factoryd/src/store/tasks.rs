@@ -175,7 +175,12 @@ impl Store {
             Fingerprint::Extended(&submission)
         };
          let result = self.mutate(b.request_id,if direct { "session.prompt" } else if legacy { "task.save" } else if implementer.is_some() { "task.submit_with_model" } else { "task.submit" },&fingerprint,|tx|{
-            if (b.prompt.trim().is_empty() && b.images.is_empty() && submission.files.is_empty()) || b.prompt.len()>12000 || b.prompt.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\r'|'\t')){return Err(StoreError::Invalid("Aufgabe braucht Text oder Anhänge; Text maximal 12000 UTF-8 Bytes"));}
+            if b.prompt.trim().is_empty() && b.images.is_empty() && submission.files.is_empty() {
+                return Err(StoreError::Invalid("Intent braucht Text oder Anhänge"));
+            }
+            if b.prompt.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+                return Err(StoreError::Invalid("Prompt enthält ungültige Steuerzeichen"));
+            }
             validate_images(&b.images).map_err(StoreError::Invalid)?;
             validate_files(&submission.files).map_err(StoreError::Invalid)?;
             let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",[b.project_id.to_string()],|r|r.get(0))?;if !exists{return Err(StoreError::NotFound);}

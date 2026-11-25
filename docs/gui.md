@@ -484,8 +484,8 @@ Vorrang. Details und festgelegte Quellversion: `vendor/sdl3-sys/YOLOFORGE-PATCH.
 - Bilder und Dateien über Dateiauswahl oder Drag-and-drop hinzufügen; Bilder auch
   aus der Zwischenablage. Anhänge können vor dem Senden entfernt werden.
 - Grenzen: vier Bilder mit zusammen 4 MiB sowie 16 weitere Dateien mit zusammen
-  4 MiB. Der Prompt hat höchstens 12000 UTF-8-Bytes. Grenzen werden angezeigt,
-  nicht durch stilles Abschneiden umgangen.
+  4 MiB. Factory hat keine separate Längenbegrenzung für den Prompt und kürzt ihn
+  nicht. Die Größenlimits für HTTP-Anfragen und das Kontextlimit des Modells gelten weiterhin.
 - Vorschauen dekodieren im Hintergrund mit Größen-/Speichergrenzen. Die Anzeige
   ist eine skalierte Vorschau, kein Ersatz für die unveränderten Originalbytes.
 

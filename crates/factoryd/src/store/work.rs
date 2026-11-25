@@ -444,7 +444,6 @@ impl Store {
                 .as_ref()
                 .ok_or(StoreError::Invalid("Agent prompt required"))?;
             if prompt.trim().is_empty()
-                || prompt.len() > 16384
                 || prompt
                     .chars()
                     .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
