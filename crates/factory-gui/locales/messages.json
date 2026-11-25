@@ -1,4 +1,17 @@
 {
+  "1 Lesezugriff": ["1 Lesezugriff", "1 read"],
+  "{} Lesezugriffe": ["{} Lesezugriffe", "{} reads"],
+  "1 Befehl": ["1 Befehl", "1 command"],
+  "{} Befehle": ["{} Befehle", "{} commands"],
+  "1 Änderung": ["1 Änderung", "1 edit"],
+  "{} Änderungen": ["{} Änderungen", "{} edits"],
+  "1 Tool": ["1 Tool", "1 tool"],
+  "{} Tools": ["{} Tools", "{} tools"],
+  "1 Anweisung": ["1 Anweisung", "1 instruction"],
+  "{} Anweisungen": ["{} Anweisungen", "{} instructions"],
+  "Anweisung": ["Anweisung", "Instruction"],
+  "Aktivität aufklappen": ["Aktivität aufklappen", "Expand activity"],
+  "Aktivität einklappen": ["Aktivität einklappen", "Collapse activity"],
   "Gespeichertes Zugangstoken konnte nicht gelesen werden.": ["Gespeichertes Zugangstoken konnte nicht gelesen werden.", "Could not read the saved access token."],
   "Verbindung zur Factory übers Internet": ["Verbindung zur Factory übers Internet", "Factory connection over the internet"],
   "Intent anzeigen": ["Intent anzeigen", "View intent"],
@@ -1182,6 +1195,110 @@
   "Lokaler Pfad": [
     "Lokaler Pfad",
     "Local path"
+  ],
+  "Projektquelle": [
+    "Projektquelle",
+    "Project source"
+  ],
+  "Factory-verwaltet": [
+    "Factory-verwaltet",
+    "Factory-managed"
+  ],
+  "Lokaler Ordner": [
+    "Lokaler Ordner",
+    "Local folder"
+  ],
+  "Pfad auf dem Runner": [
+    "Pfad auf dem Runner",
+    "Path on runner"
+  ],
+  "/srv/projekte/mein-projekt": [
+    "/srv/projekte/mein-projekt",
+    "/srv/projects/my-project"
+  ],
+  "Git-Repository": [
+    "Git-Repository",
+    "Git repository"
+  ],
+  "Das Repository wird vom ausgewählten Runner verwaltet.": [
+    "Das Repository wird vom ausgewählten Runner verwaltet.",
+    "The repository is managed by the selected runner."
+  ],
+  "Die Projektquelle ist nach dem Anlegen von Workspaces festgeschrieben.": [
+    "Die Projektquelle ist nach dem Anlegen von Workspaces festgeschrieben.",
+    "The project source is fixed after workspaces have been created."
+  ],
+  "Bitte einen absoluten Pfad auf dem Runner angeben.": [
+    "Bitte einen absoluten Pfad auf dem Runner angeben.",
+    "Enter an absolute path on the runner."
+  ],
+  "Bitte eine Git-Repository-URL angeben.": [
+    "Bitte eine Git-Repository-URL angeben.",
+    "Enter a Git repository URL."
+  ],
+  "Bitte eine gültige Projektquelle auswählen.": [
+    "Bitte eine gültige Projektquelle auswählen.",
+    "Select a valid project source."
+  ],
+  "Bitte einen gültigen Basisbranch angeben.": [
+    "Bitte einen gültigen Basisbranch angeben.",
+    "Enter a valid base branch."
+  ],
+  "Lokale Spiegelkopie": [
+    "Lokale Spiegelkopie",
+    "Local mirror"
+  ],
+  "Jeder Desktop kann einen eigenen Checkout des bestätigten Factory-Projektstands erhalten.": [
+    "Jeder Desktop kann einen eigenen Checkout des bestätigten Factory-Projektstands erhalten.",
+    "Each desktop can receive its own checkout of the confirmed Factory project state."
+  ],
+  "Lokale Spiegelkopien sind nur für Factory-verwaltete Projekte verfügbar.": [
+    "Lokale Spiegelkopien sind nur für Factory-verwaltete Projekte verfügbar.",
+    "Local mirrors are only available for Factory-managed projects."
+  ],
+  "Auf diesem Desktop ist kein lokaler Runner eingerichtet.": [
+    "Auf diesem Desktop ist kein lokaler Runner eingerichtet.",
+    "No local runner is configured on this desktop."
+  ],
+  "Lokaler Runner": [
+    "Lokaler Runner",
+    "Local runner"
+  ],
+  "Lokaler Testordner": [
+    "Lokaler Testordner",
+    "Local test folder"
+  ],
+  "/pfad/zur/testkopie": [
+    "/pfad/zur/testkopie",
+    "/path/to/test-copy"
+  ],
+  "Testordner auswählen": [
+    "Testordner auswählen",
+    "Select test folder"
+  ],
+  "Leer speichern entfernt die Spiegelkopie. Lokale Änderungen werden nie überschrieben.": [
+    "Leer speichern entfernt die Spiegelkopie. Lokale Änderungen werden nie überschrieben.",
+    "Saving an empty path removes the mirror. Local changes are never overwritten."
+  ],
+  "Spiegelung wartet auf den lokalen Runner.": [
+    "Spiegelung wartet auf den lokalen Runner.",
+    "Mirror sync is waiting for the local runner."
+  ],
+  "Spiegelung läuft.": [
+    "Spiegelung läuft.",
+    "Mirror sync is running."
+  ],
+  "Spiegelung zuletzt erfolgreich bestätigt.": [
+    "Spiegelung zuletzt erfolgreich bestätigt.",
+    "Mirror sync was last confirmed successfully."
+  ],
+  "Spiegelung ist blockiert. Details stehen in der Diagnose.": [
+    "Spiegelung ist blockiert. Details stehen in der Diagnose.",
+    "Mirror sync is blocked. Details are available in diagnostics."
+  ],
+  "Spiegelung wird nach dem nächsten bestätigten Projektstand eingeplant.": [
+    "Spiegelung wird nach dem nächsten bestätigten Projektstand eingeplant.",
+    "Mirror sync will be scheduled after the next confirmed project state."
   ],
   "Projektordner auswählen": [
     "Projektordner auswählen",

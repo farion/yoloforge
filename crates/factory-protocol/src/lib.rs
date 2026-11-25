@@ -488,6 +488,15 @@ pub struct UpdateProject {
     pub repository: Option<String>,
     pub base_branch: Option<String>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetProjectMirror {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub runner_id: RunnerId,
+    /// Empty removes this runner's mirror.
+    pub path: String,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

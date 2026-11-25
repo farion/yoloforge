@@ -336,6 +336,10 @@ nur der aktuell verbundene Server dargestellt, kein unbekanntes Servernetzwerk.
 
 Aufgaben-, Session- und Benachrichtigungslinks öffnen das konkrete Ziel.
 OpenCode-Ansichten sind zusätzliche, wiederverwendete Tabs im Hauptfenster.
+Aufeinanderfolgende Tool-Aufrufe werden mit Zählern zusammengefasst. `+` klappt die
+Gruppe auf, `-` schließt sie wieder; geöffnet bleibt jeder Aufruf ein eigener Block.
+Unter abgeschlossenen Antworten stehen Modell, Dauer und Ausgabetokens pro Sekunde,
+soweit die Session diese Angaben liefert.
 Ihre linke Sidebar ist standardmäßig 500 pt breit und bis auf 80 % der
 Fensterbreite verstellbar. Sie zeigt ausschließlich Aufgaben und Fragen der
 jeweiligen Session, einschließlich Folgeausführungen: älteste Ausführung zuerst, ihre
@@ -358,18 +362,34 @@ bleiben in den jeweiligen Details zugänglich.
 ### Projekte
 
 **Neues Projekt …** und **Projekteinstellungen → Allgemein** zeigen Name,
-Projektkürzel und lokalen Pfad. Der Pfad kann
-eingetippt oder über den Ordnerdialog gewählt werden.
-Bei einem bestehenden Git-Repository wird der ausgecheckte Branch übernommen.
-Ist der Ordner noch nicht vorhanden, kann der Runner ihn beim ersten
-Arbeitsbereich mit `main` anlegen. Bestehende Ordner ohne Git-Repository werden
-nicht verändert. Der ausführende Runner muss den angegebenen Pfad erreichen können.
+Projektkürzel und Projektquelle. Zur Auswahl stehen:
+
+- **Factory-verwaltet** für ein neues, vom ausgewählten Runner verwaltetes
+  Repository,
+- **Lokaler Ordner** mit Eingabe oder Ordnerauswahl auf dem GUI-Gerät,
+- **Pfad auf dem Runner** mit absolutem Runner-Pfad und Basisbranch,
+- **Git-Repository** mit Repository-URL und Basisbranch.
+
+Bei einem vorhandenen lokalen Git-Repository wird der ausgecheckte Branch
+übernommen. Bestehende lokale Ordner ohne Git-Repository werden nicht verändert.
+Runner-Pfade werden nicht auf dem GUI-Gerät geöffnet oder geprüft. Git-Zugänge
+müssen auf dem ausführenden Runner vorhanden sein; Zugangsdaten gehören nicht
+in die Repository-URL.
 
 Die Runner-Zuordnung steht bei neuen Projekten auf **Automatisch** und lässt
 sich im Erstellungsdialog oder später unter **Projekteinstellungen →
 Runner-Zuordnung** ändern. Änderungen betreffen neue Zuweisungen; bestehende
-Arbeitsbereiche behalten ihren Runner. Der Pfad lässt sich
-ändern, solange das Projekt noch keine Arbeitsbereiche hat.
+Arbeitsbereiche behalten ihren Runner. Die Projektquelle lässt sich ändern,
+solange das Projekt noch keine Arbeitsbereiche hat.
+
+Factory-verwaltete Projekte bieten zusätzlich **Projekteinstellungen → Lokale
+Spiegelkopie**. Dort wird für einen lokalen Desktop-Runner ein absoluter
+Testordner registriert oder durch Leerspeichern entfernt. Die Ansicht zeigt,
+ob die Spiegelung wartet, läuft, zuletzt bestätigt wurde oder wegen lokaler
+Änderungen blockiert ist. Jeder Desktop kann einen eigenen Pfad registrieren;
+die Factory aktualisiert erreichbare Spiegel nach bestätigten Ergebnissen und
+holt ausgeschaltete Geräte nach ihrer Wiederverbindung nach. Lokale Änderungen
+werden nicht überschrieben und technische Fehler bleiben in der Diagnose.
 
 ### Aufgaben
 

@@ -44,6 +44,12 @@ späteren Benutzeränderungen. Die verwaltete Basis wird per Git-CAS fortgeschri
 URL-Imports ohne lokalen Zielordner und explizite Repository-Bindings nutzen
 weiterhin den separaten Integrationsablauf.
 
+Factory-verwaltete Projekte verwenden denselben unveränderlichen Snapshot- und
+CAS-Mechanismus direkt auf ihrem verwalteten Basisbranch. Ihr erfolgreicher
+Stand wird anschließend als verifizierter Projekt-Checkpoint exportiert. Damit
+können Folgeaufträge und registrierte lokale Spiegelkopien denselben
+maßgeblichen Stand beziehen, ohne Git-Hosting oder ein gemeinsames Dateisystem.
+
 Für bereits vor dieser Funktion abgeschlossene Aufgaben existiert die
 Wartungsoption `factory-runner --publish-result COMMAND_ID` mit den bisherigen
 Runner-/Journal-/Workspace-Argumenten und einem Operator-Token. Der Runner muss

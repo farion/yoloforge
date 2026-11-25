@@ -1001,7 +1001,7 @@ fn project_create_and_edit_render_basic_fields_and_automatic_runner_default() {
         for shape in &output.shapes {
             shape_text(&shape.shape, &mut text);
         }
-        for label in ["Name", "Projektkürzel", "Lokaler Pfad",
+        for label in ["Name", "Projektkürzel", "Projektquelle", "Factory-verwaltet",
             if project.is_none() { "Projekt anlegen" } else { "Speichern" }] {
             assert!(text.iter().any(|text| text == label), "{text:?}");
         }
@@ -1009,12 +1009,10 @@ fn project_create_and_edit_render_basic_fields_and_automatic_runner_default() {
             "Die Runner-Zuordnung erfolgt automatisch."] {
             assert!(!text.iter().any(|text| text.contains(hidden)), "{text:?}");
         }
-        let [name, key, path, folder] = ctx.data_mut(|d| {
-            d.get_temp::<[egui::Rect; 4]>(egui::Id::new("test-project-field-rects"))
+        let [name, key] = ctx.data_mut(|d| {
+            d.get_temp::<[egui::Rect; 2]>(egui::Id::new("test-project-basic-field-rects"))
         }).unwrap();
         assert!((name.right() - key.right()).abs() <= 1.0);
-        assert!((name.right() - folder.right()).abs() <= 1.0, "{name:?} vs {folder:?}");
-        assert!((path.center().y - folder.center().y).abs() <= 1.0);
         assert_eq!(text.iter().any(|text| text == "Runner-Zuordnung"), project.is_none());
         if project.is_none() {
             let runner_select = ctx.data_mut(|d| {
@@ -5142,7 +5140,8 @@ fn opencode_points_only_show_while_working_and_archived_errors_are_readable() {
     ]);
     let mut text = vec![];
     for shape in frame(&mut app).shapes { shape_text(&shape.shape, &mut text); }
-    assert!(text.iter().any(|s| s.starts_with("$ patch") && s.contains("läuft")), "{text:?}");
+    assert!(text.iter().any(|s| s == &format!("+ {}", crate::tr!("1 Änderung"))), "{text:?}");
+    assert!(!text.iter().any(|s| s.starts_with("$ patch")), "{text:?}");
     assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(indicator)).is_some());
     app.tabs[0].archives.get_mut(&command).unwrap().extend([
         message(4, json!({"id":"empty","type":"assistant","content":[]})),

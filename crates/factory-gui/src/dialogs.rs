@@ -1985,6 +1985,9 @@ impl FormDialog {
     }
 
     pub(crate) fn settings_payload(&self, app: &App) -> Result<Value, String> {
+        if self.path.ends_with("/mirror") && self.folder_picker.is_some() {
+            return Err(crate::tr!("Die Ordnerauswahl ist noch geöffnet.").into());
+        }
         if self.is_project_editor() {
             if self.logo_picker.busy() {
                 return Err(crate::tr!("Die Bildauswahl ist noch geöffnet.").into());
@@ -2003,7 +2006,7 @@ impl FormDialog {
 
     pub(crate) fn saves_project_settings(&self) -> bool {
         self.is_project_update()
-            || self.path.starts_with("/v1/projects/") && ["/session-limit", "/supervisor", "/token-budget"]
+            || self.path.starts_with("/v1/projects/") && ["/session-limit", "/supervisor", "/token-budget", "/mirror"]
                 .iter().any(|suffix| self.path.ends_with(suffix))
     }
     pub(crate) fn is_project_update(&self) -> bool {
@@ -2048,6 +2051,9 @@ impl FormDialog {
         let mut name = self.body["name"].as_str().unwrap_or("").to_owned();
         let mut key = self.body["key"].as_str().unwrap_or("").to_owned();
         let mut path = self.body["repository"].as_str().unwrap_or("").to_owned();
+        let mut branch = self.body["base_branch"].as_str().unwrap_or("main").to_owned();
+        let mut source = self.body["_repository_kind"].as_str()
+            .unwrap_or_else(|| repository_kind(&path)).to_owned();
         let mut changed = false;
         let name_field = design::settings_field(ui, "Name", |ui| {
             ui.add(design::singleline(&mut name).desired_width(f32::INFINITY))
@@ -2059,45 +2065,104 @@ impl FormDialog {
                 .desired_width(f32::INFINITY),
         ));
         changed |= key_field.changed();
-        ui.label(crate::tr!("Lokaler Pfad"));
-        ui.add_enabled_ui(!path_locked && self.folder_picker.is_none(), |ui| {
-            ui.horizontal(|ui| {
-                // TextEdit's desired width excludes its padding; reserve the button
-                // from the full row width before converting to an inner width.
-                let width = (ui.available_width() - design::ICON_BUTTON_SIZE
-                    - ui.spacing().item_spacing.x - design::INPUT_MARGIN.sum().x).max(1.0);
-                let path_field = ui.add(
-                    design::singleline(&mut path)
-                        .hint_text(design::input_hint(crate::tr!("/pfad/zum/projekt")))
-                        .desired_width(width),
-                );
-                changed |= path_field.changed();
-                let folder = design::icon_button(
-                    ui, egui_phosphor::regular::FOLDER_OPEN, crate::tr!("Projektordner auswählen"), true,
-                );
-                #[cfg(test)]
-                ui.ctx().data_mut(|d| d.insert_temp(
-                    egui::Id::new("test-project-field-rects"),
-                    [name_field.rect, key_field.rect, path_field.rect, folder.rect],
-                ));
-                if folder.clicked() {
-                    let (send, receive) = std::sync::mpsc::channel();
-                    let ctx = ui.ctx().clone();
-                    let current = std::path::PathBuf::from(path.trim());
-                    std::thread::spawn(move || {
-                        let mut picker = rfd::FileDialog::new().set_title(crate::tr!("Projektordner auswählen"));
-                        if current.is_dir() {
-                            picker = picker.set_directory(current);
+        #[cfg(test)]
+        ui.ctx().data_mut(|d| d.insert_temp(
+            egui::Id::new("test-project-basic-field-rects"),
+            [name_field.rect, key_field.rect],
+        ));
+        design::settings_field(ui, crate::tr!("Projektquelle"), |ui| {
+            let selected = match source.as_str() {
+                "local" => crate::tr!("Lokaler Ordner"),
+                "runner" => crate::tr!("Pfad auf dem Runner"),
+                "git" => crate::tr!("Git-Repository"),
+                _ => crate::tr!("Factory-verwaltet"),
+            };
+            ui.add_enabled_ui(!path_locked, |ui| {
+                egui::ComboBox::from_id_salt("project-repository-kind")
+                    .selected_text(selected)
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("managed", crate::tr!("Factory-verwaltet")),
+                            ("local", crate::tr!("Lokaler Ordner")),
+                            ("runner", crate::tr!("Pfad auf dem Runner")),
+                            ("git", crate::tr!("Git-Repository")),
+                        ] {
+                            if design::navigation_row(ui, &label, source == value, None).clicked() {
+                                source = value.into();
+                                path = if value == "managed" { "factory:managed".into() } else { String::new() };
+                                branch = "main".into();
+                                changed = true;
+                                ui.close();
+                            }
                         }
-                        let _ = send.send(picker.pick_folder().and_then(|path| path.into_os_string().into_string().ok()));
-                        ctx.request_repaint();
                     });
-                    self.folder_picker = Some(receive);
-                }
             });
         });
+        if source == "local" {
+            design::settings_field(ui, crate::tr!("Lokaler Ordner"), |ui| {
+                ui.add_enabled_ui(!path_locked && self.folder_picker.is_none(), |ui| {
+                    ui.horizontal(|ui| {
+                        let width = (ui.available_width() - design::ICON_BUTTON_SIZE
+                            - ui.spacing().item_spacing.x - design::INPUT_MARGIN.sum().x).max(1.0);
+                        let path_field = ui.add(
+                            design::singleline(&mut path)
+                                .hint_text(design::input_hint(crate::tr!("/pfad/zum/projekt")))
+                                .desired_width(width),
+                        );
+                        changed |= path_field.changed();
+                        let folder = design::icon_button(
+                            ui, egui_phosphor::regular::FOLDER_OPEN, crate::tr!("Projektordner auswählen"), true,
+                        );
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(
+                            egui::Id::new("test-project-field-rects"),
+                            [name_field.rect, key_field.rect, path_field.rect, folder.rect],
+                        ));
+                        if folder.clicked() {
+                            let (send, receive) = std::sync::mpsc::channel();
+                            let ctx = ui.ctx().clone();
+                            let current = std::path::PathBuf::from(path.trim());
+                            std::thread::spawn(move || {
+                                let mut picker = rfd::FileDialog::new().set_title(crate::tr!("Projektordner auswählen"));
+                                if current.is_dir() {
+                                    picker = picker.set_directory(current);
+                                }
+                                let _ = send.send(picker.pick_folder().and_then(|path| path.into_os_string().into_string().ok()));
+                                ctx.request_repaint();
+                            });
+                            self.folder_picker = Some(receive);
+                        }
+                    });
+                });
+            });
+        } else if source == "runner" {
+            design::settings_field(ui, crate::tr!("Pfad auf dem Runner"), |ui| {
+                changed |= ui.add_enabled(!path_locked, design::singleline(&mut path)
+                    .hint_text(design::input_hint(crate::tr!("/srv/projekte/mein-projekt")))
+                    .desired_width(f32::INFINITY)).changed();
+            });
+            design::settings_field(ui, crate::tr!("Basisbranch"), |ui| {
+                changed |= ui.add_enabled(!path_locked, design::singleline(&mut branch)
+                    .hint_text(design::input_hint("main"))
+                    .desired_width(f32::INFINITY)).changed();
+            });
+        } else if source == "git" {
+            design::settings_field(ui, crate::tr!("Git-Repository"), |ui| {
+                changed |= ui.add_enabled(!path_locked, design::singleline(&mut path)
+                    .hint_text(design::input_hint("https://github.com/organisation/projekt.git"))
+                    .desired_width(f32::INFINITY)).changed();
+            });
+            design::settings_field(ui, crate::tr!("Basisbranch"), |ui| {
+                changed |= ui.add_enabled(!path_locked, design::singleline(&mut branch)
+                    .hint_text(design::input_hint("main"))
+                    .desired_width(f32::INFINITY)).changed();
+            });
+        } else {
+            ui.colored_label(MUTED, crate::tr!("Das Repository wird vom ausgewählten Runner verwaltet."));
+        }
         if path_locked {
-            ui.colored_label(MUTED, crate::tr!("Der Pfad ist nach dem Anlegen von Arbeitsbereichen festgeschrieben."));
+            ui.colored_label(MUTED, crate::tr!("Die Projektquelle ist nach dem Anlegen von Workspaces festgeschrieben."));
         } else if editing && path.is_empty() {
             ui.colored_label(MUTED, crate::tr!("Ohne neuen Pfad bleibt das bisherige Repository unverändert."));
         }
@@ -2115,9 +2180,11 @@ impl FormDialog {
             self.body["name"] = json!(name);
             self.body["key"] = json!(key);
             self.body["repository"] = json!(path);
+            self.body["base_branch"] = json!(branch);
+            self.body["_repository_kind"] = json!(source);
         }
         !name.trim().is_empty()
-            && (editing || !path.trim().is_empty())
+            && (source == "managed" || !path.trim().is_empty())
             && self.folder_picker.is_none()
             && !self.logo_picker.busy()
     }
@@ -2162,6 +2229,119 @@ impl FormDialog {
             self.error = None;
         }
     }
+    fn project_mirror_fields(&mut self, ui: &mut egui::Ui, app: &App) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        if let Some(picker) = &self.folder_picker {
+            match picker.try_recv() {
+                Ok(path) => {
+                    if let Some(path) = path {
+                        self.body["path"] = json!(path);
+                        self.error = None;
+                    }
+                    self.folder_picker = None;
+                }
+                Err(TryRecvError::Empty) => {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+                }
+                Err(TryRecvError::Disconnected) => self.folder_picker = None,
+            }
+        }
+        let project = self.path.strip_prefix("/v1/projects/")
+            .and_then(|tail| tail.strip_suffix("/mirror"))
+            .and_then(|id| id.parse::<ProjectId>().ok())
+            .and_then(|id| app.snapshot.as_ref()?.projects.iter().find(|project| project.id == id));
+        if project.is_none_or(|project| project.repository != "factory:managed") {
+            ui.label(crate::tr!("Lokale Spiegelkopien sind nur für Factory-verwaltete Projekte verfügbar."));
+            return false;
+        }
+        let runners: Vec<_> = app.local_runners.iter()
+            .filter(|runner| runner.visible(&app.server)).collect();
+        if runners.is_empty() {
+            ui.label(crate::tr!("Auf diesem Desktop ist kein lokaler Runner eingerichtet."));
+            return false;
+        }
+        let mut runner = serde_json::from_value::<RunnerId>(self.body["runner_id"].clone())
+            .ok().filter(|id| runners.iter().any(|candidate| candidate.id == *id))
+            .unwrap_or(runners[0].id);
+        let previous = runner;
+        design::settings_field(ui, crate::tr!("Lokaler Runner"), |ui| {
+            let selected = runners.iter().find(|candidate| candidate.id == runner)
+                .map_or_else(|| crate::tr!("Runner nicht verfügbar").into(), |candidate| candidate.name.clone());
+            egui::ComboBox::from_id_salt("project-mirror-runner")
+                .selected_text(selected).width(ui.available_width()).show_ui(ui, |ui| {
+                    for candidate in &runners {
+                        if design::navigation_row(ui, &candidate.name, candidate.id == runner, None).clicked() {
+                            runner = candidate.id;
+                            ui.close();
+                        }
+                    }
+                });
+        });
+        if runner != previous {
+            self.body["runner_id"] = json!(runner);
+            self.body["path"] = json!(project.and_then(|project| project.mirrors.get(&runner))
+                .map_or("", |mirror| mirror.path.as_str()));
+        }
+        let mut path = self.body["path"].as_str().unwrap_or("").to_owned();
+        design::settings_field(ui, crate::tr!("Lokaler Testordner"), |ui| {
+            ui.add_enabled_ui(self.folder_picker.is_none(), |ui| {
+                ui.horizontal(|ui| {
+                    let width = (ui.available_width() - design::ICON_BUTTON_SIZE
+                        - ui.spacing().item_spacing.x - design::INPUT_MARGIN.sum().x).max(1.0);
+                    let field = ui.add(design::singleline(&mut path)
+                        .hint_text(design::input_hint(crate::tr!("/pfad/zur/testkopie")))
+                        .desired_width(width));
+                    let folder = design::icon_button(
+                        ui, egui_phosphor::regular::FOLDER_OPEN,
+                        crate::tr!("Testordner auswählen"), true,
+                    );
+                    if folder.clicked() {
+                        let (send, receive) = std::sync::mpsc::channel();
+                        let ctx = ui.ctx().clone();
+                        let current = std::path::PathBuf::from(path.trim());
+                        std::thread::spawn(move || {
+                            let mut picker = rfd::FileDialog::new()
+                                .set_title(crate::tr!("Testordner auswählen"));
+                            if current.parent().is_some_and(|parent| parent.is_dir()) {
+                                picker = picker.set_directory(current.parent().unwrap());
+                            }
+                            let _ = send.send(picker.pick_folder()
+                                .and_then(|path| path.into_os_string().into_string().ok()));
+                            ctx.request_repaint();
+                        });
+                        self.folder_picker = Some(receive);
+                    }
+                    if field.changed() {
+                        self.error = None;
+                    }
+                });
+            });
+        });
+        self.body["runner_id"] = json!(runner);
+        self.body["path"] = json!(path.trim());
+        if !path.trim().is_empty() {
+            let state = app.snapshot.as_ref().and_then(|snapshot| {
+                snapshot.commands.iter()
+                    .filter(|command| command.runner_id == runner)
+                    .filter(|command| command.workspace_spec.as_ref()
+                        .and_then(|spec| spec.setup.as_ref())
+                        .is_some_and(|setup| setup.repository_source == CHECKPOINT_RETURN
+                            && setup.repository_path == path.trim()))
+                    .max_by_key(|command| command.created_unix_ms)
+                    .map(|command| command.state)
+            });
+            let status = match state {
+                Some(CommandState::Pending) => crate::tr!("Spiegelung wartet auf den lokalen Runner."),
+                Some(CommandState::Accepted) => crate::tr!("Spiegelung läuft."),
+                Some(CommandState::Succeeded) => crate::tr!("Spiegelung zuletzt erfolgreich bestätigt."),
+                Some(CommandState::Failed) => crate::tr!("Spiegelung ist blockiert. Details stehen in der Diagnose."),
+                None => crate::tr!("Spiegelung wird nach dem nächsten bestätigten Projektstand eingeplant."),
+            };
+            ui.colored_label(MUTED, status);
+        }
+        ui.colored_label(MUTED, crate::tr!("Leer speichern entfernt die Spiegelkopie. Lokale Änderungen werden nie überschrieben."));
+        self.folder_picker.is_none()
+    }
 
     fn project_request(&self, app: &App) -> Result<Value, String> {
         let mut body = self.body.clone();
@@ -2170,7 +2350,31 @@ impl FormDialog {
         }
         let name = body["name"].as_str().unwrap_or("").trim().to_owned();
         let key = body["key"].as_str().unwrap_or("").trim().to_ascii_uppercase();
-        let path = body["repository"].as_str().unwrap_or("").trim().to_owned();
+        let source = body["_repository_kind"].as_str()
+            .unwrap_or_else(|| repository_kind(body["repository"].as_str().unwrap_or("")));
+        let mut path = body["repository"].as_str().unwrap_or("").trim().to_owned();
+        let mut branch = body["base_branch"].as_str().unwrap_or("main").trim().to_owned();
+        match source {
+            "managed" => {
+                path = "factory:managed".into();
+                branch = "main".into();
+            }
+            "local" => branch = local_project_branch(&path)?,
+            "runner" => {
+                if !absolute_repository_path(&path) {
+                    return Err(crate::tr!("Bitte einen absoluten Pfad auf dem Runner angeben.").into());
+                }
+                validate_base_branch(&branch)?;
+            }
+            "git" => {
+                if path.is_empty() || absolute_repository_path(&path) || path == "factory:managed" {
+                    return Err(crate::tr!("Bitte eine Git-Repository-URL angeben.").into());
+                }
+                validate_base_branch(&branch)?;
+            }
+            _ => return Err(crate::tr!("Bitte eine gültige Projektquelle auswählen.").into()),
+        }
+        body.as_object_mut().unwrap().remove("_repository_kind");
         let existing = self.path.strip_prefix("/v1/projects/")
             .and_then(|id| id.parse::<ProjectId>().ok())
             .and_then(|id| app.snapshot.as_ref()?.projects.iter().find(|project| project.id == id));
@@ -2194,7 +2398,7 @@ impl FormDialog {
             body["repository"] = Value::Null;
             body["base_branch"] = Value::Null;
         } else {
-            body["base_branch"] = json!(local_project_branch(&path)?);
+            body["base_branch"] = json!(branch);
             body["repository"] = json!(path);
         }
         Ok(body)
@@ -2235,7 +2439,7 @@ impl FormDialog {
             return false;
         }
         let saves_settings = self.is_project_update() || self.path == "/v1/projects/setup"
-            || self.path.starts_with("/v1/projects/") && ["/profile", "/scheduler", "/session-limit", "/supervisor", "/token-budget"]
+            || self.path.starts_with("/v1/projects/") && ["/profile", "/scheduler", "/session-limit", "/supervisor", "/token-budget", "/mirror"]
                 .iter().any(|suffix| self.path.ends_with(suffix));
         self.show_form(ui, app, height, saves_settings.then_some(bottom), false)
     }
@@ -2274,7 +2478,9 @@ impl FormDialog {
             ui.label(crate::i18n::label(&self.help));
         }
         let mut valid = true;
-        if self.path.starts_with("/v1/projects/") && self.path.ends_with("/supervisor") {
+        if self.path.starts_with("/v1/projects/") && self.path.ends_with("/mirror") {
+            valid = self.project_mirror_fields(ui, app);
+        } else if self.path.starts_with("/v1/projects/") && self.path.ends_with("/supervisor") {
             let seconds = self.body["interval_seconds"].as_u64().unwrap_or(300);
             let mut minutes = seconds as f64 / 60.0;
             design::settings_field(ui, crate::tr!("Prüfintervall in Minuten"), |ui| {
@@ -2593,6 +2799,31 @@ pub(crate) fn is_project_update(method: &str, path: &str) -> bool {
 pub(crate) fn same_form_body(method: &str, path: &str, first: &Value, second: &Value) -> bool {
     first.get("project_id") == second.get("project_id")
         && (!is_project_update(method, path) || first.get("name").is_some() == second.get("name").is_some())
+}
+
+fn absolute_repository_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/') || path.starts_with("\\\\")
+        || (bytes.first().is_some_and(u8::is_ascii_alphabetic)
+            && matches!(bytes.get(1..3), Some(b":\\" | b":/")))
+}
+
+fn repository_kind(repository: &str) -> &'static str {
+    if repository == "factory:managed" || repository.is_empty() {
+        "managed"
+    } else if absolute_repository_path(repository) {
+        if std::path::Path::new(repository).exists() { "local" } else { "runner" }
+    } else {
+        "git"
+    }
+}
+
+fn validate_base_branch(branch: &str) -> Result<(), String> {
+    if branch.is_empty() || branch.len() > 200 || branch.chars().any(char::is_control) {
+        Err(crate::tr!("Bitte einen gültigen Basisbranch angeben.").into())
+    } else {
+        Ok(())
+    }
 }
 
 /// Read only: preparing or creating a missing repository remains a runner job.
@@ -3531,10 +3762,16 @@ mod tests {
     }
 
     #[test]
-    fn project_editor_detects_the_local_branch_and_leaves_runner_mapping_automatic() {
+    fn project_editor_supports_managed_local_runner_and_git_sources() {
         let mut app = crate::tests::fixture();
         app.project_editor(None);
         let Some(Dialog::Form(mut form)) = app.dialog.take() else { panic!("expected project form") };
+        form.body["name"] = json!(" Neues Projekt ");
+        form.body["key"] = json!(" woai ");
+        let managed = form.project_request(&app).unwrap();
+        assert_eq!(managed["repository"], "factory:managed");
+        assert_eq!(managed["base_branch"], "main");
+        assert!(managed.get("_repository_kind").is_none());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
         let git = |args: &[&str]| {
@@ -3545,9 +3782,8 @@ mod tests {
         git(&["init", "-b", "develop"]);
         git(&["-c", "user.name=Factory Test", "-c", "user.email=test@example.invalid",
             "commit", "--allow-empty", "-m", "Initial"]);
-        form.body["name"] = json!(" Neues Projekt ");
-        form.body["key"] = json!(" woai ");
         form.body["repository"] = json!(path);
+        form.body["_repository_kind"] = json!("local");
         let request = form.project_request(&app).unwrap();
         assert_eq!(request["name"], "Neues Projekt");
         assert_eq!(request["key"], "WOAI");
@@ -3556,6 +3792,18 @@ mod tests {
         assert!(request.get("setup").is_none());
         assert!(request.get("runner_id").is_none());
         assert!(request.get("runner_mapping").is_none());
+        form.body["_repository_kind"] = json!("runner");
+        form.body["repository"] = json!("/srv/projects/example");
+        form.body["base_branch"] = json!("release");
+        let request = form.project_request(&app).unwrap();
+        assert_eq!(request["repository"], "/srv/projects/example");
+        assert_eq!(request["base_branch"], "release");
+        form.body["_repository_kind"] = json!("git");
+        form.body["repository"] = json!("git@example.test:team/project.git");
+        form.body["base_branch"] = json!("develop");
+        let request = form.project_request(&app).unwrap();
+        assert_eq!(request["repository"], "git@example.test:team/project.git");
+        assert_eq!(request["base_branch"], "develop");
         let runner = app.snapshot.as_ref().unwrap().runners[0].id;
         form.body["runner_mapping"] = json!(ProjectRunnerMapping::Runner(runner));
         let request = form.project_request(&app).unwrap();
@@ -3578,7 +3826,7 @@ mod tests {
         let project = project.clone();
         app.project_editor(Some(&project));
         let Some(Dialog::Form(mut form)) = app.dialog.take() else { panic!("expected project form") };
-        assert!(form.body["repository"].is_null());
+        assert_eq!(form.body["repository"], "git@example.test:repo");
         form.body["name"] = json!("Umbenannt");
         form.body["key"] = json!("new");
         let runner = app.snapshot.as_ref().unwrap().runners[0].id;

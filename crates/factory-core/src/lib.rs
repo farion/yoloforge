@@ -863,6 +863,10 @@ pub struct Project {
     pub paused: bool,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub runner_bindings: std::collections::BTreeMap<RunnerId, ProjectLocation>,
+    /// Optional device-bound checkouts of a Factory-managed project. Mirrors
+    /// receive confirmed project checkpoints but are never execution sources.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mirrors: std::collections::BTreeMap<RunnerId, ProjectMirror>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<ProjectSetup>,
     pub id: ProjectId,
@@ -902,6 +906,10 @@ pub const PROJECT_SETUP_CAPABILITY: &str = "project-setup-v2";
 pub struct ProjectLocation {
     pub repository_path: String,
     pub service_registration: String,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMirror {
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

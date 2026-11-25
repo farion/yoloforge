@@ -8,6 +8,7 @@ use crate::{
 use egui::{self, Color32, FontFamily, FontId, RichText};
 use factory_core::*;
 use serde_json::Value;
+use std::ops::Range;
 
 pub const TEXT: Color32 = Color32::from_rgb(223, 225, 229);
 pub const EMPHASIS: Color32 = Color32::from_rgb(245, 173, 70);
@@ -22,6 +23,168 @@ const USER_MARKER_WIDTH: f32 = 6.0;
 pub enum TranscriptRow {
     Message(CommandId, std::sync::Arc<ArchivedMessage>),
     Question(Question),
+}
+
+pub enum DisplayRow<'a> {
+    Original(&'a TranscriptRow),
+    MessageSlice(CommandId, &'a ArchivedMessage, Range<usize>, bool),
+    Activity(Vec<Activity<'a>>),
+}
+
+pub struct Activity<'a> {
+    command: CommandId,
+    entry: &'a ArchivedMessage,
+    part: Option<usize>,
+    value: &'a Value,
+    kind: ActivityKind,
+}
+
+#[derive(Clone, Copy)]
+enum ActivityKind {
+    Read,
+    Command,
+    Edit,
+    Tool,
+    Instruction,
+}
+
+impl ActivityKind {
+    fn tool(tool: &Value) -> Self {
+        match tool_name(tool) {
+            "read" | "glob" | "grep" | "list" => Self::Read,
+            "bash" | "shell" => Self::Command,
+            "apply_patch" | "patch" | "edit" | "multiedit" | "write" => Self::Edit,
+            _ => Self::Tool,
+        }
+    }
+
+    fn count(self, count: usize) -> String {
+        match (self, count) {
+            (Self::Read, 1) => crate::tr!("1 Lesezugriff").into(),
+            (Self::Read, _) => crate::tr!("{} Lesezugriffe", count),
+            (Self::Command, 1) => crate::tr!("1 Befehl").into(),
+            (Self::Command, _) => crate::tr!("{} Befehle", count),
+            (Self::Edit, 1) => crate::tr!("1 Änderung").into(),
+            (Self::Edit, _) => crate::tr!("{} Änderungen", count),
+            (Self::Tool, 1) => crate::tr!("1 Tool").into(),
+            (Self::Tool, _) => crate::tr!("{} Tools", count),
+            (Self::Instruction, 1) => crate::tr!("1 Anweisung").into(),
+            (Self::Instruction, _) => crate::tr!("{} Anweisungen", count),
+        }
+    }
+}
+
+/// Coalesce consecutive activity even across native messages, without moving it
+/// across prose, answers, or execution boundaries.
+pub fn display_rows(rows: &[TranscriptRow], versions: bool) -> Vec<DisplayRow<'_>> {
+    let mut display = Vec::new();
+    let mut pending: Vec<Activity<'_>> = Vec::new();
+    fn flush<'a>(display: &mut Vec<DisplayRow<'a>>, pending: &mut Vec<Activity<'a>>) {
+        if !pending.is_empty() {
+            display.push(DisplayRow::Activity(std::mem::take(pending)));
+        }
+    }
+    for row in rows {
+        if let TranscriptRow::Message(command, entry) = row {
+            if !versions {
+                if pending.last().is_some_and(|activity| activity.command != *command) {
+                    flush(&mut display, &mut pending);
+                }
+                let message = &entry.message;
+                let kind = match message["type"].as_str() {
+                    Some("system" | "skill") => Some(ActivityKind::Instruction),
+                    Some("shell") => Some(ActivityKind::Command),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    pending.push(Activity { command: *command, entry, part: None, value: message, kind });
+                    continue;
+                }
+                if message["type"].as_str().or(message["role"].as_str()) == Some("assistant") {
+                    let parts = parts(message);
+                    if parts.iter().any(|part| matches!(part, Part::Tool(_))) {
+                        let mut start = 0;
+                        for (index, part) in parts.iter().enumerate() {
+                            if let Part::Tool(tool) = part {
+                                if start < index {
+                                    flush(&mut display, &mut pending);
+                                    display.push(DisplayRow::MessageSlice(*command, entry, start..index, false));
+                                }
+                                pending.push(Activity {
+                                    command: *command, entry, part: Some(index), value: tool,
+                                    kind: ActivityKind::tool(tool),
+                                });
+                                start = index + 1;
+                            }
+                        }
+                        if start < parts.len() || response_footer(message, &parts).is_some()
+                            || !message["error"].is_null()
+                            || message[ARCHIVE_FILES_KEY].as_array().is_some_and(|files| !files.is_empty())
+                            || !archive_inline_files(message).is_empty()
+                        {
+                            flush(&mut display, &mut pending);
+                            display.push(DisplayRow::MessageSlice(*command, entry, start..parts.len(), true));
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        flush(&mut display, &mut pending);
+        display.push(DisplayRow::Original(row));
+    }
+    flush(&mut display, &mut pending);
+    display
+}
+
+fn activity_summary(items: &[Activity<'_>]) -> String {
+    let kinds = [ActivityKind::Read, ActivityKind::Command, ActivityKind::Edit, ActivityKind::Tool, ActivityKind::Instruction];
+    let mut counts = [0; 5];
+    for item in items {
+        counts[item.kind as usize] += 1;
+    }
+    kinds.into_iter().zip(counts)
+        .filter(|(_, count)| *count != 0)
+        .map(|(kind, count)| kind.count(count))
+        .collect::<Vec<_>>().join(", ")
+}
+
+pub fn activity_group(ui: &mut egui::Ui, items: &[Activity<'_>]) -> egui::Response {
+    let first = &items[0];
+    // Virtual rows are indexed and can move when older pages are loaded.
+    let id = egui::Id::new(("session-activity", first.command, first.entry.message["id"].as_str(), first.part));
+    let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or_default();
+    let marker = if open { "-" } else { "+" };
+    let summary = activity_summary(items);
+    let response = egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0))
+        .show(ui, |ui| {
+            ui.spacing_mut().button_padding = egui::Vec2::ZERO;
+            ui.spacing_mut().interact_size.y = line_height(ui);
+            ui.add(egui::Button::new(RichText::new(format!("{marker} {summary}")).monospace().color(MUTED))
+                .wrap().frame_when_inactive(false))
+        }).inner
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if open { crate::tr!("Aktivität einklappen") } else { crate::tr!("Aktivität aufklappen") });
+    if response.clicked() {
+        ui.data_mut(|data| data.insert_temp(id, !open));
+        ui.ctx().request_repaint();
+    }
+    if open {
+        let height = line_height(ui);
+        ui.push_id(id, |ui| {
+            for (index, item) in items.iter().enumerate() {
+                ui.add_space(height);
+                ui.push_id((item.entry.message["id"].as_str(), item.part, index), |ui| {
+                    if item.part.is_some() {
+                        tool_row(ui, item.value);
+                    } else {
+                        native_activity(ui, item.value);
+                    }
+                });
+            }
+        });
+    }
+    response
 }
 
 impl TranscriptRow {
@@ -280,6 +443,42 @@ pub fn tool_output(part: &Value) -> String {
     }
 }
 
+fn response_footer(message: &Value, content: &[Part<'_>]) -> Option<String> {
+    if message["type"].as_str().or(message["role"].as_str()) != Some("assistant")
+        || !message["error"].is_null()
+        || matches!(message["finish"].as_str(), Some("tool-calls" | "error"))
+        || !content.iter().any(|part| matches!(part, Part::Text(text) if !text.trim().is_empty()))
+    {
+        return None;
+    }
+    let time = &message["time"];
+    let created = time["created"].as_f64()?;
+    let completed = time["completed"].as_f64()?;
+    if completed < created {
+        return None;
+    }
+    let model = &message["model"];
+    let mut fields = Vec::new();
+    if let Some(name) = model["name"].as_str().filter(|name| !name.is_empty())
+        .or_else(|| model["id"].as_str().filter(|id| !id.is_empty()))
+    {
+        fields.push(name.to_owned());
+    }
+    fields.push(format!("{:.1}s", (completed - created) / 1_000.0));
+    if let Some(tokens) = message["tokens"]["output"].as_f64() {
+        // Earlier V2 archives only have the step start, not the first token.
+        let first = time["firstToken"].as_f64().unwrap_or(created);
+        let end = time["streamed"].as_f64().unwrap_or(completed);
+        if created <= first && first < end && end <= completed && tokens > 0.0 {
+            let rate = tokens / ((end - first) / 1_000.0);
+            if rate.is_finite() {
+                fields.push(format!("{rate:.1} tok/s"));
+            }
+        }
+    }
+    Some(fields.join(" · "))
+}
+
 pub fn transcript_style(ui: &mut egui::Ui) {
     let height = line_height(ui);
     let style = ui.style_mut();
@@ -356,6 +555,31 @@ pub fn message(
     entry: &ArchivedMessage,
     versions: bool,
 ) -> egui::Response {
+    message_content(ui, app, command, entry, versions, None, true)
+}
+
+pub fn message_slice(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    command: CommandId,
+    entry: &ArchivedMessage,
+    range: Range<usize>,
+    tail: bool,
+) {
+    ui.push_id(("slice", entry.message["id"].as_str(), range.start), |ui| {
+        message_content(ui, app, command, entry, false, Some(range), tail);
+    });
+}
+
+fn message_content(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    command: CommandId,
+    entry: &ArchivedMessage,
+    versions: bool,
+    range: Option<Range<usize>>,
+    tail: bool,
+) -> egui::Response {
     let value = &entry.message;
     let role = value["type"]
         .as_str()
@@ -401,7 +625,8 @@ pub fn message(
                 }
             }
             let content = parts(value);
-            for (index, part) in content.iter().enumerate() {
+            for index in range.unwrap_or(0..content.len()) {
+                let part = &content[index];
                 ui.push_id(("content", index), |ui| match part {
                     Part::Text(text) if !user || value["text"].as_str() != Some(text) => {
                         if user {
@@ -435,11 +660,23 @@ pub fn message(
                     }
                 });
             }
-            if let Some(error) = value.get("error").filter(|v| !v.is_null()) {
-                let message = design_error_line(error);
-                ui.add(egui::Label::new(RichText::new(message).monospace().color(RED)).wrap());
+            if tail {
+                if let Some(error) = value.get("error").filter(|v| !v.is_null()) {
+                    let message = design_error_line(error);
+                    ui.add(egui::Label::new(RichText::new(message).monospace().color(RED)).wrap());
+                }
+                attachments(ui, app, command, entry);
+                if !versions {
+                    if let Some(footer) = response_footer(value, &content) {
+                        let height = line_height(ui);
+                        ui.add_space(height);
+                        egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0))
+                            .show(ui, |ui| {
+                                ui.add(egui::Label::new(RichText::new(footer).monospace().color(MUTED)).wrap());
+                            });
+                    }
+                }
             }
-            attachments(ui, app, command, entry);
             if versions {
                 ui.label(
                     RichText::new(format!(
@@ -480,6 +717,44 @@ fn design_error_line(error: &Value) -> String {
     crate::tr!("Fehler: {}", crate::design::elide_first_line(error_message(error), 240))
 }
 
+fn native_activity(ui: &mut egui::Ui, value: &Value) {
+    let (title, output) = if value["type"] == "shell" {
+        let command = value["command"].as_str().unwrap_or_default();
+        (format!("$ {command}"), value["output"]["output"].as_str())
+    } else {
+        let title = value["name"].as_str().or(value["description"].as_str())
+            .unwrap_or(crate::tr!("Anweisung"));
+        (title.to_owned(), value["text"].as_str())
+    };
+    activity_block(ui, &title, |ui| {
+        if value["output"]["truncated"] == true {
+            ui.colored_label(AMBER, crate::tr!("Die erfasste Toolausgabe ist gekürzt; nicht als vollständigen Stand behandeln."));
+        }
+        if let Some(output) = output.filter(|text| !text.is_empty()) {
+            let height = line_height(ui);
+            ui.add_space(height);
+            read_text(ui, output, true);
+        }
+    });
+}
+
+fn activity_block(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
+    let width = ui.available_width();
+    egui::Frame::new()
+        .fill(TOOL_BACKGROUND)
+        .corner_radius(0)
+        .inner_margin(egui::Margin::symmetric(16, 0))
+        .show(ui, |ui| {
+            ui.set_min_width((width - 32.0).max(1.0));
+            ui.visuals_mut().override_text_color = Some(TOOL_OUTPUT);
+            let height = line_height(ui);
+            ui.add_space(height);
+            ui.add(egui::Label::new(RichText::new(title).monospace().color(TOOL_CALL)).wrap());
+            contents(ui);
+            ui.add_space(height);
+        });
+}
+
 fn tool_row(ui: &mut egui::Ui, part: &Value) {
     let status = tool_status(part);
     let state = match status {
@@ -515,51 +790,38 @@ fn tool_row(ui: &mut egui::Ui, part: &Value) {
     } else {
         format!("$ {prefix} {short}{state}")
     };
-    let width = ui.available_width();
-    egui::Frame::new()
-        .fill(TOOL_BACKGROUND)
-        .corner_radius(0)
-        .inner_margin(egui::Margin::symmetric(16, 0))
-        .show(ui, |ui| {
-            ui.set_min_width((width - 32.0).max(1.0));
-            ui.visuals_mut().override_text_color = Some(TOOL_OUTPUT);
+    activity_block(ui, &title, |ui| {
+        if short != summary {
+            read_text(ui, summary, true);
+        }
+        if let Some(fields) = input.as_object().filter(|_| patches.is_empty()) {
+            for (key, value) in fields {
+                if value.as_str() == Some(summary) {
+                    continue;
+                }
+                let text = value.as_str().map(str::to_string).unwrap_or_else(|| {
+                    serde_json::to_string_pretty(value).unwrap_or_default()
+                });
+                read_text(ui, &format!("{key}: {text}"), true);
+            }
+        }
+        for (index, patch) in patches.iter().enumerate() {
+            ui.push_id(("patch", index, patch.path), |ui| patch_view::show(ui, patch, patches.len() > 1));
+        }
+        if part["state"]["metadata"]["truncated"] == true {
+            ui.colored_label(AMBER, crate::tr!("Die erfasste Toolausgabe ist gekürzt; nicht als vollständigen Stand behandeln."));
+        }
+        let output = tool_output(part);
+        if !output.is_empty() {
             let height = line_height(ui);
             ui.add_space(height);
-            ui.add(egui::Label::new(RichText::new(title).monospace().color(TOOL_CALL)).wrap());
-            {
-                    if short != summary {
-                        read_text(ui, summary, true);
-                    }
-                    if let Some(fields) = input.as_object().filter(|_| patches.is_empty()) {
-                        for (key, value) in fields {
-                            if value.as_str() == Some(summary) {
-                                continue;
-                            }
-                            let text = value.as_str().map(str::to_string).unwrap_or_else(|| {
-                                serde_json::to_string_pretty(value).unwrap_or_default()
-                            });
-                            read_text(ui, &format!("{key}: {text}"), true);
-                        }
-                    }
-                    for (index,patch) in patches.iter().enumerate() {
-                        ui.push_id(("patch",index,patch.path),|ui|patch_view::show(ui,patch,patches.len()>1));
-                    }
-                    if part["state"]["metadata"]["truncated"] == true {
-                        ui.colored_label(AMBER,crate::tr!("Die erfasste Toolausgabe ist gekürzt; nicht als vollständigen Stand behandeln."));
-                    }
-                    let output = tool_output(part);
-                    if !output.is_empty() {
-                        let height = line_height(ui);
-                        ui.add_space(height);
-                        read_text(ui, &output, true);
-                    }
-                    if let Some(error) = part["state"].get("error").or_else(|| part.get("error")) {
-                        ui.colored_label(RED, crate::tr!("Toolfehler"));
-                        json_read(ui, error);
-                    }
-            }
-            ui.add_space(height);
-        });
+            read_text(ui, &output, true);
+        }
+        if let Some(error) = part["state"].get("error").or_else(|| part.get("error")) {
+            ui.colored_label(RED, crate::tr!("Toolfehler"));
+            json_read(ui, error);
+        }
+    });
 }
 
 fn attachments(ui: &mut egui::Ui, app: &mut App, command: CommandId, entry: &ArchivedMessage) {
@@ -661,7 +923,7 @@ mod tests {
                 ui.add_space(height);
             }
             assert!((rows[0].height()-3.0*height).abs()<=1.0,"User row is text + two colored blank lines: {:?}, line {height}",rows[0]);
-            assert!((rows[1].height()-height).abs()<=1.0,"Assistant row {:?}, line {height}",rows[1]);
+             assert!((rows[1].height()-3.0*height).abs()<=1.0,"Answer, blank line and footer: {:?}, line {height}",rows[1]);
             assert!((rows[1].top()-rows[0].bottom()-height).abs()<=1.0,"One blank line expected: {rows:?}, line {height}");
         }); });
     }
@@ -804,7 +1066,7 @@ mod tests {
         );
     }
     #[test]
-    fn cli_lines_have_no_extra_vertical_gap_and_footer_omits_output_tokens() {
+    fn cli_lines_have_no_extra_vertical_gap() {
         let mut app = crate::tests::fixture();
         let ctx = app.backend.context().clone();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
@@ -839,9 +1101,6 @@ mod tests {
                 "Expected compact {CLI_FONT_SIZE}pt monospace rows, got {step}pt"
             );
         }
-        assert!(!lines
-            .iter()
-            .any(|(text, _)| text.contains("Output-Token") || text.contains("12345")));
     }
     #[test]
     fn reads_real_v2_text_reasoning_and_nested_tool_result_shapes() {
@@ -973,5 +1232,108 @@ mod tests {
         }); });
         assert_eq!(widths[0], widths[1]);
         assert!(app.settings.pending.is_empty());
+    }
+
+    #[test]
+    fn groups_adjacent_activity_across_messages_and_preserves_prose_order() {
+        let command = CommandId::new();
+        let row = |sequence, message| TranscriptRow::Message(command, std::sync::Arc::new(
+            ArchivedMessage { sequence, sample_revision: 1, captured_unix_ms: sequence, message }
+        ));
+        let rows = [
+            row(1, json!({"id":"a","type":"assistant","content":[
+                {"type":"text","text":"Before"}, {"type":"tool","name":"read"}
+            ]})),
+            row(2, json!({"id":"i","type":"skill","name":"skill","text":"Instructions"})),
+            row(3, json!({"id":"b","type":"assistant","content":[
+                {"type":"tool","name":"bash"}, {"type":"tool","name":"apply_patch"},
+                {"type":"text","text":"After"}, {"type":"tool","name":"mcp"}
+            ]})),
+        ];
+        let display = display_rows(&rows, false);
+        let [DisplayRow::MessageSlice(_, _, before, false), DisplayRow::Activity(first),
+            DisplayRow::MessageSlice(_, _, after, false), DisplayRow::Activity(last)] = display.as_slice()
+        else { panic!("Prose should split activity groups"); };
+        assert_eq!(*before, 0..1);
+        assert_eq!(*after, 2..3);
+        assert_eq!(activity_summary(first), "1 Lesezugriff, 1 Befehl, 1 Änderung, 1 Anweisung");
+        assert_eq!(activity_summary(last), "1 Tool");
+        assert!(display_rows(&rows, true).iter().all(|row| matches!(row, DisplayRow::Original(_))));
+    }
+
+    #[test]
+    fn activity_group_starts_closed_and_toggles_individual_tool_blocks() {
+        let ctx = egui::Context::default();
+        let command = CommandId::new();
+        let rows = [TranscriptRow::Message(command, std::sync::Arc::new(ArchivedMessage {
+            sequence: 1, sample_revision: 1, captured_unix_ms: 1,
+            message: json!({"id":"tools","type":"assistant","content":[
+                {"type":"tool","name":"bash","state":{"status":"completed","input":{"command":"check-first"}}},
+                {"type":"tool","name":"bash","state":{"status":"completed","input":{"command":"check-second"}}}
+            ]}),
+        }))];
+        let display = display_rows(&rows, false);
+        let DisplayRow::Activity(items) = &display[0] else { panic!("Expected activity group"); };
+        let render = |events| {
+            let mut rect = egui::Rect::NOTHING;
+            let frame = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    transcript_style(ui);
+                    rect = activity_group(ui, items).rect;
+                });
+            });
+            fn inspect(shape: &egui::epaint::Shape, texts: &mut Vec<String>, blocks: &mut usize) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => texts.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Rect(rect) if rect.fill == TOOL_BACKGROUND => *blocks += 1,
+                    egui::epaint::Shape::Vec(shapes) => {
+                        for shape in shapes { inspect(shape, texts, blocks); }
+                    }
+                    _ => {}
+                }
+            }
+            let mut texts = Vec::new();
+            let mut blocks = 0;
+            for shape in &frame.shapes { inspect(&shape.shape, &mut texts, &mut blocks); }
+            (rect, texts, blocks)
+        };
+        let (rect, texts, blocks) = render(vec![]);
+        assert!(texts.iter().any(|text| text == "+ 2 Befehle"));
+        assert_eq!(blocks, 0);
+        let click = |pressed| egui::Event::PointerButton {
+            pos: rect.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+        };
+        render(vec![egui::Event::PointerMoved(rect.center()), click(true)]);
+        render(vec![click(false)]);
+        let (_, texts, blocks) = render(vec![]);
+        assert!(texts.iter().any(|text| text == "- 2 Befehle"));
+        assert!(texts.iter().any(|text| text == "$ check-first"));
+        assert!(texts.iter().any(|text| text == "$ check-second"));
+        assert_eq!(blocks, 2);
+        render(vec![click(true)]);
+        render(vec![click(false)]);
+        let (_, texts, blocks) = render(vec![]);
+        assert!(texts.iter().any(|text| text == "+ 2 Befehle"));
+        assert_eq!(blocks, 0);
+    }
+
+    #[test]
+    fn response_footer_uses_model_wall_duration_and_generation_rate() {
+        let mut message = json!({
+            "type":"assistant", "finish":"stop", "model":{"name":"GPT-6.2 Sol Fast","id":"gpt-6.2-sol-fast"},
+            "time":{"created":1000,"firstToken":1300,"completed":21300},
+            "content":[{"type":"text","text":"Done"}], "tokens":{"output":3566}
+        });
+        assert_eq!(response_footer(&message, &parts(&message)).as_deref(), Some("GPT-6.2 Sol Fast · 20.3s · 178.3 tok/s"));
+        message["time"]["firstToken"] = Value::Null;
+        message["time"]["streamed"] = json!(21000);
+        assert_eq!(response_footer(&message, &parts(&message)).as_deref(), Some("GPT-6.2 Sol Fast · 20.3s · 178.3 tok/s"));
+        message["time"]["streamed"] = json!(22000);
+        assert_eq!(response_footer(&message, &parts(&message)).as_deref(), Some("GPT-6.2 Sol Fast · 20.3s"));
+        message["finish"] = json!("tool-calls");
+        assert_eq!(response_footer(&message, &parts(&message)), None);
+        message["finish"] = json!("stop");
+        message["time"]["completed"] = Value::Null;
+        assert_eq!(response_footer(&message, &parts(&message)), None);
     }
 }

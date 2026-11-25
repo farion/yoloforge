@@ -84,6 +84,36 @@ bestätigte Ergebnisstand in der Factory verfügbar.
 Nach bestätigter Rückübernahme kann Auto bei erreichbarem Quell-Runner wieder
 einen frischen Stand vom Desktop sichern, statt immer die ältere Kopie zu nutzen.
 
+### Lokale Spiegelkopien Factory-verwalteter Projekte
+
+Bei `factory:managed` bleibt das von der Factory verwaltete Git-Repository die
+maßgebliche Quelle. In den Projekteinstellungen kann jeder Desktop-Runner einen
+eigenen absoluten Zielpfad als lokale Test-/Lesekopie registrieren. Für ein
+Projekt dürfen mehrere Runner gleichzeitig registriert sein; pro Runner gibt es
+höchstens einen Zielpfad.
+
+Nach einem bestätigten schreibenden Ergebnis veröffentlicht der ausführende
+Runner den Snapshot zuerst per Git-CAS auf dem verwalteten Basisbranch. Parallele
+konfliktfreie Ergebnisse werden wie bei der lokalen Ergebnisveröffentlichung
+dreiseitig kombiniert; Konflikte werden nicht still zusammengeführt und die
+unveränderlichen Ergebnissnapshots bleiben erhalten. Erst der danach erzeugte
+und verifizierte Projekt-Checkpoint wird an die erreichbaren Spiegel-Runner
+verteilt. Ein ausgeschalteter Desktop erhält den jeweils neuesten bestätigten
+Stand nach seiner nächsten Anmeldung; ältere noch nicht begonnene
+Spiegelaufträge werden dabei verworfen.
+
+Ein fehlender Zielordner wird neben seinem vorhandenen Elternordner zunächst in
+einem temporären Git-Repository aufgebaut und dann umbenannt. Ein vorhandener
+Checkout wird nur auf dem konfigurierten Basisbranch, bei sauberem Arbeitsbaum,
+ohne externe Git-Filter und ausschließlich per Fast-forward aktualisiert.
+Lokale Änderungen oder abweichende Historie blockieren nur diese Spiegelkopie.
+Andere Geräte und der maßgebliche Factory-Stand laufen weiter. Der fehlgeschlagene
+Auftrag bleibt in der Diagnose sichtbar und wird nach einer kurzen
+Wiederholsperre erneut eingeplant. Ein leer gespeicherter Pfad entfernt die
+Registrierung, nicht den lokalen Ordner. Spiegelkopien sind keine zusätzlichen
+Schreibquellen; lokale Commits werden nie automatisch in die Factory
+zurückgeführt.
+
 ## Manuelle Übergabe
 
 API/CLI und Runner unterstützen Git-Checkpoints und Übergaben zwischen zwei

@@ -301,6 +301,7 @@ pub fn router_with_shutdown(
             "/v1/projects/{id}",
             patch(update_project).delete(review_routes::delete_project),
         )
+        .route("/v1/projects/{id}/mirror", axum::routing::put(set_project_mirror))
         .route("/v1/questions/{id}/answer", post(answer_question))
         .route(
             "/v1/runners/{runner}/commands/{command}/questions",
@@ -954,6 +955,20 @@ async fn create_project(
         );
     };
     db_call(body.request_id, move || app.store.create_project(body)).await
+}
+async fn set_project_mirror(
+    State(app): State<App>,
+    Path(id): Path<ProjectId>,
+    body: Result<Json<SetProjectMirror>, JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "Invalid project mirror JSON",
+        );
+    };
+    db_call(body.request_id, move || app.store.set_project_mirror(id, body)).await
 }
 async fn create_ticket(
     State(app): State<App>,

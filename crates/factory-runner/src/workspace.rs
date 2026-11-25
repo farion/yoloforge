@@ -126,9 +126,13 @@ fn git_status(
     let mut command = Command::new("git");
     // Managed checkpoint repositories are nested under project, checkpoint,
     // and command IDs. Git's worktree metadata can exceed MAX_PATH even when
-    // the checkout itself is short. Do not modify the user's Git config.
+    // the checkout itself is short. Passing that directory to CreateProcess
+    // fails before Git can apply core.longpaths, so let Git change into it.
+    // Do not modify the user's Git config.
     #[cfg(windows)]
-    command.args(["-c", "core.longpaths=true"]);
+    command
+        .args(["-c", "core.longpaths=true", "-C"])
+        .arg(git_path(repository)?.as_ref());
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);
@@ -147,8 +151,9 @@ fn git_status(
             "GIT_CONFIG_SYSTEM",
             if cfg!(windows) { "NUL" } else { "/dev/null" },
         );
+    #[cfg(not(windows))]
+    command.current_dir(repository);
     let mut child = command
-        .current_dir(repository)
         .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")

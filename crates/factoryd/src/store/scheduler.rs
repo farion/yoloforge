@@ -299,10 +299,10 @@ fn export_portable_results(tx: &Transaction<'_>, project: ProjectId, since: u64)
         JOIN tickets t ON t.id=r.ticket_id JOIN commands c ON c.id=r.agent_id
         WHERE t.project_id=?1 AND c.state='succeeded'
           AND json_extract(c.data,'$.kind')='run_agent'
-          AND json_extract(c.data,'$.workspace_spec.setup.repository_source')=?2
+          AND json_extract(c.data,'$.workspace_spec.setup.repository_source') IN (?2,?3)
           AND c.rowid=(SELECT MAX(latest.rowid) FROM commands latest WHERE latest.stream_id=c.stream_id)
         ORDER BY c.rowid")?;
-    let rows = stmt.query_map(params![project.to_string(), CHECKPOINT_REPOSITORY], |row| row.get::<_, String>(0))?
+    let rows = stmt.query_map(params![project.to_string(), CHECKPOINT_REPOSITORY, "factory:managed"], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for raw in rows {
         let completed: RunnerCommand = serde_json::from_str(&raw)?;
@@ -379,6 +379,69 @@ fn return_portable_result(tx: &Transaction<'_>, project_id: ProjectId, since: u6
     super::checkpoints::seed_stream(tx, &mut stream, Some(&seed))?;
     let command = Store::enqueue_portable_return(tx, &stream, path)?;
     event(tx, "scheduler.project_return", project.id.to_string(), &command)
+}
+fn return_project_mirrors(tx: &Transaction<'_>, project_id: ProjectId, since: u64) -> Result<()> {
+    let raw: String = tx.query_row("SELECT data FROM active_projects WHERE id=?1",
+        [project_id.to_string()], |row| row.get(0))?;
+    let project: Project = serde_json::from_str(&raw)?;
+    if project.repository != "factory:managed" || project.mirrors.is_empty() {
+        return Ok(());
+    }
+    let Some(source) = &project.setup else { return Ok(()); };
+    let Some(seed) = super::checkpoints::offline_project_seed(tx, &project, source)? else { return Ok(()); };
+    if !super::checkpoints::load(tx, seed.command_id)?.is_some_and(|spec| spec.project_result.is_some()) {
+        return Ok(());
+    }
+    let now = super::super::unix_ms();
+    for (runner, mirror) in &project.mirrors {
+        let ready: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_automatic_runners
+             WHERE runner_id=?1 AND seen_ms>=?2 AND local_source=1 AND checkpoint=1)",
+            params![runner.to_string(), since], |row| row.get(0),
+        )?;
+        if !ready || !super::work::absolute_runner_path(&mirror.path) {
+            continue;
+        }
+        let mut stale = tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id
+            WHERE s.project_id=?1 AND c.runner_id=?2 AND c.state='pending'
+              AND json_extract(c.data,'$.workspace_spec.setup.repository_source')=?3
+              AND json_extract(c.data,'$.workspace_spec.setup.repository_path')=?4
+              AND json_extract(c.data,'$.workspace_spec.checkpoint.command_id')<>?5")?;
+        let obsolete = stale.query_map(params![project.id.to_string(), runner.to_string(),
+            CHECKPOINT_RETURN, mirror.path, seed.command_id.to_string()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stale);
+        for raw in obsolete {
+            let mut command: RunnerCommand = serde_json::from_str(&raw)?;
+            command.state = CommandState::Failed;
+            super::work::save_command(tx, &command, "failed")?;
+            let mut stream = super::work::stream(tx, command.stream_id)?;
+            super::work::save_stream(tx, &mut stream, StreamState::Blocked)?;
+        }
+        let scheduled: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id
+             WHERE s.project_id=?1 AND c.runner_id=?2
+               AND json_extract(c.data,'$.workspace_spec.setup.repository_source')=?3
+               AND json_extract(c.data,'$.workspace_spec.setup.repository_path')=?4
+               AND json_extract(c.data,'$.workspace_spec.checkpoint.command_id')=?5
+               AND (c.state IN ('pending','accepted','succeeded')
+                    OR (c.state='failed' AND json_extract(c.data,'$.created_unix_ms')>?6)))",
+            params![project.id.to_string(), runner.to_string(), CHECKPOINT_RETURN,
+                mirror.path, seed.command_id.to_string(), now.saturating_sub(300_000)],
+            |row| row.get(0),
+        )?;
+        if scheduled {
+            continue;
+        }
+        let mut stream = Store::create_stream_in(tx, &CreateStream {
+            request_id: RequestId::new(), project_id, runner_id: *runner,
+            goal: "Factory-Projekt lokal spiegeln".into(), ticket_ids: vec![],
+        })?;
+        super::checkpoints::seed_stream(tx, &mut stream, Some(&seed))?;
+        let command = Store::enqueue_portable_return(tx, &stream, &mirror.path)?;
+        event(tx, "scheduler.project_mirror", project.id.to_string(), &command)?;
+    }
+    Ok(())
 }
 pub(super) fn set_limit(tx: &Transaction<'_>, id: ProjectId, limit: u8) -> Result<()> {
     if let Some(mut p) = policy(tx, id)? {
@@ -776,6 +839,146 @@ mod automatic_runner_tests {
                     "After a successful return, the reachable checkout is authoritative again");
             }
         }
+    }
+
+    #[test]
+    fn managed_results_fan_out_to_each_reachable_mirror_and_offline_devices_catch_up() {
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let source = RunnerId::new();
+        let first = RunnerId::new();
+        let second = RunnerId::new();
+        let setup = store.setup_project(SetupProject {
+            key: None,
+            request_id: RequestId::new(),
+            project_id: None,
+            expected_revision: Revision(0),
+            name: "Managed mirrors".into(),
+            repository: String::new(),
+            base_branch: "main".into(),
+            profile: ExecutionProfile::default(),
+            setup: ProjectSetup {
+                repository_source: String::new(),
+                runner_id: source,
+                repository_path: String::new(),
+                service_registration: String::new(),
+                harness: None,
+            },
+        }).unwrap();
+        let ack = |command: &RunnerCommand| AckCommand {
+            request_id: RequestId::new(),
+            ownership_epoch: command.ownership_epoch,
+        };
+        store.acknowledge(source, setup.command.id, ack(&setup.command)).unwrap();
+        store.complete(source, setup.command.id, CommandResult {
+            request_id: RequestId::new(),
+            ownership_epoch: setup.command.ownership_epoch,
+            result: CommandOutput::Workspace { workspace: Workspace {
+                path: "/source/worktree".into(),
+                branch: setup.command.workspace_spec.as_ref().unwrap().branch.clone(),
+                base_commit: "a".repeat(40),
+            }},
+        }).unwrap();
+        let project = store.update_project(setup.project.id, UpdateProject {
+            logo: None,
+            runner_mapping: Some(ProjectRunnerMapping::Automatic),
+            key: None,
+            request_id: RequestId::new(),
+            expected_revision: setup.project.revision,
+            name: None,
+            repository: None,
+            base_branch: None,
+        }).unwrap();
+        store.set_scheduler(project.id, SetScheduler {
+            request_id: RequestId::new(),
+            expected_revision: Revision(0),
+            enabled: true,
+            runner_ids: vec![source],
+            max_parallel: 1,
+        }).unwrap();
+        let project = store.snapshot().unwrap().projects.into_iter()
+            .find(|candidate| candidate.id == project.id).unwrap();
+        let project = store.set_project_mirror(project.id, SetProjectMirror {
+            request_id: RequestId::new(),
+            expected_revision: project.revision,
+            runner_id: first,
+            path: "/first/mirror".into(),
+        }).unwrap();
+        store.set_project_mirror(project.id, SetProjectMirror {
+            request_id: RequestId::new(),
+            expected_revision: project.revision,
+            runner_id: second,
+            path: "/second/mirror".into(),
+        }).unwrap();
+
+        let result = |parent: char, commit: char, bytes: &[u8]| {
+            let checkpoint = {
+                let mut db = store.0.lock().unwrap();
+                let tx = db.transaction().unwrap();
+                let owner = super::super::work::stream(&tx, setup.stream.id).unwrap();
+                let checkpoint = Store::enqueue_portable_result(&tx, &owner, ProjectCheckpointOrigin {
+                    runner_id: source,
+                    repository: "factory:managed".into(),
+                    repository_path: String::new(),
+                    base_branch: "main".into(),
+                }).unwrap();
+                tx.commit().unwrap();
+                checkpoint
+            };
+            store.acknowledge(source, checkpoint.id, ack(&checkpoint)).unwrap();
+            let receipt = store.upload_checkpoint_bundle(
+                source, checkpoint.id, checkpoint.ownership_epoch, bytes.to_vec(),
+            ).unwrap();
+            store.complete(source, checkpoint.id, CommandResult {
+                request_id: RequestId::new(),
+                ownership_epoch: checkpoint.ownership_epoch,
+                result: CommandOutput::Checkpoint { checkpoint: GitCheckpoint {
+                    commit: commit.to_string().repeat(40),
+                    parent: parent.to_string().repeat(40),
+                    tree: "e".repeat(40),
+                    bundle_path: "/source/result.bundle".into(),
+                    manifest_path: "/source/result.json".into(),
+                    bundle_sha256: receipt.sha256,
+                    bundle_bytes: receipt.bytes,
+                }},
+            }).unwrap();
+            checkpoint
+        };
+
+        let older = result('a', 'b', b"older result");
+        store.observe_automatic_runner(first, true, true, true).unwrap();
+        store.scheduler_tick().unwrap();
+        let first_return = store.pending(first).unwrap().into_iter()
+            .find(|command| command.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
+                .is_some_and(|setup| setup.repository_source == CHECKPOINT_RETURN))
+            .unwrap();
+        assert_eq!(
+            first_return.workspace_spec.as_ref().unwrap().checkpoint.as_ref().unwrap().command_id,
+            older.id,
+        );
+        assert!(store.pending(second).unwrap().is_empty());
+
+        let latest = result('b', 'c', b"latest result");
+        store.scheduler_tick().unwrap();
+        let first_latest = store.pending(first).unwrap().into_iter()
+            .find(|command| command.workspace_spec.as_ref().and_then(|spec| spec.checkpoint.as_ref())
+                .is_some_and(|checkpoint| checkpoint.command_id == latest.id))
+            .unwrap();
+        assert_ne!(first_latest.id, first_return.id);
+        store.observe_automatic_runner(second, true, true, true).unwrap();
+        store.scheduler_tick().unwrap();
+        let second_latest = store.pending(second).unwrap().into_iter()
+            .find(|command| command.workspace_spec.as_ref().and_then(|spec| spec.checkpoint.as_ref())
+                .is_some_and(|checkpoint| checkpoint.command_id == latest.id))
+            .unwrap();
+        assert_eq!(
+            second_latest.workspace_spec.as_ref().unwrap().setup.as_ref().unwrap().repository_path,
+            "/second/mirror",
+        );
+        store.acknowledge(second, second_latest.id, ack(&second_latest)).unwrap();
+        assert_eq!(
+            store.download_checkpoint_bundle(second, second_latest.id, second_latest.ownership_epoch).unwrap(),
+            b"latest result",
+        );
     }
 
     #[test]
@@ -1183,6 +1386,7 @@ impl Store {
                 tx.execute_batch("RELEASE automatic_failover")?;
                 export_portable_results(&tx, p.project_id, since)?;
                 return_portable_result(&tx, p.project_id, since)?;
+                return_project_mirrors(&tx, p.project_id, since)?;
             }
             // Recovery may update the execution command or commission a repair.
             all = tickets(&tx, p.project_id)?;

@@ -616,8 +616,8 @@ impl App {
                     expected_revision: p.revision,
                     name: Some(p.name.clone()),
                     key: (!p.key.is_empty()).then(|| p.key.clone()),
-                    repository: p.repository.starts_with('/').then(|| p.repository.clone()),
-                    base_branch: None,
+                    repository: Some(p.repository.clone()),
+                    base_branch: Some(p.base_branch.clone()),
                 }),
             )
         } else {
@@ -629,7 +629,7 @@ impl App {
                     request_id: RequestId::new(),
                     name: String::new(),
                     key: None,
-                    repository: String::new(),
+                    repository: "factory:managed".into(),
                     base_branch: "main".into(),
                 }),
             )
@@ -1772,11 +1772,14 @@ impl App {
         if jump_to_start {
             scroll = scroll.vertical_scroll_offset(0.0);
         }
+        let display_rows = conversation::display_rows(&rows, show_versions);
+        let mut toggled_activity = false;
         let scroll = scroll.show(ui, |ui| {
             conversation::transcript_style(ui);
-            list.list.ui_custom_layout(ui, rows.len(), |ui, index| {
-                match &rows[index] {
-                    conversation::TranscriptRow::Message(command, entry) => {
+            list.list.ui_custom_layout(ui, display_rows.len(), |ui, index| {
+                use conversation::{DisplayRow, TranscriptRow};
+                match &display_rows[index] {
+                    DisplayRow::Original(TranscriptRow::Message(command, entry)) => {
                         let row_id = if show_versions {
                             format!("revision/{}", entry.sequence)
                         } else {
@@ -1786,10 +1789,16 @@ impl App {
                             conversation::message(ui, self, *command, entry, show_versions);
                         });
                     }
-                    conversation::TranscriptRow::Question(question) => {
+                    DisplayRow::Original(TranscriptRow::Question(question)) => {
                         ui.push_id(("question", question.id), |ui| {
                             conversation::question(ui, question);
                         });
+                    }
+                    DisplayRow::MessageSlice(command, entry, range, tail) => {
+                        conversation::message_slice(ui, self, *command, entry, range.clone(), *tail);
+                    }
+                    DisplayRow::Activity(items) => {
+                        toggled_activity |= conversation::activity_group(ui, items).clicked();
                     }
                 }
                 let height = conversation::line_height(ui);
@@ -1800,9 +1809,14 @@ impl App {
                 conversation::working_indicator(ui);
             }
         });
+        if toggled_activity {
+            // Keep the clicked group in view instead of following a new bottom.
+            self.tabs[index].follow = false;
+            list.list.reset();
+        }
         let wheel = ui.input(|input| input.raw_scroll_delta.y);
         let over_transcript = ui.ctx().pointer_hover_pos().is_some_and(|pos| scroll.inner_rect.contains(pos));
-        if over_transcript && wheel != 0.0 {
+        if !toggled_activity && over_transcript && wheel != 0.0 {
             self.tabs[index].follow = scroll.state.offset.y + scroll.inner_rect.height()
                 >= scroll.content_size.y - 4.0;
         }

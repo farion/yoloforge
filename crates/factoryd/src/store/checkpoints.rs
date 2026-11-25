@@ -155,11 +155,29 @@ fn offline_project_seed_except(
 pub(super) fn portable_result_origin(
     tx: &Transaction<'_>, owner: &Workstream, completed: &RunnerCommand,
 ) -> Result<Option<ProjectCheckpointOrigin>> {
-    let Some(base) = &owner.checkpoint else { return Ok(None); };
+    let direct_managed = completed.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
+        .is_some_and(|setup| setup.repository_source == "factory:managed");
+    let base = if let Some(base) = &owner.checkpoint {
+        base.clone()
+    } else if direct_managed {
+        let Some(command) = automatic_baseline(tx, owner)? else { return Ok(None); };
+        let Some(CommandOutput::Checkpoint { checkpoint }) = command.result else {
+            return Err(StoreError::Internal);
+        };
+        verify_bundle(tx, command.id, &checkpoint)?;
+        CheckpointImport {
+            command_id: command.id, commit: checkpoint.commit,
+            bundle_sha256: checkpoint.bundle_sha256, bundle_bytes: checkpoint.bundle_bytes,
+        }
+    } else {
+        return Ok(None);
+    };
     if completed.state != CommandState::Succeeded
         || completed.workspace_spec.as_ref().is_none_or(|spec|
-            spec.target_git.is_some() || spec.checkpoint.as_ref() != Some(base)
-                || spec.setup.as_ref().is_none_or(|setup| setup.repository_source != CHECKPOINT_REPOSITORY))
+            spec.target_git.is_some()
+                || (!direct_managed && spec.checkpoint.as_ref() != Some(&base))
+                || spec.setup.as_ref().is_none_or(|setup|
+                    !matches!(setup.repository_source.as_str(), CHECKPOINT_REPOSITORY | "factory:managed")))
     {
         return Ok(None);
     }
@@ -168,7 +186,7 @@ pub(super) fn portable_result_origin(
     let project: Project = serde_json::from_str(&raw)?;
     let Some(source) = &project.setup else { return Ok(None); };
     if project.runner_mapping != Some(ProjectRunnerMapping::Automatic)
-        || offline_project_seed_except(tx, &project, source, Some(completed.id))?.as_ref() != Some(base)
+        || offline_project_seed_except(tx, &project, source, Some(completed.id))?.as_ref() != Some(&base)
     {
         return Ok(None);
     }
@@ -222,6 +240,16 @@ pub(super) fn portable_return_is_current(tx: &Transaction<'_>, owner: &Workstrea
     let raw: String = tx.query_row("SELECT data FROM active_projects WHERE id=?1",
         [owner.project_id.to_string()], |row| row.get(0))?;
     let project: Project = serde_json::from_str(&raw)?;
+    if project.repository == "factory:managed" {
+        let configured = project.mirrors.get(&owner.runner_id)
+            .is_some_and(|mirror| mirror.path == path);
+        let current = if let Some(source) = project.setup.as_ref() {
+            offline_project_seed(tx, &project, source)?
+        } else {
+            None
+        };
+        return Ok(configured && current.as_ref() == owner.checkpoint.as_ref());
+    }
     let Some(source) = project.setup else { return Ok(false); };
     let expected = if source.repository_path.is_empty() { &source.repository_source } else { &source.repository_path };
     Ok(source.runner_id == owner.runner_id && path == expected && offline_seed_is_current(tx, owner)?)

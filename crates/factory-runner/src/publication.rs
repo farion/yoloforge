@@ -57,22 +57,55 @@ fn unchanged_target(target: &Path, branch: &str, parent: &str) -> Result<()> {
     );
     Ok(())
 }
+fn safe_checkout_filters(target: &Path) -> Result<()> {
+    ensure!(!git(target, &["config", "--list", "--name-only"])?.lines()
+        .any(|key| key.starts_with("filter.") &&
+            (key.ends_with(".clean") || key.ends_with(".smudge") || key.ends_with(".process"))),
+        "Lokaler Checkout verwendet Git-Filter; automatische Übernahme nicht möglich.");
+    Ok(())
+}
+
+fn initialize_mirror(root: &Path, selected: &Path, spec: &WorkspaceSpec) -> Result<Workspace> {
+    let import = spec.checkpoint.as_ref().context("Return checkpoint was not pinned")?;
+    let parent = selected.parent().context("Mirror parent missing")?;
+    let parent = fs::canonicalize(parent).context("Der Elternordner der lokalen Spiegelkopie fehlt.")?;
+    let name = selected.file_name().context("Mirror folder name missing")?;
+    let target = parent.join(name);
+    ensure!(target == selected && fs::symlink_metadata(&target).is_err(),
+        "Der Pfad der lokalen Spiegelkopie ist nicht neu oder nicht kanonisch.");
+    let temp = tempfile::tempdir_in(&parent)?;
+    git(temp.path(), &["init", "-b", &spec.base_branch])?;
+    safe_checkout_filters(temp.path())?;
+    let commit = crate::checkpoint::import_objects(temp.path(), root, import)?;
+    git(temp.path(), &["reset", "--hard", &commit])?;
+    ensure!(git(temp.path(), &["symbolic-ref", "HEAD"])?
+        == format!("refs/heads/{}", spec.base_branch), "Mirror branch differs");
+    let staged = temp.keep();
+    fs::rename(&staged, &target)?;
+    factory_platform::sync_dir(&parent)?;
+    Ok(Workspace {
+        path: target.to_str().context("Non-UTF8 mirror path")?.into(),
+        branch: spec.base_branch.clone(),
+        base_commit: commit,
+    })
+}
 
 pub(crate) fn return_checkpoint(root: &Path, spec: &WorkspaceSpec) -> Result<Workspace> {
     let setup = spec.setup.as_ref().context("Return checkout was not pinned")?;
     let import = spec.checkpoint.as_ref().context("Return checkpoint was not pinned")?;
     ensure!(setup.repository_source == CHECKPOINT_RETURN, "Not a checkpoint return");
     let selected = Path::new(&setup.repository_path);
-    ensure!(selected.is_absolute() && fs::symlink_metadata(selected)?.is_dir(),
-        "Der lokale Projektordner fehlt oder wurde durch einen Link ersetzt.");
+    ensure!(selected.is_absolute(), "Der lokale Projektordner ist nicht absolut.");
+    if matches!(fs::symlink_metadata(selected), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
+        return initialize_mirror(&fs::canonicalize(root)?, selected, spec);
+    }
+    ensure!(fs::symlink_metadata(selected)?.is_dir(),
+        "Der lokale Projektordner wurde durch einen Link ersetzt.");
     let target = fs::canonicalize(selected)?;
     ensure!(fs::canonicalize(git(&target, &["rev-parse", "--show-toplevel"])?)? == target,
         "Der lokale Projektpfad ist nicht der Git-Checkout.");
     // Checkout filters can run arbitrary commands on data added to a remote tree.
-    ensure!(!git(&target, &["config", "--list", "--name-only"])?.lines()
-        .any(|key| key.starts_with("filter.") &&
-            (key.ends_with(".clean") || key.ends_with(".smudge") || key.ends_with(".process"))),
-        "Lokaler Checkout verwendet Git-Filter; automatische Übernahme nicht möglich.");
+    safe_checkout_filters(&target)?;
     let head = git(&target, &["rev-parse", "HEAD"])?;
     unchanged_target(&target, &spec.base_branch, &head)?;
     let commit = crate::checkpoint::import_objects(&target, &fs::canonicalize(root)?, import)?;
@@ -115,6 +148,109 @@ fn summary_commit_message(summary: &str) -> Option<String> {
         }
     })
 }
+fn managed_commit(repository: &Path, args: &[&str]) -> Result<String> {
+    git_env(repository, args, &[
+        ("GIT_AUTHOR_NAME", "YoloForge"),
+        ("GIT_AUTHOR_EMAIL", "factory@yoloforge.invalid"),
+        ("GIT_COMMITTER_NAME", "YoloForge"),
+        ("GIT_COMMITTER_EMAIL", "factory@yoloforge.invalid"),
+    ])
+}
+
+fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
+    let spec = r.command.workspace_spec.as_ref().context("Workspace specification missing")?;
+    let root = args.workspace_root.as_deref().context("Workspace root missing")?;
+    let workspace = workspace::existing(j, &r.command, args.repositories.as_deref(), root)?;
+    let work = PathBuf::from(&workspace.path);
+    let repository = workspace::repository(spec, args.repositories.as_deref(), root)?;
+    let previous: Option<String> = j.db.query_row(
+        "SELECT data FROM publications WHERE command_id=?1",
+        [r.command.id.to_string()],
+        |row| row.get(0),
+    ).optional()?;
+    let mut plan: Plan = if let Some(raw) = previous {
+        let plan: Plan = serde_json::from_str(&raw)?;
+        ensure!(plan.target == work && plan.repository == repository
+            && plan.branch == spec.base_branch, "Managed publication binding changed");
+        if plan.published {
+            return Ok(Some(work));
+        }
+        plan
+    } else {
+        ensure!(git(&work, &["ls-files", "--unmerged"])?.is_empty(),
+            "Arbeitsbereich enthaelt ungeloeste Konflikte");
+        let temp = tempfile::tempdir_in(root)?;
+        let index = temp.path().join("index");
+        let index = git_path(&index)?;
+        let env = [("GIT_INDEX_FILE", index.as_ref())];
+        git_env(&work, &["read-tree", "HEAD"], &env)?;
+        git_env(&work, &["add", "--all", "--", "."], &env)?;
+        ensure!(!git_env(&work, &["ls-files", "--stage"], &env)?.lines()
+            .any(|line| line.starts_with("160000 ")),
+            "Verschachtelte Repositories/Submodule werden nicht automatisch uebernommen");
+        let tree = git_env(&work, &["write-tree"], &env)?;
+        let parent = workspace.base_commit.clone();
+        let message = summary_commit_message(summary).unwrap_or_else(|| "Record task result".into());
+        let snapshot = managed_commit(&repository, &[
+            "commit-tree", &tree, "-p", &parent, "-m", &message,
+        ])?;
+        let plan = Plan {
+            snapshot: Some(snapshot.clone()), stream: r.command.stream_id,
+            epoch: r.command.ownership_epoch, target: work.clone(),
+            repository: repository.clone(), branch: spec.base_branch.clone(),
+            parent, commit: snapshot, published: false,
+        };
+        save(j, r.command.id, &plan)?;
+        plan
+    };
+    let snapshot = plan.snapshot.as_ref().context("Managed snapshot missing")?.clone();
+    let snapshot_ref = format!("refs/yoloforge/publication-snapshots/{}", r.command.id);
+    let existing = git(&repository, &["for-each-ref", "--format=%(objectname)", &snapshot_ref])?;
+    if existing.is_empty() {
+        git(&repository, &["update-ref", &snapshot_ref, &snapshot, &"0".repeat(snapshot.len())])?;
+    } else {
+        ensure!(existing == snapshot, "Managed publication snapshot changed");
+    }
+    let base_ref = format!("refs/heads/{}", spec.base_branch);
+    let current = git(&repository, &["rev-parse", &base_ref])?;
+    if current != plan.parent && current != plan.commit {
+        ensure!(plan.commit == snapshot, "Managed base changed after result merge");
+        git(&repository, &["merge-base", "--is-ancestor", &workspace.base_commit, &current])
+            .context("Managed project history diverged")?;
+        let base = git(&repository, &["merge-base", &snapshot, &current])?;
+        let (clean, output) = workspace::merge_tree(&repository, &base, &current, &snapshot)?;
+        if !clean {
+            return Err(PublicationConflict(
+                "Parallele Ergebnisse im Factory-Repository stehen in Konflikt; beide Snapshots bleiben erhalten.".into()
+            ).into());
+        }
+        let tree = output.lines().next().context("Merge tree missing")?;
+        let message = git(&repository, &["show", "-s", "--format=%B", &snapshot])?;
+        plan.parent = current;
+        plan.commit = managed_commit(&repository, &[
+            "commit-tree", tree, "-p", &plan.parent, "-p", &snapshot, "-m", &message,
+        ])?;
+        save(j, r.command.id, &plan)?;
+    }
+    let publication_ref = format!("refs/yoloforge/publications/{}", r.command.id);
+    let existing = git(&repository, &["for-each-ref", "--format=%(objectname)", &publication_ref])?;
+    if existing.is_empty() {
+        git(&repository, &["update-ref", &publication_ref, &plan.commit, &"0".repeat(plan.commit.len())])?;
+    } else {
+        ensure!(existing == plan.commit, "Managed publication ref changed");
+    }
+    let current = git(&repository, &["rev-parse", &base_ref])?;
+    if current != plan.commit {
+        ensure!(current == plan.parent, "Managed project base changed during publication");
+        git(&repository, &["update-ref", &base_ref, &plan.commit, &current])?;
+    }
+    git(&work, &["reset", "--hard", &plan.commit])?;
+    ensure!(git(&work, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
+        "Managed result worktree is not clean after publication");
+    plan.published = true;
+    save(j, r.command.id, &plan)?;
+    Ok(Some(work))
+}
 
 pub(crate) fn commit_tree(target: &Path, repository: &Path, args: &[&str]) -> Result<String> {
     fn identity(target: &Path, kind: &str) -> Result<(String, String)> {
@@ -143,6 +279,9 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
     let Some(setup) = &spec.setup else {
         return Ok(None);
     };
+    if setup.repository_source == "factory:managed" && setup.repository_path.is_empty() {
+        return publish_managed(j, r, args, summary);
+    }
     // Remote URLs and Factory-managed storage have no user-selected local output folder.
     let source = Path::new(&setup.repository_source);
     if !source.is_absolute() || !setup.repository_path.is_empty() {
@@ -479,6 +618,47 @@ mod tests {
             panic!("parallel workspace failed")
         };
         (record, PathBuf::from(workspace.path))
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn factory_managed_results_advance_the_base_and_leave_a_clean_checkpoint_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("work");
+        let journal_path = dir.path().join("journal");
+        let runner = RunnerId::new();
+        let project = ProjectId::new();
+        let stream = StreamId::new();
+        let args = Args::parse_from([
+            "runner", "--id", &runner.to_string(), "--name", "test",
+            "--journal", journal_path.to_str().unwrap(),
+            "--workspace-root", root.to_str().unwrap(),
+        ]);
+        let command: RunnerCommand = serde_json::from_value(serde_json::json!({
+            "id":CommandId::new(),"stream_id":stream,"runner_id":runner,
+            "ownership_epoch":1,"kind":"run_agent","state":"accepted","created_unix_ms":1,
+            "workspace_spec":{"project_id":project,"branch":format!("factory/{stream}"),
+            "base_branch":"main","setup":{"runner_id":runner,
+            "repository_source":"factory:managed","repository_path":"",
+            "service_registration":"","harness":null}}
+        })).unwrap();
+        let journal = Journal::open(&journal_path, &args.server, runner).unwrap();
+        let mut record = journal.receive(command).unwrap();
+        crate::managed::ensure_repository(&journal, &mut record, &args).await.unwrap();
+        let CommandOutput::Workspace { workspace } = workspace::prepare(
+            &journal, &record.command, None, &root,
+        ) else { panic!("managed workspace failed") };
+        let work = PathBuf::from(workspace.path);
+        fs::write(work.join("result.txt"), "remote result").unwrap();
+        let published = publish_with_summary(&journal, &record, &args, "Remote result")
+            .unwrap().unwrap();
+        assert_eq!(published, work);
+        assert_eq!(git(&work, &["status", "--porcelain", "--untracked-files=all"]).unwrap(), "");
+        let repository = workspace::repository(
+            record.command.workspace_spec.as_ref().unwrap(), None, &root,
+        ).unwrap();
+        assert_eq!(git(&repository, &["show", "main:result.txt"]).unwrap(), "remote result");
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]).unwrap(),
+            git(&repository, &["rev-parse", "main"]).unwrap());
+        assert!(publish_with_summary(&journal, &record, &args, "Remote result").is_ok());
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn split_git_tags_the_published_commit_and_reconciles_without_a_second_tag() {

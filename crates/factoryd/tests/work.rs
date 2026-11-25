@@ -187,6 +187,7 @@ fn migration_from_v1_preserves_projects_and_adds_work_tables() {
         max_sessions: default_session_limit(),
         paused: false,
         runner_bindings: Default::default(),
+        mirrors: Default::default(),
         setup: None,
         profile: ExecutionProfile::default(),
         id: ProjectId::new(),

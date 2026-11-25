@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, VecDeque};
 pub enum ProjectSection {
     General,
     Runner,
+    Mirrors,
     Models,
     DefaultModels,
     Skills,
@@ -23,9 +24,10 @@ pub enum ProjectSection {
     Language,
 }
 impl ProjectSection {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::General,
         Self::Runner,
+        Self::Mirrors,
         Self::Models,
         Self::Skills,
         Self::Mcps,
@@ -44,6 +46,7 @@ impl ProjectSection {
         match self {
             Self::General => crate::tr!("Allgemein"),
             Self::Runner => crate::tr!("Runner-Zuordnung"),
+            Self::Mirrors => crate::tr!("Lokale Spiegelkopie"),
             Self::Models => crate::tr!("Modell-Anbieter"),
             Self::DefaultModels => crate::tr!("Default-Modelle"),
             Self::Skills => "Skills",
@@ -417,7 +420,9 @@ impl ProjectSettings {
         if write.path == format!("{base}/mcp/local") {
             return crate::mcp_settings::confirm_project_save(app, project, value.clone());
         }
-        let project_update = write.path == base || write.path == format!("{base}/session-limit");
+        let project_update = write.path == base
+            || write.path == format!("{base}/session-limit")
+            || write.path == format!("{base}/mirror");
         let revision = value.get("revision").and_then(Value::as_u64);
         let Some(revision) = revision else { return false; };
         if project_update {
@@ -431,7 +436,10 @@ impl ProjectSettings {
             }
         }
         for next in remaining.iter_mut().filter(|w| w.retry.is_none()) {
-            if project_update && (next.path == base || next.path == format!("{base}/session-limit"))
+            if project_update
+                && (next.path == base
+                    || next.path == format!("{base}/session-limit")
+                    || next.path == format!("{base}/mirror"))
                 && next.body["expected_revision"] == write.body["expected_revision"] {
                 next.body["expected_revision"] = json!(revision);
             }
@@ -522,7 +530,8 @@ impl ProjectSettings {
                     return;
                 }
                   if self.project.is_some() && matches!(self.selected,
-                      ProjectSection::General | ProjectSection::Runner | ProjectSection::Limits | ProjectSection::Supervisor
+                      ProjectSection::General | ProjectSection::Runner | ProjectSection::Mirrors
+                          | ProjectSection::Limits | ProjectSection::Supervisor
                   ) {
                      design::section_heading(ui, self.selected.title());
                   }
@@ -725,6 +734,23 @@ fn content(app: &mut App, id: Option<ProjectId>, section: ProjectSection) -> Opt
                 }),
             ))
         }
+        ProjectSection::Mirrors => {
+            let local = app.local_runners.iter().find(|runner| runner.visible(&app.server));
+            let runner = local.map(|runner| runner.id).unwrap_or_else(RunnerId::new);
+            let mirror = p.mirrors.get(&runner).map_or("", |mirror| mirror.path.as_str());
+            app.dialog = Some(Dialog::form(
+                crate::tr!("Lokale Spiegelkopie"),
+                &crate::tr!("Jeder Desktop kann einen eigenen Checkout des bestätigten Factory-Projektstands erhalten."),
+                "PUT",
+                format!("/v1/projects/{}/mirror", p.id),
+                json!(SetProjectMirror {
+                    request_id: RequestId::new(),
+                    expected_revision: p.revision,
+                    runner_id: runner,
+                    path: mirror.to_owned(),
+                }),
+            ))
+        }
         ProjectSection::Limits => {
             app.dialog = Some(Dialog::form(
                 "Limits",
@@ -885,6 +911,7 @@ mod tests {
         let Dialog::ProjectSettings(settings) = &mut dialog else { unreachable!() };
         edit(settings, &mut app, ProjectSection::General, "name", json!("Neuer Name"));
         edit(settings, &mut app, ProjectSection::Runner, "runner_mapping", json!(ProjectRunnerMapping::Runner(runner)));
+        edit(settings, &mut app, ProjectSection::Mirrors, "path", json!("/tmp/project-mirror"));
         settings.selected = ProjectSection::Runner;
 
         let ctx = app.backend.context().clone();
@@ -925,6 +952,16 @@ mod tests {
         assert_eq!(app.settings.pending[0].body["runner_mapping"], json!(ProjectRunnerMapping::Runner(runner)));
         project.revision.0 += 1;
         project.runner_mapping = Some(ProjectRunnerMapping::Runner(runner));
+        reply(&mut app, Ok(json!(project)));
+        assert!(!draw(&mut app, &mut dialog, vec![]).0);
+        assert_eq!(app.settings.pending.len(), 1);
+        assert_eq!(app.settings.pending[0].path, format!("/v1/projects/{}/mirror", project.id));
+        assert_eq!(app.settings.pending[0].body["expected_revision"], json!(project.revision));
+        let mirror_runner: RunnerId = serde_json::from_value(
+            app.settings.pending[0].body["runner_id"].clone(),
+        ).unwrap();
+        project.revision.0 += 1;
+        project.mirrors.insert(mirror_runner, ProjectMirror { path: "/tmp/project-mirror".into() });
         reply(&mut app, Ok(json!(project)));
         assert!(draw(&mut app, &mut dialog, vec![]).0);
         assert!(!app.settings.form_drafts.iter().any(|draft| draft.path == format!("/v1/projects/{}", project.id)));

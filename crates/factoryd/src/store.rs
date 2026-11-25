@@ -276,6 +276,7 @@ impl Store {
                 max_sessions: default_session_limit(),
                 paused: false,
                 runner_bindings: Default::default(),
+                mirrors: Default::default(),
                 setup: None,
                 id: ProjectId::new(),
                 revision: Revision(1),
@@ -415,6 +416,9 @@ impl Store {
                 if let Some(v) = &body.base_branch {
                     project.base_branch = v.clone();
                 }
+                if project.repository != "factory:managed" && !project.mirrors.is_empty() {
+                    return Err(StoreError::WorkConflict);
+                }
                 project_fields(&project.name, &project.repository, &project.base_branch)?;
                 if let Some(mapping) = body.runner_mapping {
                     scheduler::map_project_runner(tx, &mut project, mapping)?;
@@ -432,6 +436,27 @@ impl Store {
                 Ok(project)
             },
         )
+    }
+    pub fn set_project_mirror(&self, id: ProjectId, body: SetProjectMirror) -> Result<Project> {
+        self.mutate(body.request_id, &format!("project.mirror/{id}"), &body, |tx| {
+            let data: Option<String> = tx.query_row(
+                "SELECT data FROM active_projects WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            ).optional()?;
+            let mut project: Project = serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
+            if project.revision != body.expected_revision {
+                return Err(StoreError::RevisionConflict(project.revision));
+            }
+            update_mirror(&mut project, &body)?;
+            project.revision.0 += 1;
+            tx.execute(
+                "UPDATE projects SET data=?1 WHERE id=?2",
+                params![serde_json::to_string(&project)?, id.to_string()],
+            )?;
+            event(tx, "project.mirror", id.to_string(), &project)?;
+            Ok(project)
+        })
     }
 
     pub fn update_ticket(&self, id: TicketId, body: UpdateTicket) -> Result<Ticket> {
@@ -716,6 +741,23 @@ fn project_fields(name: &str, repository: &str, base_branch: &str) -> Result<()>
             ));
         }
     }
+    Ok(())
+}
+fn update_mirror(project: &mut Project, mirror: &SetProjectMirror) -> Result<()> {
+    if project.repository != "factory:managed" {
+        return Err(StoreError::Invalid("Local mirrors require a Factory-managed project"));
+    }
+    if mirror.path.is_empty() {
+        project.mirrors.remove(&mirror.runner_id);
+        return Ok(());
+    }
+    if mirror.path.len() > 4096
+        || mirror.path.chars().any(char::is_control)
+        || !work::absolute_runner_path(&mirror.path)
+    {
+        return Err(StoreError::Invalid("Mirror path must be absolute on its runner"));
+    }
+    project.mirrors.insert(mirror.runner_id, ProjectMirror { path: mirror.path.clone() });
     Ok(())
 }
 

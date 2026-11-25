@@ -71,7 +71,7 @@ impl Store {
                 p.name=b.name.clone();p.profile=b.profile.clone();p.setup=Some(b.setup.clone());p.revision.0+=1;p
             }else {
                 if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}
-                Project {logo:None,runner_mapping:None,key:super::numbering::project_key(tx,&b.name,b.key.as_deref(),None)?,deleted:false,max_sessions:default_session_limit(),paused:false,runner_bindings:Default::default(),id:ProjectId::new(),revision:Revision(1),name:b.name.clone(),repository:b.repository.clone(),base_branch:b.base_branch.clone(),profile:b.profile.clone(),setup:Some(b.setup.clone()),created_unix_ms:super::super::unix_ms()}
+                Project {logo:None,runner_mapping:None,key:super::numbering::project_key(tx,&b.name,b.key.as_deref(),None)?,deleted:false,max_sessions:default_session_limit(),paused:false,runner_bindings:Default::default(),mirrors:Default::default(),id:ProjectId::new(),revision:Revision(1),name:b.name.clone(),repository:b.repository.clone(),base_branch:b.base_branch.clone(),profile:b.profile.clone(),setup:Some(b.setup.clone()),created_unix_ms:super::super::unix_ms()}
             };
             if b.project_id.is_some() {
                 if let Some(key)=b.key.as_deref().filter(|key|!key.trim().is_empty()) {

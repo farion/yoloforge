@@ -123,7 +123,9 @@ Models, Provider, Skills, Sessions und Tools bleiben englisch.
   CLI-Zeilen ohne zusätzlichen vertikalen Widgetabstand rendern. Keine vertikalen
   Pixel-Polster an Nachrichten: zwischen Nachrichten genau eine Leerzeile in
   tatsächlicher Monospace-Zeilenhöhe, sonst normale Folgezeilen. Keine Fußzeilen
-  mit Agent/Modell/Laufzeit/Output-Token oder Nachrichtenmenüs im Lesefluss.
+  mit Agent oder absoluten Output-Tokenzahlen und keine Nachrichtenmenüs im
+  Lesefluss. Unter abgeschlossenen Antworten dezent Modell, Dauer und tok/s
+  anzeigen, soweit die Nachricht die Daten enthält.
   Eingaben erhalten oben und unten jeweils eine hinterlegte Leerzeile in echter
   Monospace-Zeilenhöhe. Der blaue Marker ist 6 pt breit und hat exakt dieselbe
   obere und untere Kante wie der Hintergrund. Auch Eingaben haben kein Menü.
@@ -132,8 +134,11 @@ Models, Provider, Skills, Sessions und Tools bleiben englisch.
   Toolblöcke dezent grau hinterlegen, Aufruf und Ausgabe in Grautönen. Keine
   Originaldaten, Eingabe-/Ausgabeüberschriften oder Menüs im
   Toolblock. Zwischen Aufruf und Ausgabe höchstens eine echte Leerzeile.
-  Toolblöcke sind immer offen, nicht klappbar; vor dem Aufruf steht `$` statt
-  eines Pfeils. Oben/unten jeweils eine hinterlegte Leerzeile in Monospace-Zeilenhöhe.
+  Aufeinanderfolgende Tool-Aktivität in standardmäßig eingeklappten Gruppen
+  mit Zählern anzeigen (`+` geschlossen, `-` offen). In offenen Gruppen
+  steht jeder Tool Call als eigener, nicht einzeln klappbarer Block. Vor dem
+  Aufruf steht `$` statt eines Pfeils. Oben/unten jeweils eine hinterlegte
+  Leerzeile in Monospace-Zeilenhöhe.
   Tool- und Eingabeblöcke haben exakt dieselbe linke Kante und volle Breite.
   Patches mit sprachabhängigen Syntaxfarben und Zeilennummern rendern;
   Hinzufügungen/Entfernungen mit eigener Zeilenhinterlegung markieren. Textdateien
