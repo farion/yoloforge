@@ -359,6 +359,9 @@ mod tests {
         let repo = dir.path().join("repository");
         fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-b", "main"]).unwrap();
+        // Test Git commands ignore global configuration. Keep symlinks enabled
+        // in both repositories even when Git for Windows defaults to false.
+        git(&repo, &["config", "--local", "core.symlinks", "true"]).unwrap();
         git(&repo, &["config", "user.name", "Test"]).unwrap();
         git(&repo, &["config", "user.email", "test@example.invalid"]).unwrap();
         fs::write(repo.join("tracked"), "initial").unwrap();
@@ -447,6 +450,7 @@ mod tests {
         let imported = dir.path().join("imported");
         fs::create_dir(&imported).unwrap();
         git(&imported, &["init"]).unwrap();
+        git(&imported, &["config", "--local", "core.symlinks", "true"]).unwrap();
         git(
             &imported,
             &[
@@ -456,6 +460,8 @@ mod tests {
             ],
         )
         .unwrap();
+        let link = git(&imported, &["ls-tree", &result.commit, "--", "link"]).unwrap();
+        assert!(link.starts_with("120000 blob "), "Expected a Git symlink: {link}");
         git(&imported, &["checkout", "--detach", &result.commit]).unwrap();
         assert_eq!(
             fs::read_to_string(imported.join("tracked")).unwrap(),
