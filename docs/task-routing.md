@@ -46,7 +46,7 @@ und Memorizer starten bei Bedarf und haben kein eigenes Prüfintervall.
 Ohne feste Auswahl erzeugt der Scheduler einen dauerhaften, schreibgeschützten
 OpenCode-Auftrag im projektbezogenen Orchestrator-Arbeitsbereich. Das Modell erhält
 Prompt, Bilder und höchstens 16 aktuelle Sessionkandidaten mit Ziel und Zusammenfassung.
-Es entscheidet `new`, `session` oder `wait`. Eine Sessionentscheidung muss sowohl im
+Es entscheidet `new`, `session`, `target_git` oder `wait`. Eine Sessionentscheidung muss sowohl im
 ursprünglichen Kandidatenangebot als auch im aktuellen Angebot enthalten sein.
 Die eigentliche Fortsetzung prüft zusätzlich Besitzer, Epoche, Profil,
 Abschlussarchiv und Lifecycle-Sperren.
@@ -58,6 +58,29 @@ bei unverändertem Kontext endet die automatische Neubewertung nach 12 Versuchen
 Eine Änderung des Kandidatenkontexts erlaubt weitere Bewertungen. Die konkrete
 Ausführung bleibt am Ticket gespeichert, damit Folgeprompts in derselben Session
 nicht die Ergebniszuordnung älterer Aufgaben überschreiben.
+
+### Commit, Tag und Push
+
+Explizit angeforderte Git-Schritte im Ziel-Checkout werden getrennt von der
+Implementierung geplant. Bei „Implementiere X, dann commit, tag, push“ erhält die
+Arbeitssession nur den Implementierungsauftrag. Der Runner übernimmt die Änderungen
+mit dem bestehenden abgesicherten Verfahren und verwendet den tatsächlich dort
+gelandeten Commit für Tag und Push. Ein reiner Git-Auftrag braucht keinen eigenen
+Ausführungs-Worktree; `commit` übernimmt dann nur bereits gestagte Änderungen.
+
+- Voraussetzung ist ein lokaler Projektordner auf dem Runner mit ausgechecktem
+  Zielbranch. Fest ausgewählte Arbeitssessions umgehen das automatische Routing.
+- Ohne Tag-Namen zählt der Runner standardmäßig Patch hoch. Minor und Major sind
+  auf Anweisung möglich. Es zählen numerische Release-Tags in der Historie des
+  Zielbranches; ohne einen solchen Tag beginnt die Reihe bei `v0.1.0`.
+- Pushes brauchen einen eindeutigen Upstream oder einen ausdrücklich genannten,
+  konfigurierten Remote. Branch und neuer Tag werden, falls beide anfallen,
+  atomar gepusht. Keine Force-Pushes, Mirror-Pushes oder Tag-Überschreibungen.
+- Scheitert die Übernahme, wird weder getaggt noch gepusht. Scheitert der Push
+  später, bleiben lokale Commits und Tags erhalten. Nach einer Unterbrechung
+  wird ein begonnener Git-Plan nicht automatisch wiederholt.
+- Ob und welche Git-Aktionen ausgeführt wurden, steht im Auftragsergebnis.
+  Runner ohne `target-git-v1` führen diese Pläne nicht aus.
 
 ## Abnahme und verbleibender Umfang
 

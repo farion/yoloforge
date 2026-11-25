@@ -48,6 +48,7 @@ fn project_questions(snapshot: &Snapshot, index: usize) -> Vec<&Question> {
 
 fn command_output(output: &CommandOutput) -> String {
     match output {
+        CommandOutput::TargetGit { git_summary, .. } => git_summary.clone(),
         CommandOutput::OpenCode(status) => opencode(status),
         CommandOutput::Workspace { workspace } => workspace.path.clone(),
         CommandOutput::WorkspaceError { workspace_error } => workspace_error.clone(),

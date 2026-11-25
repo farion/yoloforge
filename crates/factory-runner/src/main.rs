@@ -30,6 +30,7 @@ mod recovery;
 mod review;
 mod setup;
 mod termination;
+mod target_git;
 mod workspace;
 use journal::{Journal, Record};
 
@@ -424,16 +425,34 @@ async fn commands(
                         .as_ref()
                         .is_some_and(|s| !s.read_only)
                 {
-                    match tokio::task::block_in_place(||publication::publish_with_summary(journal,&record,args,&progress.summary)) {
-                        Ok(Some(path))=>progress.summary.push_str(&format!("\n\nErgebnis automatisch im Projektordner bereitgestellt: {}",path.display())),
-                        Ok(None)=>{},
-                        Err(e) if e.downcast_ref::<publication::PublicationConflict>().is_some()=> {
-                            progress.summary=format!("{PUBLICATION_CONFLICT_PREFIX}\n{e}\n\nAgentenergebnis:\n{}",progress.summary);
-                            let mut end=progress.summary.len().min(32768);
-                            while !progress.summary.is_char_boundary(end) {end-=1;}
-                            progress.summary.truncate(end);
-                        },
-                        Err(e)=>progress.summary.push_str(&format!("\n\nErgebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert: {e}")),
+                    let planned_git = record.command.requires_target_git();
+                    let publication = tokio::task::block_in_place(|| publication::publish_with_summary(journal, &record, args, &progress.summary));
+                    if planned_git {
+                        let (ok, summary) = match publication {
+                            Ok(Some(_)) => match tokio::task::block_in_place(|| publication::published_commit(journal, record.command.id)) {
+                                Ok(commit) => tokio::task::block_in_place(|| target_git::execute(journal, &mut record, Some(&commit))),
+                                Err(error) => (false, format!("Git-Schritte nicht ausgeführt: {error}")),
+                            },
+                            Ok(None) => (false, "Git-Schritte nicht ausgeführt: kein lokaler Ziel-Checkout".into()),
+                            Err(error) => (false, format!("Git-Schritte nicht ausgeführt: Übernahme blockiert. {error}")),
+                        };
+                        if !ok { progress.phase = AgentPhase::Failed; }
+                        progress.summary = format!("{summary}\n\nAgentenergebnis:\n{}", progress.summary);
+                        let mut end = progress.summary.len().min(32768);
+                        while !progress.summary.is_char_boundary(end) { end -= 1; }
+                        progress.summary.truncate(end);
+                    } else {
+                        match publication {
+                            Ok(Some(path))=>progress.summary.push_str(&format!("\n\nErgebnis automatisch im Projektordner bereitgestellt: {}",path.display())),
+                            Ok(None)=>{},
+                            Err(e) if e.downcast_ref::<publication::PublicationConflict>().is_some()=> {
+                                progress.summary=format!("{PUBLICATION_CONFLICT_PREFIX}\n{e}\n\nAgentenergebnis:\n{}",progress.summary);
+                                let mut end=progress.summary.len().min(32768);
+                                while !progress.summary.is_char_boundary(end) {end-=1;}
+                                progress.summary.truncate(end);
+                            },
+                            Err(e)=>progress.summary.push_str(&format!("\n\nErgebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert: {e}")),
+                        }
                     }
                 }
                 record.result = Some(CommandOutput::Agent { agent: progress });
@@ -542,6 +561,10 @@ async fn commands(
                     opencode_status(&args.opencode_registration).await.into()
                 }
                 CommandKind::PrepareWorkspace => setup::prepare(journal, &mut record, args).await,
+                CommandKind::TargetGit => {
+                    let (git_succeeded, git_summary) = tokio::task::block_in_place(|| target_git::execute(journal, &mut record, None));
+                    CommandOutput::TargetGit { git_succeeded, git_summary }
+                }
                 CommandKind::RunAgent => unreachable!("agent execution handled above"),
                 CommandKind::Checkpoint => unreachable!("checkpoint execution handled above"),
                 CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview => {
@@ -723,6 +746,7 @@ async fn run(mut args: Args) -> Result<()> {
                         RUNTIME_TERMINATION_CAPABILITY.into(),
                         CHECKPOINT_CAPABILITY.into(),
                         REVIEW_CAPABILITY.into(),
+                        TARGET_GIT_CAPABILITY.into(),
                         PROJECT_SETUP_CAPABILITY.into(),
                         TASK_IMAGES_CAPABILITY.into(),
                         TASK_FILES_CAPABILITY.into(),

@@ -9,6 +9,9 @@ use std::{
 
 pub fn effective(args: &Args, c: &RunnerCommand) -> Result<Args> {
     let mut args = args.clone();
+    if c.kind == CommandKind::TargetGit {
+        return Ok(args);
+    }
     if let Some(s) = c.workspace_spec.as_ref().and_then(|s| s.setup.as_ref()) {
         ensure!(
             s.runner_id == c.runner_id,

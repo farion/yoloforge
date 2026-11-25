@@ -179,10 +179,13 @@ fn prepare_inner(
     mapping: Option<&Path>,
     root: &Path,
 ) -> Result<Workspace> {
-    let spec = command
+    let mut spec = command
         .workspace_spec
-        .as_ref()
+        .clone()
         .context("Workspace specification missing")?;
+    // Post-publication Git belongs to this command, not the workspace binding.
+    spec.target_git = None;
+    let spec = &spec;
     ensure!(
         spec.branch
             == if command.ownership_epoch == 1 {
@@ -439,6 +442,7 @@ mod tests {
                 result: None,
                 created_unix_ms: 1,
                 workspace_spec: Some(WorkspaceSpec {
+                    target_git: None,
                     setup: None,
                     checkpoint: None,
                     project_id: self.project,

@@ -864,6 +864,7 @@ mod tests {
             state: CommandState::Accepted,
             result: None,
             workspace_spec: Some(WorkspaceSpec {
+                target_git: None,
                 setup: None,
                 checkpoint: None,
                 project_id: ProjectId::new(),

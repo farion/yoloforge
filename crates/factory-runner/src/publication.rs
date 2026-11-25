@@ -87,7 +87,7 @@ fn summary_commit_message(summary: &str) -> Option<String> {
     })
 }
 
-fn commit_tree(target: &Path, repository: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn commit_tree(target: &Path, repository: &Path, args: &[&str]) -> Result<String> {
     fn identity(target: &Path, kind: &str) -> Result<(String, String)> {
         let ident = git(target, &["-c", "user.useConfigOnly=true", "var", kind])
             .context("Git-Identität im Zielrepository fehlt; bitte user.name und user.email konfigurieren")?;
@@ -172,6 +172,10 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
             "Verschachtelte Repositories/Submodule werden nicht automatisch uebernommen"
         );
         let tree = git_env(work, &["write-tree"], &env)?;
+        if spec.target_git.is_some() {
+            ensure!(tree != git(work, &["rev-parse", &format!("{parent}^{{tree}}")])?,
+                "Arbeitsbereich enthält keine Änderungen für die angeforderte Übernahme");
+        }
         let head = git(work, &["rev-parse", "HEAD"])?;
         // A targeted follow-up may have merged the observed target into its
         // execution branch and committed a real resolution. Preserve that
@@ -182,7 +186,8 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         }
         let mut commit_args = vec!["commit-tree", tree.as_str()];
         commit_args.extend(parents);
-        let message = if let Some(message) = summary_commit_message(summary) {
+        let requested_message = spec.target_git.as_ref().and_then(|plan| plan.commit_message.clone());
+        let message = if let Some(message) = requested_message.or_else(|| summary_commit_message(summary)) {
             message
         } else {
             let changes = git(work, &["diff", "--stat", &parent, &tree, "--"])?;
@@ -361,6 +366,17 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
     Ok(Some(target))
 }
 
+pub(crate) fn published_commit(j: &Journal, id: CommandId) -> Result<String> {
+    let raw: String = j.db.query_row("SELECT data FROM publications WHERE command_id=?1",
+        [id.to_string()], |row| row.get(0))?;
+    let plan: Plan = serde_json::from_str(&raw)?;
+    ensure!(plan.published, "Ergebnis wurde nicht übernommen");
+    ensure!(git(&plan.target, &["rev-parse", &format!("{}^{{tree}}", plan.commit)])?
+        != git(&plan.target, &["rev-parse", &format!("{}^{{tree}}", plan.parent)])?,
+        "Übernahme enthält keine Änderungen; kein Tag oder Push ausgelöst");
+    Ok(plan.commit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +450,32 @@ mod tests {
             panic!("parallel workspace failed")
         };
         (record, PathBuf::from(workspace.path))
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn split_git_tags_the_published_commit_and_does_not_replay_after_interruption() {
+        let mut f = fixture().await;
+        f.record.command.workspace_spec.as_mut().unwrap().target_git = Some(TargetGitPlan {
+            commit: true,
+            commit_message: Some("User-selected subject".into()),
+            tag: Some(TargetTag::Patch),
+            ..Default::default()
+        });
+        let before = git(&f.work, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(f.target.join("dirty"), "user file").unwrap();
+        assert!(publish(&f.journal, &f.record, &f.args).is_err());
+        assert!(published_commit(&f.journal, f.record.command.id).is_err());
+        assert_eq!(git(&f.target, &["tag", "--list"]).unwrap(), "");
+        fs::remove_file(f.target.join("dirty")).unwrap();
+        publish(&f.journal, &f.record, &f.args).unwrap();
+        let commit = published_commit(&f.journal, f.record.command.id).unwrap();
+        assert_eq!(git(&f.target, &["log", "-1", "--format=%s"]).unwrap(), "User-selected subject");
+        assert_eq!(git(&f.work, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_ne!(before, commit);
+        assert!(crate::target_git::execute(&f.journal, &mut f.record, Some(&commit)).0);
+        assert_eq!(git(&f.target, &["rev-parse", "v0.1.0"]).unwrap(), commit);
+        let mut replay = f.journal.receive(f.record.command.clone()).unwrap();
+        assert!(!crate::target_git::execute(&f.journal, &mut replay, Some(&commit)).0);
+        assert_eq!(git(&f.target, &["tag", "--list"]).unwrap(), "v0.1.0");
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn parallel_disjoint_results_combine_and_continuations_do_not_erase_other_work() {
