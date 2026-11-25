@@ -131,15 +131,17 @@ fn git_status(
     // long-path repository setup, so address bare repositories directly.
     // Do not modify the user's Git config.
     #[cfg(windows)]
+    let bare_init = args.first() == Some(&"init") && args.contains(&"--bare");
+    #[cfg(windows)]
     {
         command.args(["-c", "core.longpaths=true"]);
-        let bare = (args.first() == Some(&"init") && args.contains(&"--bare"))
-            || (!repository.join(".git").exists()
-                && repository.join("HEAD").is_file()
-                && repository.join("objects").is_dir());
-        if bare {
+        if !bare_init
+            && !repository.join(".git").exists()
+            && repository.join("HEAD").is_file()
+            && repository.join("objects").is_dir()
+        {
             command.arg(format!("--git-dir={}", git_path(repository)?));
-        } else {
+        } else if !bare_init {
             command.arg("-C").arg(git_path(repository)?.as_ref());
         }
     }
@@ -163,15 +165,21 @@ fn git_status(
         );
     #[cfg(not(windows))]
     command.current_dir(repository);
-    let mut child = command
+    command
         .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    // `git init <path>` loads command configuration before creating the target,
+    // unlike both CreateProcess.current_dir and Git's startup-level -C option.
+    #[cfg(windows)]
+    if bare_init {
+        command.arg(git_path(repository)?.as_ref());
+    }
+    let mut child = command.spawn()?;
     let deadline = Instant::now() + timeout;
     let success = loop {
         if let Some(status) = child.try_wait()? {

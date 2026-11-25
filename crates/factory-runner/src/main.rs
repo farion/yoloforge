@@ -426,7 +426,7 @@ async fn commands(
                         .command
                         .agent_spec
                         .as_ref()
-                        .is_some_and(|s| !s.read_only)
+                        .is_some_and(|s| !s.read_only && s.role != factory_protocol::directs::ROLE)
                 {
                     let planned_git = record.command.requires_target_git();
                     let publication = tokio::task::block_in_place(|| publication::publish_with_summary(journal, &record, args, &progress.summary));
@@ -601,6 +601,7 @@ fn registration_capabilities(managed: bool) -> Vec<String> {
         CHECKPOINT_CAPABILITY,
         REVIEW_CAPABILITY,
         TARGET_GIT_CAPABILITY,
+        factory_protocol::directs::CAPABILITY,
         PROJECT_SETUP_CAPABILITY,
         TASK_IMAGES_CAPABILITY,
         TASK_FILES_CAPABILITY,
@@ -813,6 +814,9 @@ async fn run(mut args: Args) -> Result<()> {
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
                 // Older servers cap registration at 16 capability strings.
                 input.capabilities.pop();
+                input
+                    .capabilities
+                    .retain(|capability| capability != factory_protocol::directs::CAPABILITY);
                 result = client.register(&input).await;
             }
             if result.is_ok() {
@@ -960,9 +964,16 @@ mod startup_identity_tests {
     fn managed_runner_registration_fits_server_limit_without_losing_git_recovery() {
         for managed in [false, true] {
             let capabilities = registration_capabilities(managed);
-            assert!(capabilities.len() <= 16);
+            assert!(capabilities.len() <= 17);
             assert!(capabilities.iter().any(|cap| cap == TARGET_GIT_CAPABILITY));
             assert!(!capabilities.iter().any(|cap| cap == RUNNER_RESTART_CAPABILITY));
+            assert!(
+                capabilities
+                    .iter()
+                    .filter(|capability| *capability != factory_protocol::directs::CAPABILITY)
+                    .count()
+                    <= 16
+            );
         }
     }
 

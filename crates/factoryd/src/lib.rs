@@ -23,6 +23,7 @@ mod access;
 mod archive_routes;
 mod checkpoint_routes;
 mod compaction_routes;
+mod direct_routes;
 mod desktop;
 mod knowledge_routes;
 mod live;
@@ -227,6 +228,10 @@ pub fn router_with_shutdown(
         )
         .route("/v1/notifications", get(desktop::notifications))
         .route("/v1/notifications/read", post(desktop::mark_notifications))
+        .route("/v1/projects/{id}/directs", get(direct_routes::list))
+        .route("/v1/directs", post(direct_routes::create))
+        .route("/v1/directs/{id}/prompt", post(direct_routes::prompt))
+        .route("/v1/directs/{id}/archive", post(direct_routes::archive))
         .route(
             "/v1/notifications/status",
             post(desktop::notification_states),
@@ -594,7 +599,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 17
+        || body.capabilities.len() > 18
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(
@@ -826,7 +831,8 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
     };
     let registry = app.registry.read().await;
     Json(Snapshot {
-        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into()],
+        directs: durable.directs,
+        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
         editable_tasks: durable.editable_tasks,
