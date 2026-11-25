@@ -1,7 +1,7 @@
 # Native Runner installieren
 
-`factory-runner` läuft nativ auf Linux (x86-64/ARM64), macOS (Intel/Apple Silicon)
-und Windows (x86-64). Git muss installiert und im `PATH` erreichbar sein.
+Native Release-Pakete für `factory-runner` gibt es für Linux (x86-64/ARM64),
+macOS (Apple Silicon) und Windows (x86-64). Git muss installiert und im `PATH` erreichbar sein.
 Die GUI-Pakete enthalten denselben Runner neben dem GUI-Binary; unter macOS
 liegen beide in `YoloForge.app/Contents/MacOS`.
 

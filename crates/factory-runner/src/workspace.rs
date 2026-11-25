@@ -5,6 +5,7 @@ use factory_core::*;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
@@ -20,6 +21,30 @@ struct Plan {
     path: PathBuf,
     commit: String,
     ready: bool,
+}
+
+/// Keep canonical paths for filesystem checks and journal bindings, but pass
+/// Windows drive and UNC paths to Git without the Win32 verbatim prefix.
+pub(crate) fn git_path(path: &Path) -> Result<Cow<'_, str>> {
+    let text = path.to_str().context("Non-UTF8 Git path")?;
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if let Some(Component::Prefix(prefix)) = path.components().next() {
+            match prefix.kind() {
+                Prefix::VerbatimDisk(_) => return Ok(text[4..].replace('\\', "/").into()),
+                Prefix::VerbatimUNC(_, _) => {
+                    return Ok(format!("//{}", text[8..].replace('\\', "/")).into());
+                }
+                Prefix::Verbatim(_) | Prefix::DeviceNS(_) => return Ok(Cow::Borrowed(text)),
+                _ => {}
+            }
+        }
+        if text.contains('\\') {
+            return Ok(text.replace('\\', "/").into());
+        }
+    }
+    Ok(Cow::Borrowed(text))
 }
 
 // Arguments are passed directly, never through a shell. Output goes to local
@@ -101,8 +126,7 @@ fn git_status(
         }
     }
     let mut child = command
-        .arg("-C")
-        .arg(repository)
+        .current_dir(repository)
         .args(["-c", "core.hooksPath=/dev/null"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -320,7 +344,7 @@ fn prepare_inner(
                 "worktree",
                 "add",
                 "--",
-                path.to_str().context("Non-UTF8 workspace path")?,
+                &git_path(&path)?,
                 &spec.branch,
             ],
         )?;
@@ -381,6 +405,20 @@ pub fn existing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn git_paths_use_drive_or_unc_syntax_without_verbatim_prefix() {
+        for (path, expected) in [
+            (r"\\?\C:\test folder\repo", "C:/test folder/repo"),
+            (r"C:\test folder\repo", "C:/test folder/repo"),
+            (r"\\?\UNC\server\share\repo", "//server/share/repo"),
+            (r"\\server\share\repo", "//server/share/repo"),
+        ] {
+            assert_eq!(git_path(Path::new(path)).unwrap(), expected);
+        }
+    }
+
     struct Fixture {
         _dir: tempfile::TempDir,
         repository: PathBuf,
@@ -545,7 +583,11 @@ mod tests {
         let mut plan = fixture.plan(&command);
         git(
             &fixture.repository,
-            &["worktree", "remove", &workspace.path],
+            &[
+                "worktree",
+                "remove",
+                &git_path(Path::new(&workspace.path)).unwrap(),
+            ],
         )
         .unwrap();
         assert!(fixture.prepare(&command).is_err());

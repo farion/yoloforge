@@ -13,13 +13,13 @@ bleiben kompatibel. Ab v0.1.1 sind die Komponenten getrennt:
 | --- | --- |
 | `yoloforge-server-vVERSION-linux-ARCH.tar.gz` | Server-Binary, Dockerfile für dieses Binary, Compose, Backup-Werkzeug, Betriebsdokumentation |
 | `yoloforge-gui-vVERSION-linux-ARCH.tar.gz` | Linux-GUI mit Server und Runner |
-| `yoloforge-gui-vVERSION-macos-ARCH.tar.gz` | macOS-App mit nativem Runner |
+| `yoloforge-gui-vVERSION-macos-aarch64.tar.gz` | macOS-App mit nativem Runner (Apple Silicon) |
 | `yoloforge-gui-vVERSION-windows-x86_64.zip` | Windows-GUI mit nativem Runner |
 | `yoloforge-runner-vVERSION-linux-ARCH.tar.gz` | Separater Linux-Runner und Dienstvorlagen |
-| `yoloforge-runner-vVERSION-macos-ARCH.tar.gz` | Separater macOS-Runner |
+| `yoloforge-runner-vVERSION-macos-aarch64.tar.gz` | Separater macOS-Runner (Apple Silicon) |
 | `yoloforge-runner-vVERSION-windows-x86_64.zip` | Separater Windows-Runner |
 | `*.sha256` | Prüfsumme des jeweiligen Archivs |
-| `SHA256SUMS` | Gemeinsame Prüfsummenliste aller zwölf Pakete |
+| `SHA256SUMS` | Gemeinsame Prüfsummenliste aller zehn Pakete |
 
 `ARCH` ist `x86_64` oder `aarch64`. Die neue CI baut ausschließlich GUI, Runner
 und Server. TUI-, Android- und GHCR-Image-Builds sind daraus entfernt.

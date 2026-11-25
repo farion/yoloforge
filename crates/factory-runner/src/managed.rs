@@ -1,7 +1,7 @@
 //! Factory-owned repositories. Never reuse an unjournaled directory or delete failed attempts.
 use crate::{
     journal::{Journal, Record},
-    workspace::git,
+    workspace::{git, git_path},
     Args,
 };
 use anyhow::{ensure, Context, Result};
@@ -150,6 +150,11 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                 !plan.source.is_empty() && !plan.source.starts_with('-'),
                 "Invalid repository source"
             );
+            let source = if Path::new(&plan.source).is_absolute() {
+                git_path(Path::new(&plan.source))?
+            } else {
+                std::borrow::Cow::Borrowed(plan.source.as_str())
+            };
             let mut command = tokio::process::Command::new("git");
             for (key, _) in std::env::vars_os() {
                 if key.to_string_lossy().starts_with("GIT_") {
@@ -166,9 +171,9 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                     "--branch",
                     &plan.branch,
                     "--",
-                    &plan.source,
+                    &source,
                 ])
-                .arg(&plan.path)
+                .arg(git_path(&plan.path)?.as_ref())
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
                 .stdin(std::process::Stdio::null())

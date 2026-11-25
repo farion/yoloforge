@@ -2,7 +2,7 @@
 //! The execution worktree and its index are never modified.
 use crate::{
     journal::{Journal, Record},
-    workspace::{self, git, git_env},
+    workspace::{self, git, git_env, git_path},
     Args,
 };
 use anyhow::{ensure, Context, Result};
@@ -161,8 +161,8 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         );
         let temp = tempfile::tempdir_in(root)?;
         let index = temp.path().join("index");
-        let index = index.to_str().context("Non-UTF8 index path")?;
-        let env = [("GIT_INDEX_FILE", index)];
+        let index = git_path(&index)?;
+        let env = [("GIT_INDEX_FILE", index.as_ref())];
         git_env(work, &["read-tree", "HEAD"], &env)?;
         git_env(work, &["add", "--all", "--", "."], &env)?;
         ensure!(
@@ -248,7 +248,7 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
                     "--no-tags",
                     "--no-write-fetch-head",
                     "--no-auto-maintenance",
-                    target.to_str().context("Non-UTF8 target")?,
+                    &git_path(&target)?,
                     &current,
                 ],
             )?;
@@ -323,7 +323,7 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
                 "--refmap=",
                 "--no-write-fetch-head",
                 "--no-auto-maintenance",
-                repository.to_str().context("Non-UTF8 repository path")?,
+                &git_path(&repository)?,
                 &reference,
             ],
         )?;
@@ -679,7 +679,7 @@ mod tests {
         let index = git(&f.work, &["ls-files", "--stage"]).unwrap();
         assert_eq!(
             publish(&f.journal, &f.record, &f.args).unwrap(),
-            Some(f.target.clone())
+            Some(f.target.canonicalize().unwrap())
         );
         assert_eq!(
             fs::read_to_string(f.target.join("result.txt")).unwrap(),

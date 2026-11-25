@@ -1,7 +1,7 @@
 //! Snapshot to independent Git objects/ref and bundle; never mutate HEAD, index or worktree.
 use crate::{
     journal::{Journal, Record},
-    workspace::{self, git, git_env},
+    workspace::{self, git, git_env, git_path},
     Args,
 };
 use anyhow::{ensure, Context, Result};
@@ -111,13 +111,13 @@ pub fn import_objects(repository: &Path, root: &Path, import: &CheckpointImport)
         "Imported checkpoint digest differs"
     );
     let reference = format!("refs/yoloforge/checkpoints/{}", import.command_id);
-    let file = bundle.to_str().context("Non-UTF8 bundle path")?;
+    let file = git_path(&bundle)?;
     ensure!(
-        git(repository, &["bundle", "list-heads", file])?
+        git(repository, &["bundle", "list-heads", &file])?
             == format!("{} {}", import.commit, reference),
         "Bundle does not contain the pinned checkpoint ref"
     );
-    git(repository, &["bundle", "verify", file])?;
+    git(repository, &["bundle", "verify", &file])?;
     git(
         repository,
         &[
@@ -125,7 +125,7 @@ pub fn import_objects(repository: &Path, root: &Path, import: &CheckpointImport)
             "--no-tags",
             "--no-write-fetch-head",
             "--no-auto-maintenance",
-            file,
+            &file,
             &reference,
         ],
     )?;
@@ -192,8 +192,8 @@ fn capture(
         let parent = git(path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
         let temp = tempfile::tempdir()?;
         let index = temp.path().join("index");
-        let index = index.to_str().context("Non-UTF8 index path")?;
-        let env = [("GIT_INDEX_FILE", index)];
+        let index = git_path(&index)?;
+        let env = [("GIT_INDEX_FILE", index.as_ref())];
         git_env(path, &["read-tree", &parent], &env)?;
         git_env(path, &["add", "--all", "--", "."], &env)?;
         ensure!(
@@ -283,16 +283,9 @@ fn capture(
     if fs::symlink_metadata(&bundle).is_err() {
         let temp = tempfile::tempdir_in(&plan.directory)?;
         let temp_bundle = temp.path().join("bundle");
-        git(
-            path,
-            &[
-                "bundle",
-                "create",
-                temp_bundle.to_str().context("Non-UTF8 artifact path")?,
-                &reference,
-            ],
-        )?;
-        git(path, &["bundle", "verify", temp_bundle.to_str().unwrap()])?;
+        let git_bundle = git_path(&temp_bundle)?;
+        git(path, &["bundle", "create", &git_bundle, &reference])?;
+        git(path, &["bundle", "verify", &git_bundle])?;
         let (sha, size) = digest(&temp_bundle)?;
         ensure!(
             size <= CHECKPOINT_BUNDLE_LIMIT as u64,
@@ -316,7 +309,11 @@ fn capture(
         plan.artifact = Some(artifact);
         record.checkpoint = Some(plan.clone());
         journal.save(record)?;
-        fs::File::open(&temp_bundle)?.sync_all()?;
+        // FlushFileBuffers on Windows requires a handle with write access.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&temp_bundle)?
+            .sync_all()?;
         fs::hard_link(&temp_bundle, &bundle)?;
         factory_platform::sync_dir(&plan.directory)?;
     }
@@ -435,7 +432,7 @@ mod tests {
             &imported,
             &[
                 "fetch",
-                &result.bundle_path,
+                &git_path(Path::new(&result.bundle_path)).unwrap(),
                 &format!("refs/yoloforge/checkpoints/{}", cmd.id),
             ],
         )
