@@ -23,6 +23,39 @@ fn configure_models(s: &Store) {
 }
 
 #[test]
+fn long_prompt_reaches_orchestrator_and_worker_without_truncation() {
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let project = store.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Long prompt".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&store);
+    let runner = RunnerId::new();
+    let prompt = format!("Implement changes\n{}Do not push.", "Details: ä, ö, ü.\n".repeat(3_000));
+    let ticket = store.save_task(SaveTask {
+        request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+        project_id: project.id, requested_session: None, prompt: prompt.clone(), images: vec![],
+    }).unwrap();
+    assert_eq!(ticket.prompt.as_deref(), Some(prompt.as_str()));
+    store.autostart_runner(runner).unwrap();
+    store.scheduler_tick().unwrap();
+    prepare(&store, &store.pending(runner).unwrap()[0]);
+    store.scheduler_tick().unwrap();
+    let routing = store.pending(runner).unwrap().pop().unwrap();
+    let spec = routing.agent_spec.as_ref().unwrap();
+    assert_eq!(spec.role, "orchestrator");
+    assert!(spec.prompt.contains(&format!("\nTask: {}\n", serde_json::to_string(&prompt).unwrap())));
+    decide(&store, &routing, r#"{"action":"new","reason":"New workspace"}"#);
+    store.scheduler_tick().unwrap();
+    prepare(&store, &store.pending(runner).unwrap()[0]);
+    store.scheduler_tick().unwrap();
+    let worker = store.pending(runner).unwrap().pop().unwrap();
+    let spec = worker.agent_spec.unwrap();
+    assert!(!spec.read_only);
+    assert!(spec.prompt.starts_with(&prompt));
+}
+
+#[test]
 fn skills_reach_only_the_implementer_and_are_pinned_before_routing() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("db")).unwrap();
@@ -886,7 +919,7 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
         .find(|c| c.kind == CommandKind::RunAgent)
         .unwrap();
     let direct = PromptSession {
-        request_id: RequestId::new(), prompt: "Add multiplication".into(), images: vec![],
+        request_id: RequestId::new(), prompt: format!("Add multiplication\n{}End of follow-up.", "Details: ä, ö, ü.\n".repeat(3_000)), images: vec![],
         files: vec![PromptFile::from_bytes("details.txt".into(), b"Direct session details").unwrap()],
     };
     let routing_count = s.snapshot().unwrap().commands.iter()
@@ -960,7 +993,7 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
         .as_ref()
         .unwrap()
         .prompt
-        .starts_with("Add multiplication"));
+        .starts_with(&direct.prompt));
     assert_eq!(
         s.snapshot()
             .unwrap()

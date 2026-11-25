@@ -684,17 +684,6 @@ impl Store {
                     prompt =
                         "Bearbeite die Aufgabe anhand der angehängten Bilder und Dateien.".into();
                 }
-                if prompt.len() > 16384 {
-                    t.status = TicketState::Blocked;
-                    save_ticket(&tx, &mut t)?;
-                    event(
-                        &tx,
-                        "scheduler.blocked",
-                        t.id.to_string(),
-                        &serde_json::json!({"reason":"Ticket prompt exceeds 16384 UTF-8 bytes"}),
-                    )?;
-                    continue;
-                }
                 let goal = t.title.chars().take(60).collect::<String>();
                 tx.execute_batch("SAVEPOINT routing_evaluation")?;
                 let routed = match super::routing::route(&tx, &p, &mut t) {
