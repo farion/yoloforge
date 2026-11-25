@@ -346,6 +346,7 @@ pub(super) async fn pending_commands(
         let factory_skills = guard.entries[&id].input.capabilities.iter().any(|c| c == skills::FACTORY_SKILLS_CAPABILITY);
         let local_mcp = guard.entries[&id].input.capabilities.iter().any(|c| c == mcp::LOCAL_MCP_CAPABILITY);
         let remote_mcp = guard.entries[&id].input.capabilities.iter().any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
+        let target_git = guard.entries[&id].input.capabilities.iter().any(|c| c == TARGET_GIT_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
@@ -368,6 +369,7 @@ pub(super) async fn pending_commands(
                             .is_none_or(|s| s.profile.context_planning.is_none())
                 });
                 commands.retain(|c| checkpoints || !c.requires_checkpoint());
+                commands.retain(|c| target_git || !c.requires_target_git());
                 commands.retain(|c| {
                     reviews
                         || !matches!(
@@ -453,6 +455,7 @@ pub(super) async fn ack_command(
     let factory_skills = guard.entries[&runner].input.capabilities.iter().any(|c| c == skills::FACTORY_SKILLS_CAPABILITY);
     let local_mcp = guard.entries[&runner].input.capabilities.iter().any(|c| c == mcp::LOCAL_MCP_CAPABILITY);
     let remote_mcp = guard.entries[&runner].input.capabilities.iter().any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
+    let target_git = guard.entries[&runner].input.capabilities.iter().any(|c| c == TARGET_GIT_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_context_planning_support(
             runner,
@@ -469,6 +472,7 @@ pub(super) async fn ack_command(
         store.require_setup_support(runner, id, body.ownership_epoch, setup)?;
         store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;
         store.require_review_support(runner, id, body.ownership_epoch, reviews)?;
+        store.require_target_git_support(runner, id, body.ownership_epoch, target_git)?;
         store.acknowledge_supported(runner, id, body, lifecycle)
     })
     .await

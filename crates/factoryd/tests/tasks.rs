@@ -674,6 +674,62 @@ fn route_new(s: &Store, task: TicketId) {
 }
 
 #[test]
+fn orchestrated_git_runs_directly_or_separates_the_worker_prompt() {
+    for mixed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store");
+        let store = Store::open(&db).unwrap();
+        let project = store.create_project(CreateProject {
+            key: None, logo: None, runner_mapping: None, request_id: RequestId::new(),
+            name: "Release routing".into(), repository: dir.path().join("project").display().to_string(),
+            base_branch: "main".into(),
+        }).unwrap();
+        configure_models(&store);
+        let runner = RunnerId::new();
+        let original = if mixed { "Implement X, then commit, tag, push" } else { "commit, tag, push" };
+        let task = store.save_task(SaveTask {
+            request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+            project_id: project.id, requested_session: None, prompt: original.into(), images: vec![],
+        }).unwrap();
+        store.autostart_runner(runner).unwrap();
+        store.scheduler_tick().unwrap();
+        prepare(&store, &store.pending(runner).unwrap()[0]);
+        store.scheduler_tick().unwrap();
+        let evaluation = store.pending(runner).unwrap().pop().unwrap();
+        assert!(evaluation.agent_spec.as_ref().unwrap().prompt.contains(original));
+        decide(&store, &evaluation, &serde_json::json!({"action":"target_git","reason":"Explicit request",
+            "worktree_prompt": mixed.then_some("Implement X"),
+            "git":{"commit":true,"tag":{"kind":"patch"},"push":true}}).to_string());
+        store.scheduler_tick().unwrap();
+        let commands = store.pending(runner).unwrap();
+        assert_eq!(commands.len(), 1);
+        let first = &commands[0];
+        assert_eq!(first.kind, if mixed { CommandKind::PrepareWorkspace } else { CommandKind::TargetGit });
+        if mixed { prepare(&store, first); }
+        drop(store);
+        let store = Store::open(&db).unwrap();
+        store.scheduler_tick().unwrap();
+        let pending = store.pending(runner).unwrap();
+        assert_eq!(pending.len(), 1);
+        let command = &pending[0];
+        if mixed {
+            assert_eq!(command.kind, CommandKind::RunAgent);
+            let prompt = &command.agent_spec.as_ref().unwrap().prompt;
+            assert!(prompt.starts_with("Implement X\n"));
+            assert!(!prompt.contains(original));
+        } else {
+            assert_eq!(first.id, command.id);
+            assert!(command.agent_spec.is_none());
+        }
+        let plan = command.workspace_spec.as_ref().unwrap().target_git.as_ref().unwrap();
+        assert!(plan.commit && plan.push);
+        assert_eq!(plan.tag, Some(TargetTag::Patch));
+        assert!(store.require_target_git_support(runner, command.id, 1, false).is_err());
+        assert_eq!(store.snapshot().unwrap().tickets.iter().find(|t| t.id == task.id).unwrap().execution_command, Some(command.id));
+    }
+}
+
+#[test]
 fn committed_intent_wakes_scheduler_and_remapping_moves_future_orchestration() {
     use futures_util::FutureExt;
     let store = Store::open(std::path::Path::new(":memory:")).unwrap();
