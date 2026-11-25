@@ -94,6 +94,12 @@ pub(super) fn set_limit(tx: &Transaction<'_>, id: ProjectId, limit: u8) -> Resul
     Ok(())
 }
 
+fn is_local_repository(repository: &str) -> bool {
+    repository.starts_with('/')
+        || repository.starts_with("\\\\")
+        || matches!(repository.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
+}
+
 fn refresh_automatic_runner(tx: &Transaction<'_>, policy: &mut SchedulerPolicy, ticket: &Ticket) -> Result<()> {
     let data: String = tx.query_row(
         "SELECT data FROM active_projects WHERE id=?1",
@@ -112,9 +118,7 @@ fn refresh_automatic_runner(tx: &Transaction<'_>, policy: &mut SchedulerPolicy, 
     )?;
     let candidates = query.query_map([now], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let local_repository = std::path::Path::new(&project.repository).is_absolute()
-        || project.repository.as_bytes().get(1..3).is_some_and(|prefix| prefix == b":\\" || prefix == b":/")
-        || project.repository.starts_with("\\\\");
+    let local_repository = is_local_repository(&project.repository);
     let mcps = super::mcp::for_ticket(tx, ticket.id, project.id)?;
     if !super::mcp::allowed(tx, project.id, &mcps)? {
         return Ok(());
@@ -152,11 +156,17 @@ mod automatic_runner_tests {
 
     #[test]
     fn auto_replaces_a_stale_local_runner_without_changing_manual_assignments() {
+        for repository in ["/project", "C:/project", r"C:\project", r"\\host\share\project"] {
+            assert_automatic_runner_replacement(repository);
+        }
+    }
+
+    fn assert_automatic_runner_replacement(repository: &str) {
         let store = Store::open(std::path::Path::new(":memory:")).unwrap();
         let project = store.create_project(CreateProject {
             request_id: RequestId::new(), key: None, logo: None,
             name: "Automatic runner".into(),
-            repository: if cfg!(windows) { "C:/project" } else { "/project" }.into(),
+            repository: repository.into(),
             base_branch: "main".into(), runner_mapping: None,
         }).unwrap();
         let old = RunnerId::new();
@@ -168,6 +178,8 @@ mod automatic_runner_tests {
             prompt: "Run on an available host".into(), images: vec![],
         }).unwrap();
         store.autostart_runner(old).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        assert_eq!(snapshot.projects.iter().find(|p| p.id == project.id).unwrap().repository, repository);
         let assert_runner = |runner| {
             assert_eq!(store.scheduler_policy(project.id).unwrap().unwrap().runner_ids, [runner]);
         };
@@ -305,7 +317,7 @@ impl Store {
                     continue;
                 }
                 if !p.repository.contains("://")
-                    && !p.repository.starts_with('/')
+                    && !is_local_repository(&p.repository)
                     && !p.repository.contains('@')
                 {
                     p.repository = "factory:managed".into();
