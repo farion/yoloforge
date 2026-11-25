@@ -91,8 +91,18 @@ pub fn display_rows(rows: &[TranscriptRow], versions: bool) -> Vec<DisplayRow<'_
                     flush(&mut display, &mut pending);
                 }
                 let message = &entry.message;
-                let kind = match message["type"].as_str() {
+                let kind = match message["type"].as_str().or(message["role"].as_str()) {
                     Some("system" | "skill") => Some(ActivityKind::Instruction),
+                    // OpenCode injects instructions discovered during tool calls as synthetic
+                    // messages. Other synthetic entries (e.g. background results) stay visible.
+                    Some("synthetic")
+                        if message["metadata"]["instruction"].is_object()
+                            || message["text"]
+                                .as_str()
+                                .is_some_and(|text| text.starts_with("Instructions from: ")) =>
+                    {
+                        Some(ActivityKind::Instruction)
+                    }
                     Some("shell") => Some(ActivityKind::Command),
                     _ => None,
                 };
@@ -156,15 +166,39 @@ pub fn activity_group(ui: &mut egui::Ui, items: &[Activity<'_>]) -> egui::Respon
     let open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or_default();
     let marker = if open { "-" } else { "+" };
     let summary = activity_summary(items);
-    let response = egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0))
-        .show(ui, |ui| {
-            ui.spacing_mut().button_padding = egui::Vec2::ZERO;
-            ui.spacing_mut().interact_size.y = line_height(ui);
-            ui.add(egui::Button::new(RichText::new(format!("{marker} {summary}")).monospace().color(MUTED))
-                .wrap().frame_when_inactive(false))
-        }).inner
+    let action = if open {
+        crate::tr!("Aktivität einklappen")
+    } else {
+        crate::tr!("Aktivität aufklappen")
+    };
+    let width = ui.available_width();
+    let inset = 22.0;
+    let galley = ui.painter().layout(
+        format!("{marker} {summary}"),
+        FontId::monospace(CLI_FONT_SIZE),
+        MUTED,
+        (width - 2.0 * inset).max(1.0),
+    );
+    let height = line_height(ui).max(galley.size().y);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("{action}: {summary}"),
+        )
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 4, crate::design::HOVER_FILL);
+    }
+    ui.painter().galley(
+        rect.left_top() + egui::vec2(inset, (height - galley.size().y) / 2.0),
+        galley,
+        MUTED,
+    );
+    let response = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(if open { crate::tr!("Aktivität einklappen") } else { crate::tr!("Aktivität aufklappen") });
+        .on_hover_text(action);
     if response.clicked() {
         ui.data_mut(|data| data.insert_temp(id, !open));
         ui.ctx().request_repaint();
@@ -239,7 +273,7 @@ pub fn transcript_rows(
     rows
 }
 
-pub fn question(ui: &mut egui::Ui, question: &Question) {
+pub fn question(ui: &mut egui::Ui, question: &Question, app: Option<&mut App>) {
     let width = ui.available_width();
     egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0)).show(ui, |ui| {
         ui.set_min_width((width - 44.0).max(1.0));
@@ -263,6 +297,11 @@ pub fn question(ui: &mut egui::Ui, question: &Question) {
             if let Some(command) = payload["metadata"]["command"].as_str() {
                 read_text(ui, &crate::tr!("Befehl: {command}", command = command), true);
             }
+        }
+        if let Some(app) = app.filter(|_| crate::model::needs_answer(question)) {
+            crate::dialogs::inline_question_answer(ui, app, question);
+            ui.colored_label(MUTED, crate::model::question_status(question.state));
+            return;
         }
         let fields: Vec<_> = payload["fields"].as_array().into_iter().flatten()
             .filter(|field| field["hidden"] != true).collect();
@@ -1262,24 +1301,50 @@ mod tests {
     }
 
     #[test]
-    fn activity_group_starts_closed_and_toggles_individual_tool_blocks() {
+    fn synthetic_instruction_messages_join_tools_without_hiding_other_synthetic_messages() {
+        let command = CommandId::new();
+        let row = |sequence, message| TranscriptRow::Message(command, std::sync::Arc::new(
+            ArchivedMessage { sequence, sample_revision: 1, captured_unix_ms: sequence, message }
+        ));
+        let rows = [
+            row(1, json!({"id":"tool","type":"assistant","content":[{"type":"tool","name":"read"}]})),
+            row(2, json!({"id":"injected","type":"synthetic","text":"Loaded repository instructions",
+                "metadata":{"instruction":{"paths":["/repo/AGENTS.md"]}}})),
+            row(3, json!({"id":"prefix","type":"synthetic","text":"Instructions from: /repo/src/AGENTS.md\nRules"})),
+            row(4, json!({"id":"result","type":"synthetic","text":"Background job completed"})),
+            row(5, json!({"id":"user","type":"user","text":"Instructions from: my message"})),
+        ];
+        let display = display_rows(&rows, false);
+        let [DisplayRow::Activity(items), DisplayRow::Original(_), DisplayRow::Original(_)] = display.as_slice()
+        else { panic!("Only instruction messages should join the tool group"); };
+        assert_eq!(activity_summary(items), "1 Lesezugriff, 2 Anweisungen");
+    }
+
+    #[test]
+    fn activity_group_toggles_tools_and_instructions_across_the_full_row() {
         let ctx = egui::Context::default();
         let command = CommandId::new();
-        let rows = [TranscriptRow::Message(command, std::sync::Arc::new(ArchivedMessage {
-            sequence: 1, sample_revision: 1, captured_unix_ms: 1,
-            message: json!({"id":"tools","type":"assistant","content":[
+        let row = |sequence, message| TranscriptRow::Message(command, std::sync::Arc::new(
+            ArchivedMessage { sequence, sample_revision: 1, captured_unix_ms: sequence, message }
+        ));
+        let rows = [
+            row(1, json!({"id":"tools","type":"assistant","content":[
                 {"type":"tool","name":"bash","state":{"status":"completed","input":{"command":"check-first"}}},
                 {"type":"tool","name":"bash","state":{"status":"completed","input":{"command":"check-second"}}}
-            ]}),
-        }))];
+            ]})),
+            row(2, json!({"id":"instructions","type":"synthetic","text":"Instructions from: /repo/AGENTS.md\nRepository rules"})),
+        ];
         let display = display_rows(&rows, false);
         let DisplayRow::Activity(items) = &display[0] else { panic!("Expected activity group"); };
         let render = |events| {
             let mut rect = egui::Rect::NOTHING;
             let frame = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_width(600.0);
                     transcript_style(ui);
+                    let width = ui.available_width();
                     rect = activity_group(ui, items).rect;
+                    assert_eq!(rect.width(), width);
                 });
             });
             fn inspect(shape: &egui::epaint::Shape, texts: &mut Vec<String>, blocks: &mut usize) {
@@ -1295,25 +1360,36 @@ mod tests {
             let mut texts = Vec::new();
             let mut blocks = 0;
             for shape in &frame.shapes { inspect(&shape.shape, &mut texts, &mut blocks); }
-            (rect, texts, blocks)
+            let hover_rect = frame.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Rect(rect) if rect.fill == crate::design::HOVER_FILL => Some(rect.rect),
+                _ => None,
+            });
+            (rect, texts, blocks, hover_rect)
         };
-        let (rect, texts, blocks) = render(vec![]);
-        assert!(texts.iter().any(|text| text == "+ 2 Befehle"));
+        let (rect, texts, blocks, hover_rect) = render(vec![]);
+        assert_eq!(hover_rect, None);
+        assert!(texts.iter().any(|text| text == "+ 2 Befehle, 1 Anweisung"));
+        assert!(!texts.iter().any(|text| text.contains("Repository rules")));
         assert_eq!(blocks, 0);
+        let edge = egui::pos2(rect.right() - 10.0, rect.center().y);
+        let (_, _, _, hover_rect) = render(vec![egui::Event::PointerMoved(edge)]);
+        assert_eq!(hover_rect, Some(rect));
         let click = |pressed| egui::Event::PointerButton {
-            pos: rect.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            pos: edge, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
         };
-        render(vec![egui::Event::PointerMoved(rect.center()), click(true)]);
-        render(vec![click(false)]);
-        let (_, texts, blocks) = render(vec![]);
-        assert!(texts.iter().any(|text| text == "- 2 Befehle"));
-        assert!(texts.iter().any(|text| text == "$ check-first"));
-        assert!(texts.iter().any(|text| text == "$ check-second"));
-        assert_eq!(blocks, 2);
         render(vec![click(true)]);
         render(vec![click(false)]);
-        let (_, texts, blocks) = render(vec![]);
-        assert!(texts.iter().any(|text| text == "+ 2 Befehle"));
+        let (_, texts, blocks, _) = render(vec![]);
+        assert!(texts.iter().any(|text| text == "- 2 Befehle, 1 Anweisung"));
+        assert!(texts.iter().any(|text| text == "$ check-first"));
+        assert!(texts.iter().any(|text| text == "$ check-second"));
+        assert!(texts.iter().any(|text| text.contains("Repository rules")));
+        assert_eq!(blocks, 3);
+        render(vec![click(true)]);
+        render(vec![click(false)]);
+        let (_, texts, blocks, _) = render(vec![]);
+        assert!(texts.iter().any(|text| text == "+ 2 Befehle, 1 Anweisung"));
+        assert!(!texts.iter().any(|text| text.contains("Repository rules")));
         assert_eq!(blocks, 0);
     }
 

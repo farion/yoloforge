@@ -508,16 +508,51 @@ fn peon_prompt_hint(ui: &egui::Ui) -> &'static str {
 /// OpenCode-like composer. The editor grows with its content; the surrounding
 /// dialog owns scrolling, so this never creates a second scroll area.
 pub fn task_prompt(ui: &mut egui::Ui, text: &mut String, rows: usize) -> egui::Response {
-    task_prompt_buffer(ui, text, rows, peon_prompt_hint(ui))
+    task_prompt_buffer(ui, text, rows, peon_prompt_hint(ui), egui::Modifiers::NONE)
 }
 
-pub fn question_answer_editor(ui: &mut egui::Ui, text: &mut String) -> egui::Response {
-    task_prompt_buffer(ui, text, 2, crate::tr!("Antwort eingeben …"))
+pub fn question_answer_editor(ui: &mut egui::Ui, text: &mut String) -> (egui::Response, bool) {
+    let response = task_prompt_buffer(ui, text, 2, crate::tr!("Antwort eingeben …"), egui::Modifiers::SHIFT);
+    let ime_id = response.id.with("answer-ime-composing");
+    let was_composing = ui.data(|data| data.get_temp::<bool>(ime_id)).unwrap_or(false);
+    if !response.enabled() || !response.has_focus() {
+        if was_composing {
+            ui.data_mut(|data| data.remove::<bool>(ime_id));
+        }
+        return (response, false);
+    }
+    let (composing, submit) = ui.input_mut(|input| {
+        let mut composing = was_composing;
+        let mut ime_event = false;
+        for event in &input.events {
+            if let egui::Event::Ime(event) = event {
+                ime_event = true;
+                composing = matches!(event, egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_));
+            }
+        }
+        let mut submit = false;
+        if !was_composing && !ime_event {
+            input.events.retain(|event| {
+                if let egui::Event::Key { key: egui::Key::Enter, pressed: true, repeat, modifiers, .. } = event {
+                    if *modifiers == egui::Modifiers::NONE {
+                        submit |= !repeat;
+                        return false;
+                    }
+                }
+                true
+            });
+        }
+        (composing, submit)
+    });
+    if was_composing != composing {
+        ui.data_mut(|data| data.insert_temp(ime_id, composing));
+    }
+    (response, submit)
 }
 
 pub fn task_prompt_read_only(ui: &mut egui::Ui, text: &str, rows: usize) -> egui::Response {
     let mut buffer = text;
-    task_prompt_buffer(ui, &mut buffer, rows, peon_prompt_hint(ui))
+    task_prompt_buffer(ui, &mut buffer, rows, peon_prompt_hint(ui), egui::Modifiers::NONE)
 }
 
 fn task_prompt_buffer(
@@ -525,6 +560,7 @@ fn task_prompt_buffer(
     text: &mut dyn egui::TextBuffer,
     rows: usize,
     hint: &str,
+    newline_modifiers: egui::Modifiers,
 ) -> egui::Response {
     let background = ui.painter().add(egui::epaint::Shape::Noop);
     let mut editor = None;
@@ -541,7 +577,8 @@ fn task_prompt_buffer(
                     .frame(false)
                     .hint_text(input_hint(hint))
                     .desired_rows(rows)
-                    .desired_width(f32::INFINITY)
+                     .desired_width(f32::INFINITY)
+                     .return_key(egui::KeyboardShortcut::new(newline_modifiers, egui::Key::Enter))
                     .show(ui)
                     .response,
             );

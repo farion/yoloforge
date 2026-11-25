@@ -1158,7 +1158,11 @@ fn question_options_group_labels_with_descriptions_and_use_one_submit_button() {
     let input: egui::Rect = ctx.data_mut(|d| d.get_temp(editor)).unwrap();
     let _ = frame(&mut dialog, &mut app, click_events(input.center()));
     let _ = frame(&mut dialog, &mut app, vec![egui::Event::Text("Meine Variante".into())]);
-    assert_eq!(app.settings.question_drafts[0].values["restart"], "Meine Variante");
+    let mut events = answer_enter(egui::Modifiers::SHIFT);
+    events.push(egui::Event::Text("Zeile 2".into()));
+    let _ = frame(&mut dialog, &mut app, events);
+    assert_eq!(app.settings.question_drafts[0].values["restart"], "Meine Variante\nZeile 2");
+    assert!(app.settings.pending.is_empty());
     let updated = &mut Arc::make_mut(app.snapshot.as_mut().unwrap()).questions[0];
     updated.update_seq.0 += 1;
     updated.orchestration_note = "human: explicit interview".into();
@@ -1166,9 +1170,9 @@ fn question_options_group_labels_with_descriptions_and_use_one_submit_button() {
     let _ = frame(&mut dialog, &mut app, vec![]);
     let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-question-submit"))).unwrap();
     assert!(submit.top() > second.bottom());
-    let _ = frame(&mut dialog, &mut app, click_events(submit.center()));
+    let _ = frame(&mut dialog, &mut app, answer_enter(egui::Modifiers::NONE));
     assert_eq!(app.settings.pending.len(), 1);
-    assert_eq!(app.settings.pending[0].body["answer"]["restart"], "Meine Variante");
+    assert_eq!(app.settings.pending[0].body["answer"]["restart"], "Meine Variante\nZeile 2");
     assert!(app.settings.pending[0].body.get("expected_revision").is_none());
     let pending = app.settings.pending[0].clone();
     let mut closed = false;
@@ -1185,6 +1189,12 @@ fn question_options_group_labels_with_descriptions_and_use_one_submit_button() {
     app.backend.emit_for_test(crate::backend::Event::Request(pending.id, Ok(json!(confirmed))));
     app.receive();
     assert!(render(&mut app), "Close immediately after confirmation");
+}
+
+fn answer_enter(modifiers: egui::Modifiers) -> Vec<egui::Event> {
+    [true, false].into_iter().map(|pressed| egui::Event::Key {
+        key: egui::Key::Enter, physical_key: None, pressed, repeat: false, modifiers,
+    }).collect()
 }
 
 #[test]
@@ -5009,6 +5019,108 @@ fn opencode_session_view_shows_automatic_answers_without_native_messages() {
 }
 
 #[test]
+fn opencode_custom_answer_enter_submits_and_shift_enter_inserts_a_line() {
+    let mut app = fixture();
+    let mut question = app.snapshot.as_ref().unwrap().questions[0].clone();
+    question.external.payload = json!({"fields":[{"key":"response","type":"string","required":true}]});
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, events| {
+        ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                crate::conversation::question(ui, &question, Some(app));
+            });
+        })
+    };
+    app.online = false;
+    let _ = render(&mut app, vec![]);
+    let input = ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-question-text-editor"))).unwrap();
+    let _ = render(&mut app, click_events(input.center()));
+    let _ = render(&mut app, [vec![egui::Event::Text("Erste Zeile".into())], answer_enter(egui::Modifiers::SHIFT)].concat());
+    let _ = render(&mut app, [vec![egui::Event::Text("Zweite Zeile".into())], answer_enter(egui::Modifiers::NONE)].concat());
+    assert!(app.settings.pending.is_empty(), "Enter cannot send while offline");
+    assert_eq!(app.settings.question_drafts[0].values["response"], "Erste Zeile\nZweite Zeile");
+
+    app.online = true;
+    let _ = render(&mut app, vec![egui::Event::Ime(egui::ImeEvent::Enabled)]);
+    let _ = render(&mut app, answer_enter(egui::Modifiers::NONE));
+    let mut events = answer_enter(egui::Modifiers::NONE);
+    events.push(egui::Event::Ime(egui::ImeEvent::Disabled));
+    let _ = render(&mut app, events);
+    assert!(app.settings.pending.is_empty(), "Enter during IME composition must not send");
+    let _ = render(&mut app, answer_enter(egui::Modifiers::NONE));
+    assert_eq!(app.settings.pending.len(), 1);
+    assert_eq!(app.settings.pending[0].body["answer"]["response"], "Erste Zeile\nZweite Zeile");
+}
+
+#[test]
+fn opencode_session_answers_a_question_inline_and_shows_the_confirmed_answer() {
+    let mut app = fixture();
+    app.online = true;
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let root = snapshot.commands[0].session_root();
+    snapshot.questions.truncate(1);
+    let mut question = snapshot.questions[0].clone();
+    question.external.payload = json!({"title":"Questions","fields":[
+        {"key":"color","title":"Pick a color","type":"string","required":true,
+            "options":[{"value":"blue","label":"Blue option"}]}
+    ]});
+    snapshot.questions[0] = question.clone();
+    app.open_session(app.settings.project.unwrap(), root);
+    let ctx = app.backend.context().clone();
+    let submit_id = egui::Id::new(("test-inline-question-submit", question.id));
+    let frame = |app: &mut App, events| {
+        ctx.data_mut(|d| d.remove::<egui::Rect>(submit_id));
+        ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 800.0))),
+            events, ..Default::default()
+        }, |ctx| app.draw_shell(ctx))
+    };
+    let rect = |id| ctx.data(|d| d.get_temp::<egui::Rect>(id)).unwrap();
+    for _ in 0..3 { let _ = frame(&mut app, vec![]); }
+    assert!(app.dialog.is_none());
+    assert!(app.settings.question_drafts.is_empty(), "Reading must not create an empty draft");
+    let _ = frame(&mut app, click_events(rect(submit_id).center()));
+    assert!(app.settings.pending.is_empty(), "Required answers must be validated");
+
+    let option = rect(egui::Id::new(("test-question-option", "Blue option")));
+    let _ = frame(&mut app, click_events(option.left_center() + egui::vec2(6.0, 0.0)));
+    assert_eq!(app.settings.question_drafts[0].values["color"], "blue");
+    let _ = frame(&mut app, click_events(rect(submit_id).center()));
+    assert!(app.dialog.is_none(), "Submitting must not open a separate dialog");
+    let [pending] = app.settings.pending.as_slice() else { panic!("Expected one answer request"); };
+    let pending = pending.clone();
+    assert_eq!(pending.path, format!("/v1/questions/{}/answer", question.id));
+    assert_eq!(pending.body["answer"], json!({"color":"blue"}));
+    let _ = frame(&mut app, click_events(rect(submit_id).center()));
+    assert_eq!(app.settings.pending.len(), 1, "Do not submit twice while awaiting confirmation");
+
+    app.backend.emit_for_test(crate::backend::Event::Request(pending.id, Err(crate::backend::Failure {
+        message: "HTTP technical diagnostic".into(), uncertain: false,
+    })));
+    app.receive();
+    assert!(app.settings.pending.is_empty());
+    assert_eq!(app.settings.question_drafts[0].values["color"], "blue");
+    let _ = frame(&mut app, vec![]);
+    let _ = frame(&mut app, click_events(rect(submit_id).center()));
+    let [pending] = app.settings.pending.as_slice() else { panic!("Expected one retried answer"); };
+    assert_eq!(pending.body["answer"], json!({"color":"blue"}));
+
+    question.state = QuestionState::AnswerQueued;
+    question.update_seq.0 += 1;
+    question.answer_request = serde_json::from_value(pending.body["request_id"].clone()).ok();
+    question.answer = Some(pending.body["answer"].clone());
+    app.backend.emit_for_test(crate::backend::Event::Request(pending.id, Ok(json!(question))));
+    app.receive();
+    let output = frame(&mut app, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|line| line == "Blue option"));
+    assert!(text.iter().any(|line| line == question_status(QuestionState::AnswerQueued)));
+    assert!(ctx.data(|d| d.get_temp::<egui::Rect>(submit_id)).is_none());
+    assert!(app.settings.question_drafts.is_empty());
+}
+
+#[test]
 fn opencode_transcript_always_contains_human_and_automatic_question_answers_without_archives() {
     let mut app = fixture();
     app.online = false;
@@ -5027,7 +5139,7 @@ fn opencode_transcript_always_contains_human_and_automatic_question_answers_with
         egui::CentralPanel::default().show(ctx, |ui| {
             for row in &rows {
                 let crate::conversation::TranscriptRow::Question(q) = row else { panic!("Expected a question"); };
-                crate::conversation::question(ui, q);
+                crate::conversation::question(ui, q, None);
             }
         });
     });
@@ -5090,7 +5202,7 @@ fn opencode_question_answers_show_pending_delivery_and_permissions_without_hidde
         QuestionState::Rejected, QuestionState::Unknown] {
         question.state = state;
         let output = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| crate::conversation::question(ui, &question));
+            egui::CentralPanel::default().show(ctx, |ui| crate::conversation::question(ui, &question, None));
         });
         let mut text = vec![];
         for shape in output.shapes { shape_text(&shape.shape, &mut text); }
@@ -5103,7 +5215,7 @@ fn opencode_question_answers_show_pending_delivery_and_permissions_without_hidde
     question.external.payload = json!({"title":"Run tests?","permission":"shell","metadata":{"command":"cargo test"}});
     question.answer = Some(json!({"decision":"once"}));
     let output = ctx.run(egui::RawInput::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| crate::conversation::question(ui, &question));
+        egui::CentralPanel::default().show(ctx, |ui| crate::conversation::question(ui, &question, None));
     });
     let mut text = vec![];
     for shape in output.shapes { shape_text(&shape.shape, &mut text); }

@@ -250,7 +250,7 @@ impl App {
                             let memorizers = self.session_counts(Page::Memorizer);
                             for (page, badges, hint) in [
                                  (Page::Tasks, &[(queue, BLUE), (waiting, AMBER)][..], if self.online { crate::tr!("{queue} eingereiht · {waiting} wartend", queue = queue, waiting = waiting) } else { crate::tr!("{queue} lokal vorbereitet", queue = queue) }),
-                                (Page::Questions, &[(question_count, RED)][..], crate::tr!("{question_count} offen", question_count = question_count)),
+                                 (Page::Questions, &[(question_count, AMBER)][..], crate::tr!("{question_count} offen", question_count = question_count)),
                                 (Page::Sessions, &[(work.running, GREEN), (work.idle, BLUE), (work.failed, RED)][..],
                                     crate::tr!("{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen", work.running, work.idle, work.failed)),
                                 (Page::Orchestrator, &[(controllers.running, GREEN)][..], crate::tr!("{} laufend", controllers.running)),
@@ -1791,7 +1791,7 @@ impl App {
                     }
                     DisplayRow::Original(TranscriptRow::Question(question)) => {
                         ui.push_id(("question", question.id), |ui| {
-                            conversation::question(ui, question);
+                            conversation::question(ui, question, Some(self));
                         });
                     }
                     DisplayRow::MessageSlice(command, entry, range, tail) => {

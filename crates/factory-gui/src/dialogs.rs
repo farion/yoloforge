@@ -218,32 +218,7 @@ impl Dialog {
         Self::Questions(QuestionDialog {
             questions: qs
                 .into_iter()
-                .map(|question| {
-                    let values = question.external.payload["fields"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|f| {
-                            Some((
-                                f["key"].as_str()?.into(),
-                                question
-                                    .answer
-                                    .as_ref()
-                                    .and_then(|a| a.get(f["key"].as_str()?))
-                                    .or(f.get("default"))
-                                    .cloned()
-                                    .unwrap_or(Value::Null),
-                            ))
-                        })
-                        .collect();
-                    QuestionAnswer {
-                        question,
-                        values,
-                        decision: String::new(),
-                        request: None,
-                        restored: false,
-                    }
-                })
+                .map(QuestionAnswer::new)
                 .collect(),
             error: None,
             step: 0,
@@ -1705,26 +1680,9 @@ impl QuestionDialog {
         }
         for entry in &mut self.questions {
             if !entry.restored {
-                if let Some(draft) = app
-                    .settings
-                    .question_drafts
-                    .iter()
-                    .find(|d| d.server == app.server && d.question == entry.question.id)
-                {
-                    entry.values = draft.values.clone();
-                    entry.decision = draft.decision.clone();
-                }
-                entry.request = app
-                    .settings
-                    .pending
-                    .iter()
-                    .find(|r| {
-                        r.server == app.server
-                            && r.path == format!("/v1/questions/{}/answer", entry.question.id)
-                    })
-                    .map(|r| r.id);
-                entry.restored = true;
+                entry.restore_draft(app);
             }
+            entry.request = entry.pending_request(app).or(entry.request);
             if entry.request.and_then(|id| app.responses.get(&id))
                 .is_some_and(|result| result.as_ref().is_err_and(|error| !error.uncertain))
             {
@@ -1744,6 +1702,7 @@ impl QuestionDialog {
             question_intent_link(ui, app, id, &key);
             height - (ui.cursor().top() - top)
         } else { height };
+        let mut submit_from_editor = false;
         egui::ScrollArea::vertical()
             .id_salt(("questions-dialog-scroll", question_id, field))
             .max_height((height - design::SETTINGS_FOOTER_HEIGHT - 26.0).max(20.0))
@@ -1779,29 +1738,21 @@ impl QuestionDialog {
                             }
                              ui.add_enabled_ui(entry.request.is_none(), |ui| {
                                 if q.external.kind == QuestionKind::Permission {
-                                    for (value, label) in [
-                                        ("once", crate::tr!("Einmal erlauben")),
-                                        ("always", crate::tr!("Dauerhaft erlauben (erweiterte Freigabe)")),
-                                        ("reject", crate::tr!("Ablehnen")),
-                                    ] {
-                                        if question_option(ui, entry.decision == value, false, label, None) {
-                                            entry.decision = value.into();
-                                        }
-                                    }
+                                    permission_options(ui, &mut entry.decision);
                                  } else if let Some(schema) = field.and_then(|field| q.external.payload["fields"].get(field))
                                  {
                                          let Some(key) = schema["key"].as_str() else {
                                              ui.colored_label(RED, crate::tr!("Feld ohne Schlüssel"));
                                              return;
                                         };
-                                         ui.push_id(key, |ui| {
+                                          submit_from_editor = ui.push_id(key, |ui| {
                                               question_field(
                                                   ui,
                                                   schema,
                                                   q.external.payload["description"].as_str(),
                                                   entry.values.entry(key.into()).or_insert(Value::Null),
-                                             );
-                                         });
+                                              )
+                                          }).inner;
                                  } else if q.external.payload["fields"].is_array() {
                                      if q.external.payload["fields"].as_array().is_some_and(|fields| fields.is_empty()) {
                                          ui.colored_label(RED, crate::tr!("Dieses Frageformat kann hier nicht beantwortet werden."));
@@ -1835,6 +1786,7 @@ impl QuestionDialog {
                 enabled,
                 BLUE.gamma_multiply(0.7),
             );
+            let forward = button.clicked() || (enabled && submit_from_editor);
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-question-submit"), button.rect));
             let back = if current > 0 {
@@ -1846,11 +1798,11 @@ impl QuestionDialog {
             if back {
                 self.step -= 1;
                 self.error = None;
-            } else if !last && button.clicked() {
+            } else if !last && forward {
                 self.step += 1;
                 self.error = None;
             }
-            last && button.clicked()
+            last && forward && !back
         });
         if submit {
             let mut bodies = Vec::new();
@@ -1879,12 +1831,7 @@ impl QuestionDialog {
             if self.error.is_none() {
                 for (index, body) in bodies {
                     let q = &mut self.questions[index];
-                    q.request = Some(app.write(
-                        crate::tr!("Frage beantworten"),
-                        "POST",
-                        format!("/v1/questions/{}/answer", q.question.id),
-                        json!(body),
-                    ));
+                    q.send(app, body);
                 }
             }
         }
@@ -1899,33 +1846,65 @@ impl QuestionDialog {
             {
                 continue;
             }
-            let draft = crate::persistence::QuestionDraft {
-                server: app.server.clone(),
-                question: entry.question.id,
-                values: entry.values.clone(),
-                decision: entry.decision.clone(),
-            };
-            let old = app
-                .settings
-                .question_drafts
-                .iter_mut()
-                .find(|d| d.server == draft.server && d.question == draft.question);
-            if let Some(old) = old {
-                if old.values != draft.values
-                    || old.decision != draft.decision
-                {
-                    *old = draft;
-                    app.settings_dirty = true;
-                }
-            } else {
-                app.settings.question_drafts.push(draft);
-                app.settings_dirty = true;
-            }
+            entry.save_draft(app);
         }
         false
     }
 }
 impl QuestionAnswer {
+    fn new(question: Question) -> Self {
+        let values = question.external.payload["fields"].as_array().into_iter().flatten()
+            .filter_map(|field| {
+                let key = field["key"].as_str()?;
+                let value = question.answer.as_ref().and_then(|answer| answer.get(key))
+                    .or(field.get("default")).cloned().unwrap_or(Value::Null);
+                Some((key.to_owned(), value))
+            }).collect();
+        Self { question, values, decision: String::new(), request: None, restored: false }
+    }
+
+    fn restore_draft(&mut self, app: &App) {
+        if let Some(draft) = app.settings.question_drafts.iter()
+            .find(|d| d.server == app.server && d.question == self.question.id)
+        {
+            self.values.clone_from(&draft.values);
+            self.decision.clone_from(&draft.decision);
+        }
+        self.restored = true;
+    }
+
+    fn save_draft(&self, app: &mut App) {
+        let drafts = &mut app.settings.question_drafts;
+        if let Some(draft) = drafts.iter_mut()
+            .find(|d| d.server == app.server && d.question == self.question.id)
+        {
+            if draft.values == self.values && draft.decision == self.decision {
+                return;
+            }
+            draft.values.clone_from(&self.values);
+            draft.decision.clone_from(&self.decision);
+        } else {
+            drafts.push(crate::persistence::QuestionDraft {
+                server: app.server.clone(), question: self.question.id,
+                values: self.values.clone(), decision: self.decision.clone(),
+            });
+        }
+        app.settings_dirty = true;
+    }
+
+    fn path(&self) -> String {
+        format!("/v1/questions/{}/answer", self.question.id)
+    }
+
+    fn pending_request(&self, app: &App) -> Option<u64> {
+        let path = self.path();
+        app.settings.pending.iter().find(|r| r.server == app.server && r.path == path).map(|r| r.id)
+    }
+
+    fn send(&mut self, app: &mut App, body: AnswerQuestion) {
+        self.request = Some(app.write(crate::tr!("Frage beantworten"), "POST", self.path(), json!(body)));
+    }
+
     fn payload(&self) -> Result<AnswerQuestion, String> {
         let q = &self.question;
         let answer = if q.external.kind == QuestionKind::Permission {
@@ -1966,6 +1945,72 @@ impl QuestionAnswer {
             legacy_revision: None,
             answer,
         })
+    }
+}
+
+/// Edit an open question in the session transcript without a modal or another scroll area.
+pub(crate) fn inline_question_answer(ui: &mut egui::Ui, app: &mut App, question: &Question) {
+    let mut entry = QuestionAnswer::new(question.clone());
+    entry.restore_draft(app);
+    let pending = entry.pending_request(app);
+    let error_id = ui.make_persistent_id(("inline-question-validation", question.update_seq.0));
+    let permission = question.external.kind == QuestionKind::Permission;
+    let fields = question.external.payload["fields"].as_array();
+    if !permission && fields.is_none_or(Vec::is_empty) {
+        ui.label(crate::tr!("Dieses Frageformat kann hier nicht beantwortet werden."));
+        return;
+    }
+
+    let before = (entry.values.clone(), entry.decision.clone());
+    let mut submit_from_editor = false;
+    ui.add_enabled_ui(pending.is_none(), |ui| {
+        if permission {
+            permission_options(ui, &mut entry.decision);
+        } else {
+            for schema in fields.into_iter().flatten() {
+                if schema["hidden"] == true || !field_enabled(schema, &entry.values) {
+                    continue;
+                }
+                if let Some(key) = schema["key"].as_str() {
+                    ui.add_space(8.0);
+                    submit_from_editor |= ui.push_id(key, |ui| question_field(
+                        ui, schema, None, entry.values.entry(key.to_owned()).or_insert(Value::Null),
+                    )).inner;
+                }
+            }
+        }
+    });
+    if before.0 != entry.values || before.1 != entry.decision {
+        entry.save_draft(app);
+        ui.data_mut(|data| data.remove::<String>(error_id));
+    }
+
+    ui.add_space(8.0);
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let enabled = app.online && pending.is_none();
+        let submit = design::accent_button(
+            ui, egui::Button::new(crate::tr!("Antwort abgeben")),
+            enabled, BLUE.gamma_multiply(0.7),
+        );
+        #[cfg(test)]
+        ui.data_mut(|data| data.insert_temp(egui::Id::new(("test-inline-question-submit", question.id)), submit.rect));
+        if submit.clicked() || (enabled && submit_from_editor) {
+            match entry.payload() {
+                Ok(body) => {
+                    entry.save_draft(app);
+                    entry.send(app, body);
+                    ui.data_mut(|data| data.remove::<String>(error_id));
+                }
+                Err(error) => ui.data_mut(|data| data.insert_temp(error_id, error)),
+            }
+        }
+        if pending.is_some_and(|id| app.in_flight.contains(&id)) {
+            ui.label(crate::tr!("Wird übertragen …"));
+            ui.spinner();
+        }
+    });
+    if let Some(error) = ui.data(|data| data.get_temp::<String>(error_id)) {
+        ui.add(egui::Label::new(egui::RichText::new(error).color(RED)).wrap());
     }
 }
 
@@ -3004,6 +3049,18 @@ fn field_enabled(schema: &Value, values: &BTreeMap<String, Value>) -> bool {
     })
 }
 
+fn permission_options(ui: &mut egui::Ui, decision: &mut String) {
+    for (value, label) in [
+        ("once", crate::tr!("Einmal erlauben")),
+        ("always", crate::tr!("Dauerhaft erlauben (erweiterte Freigabe)")),
+        ("reject", crate::tr!("Ablehnen")),
+    ] {
+        if question_option(ui, decision.as_str() == value, false, label, None) {
+            *decision = value.into();
+        }
+    }
+}
+
 fn question_option(ui: &mut egui::Ui, selected: bool, multiple: bool, label: &str, description: Option<&str>) -> bool {
     ui.add_space(6.0);
     let width = ui.available_width();
@@ -3030,7 +3087,7 @@ fn question_option(ui: &mut egui::Ui, selected: bool, multiple: bool, label: &st
     row.inner
 }
 
-fn question_field(ui: &mut egui::Ui, schema: &Value, fallback_description: Option<&str>, value: &mut Value) {
+fn question_field(ui: &mut egui::Ui, schema: &Value, fallback_description: Option<&str>, value: &mut Value) -> bool {
     let title = schema["title"]
         .as_str()
         .or(schema["key"].as_str())
@@ -3052,7 +3109,7 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, fallback_description: Optio
         } else {
             ui.label(crate::tr!("Kein gültiger Link zum externen Formular vorhanden."));
         }
-        return;
+        return false;
     }
     let multiple = schema["type"] == "multiselect";
     if let Some(options) = schema["options"].as_array().filter(|v| !v.is_empty()) {
@@ -3092,12 +3149,12 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, fallback_description: Optio
             }
             ui.data_mut(|d| d.insert_temp(custom_id, own));
             if !own {
-                return;
+                return false;
             }
             ui.add_space(4.0);
         } else {
             if schema["custom"] != true {
-                return;
+                return false;
             }
             ui.add_space(8.0);
             ui.label(crate::tr!("Eigene Antwort (optional)"));
@@ -3116,12 +3173,13 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, fallback_description: Optio
         }
         Some("string") => {
             let mut text = value.as_str().unwrap_or("").to_string();
-            let input = design::question_answer_editor(ui, &mut text);
+            let (input, submit) = design::question_answer_editor(ui, &mut text);
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-question-text-editor"), input.rect));
             if input.changed() {
                 *value = json!(text);
             }
+            return submit;
         }
         Some("number" | "integer") => {
             // Preserve invalid text in egui memory rather than silently resetting it.
@@ -3153,6 +3211,7 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, fallback_description: Optio
             );
         }
     }
+    false
 }
 pub fn validate_field(schema: &Value, value: &Value) -> Result<(), String> {
     let valid = match schema["type"].as_str() {
