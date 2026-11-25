@@ -65,7 +65,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libxkbcommon-dev libwayland-dev wayland-protocols libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libgl1-mesa-dev libegl1-mesa-dev
+          sudo apt-get install -y \
+            cmake pkg-config libasound2-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols \
+            libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev \
+            libgl1-mesa-dev libegl1-mesa-dev
       - name: Windows Git fixtures
         if: runner.os == 'Windows'
         run: |

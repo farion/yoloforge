@@ -2154,6 +2154,9 @@ impl FormDialog {
         if self.method == "POST" && self.path.starts_with("/v1/devices/") && self.path.ends_with("/revoke") {
             return self.show_device_revoke(ui, app);
         }
+        if self.method == "DELETE" && self.body.get("confirm_name").is_some() {
+            return self.show_project_delete(ui, app);
+        }
         if self.path == "/v1/projects/setup" && self.request.is_none() {
             self.body["setup"]["repository_source"] = self.body["repository"].clone();
         }
@@ -2162,7 +2165,6 @@ impl FormDialog {
             ui.label(crate::i18n::label(&self.help));
         }
         let mut valid = true;
-        let deleting_project = self.method == "DELETE" && self.body.get("confirm_name").is_some();
         if self.path.starts_with("/v1/projects/") && self.path.ends_with("/supervisor") {
             let seconds = self.body["interval_seconds"].as_u64().unwrap_or(300);
             let mut minutes = seconds as f64 / 60.0;
@@ -2264,18 +2266,6 @@ impl FormDialog {
                     }
                 });
         }
-        if deleting_project {
-            let expected = app
-                .snapshot
-                .as_ref()
-                .and_then(|s| {
-                    s.projects
-                        .iter()
-                        .find(|p| self.path == format!("/v1/projects/{}", p.id))
-                })
-                .map(|p| p.name.as_str());
-            valid &= expected.is_some_and(|name| self.body["confirm_name"].as_str() == Some(name));
-        }
         if staged {
             return false;
         }
@@ -2365,9 +2355,7 @@ impl FormDialog {
                 design::settings_save_button(ui, self.request.is_none() && app.online && valid).clicked())
         } else if self.request.is_none() {
             design::accent_button(
-                ui, egui::Button::new(if deleting_project {
-                    crate::tr!("Projekt löschen")
-                } else if project_editor && self.method == "POST" {
+                ui, egui::Button::new(if project_editor && self.method == "POST" {
                     crate::tr!("Projekt anlegen")
                 } else if project_editor {
                     crate::tr!("Speichern")
@@ -2375,11 +2363,7 @@ impl FormDialog {
                     crate::tr!("Bestätigen und ausführen")
                 }),
                 app.online && valid,
-                if deleting_project {
-                    RED.gamma_multiply(0.7)
-                } else {
-                    BLUE.gamma_multiply(0.7)
-                },
+                BLUE.gamma_multiply(0.7),
             )
             .clicked()
         } else {
@@ -2409,6 +2393,61 @@ impl FormDialog {
             self.request = Some(app.write(&self.title, &self.method, path, body));
         }
         settings_bottom.is_none() && !project_editor && ui.button(crate::tr!("Schließen")).clicked()
+    }
+
+    fn show_project_delete(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
+        if self.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)) {
+            return true;
+        }
+        if self.request.is_some_and(|id| app.responses.get(&id).is_some_and(|result|
+            result.as_ref().is_err_and(|error| !error.uncertain)))
+        {
+            self.request = None;
+            self.body["request_id"] = json!(RequestId::new());
+        }
+        ui.label(crate::i18n::label(&self.help));
+        let project = app.snapshot.as_ref().and_then(|snapshot|
+            snapshot.projects.iter().find(|project| self.path == format!("/v1/projects/{}", project.id)));
+        // Revisions are concurrency guards, not user input. A rejected request
+        // keeps the confirmation draft and requires another explicit click.
+        if self.request.is_none() {
+            if let Some(project) = project {
+                self.body["expected_revision"] = json!(project.revision);
+            }
+        }
+        let mut name = self.body["confirm_name"].as_str().unwrap_or("").to_owned();
+        design::settings_field(ui, crate::tr!("Projektname zur Bestätigung"), |ui| {
+            let input = ui.add_enabled(self.request.is_none(), design::singleline(&mut name).desired_width(f32::INFINITY));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-project-delete-name"), input.rect));
+            #[cfg(not(test))]
+            let _ = input;
+        });
+        let valid = project.is_some_and(|project| project.name == name);
+        self.body["confirm_name"] = json!(name);
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let confirm = design::accent_button(ui, egui::Button::new(crate::tr!("Projekt löschen")),
+                app.online && self.request.is_none() && valid, RED.gamma_multiply(0.7));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(egui::Id::new("test-project-delete-confirm"), confirm.rect);
+                d.insert_temp(egui::Id::new("test-project-delete-right"), ui.max_rect().right());
+            });
+            if confirm.clicked() {
+                self.request = Some(app.write(&self.title, &self.method, self.path.clone(), self.body.clone()));
+            }
+            if let Some(id) = self.request {
+                if app.in_flight.contains(&id) {
+                    ui.spinner();
+                } else if ui.add_enabled(app.online, egui::Button::new(crate::tr!("Zustellung prüfen"))).clicked() {
+                    app.retry(id);
+                }
+            }
+        });
+        false
     }
 
     fn show_device_revoke(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {

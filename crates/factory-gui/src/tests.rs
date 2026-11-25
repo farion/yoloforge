@@ -4489,6 +4489,71 @@ fn devices_show_only_active_accesses_and_revoke_without_raw_management_forms() {
 }
 
 #[test]
+fn project_delete_only_asks_for_name_and_closes_with_a_toast_after_confirmation() {
+    let mut app = fixture();
+    let mut project = app.snapshot.as_ref().unwrap().projects[0].clone();
+    let mut dialog = Dialog::form(
+        crate::tr!("Projekt löschen"), "Projekt entfernen.", "DELETE",
+        format!("/v1/projects/{}", project.id),
+        json!(DeleteProject { request_id: RequestId::new(), expected_revision: project.revision, confirm_name: String::new() }),
+    );
+    let ctx = app.backend.context().clone();
+    let render = |dialog: &mut Dialog, app: &mut App, events| {
+        let mut closed = false;
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+            events, ..Default::default()
+        }, |ctx| { closed = dialog.show(ctx, app); });
+        (output, closed)
+    };
+    for _ in 0..3 { let _ = render(&mut dialog, &mut app, vec![]); }
+    let (output, closed) = render(&mut dialog, &mut app, vec![]);
+    assert!(!closed);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|text| text == crate::tr!("Projektname zur Bestätigung")));
+    assert!(!text.iter().any(|text| text.contains("Serverrevision") || text.contains("Anfragedaten") || text == crate::tr!("Schließen")));
+    let button: egui::Rect = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-project-delete-confirm"))).unwrap();
+    let right: f32 = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-project-delete-right"))).unwrap();
+    assert!((button.right() - right).abs() < 1.0, "Delete action must align with the content's right edge");
+    let _ = render(&mut dialog, &mut app, click_events(button.center()));
+    assert!(app.settings.pending.is_empty(), "The full project name is required");
+    let Dialog::Form(form) = &mut dialog else { unreachable!() };
+    form.body["confirm_name"] = json!(project.name);
+    let _ = render(&mut dialog, &mut app, vec![]);
+    let button: egui::Rect = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-project-delete-confirm"))).unwrap();
+    let (_, closed) = render(&mut dialog, &mut app, click_events(button.center()));
+    assert!(!closed, "Do not close before the server confirms deletion");
+    let request = app.settings.pending.last().unwrap().clone();
+    assert_eq!(request.body["expected_revision"], json!(project.revision));
+    assert_eq!(request.body["confirm_name"], json!(project.name));
+    app.backend.emit_for_test(crate::backend::Event::Request(request.id, Err(crate::backend::Failure {
+        message: "HTTP technical diagnostic".into(), uncertain: false,
+    })));
+    app.receive();
+    let (output, closed) = render(&mut dialog, &mut app, vec![]);
+    assert!(!closed, "A rejected deletion must keep the confirmation draft");
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(!text.iter().any(|text| text.contains("HTTP technical diagnostic")));
+    assert_eq!(app.notices.last().unwrap().0, crate::tr!("Projekt konnte nicht gelöscht werden. Bitte den aktuellen Projektstand prüfen."));
+    let Dialog::Form(form) = &dialog else { unreachable!() };
+    assert_eq!(form.body["confirm_name"], json!(project.name));
+    let button: egui::Rect = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-project-delete-confirm"))).unwrap();
+    let _ = render(&mut dialog, &mut app, click_events(button.center()));
+    let retry = app.settings.pending.last().unwrap().clone();
+    assert_ne!(retry.body["request_id"], request.body["request_id"]);
+    project.deleted = true;
+    project.revision.0 += 1;
+    app.backend.emit_for_test(crate::backend::Event::Request(retry.id, Ok(json!(project))));
+    app.receive();
+    assert!(render(&mut dialog, &mut app, vec![]).1);
+    assert_eq!(app.notices.last().unwrap().0, crate::tr!("Projekt gelöscht."));
+    assert!(app.settings.pending.is_empty());
+    assert!(!app.snapshot.as_ref().unwrap().projects.iter().any(|current| current.id == project.id));
+}
+
+#[test]
 fn settings_menu_and_copy_use_normal_body_size_and_sidebar_hover_style() {
     use crate::project_settings::ProjectSection;
     let mut app = fixture();

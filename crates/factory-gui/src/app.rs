@@ -1162,6 +1162,38 @@ impl App {
                         }
                     }
                     let mut task_notice = None;
+                    if let Some(request) = self.settings.pending.iter().find(|request| request.id == id
+                        && request.method == "DELETE"
+                        && request.path.strip_prefix("/v1/projects/").is_some_and(|id| id.parse::<ProjectId>().is_ok())).cloned()
+                    {
+                        if let Ok(value) = &result {
+                            match serde_json::from_value::<Project>(value.clone()) {
+                                Ok(project) if project.deleted && request.path == format!("/v1/projects/{}", project.id) => {
+                                    if request.server == self.server {
+                                        if let Some(snapshot) = &mut self.snapshot {
+                                            std::sync::Arc::make_mut(snapshot).projects.retain(|current| current.id != project.id);
+                                        }
+                                        if self.settings.project == Some(project.id) {
+                                            self.set_project(None);
+                                        }
+                                    }
+                                    task_notice = Some(crate::tr!("Projekt gelöscht."));
+                                }
+                                _ => result = Err(Failure {
+                                    message: crate::tr!("Löschen des Projekts nicht eindeutig bestätigt.").into(),
+                                    uncertain: true,
+                                }),
+                            }
+                        }
+                        if let Err(error) = &result {
+                            self.notice(if error.uncertain {
+                                crate::tr!("Löschen nicht bestätigt. Bitte die Zustellung prüfen.")
+                            } else {
+                                crate::tr!("Projekt konnte nicht gelöscht werden. Bitte den aktuellen Projektstand prüfen.")
+                            });
+                            self.action_errors.push((crate::overview::now_ms(), format!("{}: {}", request.label, error.message)));
+                        }
+                    }
                     let offline_task = self.settings.offline_tasks.iter().find(|t| t.sync_request == Some(id)).cloned();
                     if let (Some(task), Ok(value)) = (&offline_task, &result) {
                         let confirmed = serde_json::from_value::<Ticket>(value.clone()).ok().is_some_and(|ticket|

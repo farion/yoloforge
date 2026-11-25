@@ -1,4 +1,8 @@
 {
+  "Projekt gelöscht.": ["Projekt gelöscht.", "Project deleted."],
+  "Löschen des Projekts nicht eindeutig bestätigt.": ["Löschen des Projekts nicht eindeutig bestätigt.", "Project deletion was not clearly confirmed."],
+  "Löschen nicht bestätigt. Bitte die Zustellung prüfen.": ["Löschen nicht bestätigt. Bitte die Zustellung prüfen.", "Deletion not confirmed. Please check delivery."],
+  "Projekt konnte nicht gelöscht werden. Bitte den aktuellen Projektstand prüfen.": ["Projekt konnte nicht gelöscht werden. Bitte den aktuellen Projektstand prüfen.", "The project could not be deleted. Please check its current state."],
   "Wird fortgesetzt": ["Wird fortgesetzt", "Resuming"],
   "About": ["About", "About"],
   "Zurück zur Factory": ["Zurück zur Factory", "Back to Factory"],
