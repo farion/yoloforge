@@ -243,6 +243,14 @@ fn key(command: &RunnerCommand) -> String {
         format!("{}-epoch-{}", command.stream_id, command.ownership_epoch)
     }
 }
+fn path_key(command: &RunnerCommand) -> String {
+    let stream = command.stream_id.to_string().replace('-', "");
+    if command.ownership_epoch == 1 {
+        stream
+    } else {
+        format!("{stream}e{}", command.ownership_epoch)
+    }
+}
 
 pub(crate) fn has_plan(journal: &Journal, command: &RunnerCommand) -> Result<bool> {
     Ok(journal.db.query_row("SELECT EXISTS(SELECT 1 FROM workspaces WHERE stream_id=?1)",
@@ -299,7 +307,6 @@ fn prepare_inner(
     let common = common_dir(&repository).context("Mapped path is not a Git repository")?;
     fs::create_dir_all(root).context("Cannot create workspace root")?;
     let root = fs::canonicalize(root)?;
-    let path = root.join(key(command));
     let previous: Option<String> = journal
         .db
         .query_row(
@@ -308,17 +315,25 @@ fn prepare_inner(
             |r| r.get(0),
         )
         .optional()?;
+    let previous: Option<Plan> = previous
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
+    let new_path = root.join(path_key(command));
+    let legacy_path = root.join(key(command));
+    let path = previous
+        .as_ref()
+        .map(|plan| plan.path.clone())
+        .unwrap_or_else(|| new_path.clone());
     let reference = format!("refs/heads/{}", spec.branch);
     let mut plan: Plan = if let Some(previous) = previous {
-        let plan: Plan = serde_json::from_str(&previous)?;
         ensure!(
-            plan.spec == *spec
-                && plan.repository == repository
-                && plan.common_dir == common
-                && plan.path == path,
+            previous.spec == *spec
+                && previous.repository == repository
+                && previous.common_dir == common
+                && (previous.path == new_path || previous.path == legacy_path),
             "Workspace mapping changed; restore original configuration before retrying"
         );
-        plan
+        previous
     } else {
         ensure!(
             !path.try_exists()? && fs::symlink_metadata(&path).is_err(),
@@ -609,7 +624,7 @@ mod tests {
     fn occupied_path_and_unjournaled_branch_are_never_overwritten() {
         let fixture = Fixture::new();
         let command = fixture.command();
-        let path = fixture.root.join(command.stream_id.to_string());
+        let path = fixture.root.join(path_key(&command));
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("keep"), "user data").unwrap();
         assert!(fixture.prepare(&command).is_err());
@@ -621,7 +636,7 @@ mod tests {
         )
         .unwrap();
         assert!(fixture.prepare(&other).is_err());
-        assert!(!fixture.root.join(other.stream_id.to_string()).exists());
+        assert!(!fixture.root.join(path_key(&other)).exists());
     }
     #[test]
     fn restart_reconciles_completed_git_operation_but_refuses_ambiguous_dirty_checkout() {
