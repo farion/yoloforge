@@ -40,6 +40,7 @@ fn review_pins_profile_and_source_and_only_matching_test_evidence_can_authorize_
     let store = Store::open(&path).unwrap();
     let p = store
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),

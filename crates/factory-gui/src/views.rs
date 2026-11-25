@@ -11,8 +11,20 @@ use factory_protocol::*;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+const HEADER_PADDING: i8 = 10;
+const HEADER_LOGO_HEIGHT: f32 =
+    (design::SECTION_TAB_HEIGHT + 2.0 * HEADER_PADDING as f32) * 4.0 / 3.0
+    - 2.0 * HEADER_PADDING as f32;
+
 impl App {
     pub fn draw_shell(&mut self, ctx: &egui::Context) {
+        if !self.online {
+            self.enter_offline_mode();
+            if !self.available_projects().iter().any(|p| Some(p.id) == self.settings.project) {
+                let first = self.available_projects().first().map(|p| p.id);
+                self.set_project(first);
+            }
+        }
         if let Some(snapshot) = &self.snapshot {
             self.factory_flow.observe(&self.server, snapshot, self.online, crate::overview::now_ms());
         }
@@ -23,21 +35,25 @@ impl App {
             self.dialog = Some(Dialog::FactorySettings);
         }
         let snapshot = self.snapshot.clone();
+        let projects = self.available_projects().to_vec();
         egui::TopBottomPanel::top("tabs")
             .frame(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(17, 20, 26))
-                    .inner_margin(10),
+                    .inner_margin(egui::Margin {
+                        bottom: 0,
+                        ..egui::Margin::same(HEADER_PADDING)
+                    }),
             )
             .show(ctx, |ui| self.header_tabs(ui));
         let _footer = egui::TopBottomPanel::bottom("connection-status")
             .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(design::FOOTER_MARGIN))
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                let row = ui.horizontal(|ui| {
                     let connect = design::icon_button(
                         ui,
                         egui_phosphor::regular::PLUGS_CONNECTED,
-                        "Verbindungsübersicht",
+                        crate::tr!("Verbindungsübersicht"),
                         true,
                     );
                     #[cfg(test)]
@@ -47,18 +63,20 @@ impl App {
                     if connect.clicked() {
                         self.dialog = Some(Dialog::ConnectionInfo);
                     }
-                    let width = (ui.available_width() - 230.0).max(30.0);
+                    let width = (ui.available_width() - 230.0
+                        - design::ICON_BUTTON_SIZE - ui.spacing().item_spacing.x).max(30.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(width, 36.0),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
+                            if !self.online { ui.set_max_width(220.0); }
                             let text = ui
                                 .vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 0.0;
                                     let color = if self.online { GREEN } else { AMBER };
                                     let status = ui.colored_label(
                                         color,
-                                        if self.online { "Verbunden" } else { "Offline" },
+                                        if self.online { crate::tr!("Verbunden") } else { "Offline" },
                                     );
                                     let url = ui
                                         .add(
@@ -87,9 +105,19 @@ impl App {
                             let _ = text;
                         },
                     );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let about = design::icon_button(
+                            ui, egui_phosphor::regular::INFO, crate::tr!("About"), true,
+                        );
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(
+                            egui::Id::new("test-footer-about"), about.rect,
+                        ));
+                        if about.clicked() {
+                            self.dialog = Some(Dialog::About);
+                        }
                         let settings = design::icon_button(
-                            ui, egui_phosphor::regular::GEAR, "Factory-Einstellungen", true,
+                            ui, egui_phosphor::regular::GEAR, crate::tr!("Factory-Einstellungen"), self.online,
                         );
                         #[cfg(test)]
                         ui.ctx().data_mut(|d| d.insert_temp(
@@ -108,6 +136,17 @@ impl App {
                         });
                     });
                 });
+                if !self.online {
+                    let galley = ui.painter().layout_job(design::elided_text_job(
+                        crate::offline::footer_notice().into(),
+                        egui::TextStyle::Body.resolve(ui.style()), AMBER,
+                        (row.response.rect.width() - 560.0).max(80.0), 1,
+                    ));
+                    let rect = egui::Rect::from_center_size(row.response.rect.center(), galley.size());
+                    ui.painter().galley(rect.min, galley, AMBER);
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-offline-footer-notice"), rect));
+                }
             });
         #[cfg(test)]
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("test-footer-panel"), _footer.response.rect));
@@ -132,7 +171,7 @@ impl App {
                                 data.insert_temp(id, page);
                                 changed
                             });
-                            ui.colored_label(MUTED, "PROJEKT");
+                            ui.colored_label(MUTED, crate::tr!("PROJEKT"));
                             let mut selected_project = self.settings.project;
                             ui.horizontal(|ui| {
                                 let width =
@@ -142,12 +181,11 @@ impl App {
                                     .width(width)
                                     .wrap_mode(egui::TextWrapMode::Truncate)
                                     .selected_text(
-                                        self.project().map_or_else(||"Projekt auswählen".into(),|p|
+                                        self.project().map_or_else(||crate::tr!("Projekt auswählen").into(),|p|
                                             if p.key.is_empty(){p.name.clone()}else{format!("{} · {}",p.key,p.name)}),
                                     )
                                     .show_ui(ui, |ui| {
-                                        if let Some(s) = &snapshot {
-                                            for project in &s.projects {
+                                            for project in &projects {
                                                 ui.selectable_value(
                                                     &mut selected_project,
                                                     Some(project.id),
@@ -155,12 +193,11 @@ impl App {
                                                     else{format!("{} · {}",project.key,project.name)},
                                                 );
                                             }
-                                        }
                                      });
                                 _selector.response.clone().on_hover_cursor(egui::CursorIcon::PointingHand);
                                 self.set_project(selected_project);
                                 let menu = ui
-                                    .scope(|ui| {
+                                    .add_enabled_ui(self.online, |ui| {
                                         ui.spacing_mut().button_padding = egui::vec2(6.0, 6.0);
                                         ui.menu_button(
                                             RichText::new(
@@ -175,8 +212,8 @@ impl App {
                                 menu.widget_info(|| {
                                     egui::WidgetInfo::labeled(
                                         egui::WidgetType::Button,
-                                        true,
-                                        "Projektmenü",
+                                        self.online,
+                                        crate::tr!("Projektmenü"),
                                     )
                                 });
                                 #[cfg(test)]
@@ -186,18 +223,13 @@ impl App {
                                         (_selector.response.rect, menu.rect),
                                     )
                                 });
-                                menu.on_hover_text("Projektmenü");
+                                menu.on_hover_text(crate::tr!("Projektmenü"));
                             });
                             ui.add_space(8.0);
-                            if design::accent_button(
-                                    ui, egui::Button::new(
-                                        RichText::new("+ Aufgabe").size(20.0).strong(),
-                                    )
-                                    .min_size(egui::vec2(ui.available_width(), 55.0)),
-                                    self.settings.project.is_some(),
-                                    BLUE.gamma_multiply(0.8),
-                                )
-                                .clicked()
+                            let project_logo = snapshot.as_ref().and_then(|s|
+                                s.projects.iter().find(|p| Some(p.id) == self.settings.project))
+                                .and_then(|p| p.logo.as_ref());
+                            if crate::project_logo::intent_button(ui, project_logo, self.settings.project.is_some()).clicked()
                             {
                                 self.new_task();
                             }
@@ -207,27 +239,31 @@ impl App {
                                 .as_ref()
                                 .zip(project)
                                 .map_or(0, |(s, p)| question_groups(s, p, true).len());
-                            let queue = snapshot.as_ref().zip(project).map_or(0, |(s,p)| queued_task_count(s, p));
+                             let (queue, waiting) = if self.online {
+                                 snapshot.as_ref().zip(project).map_or((0, 0), |(s,p)| task_queue_counts(s, p))
+                             } else {
+                                 (self.settings.offline_tasks.iter().filter(|t| t.draft.server == self.server && Some(t.draft.project) == project).count(), 0)
+                            };
                             let work = self.session_counts(Page::Sessions);
                             let controllers = self.session_counts(Page::Orchestrator);
                             let supervisors = self.session_counts(Page::Supervisor);
                             let memorizers = self.session_counts(Page::Memorizer);
                             for (page, badges, hint) in [
-                                (Page::Tasks, &[(queue, BLUE)][..], format!("{queue} in der Warteschlange")),
-                                (Page::Questions, &[(question_count, RED)][..], format!("{question_count} offen")),
+                                 (Page::Tasks, &[(queue, BLUE), (waiting, AMBER)][..], if self.online { crate::tr!("{queue} eingereiht · {waiting} wartend", queue = queue, waiting = waiting) } else { crate::tr!("{queue} lokal vorbereitet", queue = queue) }),
+                                (Page::Questions, &[(question_count, RED)][..], crate::tr!("{question_count} offen", question_count = question_count)),
                                 (Page::Sessions, &[(work.running, GREEN), (work.idle, BLUE), (work.failed, RED)][..],
-                                    format!("{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen", work.running, work.idle, work.failed)),
-                                (Page::Orchestrator, &[(controllers.running, GREEN)][..], format!("{} laufend", controllers.running)),
-                                (Page::Supervisor, &[(supervisors.running, GREEN)][..], format!("{} laufend", supervisors.running)),
-                                (Page::Memorizer, &[(memorizers.running, GREEN)][..], format!("{} laufend", memorizers.running)),
+                                    crate::tr!("{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen", work.running, work.idle, work.failed)),
+                                (Page::Orchestrator, &[(controllers.running, GREEN)][..], crate::tr!("{} laufend", controllers.running)),
+                                (Page::Supervisor, &[(supervisors.running, GREEN)][..], crate::tr!("{} laufend", supervisors.running)),
+                                (Page::Memorizer, &[(memorizers.running, GREEN)][..], crate::tr!("{} laufend", memorizers.running)),
                             ] {
-                                let row = design::navigation_row_with_badges(
+                                let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
                                     ui,
                                     Some(page.icon()),
                                     page.title(),
                                     self.page() == page,
                                     badges,
-                                ).on_hover_text(hint);
+                                )).inner.on_hover_text(hint);
                                 if reveal_selected && self.page() == page {
                                     row.scroll_to_me(Some(egui::Align::Center));
                                 }
@@ -243,10 +279,9 @@ impl App {
                                 Page::Overview,
                                 Page::Notifications,
                                 Page::Infrastructure,
-                                Page::Runners,
                                 Page::Diagnostics,
                             ] {
-                                let row = design::navigation_row_with_icon(
+                                let row = ui.add_enabled_ui(self.online, |ui| design::navigation_row_with_icon(
                                     ui,
                                     Some(page.icon()),
                                     page.title(),
@@ -255,7 +290,7 @@ impl App {
                                         usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
                                         AMBER,
                                     )),
-                                );
+                                )).inner;
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d| {
                                     d.insert_temp(
@@ -281,7 +316,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     let context = if self.active_tab > 0 {
-                        "OpenCode · schreibgeschützt"
+                        crate::tr!("OpenCode · schreibgeschützt")
                     } else {
                         self.page().title()
                     };
@@ -315,6 +350,10 @@ impl App {
                     .inner_margin(24),
             )
             .show(ctx, |ui| {
+                if !self.online {
+                    crate::offline::show(ui, self);
+                    return;
+                }
                 if self.active_tab > 0 {
                     self.session_tab(ui);
                     return;
@@ -330,18 +369,18 @@ impl App {
                 if self.snapshot.is_none() && self.page() != Page::Diagnostics {
                     ui.vertical_centered(|ui| {
                         ui.add_space(80.0);
-                        ui.heading("Deine Factory im Blick");
-                        ui.label("Mit einem Server verbinden oder eine lokale Factory starten.");
-                        if ui.button("Verbindung einrichten …").clicked() {
+                        ui.heading(crate::tr!("Deine Factory im Blick"));
+                        ui.label(crate::tr!("Mit einem Server verbinden oder eine lokale Factory starten."));
+                        if ui.button(crate::tr!("Verbindung einrichten …")).clicked() {
                             self.dialog = Some(Dialog::connection(self.server.clone()));
                         }
                     });
                     return;
                 }
                 if !self.page().global() && self.settings.project.is_none() {
-                    ui.heading("Noch kein Projekt");
-                    ui.label("Lege ein Projekt an, um Aufgaben zu verwalten.");
-                    if ui.button("Projekt anlegen …").clicked() {
+                    ui.heading(crate::tr!("Noch kein Projekt"));
+                    ui.label(crate::tr!("Lege ein Projekt an, um Aufgaben zu verwalten."));
+                    if ui.button(crate::tr!("Projekt anlegen …")).clicked() {
                         self.project_editor(None);
                     }
                     return;
@@ -352,7 +391,6 @@ impl App {
                     Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer => {
                         self.session_list(ui, self.page())
                     }
-                    Page::Runners => self.runners(ui),
                     Page::Diagnostics => self.diagnostics(ui),
                     Page::Notifications => self.notifications_view(ui),
                     Page::Settings => {}
@@ -368,90 +406,122 @@ impl App {
             .filter_map(|file| file.path.clone())
             .collect::<Vec<_>>();
         if dropped.len() > paths.len() {
-            self.notice("Ein Anhang enthält keinen lokalen Dateipfad. Bitte über „Dateien/Bilder hinzufügen“ auswählen.");
+            self.notice(crate::tr!("Ein Anhang enthält keinen lokalen Dateipfad. Bitte über „Dateien/Bilder hinzufügen“ auswählen."));
         }
         if !paths.is_empty() {
             if let Some(Dialog::Task(task)) = &self.dialog {
                 if task.read_only {
-                    self.notice("Diese Aufgabenansicht ist schreibgeschützt. Zum Anhängen einen bearbeitbaren Auftrag öffnen.");
+                    self.notice(crate::tr!("Diese Aufgabenansicht ist schreibgeschützt. Zum Anhängen einen bearbeitbaren Auftrag öffnen."));
                 } else if task.request.is_none() {
                     self.backend.load_attachments(task.id, paths);
-                    self.notice("Anhänge werden geladen …");
+                    self.notice(crate::tr!("Anhänge werden geladen …"));
                 } else {
                     self.notice(
-                        "Diese Aufgabe wurde bereits gesendet. Bitte einen neuen Entwurf öffnen.",
+                        crate::tr!("Diese Aufgabe wurde bereits gesendet. Bitte einen neuen Entwurf öffnen."),
                     );
                 }
+            } else if let Some(target) = self.clipboard_image_target() {
+                self.backend.load_attachments(target, paths);
+                self.notice(crate::tr!("Anhänge werden geladen …"));
             } else {
-                self.notice("Zum Anhängen bitte zuerst „+ Aufgabe“ öffnen.");
+                self.notice(crate::tr!("Zum Anhängen bitte einen bearbeitbaren Aufgaben- oder Session-Prompt öffnen."));
             }
         }
     }
     fn header_tabs(&mut self, ui: &mut egui::Ui) {
-        use egui_phosphor::regular::{CARET_LEFT, CARET_RIGHT, FACTORY, TERMINAL_WINDOW};
+        use egui_phosphor::regular::{CARET_LEFT, CARET_RIGHT, TERMINAL_WINDOW};
 
         const TAB_WIDTH: f32 = 220.0;
-        let pager_id = ui.id().with("session-tab-pager");
-        ui.horizontal(|ui| {
-            let (factory, _) = design::tab_with_icon(
-                ui, Some(FACTORY), "Factory", self.active_tab == 0, TAB_WIDTH, false,
-            );
-            #[cfg(test)]
-            ui.ctx().data_mut(|d| d.insert_temp(
-                egui::Id::new(("test-header-tab", 0usize)), (factory.rect, self.active_tab == 0),
+        let state_id = ui.id().with("session-tab-strip-state");
+        let delta_id = state_id.with("pending-scroll");
+        let row_height = HEADER_LOGO_HEIGHT + HEADER_PADDING as f32;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), row_height),
+            egui::Layout::left_to_right(egui::Align::Max),
+            |ui| {
+            let logo_size = egui::vec2(HEADER_LOGO_HEIGHT * (1540.0 / 558.0), HEADER_LOGO_HEIGHT);
+            let (logo_id, logo_slot) = ui.allocate_space(egui::vec2(logo_size.x, row_height));
+            let logo_rect = egui::Rect::from_min_size(logo_slot.min, logo_size);
+            let logo = ui.interact(logo_rect, logo_id, egui::Sense::click());
+            // Keep the tab strip steady while the image loader decodes the PNG.
+            egui::Image::from_bytes(
+                "bytes://yoloforgelogo.png",
+                include_bytes!("../../../yoloforgelogo.png").as_slice(),
+            )
+            .paint_at(ui, logo_rect);
+            logo.widget_info(|| egui::WidgetInfo::labeled(
+                egui::WidgetType::Button, true, crate::tr!("Zurück zur Factory"),
             ));
-            if factory.clicked() {
+            if logo.on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(crate::tr!("Zurück zur Factory")).clicked()
+            {
                 self.active_tab = 0;
             }
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-header-logo"), logo_rect));
+            ui.add_space(8.0);
 
+            ui.add_enabled_ui(self.online, |ui| {
             let gap = ui.spacing().item_spacing.x;
             let remaining = ui.available_width();
-            let fit = |width: f32| ((width + gap) / (TAB_WIDTH + gap)).floor() as usize;
-            let overflow = self.tabs.len() > fit(remaining);
-            let slots = if overflow {
-                fit(remaining - 2.0 * (design::ICON_BUTTON_SIZE + gap)).max(1)
-            } else {
-                fit(remaining)
-            };
-            let last_start = self.tabs.len().saturating_sub(slots);
+            let content_width = (self.tabs.len() as f32 * (TAB_WIDTH + gap) - gap).max(0.0);
+            let overflow = content_width > remaining;
+            let viewport_width = (remaining - if overflow {
+                2.0 * (design::ICON_BUTTON_SIZE + gap)
+            } else { 0.0 }).max(1.0);
             let active_index = self.active_tab.checked_sub(1).filter(|&i| i < self.tabs.len());
             let active_root = active_index.map(|i| self.tabs[i].root);
-            let (previous_start, previous_active, previous_slots) = ui.ctx().data_mut(|d| {
-                d.get_temp::<(usize, Option<CommandId>, usize)>(pager_id).unwrap_or_default()
+            let (previous_offset, previous_active, previous_width) = ui.ctx().data_mut(|d| {
+                d.get_temp::<(f32, Option<CommandId>, f32)>(state_id).unwrap_or_default()
             });
-            let mut start = previous_start.min(last_start);
-            if let Some(index) = active_index.filter(|_| {
-                active_root != previous_active || slots != previous_slots
-            }) {
-                start = start.clamp((index + 1).saturating_sub(slots), index);
-            }
-
-            let mut next_start = start;
-            if overflow && design::icon_button(ui, CARET_LEFT, "Tabs nach links", start > 0).clicked() {
-                next_start -= 1;
+            let reveal_active = active_root != previous_active || (viewport_width - previous_width).abs() > 1.0;
+            // Pixel scrolling deliberately does not snap to tab boundaries. Partial
+            // tabs at the edges make the strip's continuation visible.
+            let step = (viewport_width * 0.65).max(40.0);
+            let mut delta = ui.ctx().data_mut(|d| d.remove_temp::<f32>(delta_id)).unwrap_or(0.0);
+            if overflow && design::icon_button(ui, CARET_LEFT, crate::tr!("Tabs nach links"), previous_offset > 0.5).clicked() {
+                delta += step;
             }
             let mut close = None;
-            for (index, tab) in self.tabs.iter().enumerate().skip(start).take(slots) {
-                ui.push_id(tab.root, |ui| {
-                    let (response, closed) = design::tab_with_icon(
-                        ui, Some(TERMINAL_WINDOW), &tab.title, self.active_tab == index + 1, TAB_WIDTH, true,
-                    );
-                    #[cfg(test)]
-                    ui.ctx().data_mut(|d| d.insert_temp(
-                        egui::Id::new(("test-header-tab", index + 1)), (response.rect, self.active_tab == index + 1),
-                    ));
-                    if response.clicked() {
-                        self.active_tab = index + 1;
-                    }
-                    if closed {
-                        close = Some(index);
-                    }
-                });
-            }
-            if overflow && design::icon_button(ui, CARET_RIGHT, "Tabs nach rechts", start < last_start).clicked() {
-                next_start += 1;
-            }
-            if next_start != start {
+            let scroll = ui.allocate_ui_with_layout(
+                egui::vec2(viewport_width, design::SECTION_TAB_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    // Use the normal vertical wheel as well as horizontal trackpad gestures.
+                    ui.style_mut().always_scroll_the_only_direction = true;
+                    egui::ScrollArea::horizontal()
+                    .id_salt("session-tab-strip")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                    .auto_shrink([false, true])
+                    .max_width(viewport_width)
+                    .show(ui, |ui| {
+                        if delta != 0.0 { ui.scroll_with_delta(egui::vec2(delta, 0.0)); }
+                        ui.horizontal(|ui| {
+                            for (index, tab) in self.tabs.iter().enumerate() {
+                                ui.push_id(tab.root, |ui| {
+                                    let (response, closed) = design::tab_with_icon(
+                                        ui, Some(TERMINAL_WINDOW), &tab.title, self.active_tab == index + 1, TAB_WIDTH, true,
+                                    );
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d| d.insert_temp(
+                                        egui::Id::new(("test-header-tab", index + 1)), (response.rect, self.active_tab == index + 1),
+                                    ));
+                                    if reveal_active && Some(index) == active_index {
+                                        response.scroll_to_me(None);
+                                    }
+                                    if response.clicked() { self.active_tab = index + 1; }
+                                    if closed { close = Some(index); }
+                                });
+                            }
+                        });
+                    })
+                },
+            ).inner;
+            let max_offset = (scroll.content_size.x - scroll.inner_rect.width()).max(0.0);
+            if overflow && design::icon_button(ui, CARET_RIGHT, crate::tr!("Tabs nach rechts"), scroll.state.offset.x < max_offset - 0.5).clicked() {
+                // The right control is painted after the strip; apply its request
+                // inside the scroll area on the next frame.
+                ui.ctx().data_mut(|d| d.insert_temp(delta_id, -step));
                 ui.ctx().request_repaint();
             }
             if let Some(index) = close {
@@ -462,11 +532,13 @@ impl App {
                     self.active_tab -= 1;
                 }
             }
-            ui.ctx().data_mut(|d| d.insert_temp(pager_id, (next_start, active_root, slots)));
+            ui.ctx().data_mut(|d| d.insert_temp(state_id, (scroll.state.offset.x, active_root, viewport_width)));
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(
-                egui::Id::new("test-visible-header-tabs"), start..(start + slots).min(self.tabs.len()),
+                egui::Id::new("test-header-tab-scroll"),
+                (scroll.inner_rect, scroll.content_size.x, scroll.state.offset.x),
             ));
+            });
         });
     }
 
@@ -477,7 +549,7 @@ impl App {
         sidebar_session_counts(s, project, page, self.online, &self.instances)
     }
     pub fn new_task(&mut self) {
-        if self.models.needs_setup() {
+        if self.online && self.models.needs_setup() {
             self.dialog = Some(Dialog::ModelSetupRequired);
             return;
         }
@@ -499,42 +571,47 @@ impl App {
     }
     fn project_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_width(310.0);
-        if design::navigation_row(ui, "Neues Projekt", false, None).clicked() {
+        let create = design::navigation_row(ui, crate::tr!("Neues Projekt …"), false, None);
+        if create.clicked() {
             self.project_editor(None);
             ui.close();
         }
         let project = self.project().cloned();
         ui.add_enabled_ui(project.is_some(),|ui| {
-        let edit=design::navigation_row(ui,"Projekt editieren",false,None);
+        let settings=design::navigation_row(ui,crate::tr!("Projekteinstellungen …"),false,None);
         let pause=ui.add_enabled_ui(self.online && project.as_ref().is_some_and(|p|!self.project_pause_pending(p.id)), |ui|
-            design::navigation_row(ui,if project.as_ref().is_some_and(|p|p.paused) {"Projekt fortsetzen"} else {"Projekt pausieren"},false,None)
-        ).inner.on_hover_text("Gilt für neue automatische Arbeit. Laufende Prozesse werden nicht gestoppt.");
-        let delete=design::navigation_row(ui,"Projekt löschen",false,None);
-        let advanced=design::navigation_row(ui,"Erweiterte Projekteinstellungen",false,None);
+            design::navigation_row(ui,if project.as_ref().is_some_and(|p|p.paused) {crate::tr!("Projekt fortsetzen")} else {crate::tr!("Projekt pausieren")},false,None)
+        ).inner.on_hover_text(crate::tr!("Gilt für neue automatische Arbeit. Laufende Prozesse werden nicht gestoppt."));
+        let usage=design::navigation_row(ui,crate::tr!("Verbrauch …"),false,None);
+        let delete=design::navigation_row(ui,crate::tr!("Projekt löschen …"),false,None);
         #[cfg(test)]
-        ui.ctx().data_mut(|data|data.insert_temp(egui::Id::new("test-project-menu-rows"),[edit.rect,pause.rect,delete.rect,advanced.rect]));
+        ui.ctx().data_mut(|data|data.insert_temp(egui::Id::new("test-project-menu-rows"),[create.rect,settings.rect,pause.rect,usage.rect,delete.rect]));
         let Some(p)=project else {return;};
-        if edit.clicked() {
-            self.project_editor(Some(&p));
+        if settings.clicked() {
+            self.dialog=Some(Dialog::project_settings(p.id));
             ui.close();
         }
         if pause.clicked() {
             self.toggle_project_pause(&p);
             ui.close();
         }
-        if delete.clicked() {
-            self.dialog=Some(Dialog::form("Projekt löschen",&format!("Projekt „{}“ aus der Factory-Auswahl entfernen. Repository-Dateien und Historie bleiben erhalten. Laufende oder eingereihte Aufträge verhindern das Löschen. Zum Bestätigen den vollständigen Projektnamen eingeben.",p.name),"DELETE",format!("/v1/projects/{}",p.id),json!(DeleteProject {request_id:RequestId::new(),expected_revision:p.revision,confirm_name:String::new()})));
+        if usage.clicked() {
+            self.read(&crate::tr!("Verbrauch - {}", p.name), format!("/v1/projects/{}/usage", p.id));
             ui.close();
         }
-        if advanced.clicked() {self.dialog=Some(Dialog::project_settings(p.id));ui.close();}
+        if delete.clicked() {
+            self.dialog=Some(Dialog::form(crate::tr!("Projekt löschen"),&crate::tr!("Projekt „{}“ aus der Factory-Auswahl entfernen. Repository-Dateien und Historie bleiben erhalten. Laufende oder eingereihte Aufträge verhindern das Löschen. Zum Bestätigen den vollständigen Projektnamen eingeben.", p.name),"DELETE",format!("/v1/projects/{}",p.id),json!(DeleteProject {request_id:RequestId::new(),expected_revision:p.revision,confirm_name:String::new()})));
+            ui.close();
+        }
         });
     }
     pub(crate) fn project_editor(&mut self, project: Option<&Project>) {
         let dialog = if let Some(p) = project {
             Dialog::form(
-                "Projekt bearbeiten", "", "PATCH", format!("/v1/projects/{}", p.id),
+                crate::tr!("Allgemein"), "", "PATCH", format!("/v1/projects/{}", p.id),
                 json!(UpdateProject {
-                    runner_mapping: p.runner_mapping,
+                    logo: Some(ProjectLogoUpdate { image: p.logo.clone() }),
+                    runner_mapping: None,
                     request_id: RequestId::new(),
                     expected_revision: p.revision,
                     name: Some(p.name.clone()),
@@ -545,8 +622,9 @@ impl App {
             )
         } else {
             Dialog::form(
-                "Neues Projekt", "", "POST", "/v1/projects".into(),
+                crate::tr!("Neues Projekt"), "", "POST", "/v1/projects".into(),
                 json!(CreateProject {
+                    logo: None,
                     runner_mapping: None,
                     request_id: RequestId::new(),
                     name: String::new(),
@@ -561,67 +639,11 @@ impl App {
         self.dialog = dialog;
     }
 
-    pub(crate) fn project_setup(&mut self, project: Option<Project>) {
-        let runner = project
-            .as_ref()
-            .and_then(|p| p.setup.as_ref().map(|s| s.runner_id))
-            .or_else(|| self.snapshot.as_ref()?.runners.first().map(|r| r.id))
-            .unwrap_or_default();
-        let setup = project
-            .as_ref()
-            .and_then(|p| p.setup.clone())
-            .unwrap_or(ProjectSetup {
-                repository_source: String::new(),
-                runner_id: runner,
-                repository_path: String::new(),
-                service_registration: String::new(),
-                harness: None,
-            });
-        let body = SetupProject {
-            key: Some(project.as_ref().map_or_else(String::new,|p|p.key.clone())),
-            request_id: RequestId::new(),
-            project_id: project.as_ref().map(|p| p.id),
-            expected_revision: project.as_ref().map_or(Revision(0), |p| p.revision),
-            name: project
-                .as_ref()
-                .map_or_else(String::new, |p| p.name.clone()),
-            repository: project
-                .as_ref()
-                .map_or_else(|| "factory:managed".into(), |p| p.repository.clone()),
-            base_branch: project
-                .as_ref()
-                .map_or_else(|| "main".into(), |p| p.base_branch.clone()),
-            profile: project
-                .as_ref()
-                .map_or_else(ExecutionProfile::default, |p| p.profile.clone()),
-            setup,
-        };
-        self.dialog = Some(Dialog::form("Projekt einrichten", "Name und Modellbindung angeben. „factory:managed“ legt ein verwaltetes Repository an; alternativ Repository-Quelle angeben. Pfade gelten auf dem ausgewählten Runner. Leere Pfade werden automatisch ermittelt.", "POST", "/v1/projects/setup".into(), json!(body)));
-    }
-    pub(crate) fn scheduler_for_project(&mut self, p: &Project) {
-        let policy = self
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.scheduler_policies.iter().find(|v| v.project_id == p.id));
-        let body = SetScheduler {
-            request_id: RequestId::new(),
-            expected_revision: policy.map_or(Revision(0), |v| v.revision),
-            enabled: policy.is_none_or(|v| v.enabled),
-            runner_ids: policy.map_or_else(
-                || {
-                    p.setup
-                        .as_ref()
-                        .map(|s| vec![s.runner_id])
-                        .unwrap_or_default()
-                },
-                |v| v.runner_ids.clone(),
-            ),
-            max_parallel: policy.map_or(p.max_sessions, |v| v.max_parallel),
-            start_budget: policy.map_or(UNLIMITED_STARTS, |v| v.remaining_starts),
-        };
-        self.dialog = Some(Dialog::form("Automatische Verteilung", "Aktivieren/Pausieren betrifft neue Zuweisungen, nicht bereits laufende Aufgaben. Neue Aufgaben explizit einreihen. Runner und Parallelität gelten für die weitere Verteilung.", "POST", format!("/v1/projects/{}/scheduler", p.id), json!(body)));
-    }
     fn tasks(&mut self, ui: &mut egui::Ui) {
+        if self.settings.offline_tasks.iter().any(|t| t.draft.server == self.server) {
+            egui::ScrollArea::vertical().id_salt("offline-sync-tasks").max_height(220.0)
+                .show(ui, |ui| { crate::offline::local_tasks(ui, self); });
+        }
         let Some(s) = self.snapshot.clone() else {
             return;
         };
@@ -654,7 +676,7 @@ impl App {
             ui,
             "task",
             &mut self.query,
-            "Aufgaben durchsuchen …",
+            crate::tr!("Aufgaben durchsuchen …"),
             &tabs,
             &mut self.task_filter,
         );
@@ -671,16 +693,17 @@ impl App {
             .collect::<Vec<_>>();
         tasks.sort_by_key(|t| std::cmp::Reverse(t.created_unix_ms));
         if tasks.is_empty() {
-            ui.add_space(30.0);
-            ui.label(if !needle.is_empty() {
-                "Keine passenden Aufgaben in diesem Tab."
+            let message = if !needle.is_empty() {
+                crate::tr!("Keine passenden Aufgaben")
             } else {
                 match self.task_filter {
-                1=>"Keine Drafts vorhanden.",
-                2=>"Noch keine erfolgreich abgeschlossenen Aufgaben im Archiv.",
-                _=>"Keine aktuellen Aufgaben. Mit „+ Aufgabe“ einen Arbeitsauftrag vorbereiten.",
-            }
-            });
+                    1 => crate::tr!("Keine Entwürfe"),
+                    2 => crate::tr!("Keine archivierten Aufgaben"),
+                    _ => crate::tr!("Keine Aufgaben"),
+                }
+            };
+            design::list_empty_state(ui, Page::Tasks.icon(), message);
+            return;
         }
         let list_key = format!("tasks/{project}/{}", self.task_filter);
         let mut list = self.take_list(
@@ -703,7 +726,7 @@ impl App {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = 4.0;
                             ui.horizontal_top(|ui| {
-                                let status = if t.draft { "Draft" } else { task_status(&s, t) };
+                                let status = if t.draft { crate::tr!("Draft") } else { task_status(&s, t) };
                                 let tokens = task_tokens(&s, t);
                                 let badges_width = design::badge_width(ui, status)
                                     + design::badge_width(ui, &design::token_label(tokens));
@@ -738,11 +761,11 @@ impl App {
                                 let session = task_session_command(&s, t);
                                 let editable = t.draft || s.editable_tasks.contains_key(&t.id);
                                 let labels = if session.is_some() {
-                                    vec!["Anzeigen", "OpenCode anzeigen"]
+                                    vec![crate::tr!("Anzeigen"), crate::tr!("OpenCode anzeigen")]
                                 } else if editable {
-                                    vec!["Anzeigen", "Bearbeiten"]
+                                    vec![crate::tr!("Anzeigen"), crate::tr!("Bearbeiten")]
                                 } else {
-                                    vec!["Anzeigen"]
+                                    vec![crate::tr!("Anzeigen")]
                                 };
                                 let reserved = labels
                                     .iter()
@@ -774,9 +797,9 @@ impl App {
                                                     "{} {}",
                                                     attachments,
                                                     if attachments == 1 {
-                                                        "Anhang"
+                                                        crate::tr!("Anhang")
                                                     } else {
-                                                        "Anhänge"
+                                                        crate::tr!("Anhänge")
                                                     }
                                                 ),
                                             );
@@ -786,9 +809,14 @@ impl App {
                                                  && matches!(t.status, TicketState::Backlog | TicketState::Ready)
                                                  && !t.routing_note.is_empty()
                                              {
-                                                 ui.add(egui::Label::new(
-                                                     RichText::new(&t.routing_note).color(design::history_color(task_routing_level(&t.routing_note), MUTED))
-                                                 ).truncate()).on_hover_text(&t.routing_note);
+                                                  let note = task_runner_blocker(&s, t).unwrap_or(&t.routing_note);
+                                                  design::routing_note_spacing(ui);
+                                                  let _note = ui.add(egui::Label::new(
+                                                      RichText::new(note).color(design::history_color(task_routing_level(&t.routing_note), MUTED))
+                                                  ).truncate()).on_hover_text(note);
+                                                  #[cfg(test)]
+                                                  ui.ctx().data_mut(|d| d.insert_temp(
+                                                      egui::Id::new(("test-task-row-routing-note", t.id)), _note.rect));
                                              }
                                             #[cfg(test)]
                                             ui.ctx().data_mut(|d| {
@@ -808,12 +836,12 @@ impl App {
                                     egui::Layout::right_to_left(egui::Align::Max),
                                     |ui| {
                                         if let Some(command) = session {
-                                            let action = ui.button("OpenCode anzeigen");
+                                            let action = ui.button(crate::tr!("OpenCode anzeigen"));
                                             #[cfg(test)]
                                             ui.ctx().data_mut(|d| {
                                                 d.insert_temp(
                                                     egui::Id::new(("test-task-row-action", t.id)),
-                                                    (action.rect, "OpenCode anzeigen"),
+                                                    (action.rect, crate::tr!("OpenCode anzeigen")),
                                                 )
                                             });
                                             if action.clicked() {
@@ -822,13 +850,13 @@ impl App {
                                         } else if editable {
                                             let action = ui.add_enabled(
                                                 self.online,
-                                                egui::Button::new("Bearbeiten"),
+                                                egui::Button::new(crate::tr!("Bearbeiten")),
                                             );
                                             #[cfg(test)]
                                             ui.ctx().data_mut(|d| {
                                                 d.insert_temp(
                                                     egui::Id::new(("test-task-row-action", t.id)),
-                                                    (action.rect, "Bearbeiten"),
+                                                    (action.rect, crate::tr!("Bearbeiten")),
                                                 )
                                             });
                                             if action.clicked() {
@@ -836,8 +864,8 @@ impl App {
                                             }
                                         }
                                         let view = ui
-                                            .button("Anzeigen")
-                                            .on_hover_text("Aufgabe schreibgeschützt anzeigen");
+                                            .button(crate::tr!("Anzeigen"))
+                                            .on_hover_text(crate::tr!("Aufgabe schreibgeschützt anzeigen"));
                                         #[cfg(test)]
                                         ui.ctx().data_mut(|d| {
                                             d.insert_temp(
@@ -866,7 +894,7 @@ impl App {
         self.put_list(list_key, list);
     }
     fn task_details(&mut self, ui: &mut egui::Ui, id: TicketId) {
-        if ui.button("‹ Zur Aufgabenliste").clicked() {
+        if ui.button(crate::tr!("‹ Zur Aufgabenliste")).clicked() {
             self.detail = None;
             return;
         }
@@ -874,7 +902,7 @@ impl App {
             return;
         };
         let Some(t) = s.tickets.iter().find(|t| t.id == id) else {
-            ui.colored_label(AMBER, "Aufgabe nicht mehr verfügbar.");
+            ui.colored_label(AMBER, crate::tr!("Aufgabe nicht mehr verfügbar."));
             return;
         };
         let payload = self.task_data(t);
@@ -888,7 +916,7 @@ impl App {
             if ui
                 .add_enabled(
                     !self.task_loading.contains_key(&t.id),
-                    egui::Button::new("Anhänge erneut laden"),
+                    egui::Button::new(crate::tr!("Anhänge erneut laden")),
                 )
                 .clicked()
             {
@@ -898,15 +926,15 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             badge(ui, task_status(&s, t), status_color(task_status(&s, t)));
             design::token_pill(ui, task_tokens(&s, t));
-            if task_command(&s, t).is_none() && ui.button("Bearbeiten …").clicked() { self.edit_task(t.id); }
-            if ui.button("Technisches Ticket bearbeiten …").clicked() { self.dialog = Some(Dialog::form("Ticket bearbeiten", "Status und Metadaten des Tickets ändern. Eine Änderung beendet keine laufenden Prozesse.", "PATCH", format!("/v1/tickets/{}", t.id), json!(UpdateTicket { request_id: RequestId::new(), expected_revision: t.revision, title: Some(t.title.clone()), description: Some(t.description.clone()), acceptance_criteria: Some(t.acceptance_criteria.clone()), priority: Some(t.priority), status: Some(t.status) }))); }
-            if ui.button("Abhängigkeiten …").clicked() { self.dialog = Some(Dialog::form("Abhängigkeiten", "Alle vorausgesetzten Aufgaben müssen abgeschlossen sein. IDs gelten innerhalb desselben Projekts.", "POST", format!("/v1/tickets/{}/dependencies", t.id), json!(SetDependencies { request_id: RequestId::new(), expected_revision: t.revision, depends_on: t.depends_on.clone() }))); }
-            if ui.add_enabled(complete, egui::Button::new("Exportieren …")).clicked() { self.backend.save_json("aufgabe.json", json!(t)); }
+            if task_command(&s, t).is_none() && ui.button(crate::tr!("Bearbeiten …")).clicked() { self.edit_task(t.id); }
+            if ui.button(crate::tr!("Technisches Ticket bearbeiten …")).clicked() { self.dialog = Some(Dialog::form(crate::tr!("Ticket bearbeiten"), crate::tr!("Status und Metadaten des Tickets ändern. Eine Änderung beendet keine laufenden Prozesse."), "PATCH", format!("/v1/tickets/{}", t.id), json!(UpdateTicket { request_id: RequestId::new(), expected_revision: t.revision, title: Some(t.title.clone()), description: Some(t.description.clone()), acceptance_criteria: Some(t.acceptance_criteria.clone()), priority: Some(t.priority), status: Some(t.status) }))); }
+            if ui.button(crate::tr!("Abhängigkeiten …")).clicked() { self.dialog = Some(Dialog::form(crate::tr!("Abhängigkeiten"), crate::tr!("Alle vorausgesetzten Aufgaben müssen abgeschlossen sein. IDs gelten innerhalb desselben Projekts."), "POST", format!("/v1/tickets/{}/dependencies", t.id), json!(SetDependencies { request_id: RequestId::new(), expected_revision: t.revision, depends_on: t.depends_on.clone() }))); }
+            if ui.add_enabled(complete, egui::Button::new(crate::tr!("Exportieren …"))).clicked() { self.backend.save_json("aufgabe.json", json!(t)); }
         });
         egui::ScrollArea::vertical()
             .id_salt(("task-detail", id))
             .show(ui, |ui| {
-                ui.label(RichText::new("Vollständiger Arbeitsauftrag").strong());
+                ui.label(RichText::new(crate::tr!("Vollständiger Arbeitsauftrag")).strong());
                 ui.add(
                     egui::Label::new(t.prompt.as_deref().unwrap_or(&t.description))
                         .wrap()
@@ -917,7 +945,7 @@ impl App {
                     if !complete {
                         continue;
                     }
-                    if ui.button("Originalbild speichern …").clicked() {
+                    if ui.button(crate::tr!("Originalbild speichern …")).clicked() {
                         self.backend
                             .save_input_file(image.name.clone(), image.data.clone());
                     }
@@ -938,7 +966,7 @@ impl App {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(format!("{} · {}", file.name, file.mime));
                         if ui
-                            .add_enabled(complete, egui::Button::new("Datei speichern …"))
+                            .add_enabled(complete, egui::Button::new(crate::tr!("Datei speichern …")))
                             .clicked()
                         {
                             self.backend
@@ -947,32 +975,33 @@ impl App {
                     });
                 }
                 ui.separator();
+                design::routing_note_spacing(ui);
                 ui.colored_label(design::history_color(task_routing_level(&t.routing_note), ui.visuals().text_color()), &t.routing_note);
                 if let Some(c) = task_command(&s, t) {
                     ui.horizontal_wrapped(|ui| {
                         if c.kind == CommandKind::RunAgent
-                            && ui.button("OpenCode anzeigen").clicked()
+                            && ui.button(crate::tr!("OpenCode anzeigen")).clicked()
                         {
                             self.open_session(t.project_id, c.session_root());
                         }
-                        if ui.button("Diagnose").clicked() {
+                        if ui.button(crate::tr!("Diagnose")).clicked() {
                             self.navigate(Target::Diagnose(Some(t.project_id)));
                         }
-                        ui.menu_button("Verwaltung …", |ui| self.command_menu(ui, c));
+                        ui.menu_button(crate::tr!("Verwaltung …"), |ui| self.command_menu(ui, c));
                     });
                     ui.collapsing(
-                        "Auftrag, Ausführungsprofil, Fortschritt und Ergebnis",
+                        crate::tr!("Auftrag, Ausführungsprofil, Fortschritt und Ergebnis"),
                         |ui| json_read(ui, &json!(c)),
                     );
                     if s.payloads_deferred
                         && ui
-                            .button("Vollständigen Originalauftrag einschließlich Anhängen laden")
+                            .button(crate::tr!("Vollständigen Originalauftrag einschließlich Anhängen laden"))
                             .clicked()
                     {
-                        self.read("Originalauftrag", format!("/v1/commands/{}", c.id));
+                        self.read(crate::tr!("Originalauftrag"), format!("/v1/commands/{}", c.id));
                     }
                 }
-                ui.collapsing("Alle Aufgaben-Metadaten", |ui| json_read(ui, &json!(t)));
+                ui.collapsing(crate::tr!("Alle Aufgaben-Metadaten"), |ui| json_read(ui, &json!(t)));
             });
     }
     fn questions(&mut self, ui: &mut egui::Ui) {
@@ -989,8 +1018,8 @@ impl App {
             ui,
             "question",
             &mut self.query,
-            "Fragen durchsuchen …",
-            &[("Offen", current.len()), ("Archiv", archived.len())],
+            crate::tr!("Fragen durchsuchen …"),
+            &[(crate::tr!("Offen"), current.len()), (crate::tr!("Archiv"), archived.len())],
             &mut selected,
         );
         self.show_answered = selected == 1;
@@ -1019,14 +1048,15 @@ impl App {
                 })
         });
         if groups.is_empty() {
-            ui.add_space(30.0);
-            ui.label(if !needle.is_empty() {
-                "Keine passenden Fragen in diesem Tab."
+            let message = if !needle.is_empty() {
+                crate::tr!("Keine passenden Fragen")
             } else if self.show_answered {
-                "Noch keine beantworteten Fragen im Archiv."
+                crate::tr!("Keine beantworteten Fragen")
             } else {
-                "Keine aktuellen Fragen. Neue Rückfragen erscheinen automatisch hier."
-            });
+                crate::tr!("Keine Fragen")
+            };
+            design::list_empty_state(ui, Page::Questions.icon(), message);
+            return;
         }
         egui::ScrollArea::vertical()
             .id_salt(("questions", project, self.show_answered))
@@ -1036,9 +1066,9 @@ impl App {
                     let total: usize = group.questions.iter().map(|q| question_field_count(q).max(1)).sum();
                     let answered: usize = group.questions.iter().filter(|q| q.state == QuestionState::Answered)
                         .map(|q| question_field_count(q).max(1)).sum();
-                    let (status, color) = if answered == total { ("Beantwortet", GREEN) }
-                        else if answered > 0 { ("Teilweise beantwortet", BLUE) }
-                        else { ("Unbeantwortet", AMBER) };
+                    let (status, color) = if answered == total { (crate::tr!("Beantwortet"), GREEN) }
+                        else if answered > 0 { (crate::tr!("Teilweise beantwortet"), BLUE) }
+                        else { (crate::tr!("Unbeantwortet"), AMBER) };
                     ui.push_id(command.id, |ui| {
                         let row = design::task_row_frame().show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -1047,7 +1077,7 @@ impl App {
                                 let width = (ui.available_width() - 220.0).max(80.0);
                                 let title = ui.allocate_ui_with_layout(egui::vec2(width,0.0),
                                     egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                                    let full = format!("Fragen zu: {}", group.task);
+                                    let full = crate::tr!("Fragen zu: {}", group.task);
                                     design::ticket_title(ui,&group.ticket_key,&full,
                                         egui::FontId::proportional(18.0),width).on_hover_text(full);
                                 }).response;
@@ -1059,17 +1089,17 @@ impl App {
                                     let _ = (title,pill);
                                 });
                             });
-                            ui.colored_label(MUTED, format!("{} offen · {} beantwortet", total-answered,answered));
+                            ui.colored_label(MUTED, crate::tr!("{} offen · {} beantwortet", total-answered,answered));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                if ui.button("OpenCode anzeigen").clicked() {
+                                if ui.button(crate::tr!("OpenCode anzeigen")).clicked() {
                                     self.open_session(project,command.session_root());
                                 }
-                                let action = if group.questions.iter().any(needs_answer) { "Beantworten" } else { "Anzeigen" };
+                                let action = if group.questions.iter().any(needs_answer) { crate::tr!("Beantworten") } else { crate::tr!("Anzeigen") };
                                 let button = ui.button(action);
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-question-open",command.id)),button.rect));
                                 if button.clicked() {
-                                    self.dialog = Some(if action == "Beantworten" {
+                                    self.dialog = Some(if action == crate::tr!("Beantworten") {
                                         Dialog::questions(group.questions.clone())
                                     } else { Dialog::QuestionView(group.questions.clone()) });
                                 }
@@ -1117,10 +1147,10 @@ impl App {
                     _ => "session",
                 },
                 &mut self.query,
-                "Sessions durchsuchen …",
+                crate::tr!("Sessions durchsuchen …"),
                 &[
-                    ("Offen", sessions.len() - closed),
-                    (if controllers { "Archiv" } else { "Geschlossen" }, closed),
+                    (crate::tr!("Offen"), sessions.len() - closed),
+                    (if controllers { crate::tr!("Archiv") } else { crate::tr!("Geschlossen") }, closed),
                 ],
                 &mut selected,
             );
@@ -1142,17 +1172,18 @@ impl App {
             });
         }
         if sessions.is_empty() {
-            ui.label(if !self.query.is_empty() {
-                "Keine passenden Sessions in diesem Tab.".into()
-            } else if controllers && self.sessions_closed {
-                format!("Keine archivierten {}-Läufe vorhanden.", page.title())
-            } else if controllers {
-                format!("Keine offenen {}-Läufe vorhanden.", page.title())
+            let message = if controllers {
+                let modifier = if self.query.is_empty() { "" } else { crate::tr!("passenden ") };
+                crate::tr!("Keine {modifier}{}-Läufe", page.title(), modifier = modifier)
+            } else if !self.query.is_empty() {
+                crate::tr!("Keine passenden Sessions").into()
             } else if self.sessions_closed {
-                "Keine geschlossenen Sessions vorhanden.".into()
+                crate::tr!("Keine geschlossenen Sessions").into()
             } else {
-                "Keine offenen Sessions vorhanden.".into()
-            });
+                crate::tr!("Keine Sessions").into()
+            };
+            design::list_empty_state(ui, page.icon(), &message);
+            return;
         }
         egui::ScrollArea::vertical()
             .id_salt((
@@ -1168,7 +1199,7 @@ impl App {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y=4.0;
                             ui.horizontal_top(|ui| {
-                                let status=if controllers && c.state == CommandState::Failed { "Fehlgeschlagen" } else { session_row_status(&s,&c) };
+                                let status=if controllers && c.state == CommandState::Failed { crate::tr!("Fehlgeschlagen") } else { session_row_status(&s,&c) };
                                 let tokens=s.token_totals.by_session.get(&c.session_root()).copied();
                                 let badges_width=design::badge_width(ui,status)+design::badge_width(ui,&design::token_label(tokens));
                                 let width=(ui.available_width()-badges_width.max(185.0)).max(1.0);
@@ -1180,7 +1211,9 @@ impl App {
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-title",c.session_root())),_title.rect));
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min),|ui| {
-                                    let color=match status {"Fehlgeschlagen"=>RED,"Working"=>GREEN,"Offen"=>BLUE,_=>MUTED};
+                                    let color=if status == crate::tr!("Fehlgeschlagen") { RED }
+                                        else if status == "Working" { GREEN }
+                                        else if status == crate::tr!("Offen") { BLUE } else { MUTED };
                                     ui.scope(|ui|badge(ui,status,color)).response.on_hover_text(session_status(&s,&c));
                                     design::token_pill(ui, tokens);
                                 });
@@ -1192,10 +1225,10 @@ impl App {
                                     if let Some(CommandOutput::WorkspaceError { workspace_error }) = &c.result {
                                         ui.add(egui::Label::new(egui::RichText::new(workspace_error).color(RED)).wrap());
                                     } else {
-                                        let task=session_last_task(&s,&c).map(task_summary).unwrap_or_else(||"Keine zugeordnete Aufgabe".into());
-                                        ui.add(egui::Label::new(egui::RichText::new(format!("Letzte Aufgabe: {task}")).color(MUTED)).wrap());
+                                        let task=session_last_task(&s,&c).map(task_summary).unwrap_or_else(||crate::tr!("Keine zugeordnete Aufgabe").into());
+                                        ui.add(egui::Label::new(egui::RichText::new(crate::tr!("Letzte Aufgabe: {task}", task = task)).color(MUTED)).wrap());
                                     }
-                                    let _activity=ui.colored_label(MUTED,format!("Zuletzt aktiv {}",timestamp(session_last_activity(&s,&c)))).on_hover_text("Letzte bekannte Änderung an Ausführung, Fragen oder zugeordneter Aufgabe; kein Verbindungs-Heartbeat.");
+                                    let _activity=ui.colored_label(MUTED,crate::tr!("Zuletzt aktiv {}", timestamp(session_last_activity(&s,&c)))).on_hover_text(crate::tr!("Letzte bekannte Änderung an Ausführung, Fragen oder zugeordneter Aufgabe; kein Verbindungs-Heartbeat."));
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-activity",c.session_root())),_activity.rect));
                                 }).response;
@@ -1203,7 +1236,7 @@ impl App {
                                     return;
                                 }
                                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),metadata.rect.height()),egui::Layout::right_to_left(egui::Align::Max),|ui| {
-                                    let open=ui.button("OpenCode anzeigen");
+                                    let open=ui.button(crate::tr!("OpenCode anzeigen"));
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-open",c.session_root())),open.rect));
                                     if open.clicked() {self.open_session(project,c.session_root());}
@@ -1211,21 +1244,21 @@ impl App {
                                         ui.spacing_mut().button_padding=egui::vec2(6.0,6.0);
                                         ui.menu_button(RichText::new(egui_phosphor::regular::DOTS_THREE).size(20.0),|ui| {
                                             ui.set_width(400.0);
-                                            if s.questions.iter().any(|q|q.session_id==c.session_id() && needs_answer(q)) && ui.button("Zu den Fragen").clicked() {
+                                            if s.questions.iter().any(|q|q.session_id==c.session_id() && needs_answer(q)) && ui.button(crate::tr!("Zu den Fragen")).clicked() {
                                                 self.navigate(Target::Questions(project,c.session_id()));ui.close();
                                             }
                                             self.command_menu(ui,&c);
                                             ui.separator();
-                                            if ui.button("Metadaten und Ausführung").clicked() {
+                                            if ui.button(crate::tr!("Metadaten und Ausführung")).clicked() {
                                                 let value=json!({"command":c,"closure":s.session_closures.iter().find(|v|v.root_command_id==c.session_root()),"termination":s.runtime_terminations.iter().find(|v|v.command_id==c.id),"compaction":s.compactions.iter().rev().find(|v|v.command_id==c.id),"runner":s.runners.iter().find(|r|r.id==c.runner_id),"presence":self.instances.iter().find(|i|i.commands.contains(&c.id))});
-                                                self.inspect("Session-Metadaten",value);ui.close();
+                                                self.inspect(crate::tr!("Session-Metadaten"),value);ui.close();
                                             }
                                         }).response
                                     }).inner;
-                                    menu.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,true,"Session verwalten"));
+                                    menu.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,true,crate::tr!("Session verwalten")));
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-menu",c.session_root())),menu.rect));
-                                    menu.on_hover_text("Session verwalten");
+                                    menu.on_hover_text(crate::tr!("Session verwalten"));
                                 });
                             });
                         });
@@ -1235,128 +1268,6 @@ impl App {
                 }
             });
     }
-    fn runners(&mut self, ui: &mut egui::Ui) {
-        let Some(s) = self.snapshot.clone() else {
-            return;
-        };
-        if s.runners.is_empty() {
-            ui.label("Kein Runner verbunden. Einen lokalen Runner über den Verbindungsdialog starten oder einen vorhandenen Runner registrieren.");
-        }
-        egui::ScrollArea::vertical().id_salt("runners-scroll").show(ui, |ui| {
-            for runner in &s.runners {
-                ui.push_id(runner.id, |ui| {
-                    let row = design::task_row_frame().show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.y = design::TASK_METADATA_LINE_GAP;
-                        let (status, color) = if !self.online {
-                            ("Stand veraltet", AMBER)
-                        } else {
-                            match runner.connection {
-                                ConnectionState::Online => ("Verbunden", GREEN),
-                                ConnectionState::Suspect => ("Kontakt veraltet", AMBER),
-                                ConnectionState::Unreachable => ("Nicht erreichbar", RED),
-                            }
-                        };
-                        ui.horizontal_top(|ui| {
-                            let width = (ui.available_width() - 210.0).max(80.0);
-                            let title = ui.allocate_ui_with_layout(
-                                egui::vec2(width, 0.0),
-                                egui::Layout::top_down(egui::Align::LEFT),
-                                |ui| {
-                                    ui.horizontal(|ui| {
-                                        let icon = ui.label(RichText::new(design::RUNNER_ICON).size(22.0).color(color));
-                                        let name = ui.add(egui::Label::new(design::elided_text_job(
-                                            runner.name.clone(),egui::FontId::proportional(18.0),
-                                            ui.visuals().text_color(),ui.available_width(),1,
-                                        ))).on_hover_text(&runner.name);
-                                        #[cfg(test)]
-                                        ui.ctx().data_mut(|d|d.insert_temp(
-                                            egui::Id::new(("test-runner-icon",runner.id)),(icon.rect,name.rect,color),
-                                        ));
-                                        #[cfg(not(test))]
-                                        let _ = (icon,name);
-                                    });
-                                },
-                            ).response;
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                let pill = ui.scope(|ui| badge(ui, status, color)).response;
-                                #[cfg(test)]
-                                ui.ctx().data_mut(|d| d.insert_temp(
-                                    egui::Id::new(("test-runner-heading", runner.id)), (title.rect, pill.rect),
-                                ));
-                                #[cfg(not(test))]
-                                let _ = (title, pill);
-                            });
-                        });
-                        let active: Vec<_> = s.commands.iter().filter(|command| {
-                            command.runner_id == runner.id
-                                && matches!(command.state, CommandState::Accepted | CommandState::Pending)
-                        }).collect();
-                        let location = match runner.location {
-                            RunnerLocation::Local => "Lokal",
-                            RunnerLocation::Server => "Server",
-                        };
-                        ui.colored_label(MUTED, format!(
-                            "{location} · {}",
-                            if active.len() == 1 { "1 offener Auftrag".into() }
-                            else { format!("{} offene Aufträge", active.len()) },
-                        ));
-                        let contact = if runner.last_seen_unix_ms == 0 {
-                            "Noch kein Kontakt bestätigt".to_string()
-                        } else {
-                            format!("Letzter Kontakt: {}", timestamp(runner.last_seen_unix_ms))
-                        };
-                        ui.colored_label(MUTED, contact);
-                        let opencode = match runner.opencode {
-                            OpenCodeStatus::Ready { .. } => "OpenCode bereit",
-                            OpenCodeStatus::NotConfigured => "OpenCode nicht eingerichtet",
-                            OpenCodeStatus::Unavailable => "OpenCode nicht erreichbar",
-                            OpenCodeStatus::Unsupported { .. } => "OpenCode-Version nicht unterstützt",
-                        };
-                        ui.colored_label(MUTED, opencode).on_hover_text(
-                            "Zuletzt gemeldeter OpenCode-Servicestatus des Runners, keine Aussage zur Anmeldung oder Modellbereitschaft eines Projekts.",
-                        );
-                        for command in active.into_iter().filter(|c| c.kind == CommandKind::RunAgent) {
-                            ui.separator();
-                            ui.horizontal_top(|ui| {
-                                let width = (ui.available_width() - 185.0).max(80.0);
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(width, 0.0),
-                                    egui::Layout::top_down(egui::Align::LEFT),
-                                    |ui| {
-                                        let title = session_title(&s, command);
-                                        ui.add(egui::Label::new(design::elided_text_job(
-                                            title.clone(), egui::FontId::proportional(16.0),
-                                            ui.visuals().text_color(), width, 1,
-                                        ))).on_hover_text(title);
-                                        ui.colored_label(MUTED, command_status(command));
-                                    },
-                                );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                    if let Some(project) = command_project(&s, command) {
-                                        let button = ui.button("OpenCode anzeigen");
-                                        #[cfg(test)]
-                                        ui.ctx().data_mut(|d| d.insert_temp(
-                                            egui::Id::new(("test-runner-session-open", command.id)), button.rect,
-                                        ));
-                                        if button.clicked() {
-                                            self.open_session(project, command.session_root());
-                                        }
-                                    }
-                                });
-                            });
-                        }
-                    });
-                    #[cfg(test)]
-                    ui.ctx().data_mut(|d| d.insert_temp(
-                        egui::Id::new(("test-runner-row", runner.id)), row.response.rect,
-                    ));
-                    #[cfg(not(test))]
-                    let _ = row;
-                });
-            }
-        });
-    }
     fn diagnostics(&mut self, ui: &mut egui::Ui) {
         if self.error.is_some()
             || self.instance_error.is_some()
@@ -1364,11 +1275,11 @@ impl App {
             || self.tabs.iter().any(|tab| tab.error.is_some())
             || !self.task_errors.is_empty()
         {
-            ui.collapsing("Verbindungs- und Ladefehler", |ui| {
+            ui.collapsing(crate::tr!("Verbindungs- und Ladefehler"), |ui| {
                 for (source, error) in [
                     ("Server", self.error.as_deref()),
-                    ("Client-Präsenz", self.client_error.as_deref()),
-                    ("OpenCode-Präsenz", self.instance_error.as_deref()),
+                    (crate::tr!("Client-Präsenz"), self.client_error.as_deref()),
+                    (crate::tr!("OpenCode-Präsenz"), self.instance_error.as_deref()),
                 ] {
                     if let Some(error) = error {
                         ui.label(format!("{source}: {error}"));
@@ -1376,27 +1287,30 @@ impl App {
                 }
                 for tab in &self.tabs {
                     if let Some(error) = &tab.error {
-                        ui.label(format!("OpenCode-Verlauf ({}): {error}", tab.title));
+                        ui.label(crate::tr!("OpenCode-Verlauf ({}): {error}", tab.title, error = error));
                     }
                 }
                 for (id, (_, error)) in &self.task_errors {
-                    ui.label(format!("Aufgabe {id}: {error}"));
+                    ui.label(crate::tr!("Aufgabe {id}: {error}", error = error, id = id));
                 }
             });
         }
         ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut self.diagnostics_project, "Nur gewähltes Projekt");
+            ui.checkbox(&mut self.diagnostics_project, crate::tr!("Nur gewähltes Projekt"));
+            if !self.settings.pending.is_empty() && ui.button(crate::tr!("Zustellungen prüfen")).clicked() {
+                self.dialog = Some(Dialog::Pending);
+            }
         });
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 design::singleline(&mut self.query)
-                    .hint_text(design::input_hint("Ereignis, Auftrag, Rolle oder Inhalt …"))
+                    .hint_text(design::input_hint(crate::tr!("Ereignis, Auftrag, Rolle oder Inhalt …")))
                     .desired_width((ui.available_width() - 260.0).clamp(140.0, 380.0)),
             );
             if ui
                 .add_enabled(
                     !self.events_loading && self.event_before.is_some(),
-                    egui::Button::new("Ältere Ereignisse laden"),
+                    egui::Button::new(crate::tr!("Ältere Ereignisse laden")),
                 )
                 .clicked()
             {
@@ -1407,14 +1321,30 @@ impl App {
                 ui.spinner();
             }
         });
-        ui.colored_label(MUTED, format!("{} Ereignisse geladen", self.events.len()))
-            .on_hover_text(format!("Dauerhafter Ereigniscursor: {}. Ältere Ereignisse bleiben über die Historie erreichbar.", self.event_cursor));
+        ui.colored_label(MUTED, crate::tr!("{} Ereignisse geladen", self.events.len()))
+            .on_hover_text(crate::tr!("Dauerhafter Ereigniscursor: {}. Ältere Ereignisse bleiben über die Historie erreichbar.", self.event_cursor));
         let events = self.events.clone();
         let s = self.snapshot.clone();
         let needle = self.query.to_lowercase();
         egui::ScrollArea::vertical()
             .id_salt("diagnostics-scroll")
             .show(ui, |ui| {
+                if !self.action_errors.is_empty() {
+                    egui::CollapsingHeader::new(crate::tr!("Fehlgeschlagene Aktionen"))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for (time, error) in self.action_errors.iter().rev() {
+                                if !needle.is_empty() && !error.to_lowercase().contains(&needle)
+                                    && !crate::tr!("fehlgeschlagene aktionen").contains(&needle) { continue; }
+                                design::task_row_frame().show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.strong(crate::tr!("Aktion fehlgeschlagen"));
+                                    ui.colored_label(MUTED, timestamp(*time));
+                                    ui.add(egui::Label::new(error).wrap().selectable(true));
+                                });
+                            }
+                        });
+                }
                 let selected_project = self.settings.project;
                 let project_only = self.diagnostics_project;
                 for e in events.iter().rev().filter(|e| {
@@ -1445,21 +1375,21 @@ impl App {
                                 ).response;
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                     let category = match e.kind.split('.').next().unwrap_or("") {
-                                        "command" => "Auftrag",
-                                        "question" => "Frage",
-                                        "ticket" | "task" => "Aufgabe",
+                                        "command" => crate::tr!("Auftrag"),
+                                        "question" => crate::tr!("Frage"),
+                                        "ticket" | "task" => crate::tr!("Aufgabe"),
                                         "runner" => "Runner",
-                                        "project" => "Projekt",
-                                        "knowledge" | "memory" => "Wissen",
+                                        "project" => crate::tr!("Projekt"),
+                                        "knowledge" | "memory" => crate::tr!("Wissen"),
                                         "supervisor" => "Supervisor",
                                         "memorizer" | "orchestrator-memory" => "Memorizer",
-                                        "orchestrator" | "scheduler" => "Verteilung",
+                                        "orchestrator" | "scheduler" => crate::tr!("Verteilung"),
                                         "session" => "Session",
-                                        "stream" => "Arbeitsbereich",
+                                        "stream" => crate::tr!("Arbeitsbereich"),
                                         _ => "System",
                                     };
                                     let pill = ui.scope(|ui| badge(ui, category, BLUE)).response;
-                                    pill.clone().on_hover_text("Ereigniskategorie, kein Live-Status");
+                                    pill.clone().on_hover_text(crate::tr!("Ereigniskategorie, kein Live-Status"));
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d| d.insert_temp(
                                         egui::Id::new(("test-diagnostic-heading", e.sequence)), (title.rect, pill.rect),
@@ -1485,20 +1415,20 @@ impl App {
                                     egui::vec2(ui.available_width(), metadata.rect.height()),
                                     egui::Layout::right_to_left(egui::Align::Max),
                                     |ui| {
-                                    let button = ui.button("Anzeigen");
+                                    let button = ui.button(crate::tr!("Anzeigen"));
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d| d.insert_temp(
                                         egui::Id::new(("test-diagnostic-open", e.sequence)), button.rect,
                                     ));
                                     if button.clicked() {
-                                        self.inspect("Ereignisdaten", json!(e));
+                                        self.inspect(crate::tr!("Ereignisdaten"), json!(e));
                                     }
                                     ui.menu_button(egui_phosphor::regular::DOTS_THREE, |ui| {
-                                        if ui.button("Vollständiges Originalereignis laden").clicked() {
-                                            self.read("Originalereignis", format!("/v1/events/{}", e.sequence));
+                                        if ui.button(crate::tr!("Vollständiges Originalereignis laden")).clicked() {
+                                            self.read(crate::tr!("Originalereignis"), format!("/v1/events/{}", e.sequence));
                                             ui.close();
                                         }
-                                    }).response.on_hover_text("Weitere Ereignisaktionen");
+                                    }).response.on_hover_text(crate::tr!("Weitere Ereignisaktionen"));
                                 });
                             });
                         });
@@ -1516,7 +1446,7 @@ impl App {
         if let Some(e) = &self.notification_error {
             ui.colored_label(
                 AMBER,
-                format!("Benachrichtigungen nicht aktuell verfügbar: {e}"),
+                crate::tr!("Benachrichtigungen nicht aktuell verfügbar: {e}", e = e),
             );
         }
         let pending = self.notification_reads_pending();
@@ -1525,21 +1455,21 @@ impl App {
             egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
-                let label = "Alles als gelesen markieren";
+                let label = crate::tr!("Alles als gelesen markieren");
                 let button = ui.add_enabled(enabled, egui::Button::new(format!(
                     "{}  {label}", egui_phosphor::regular::CHECK,
                 )));
                 button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-notifications-mark-all"), button.rect));
-                if button.on_hover_text("Alle geladenen Benachrichtigungen als gelesen markieren").clicked() {
+                if button.on_hover_text(crate::tr!("Alle geladenen Benachrichtigungen als gelesen markieren")).clicked() {
                     let ids = self.notifications.iter().filter(|n| !n.read).map(|n| n.id).collect::<Vec<_>>();
                     self.mark_notifications_read(ids);
                 }
             },
         );
         if self.notifications.is_empty() {
-            ui.label("Noch keine Benachrichtigungen vorhanden. Der serverseitige Verlauf erfasst neue Fragen, Abschlüsse und Fehler ab dem GUI-Backend-Update.");
+            ui.label(crate::tr!("Noch keine Benachrichtigungen vorhanden. Der serverseitige Verlauf erfasst neue Fragen, Abschlüsse und Fehler ab dem GUI-Backend-Update."));
         }
         let snapshot = self.snapshot.clone();
         egui::ScrollArea::vertical().id_salt("notification-list").auto_shrink([false, false]).show(ui, |ui| {
@@ -1566,7 +1496,7 @@ impl App {
                             });
                             if !read {
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                    badge(ui, "Neu", AMBER);
+                                    badge(ui, crate::tr!("Neu"), AMBER);
                                 });
                             }
                         });
@@ -1585,7 +1515,7 @@ impl App {
                                 self.open_notification(n.id, target);
                             }
                             if !read {
-                                let _check = design::icon_button(ui, egui_phosphor::regular::CHECK, "Als gelesen markieren", self.online);
+                                let _check = design::icon_button(ui, egui_phosphor::regular::CHECK, crate::tr!("Als gelesen markieren"), self.online);
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-notification-check", n.id)), _check.rect));
                                 if _check.clicked() {
@@ -1612,7 +1542,7 @@ impl App {
                     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-notification-row", n.id)), _row.response.rect));
                 });
             }
-            if let Some(before) = self.notification_before { if ui.add_enabled(self.online, egui::Button::new("Ältere Meldungen laden")).clicked() { self.backend.notifications(before); } }
+            if let Some(before) = self.notification_before { if ui.add_enabled(self.online, egui::Button::new(crate::tr!("Ältere Meldungen laden"))).clicked() { self.backend.notifications(before); } }
         });
     }
     fn session_sidebar(&mut self, ctx: &egui::Context) {
@@ -1629,33 +1559,33 @@ impl App {
                 .fill(egui::Color32::from_rgb(19, 22, 28))
                 .inner_margin(18))
             .show(ctx, |ui| {
-                ui.strong("Aufgaben und Fragen");
+                ui.strong(crate::tr!("Aufgaben und Fragen"));
                 ui.add_space(10.0);
                 egui::ScrollArea::vertical().id_salt(("session-activities", root))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         if activities.is_empty() {
-                            ui.colored_label(MUTED, "Noch keine Aufgaben oder Fragen in dieser Session.");
+                            ui.colored_label(MUTED, crate::tr!("Noch keine Aufgaben oder Fragen in dieser Session."));
                         }
                         for activity in &activities {
                             let (id, kind, title, status, action) = match activity {
                                 SessionActivity::Task(task) => (
-                                    task.id.to_string(), "Aufgabe".to_string(), task_text(task),
-                                    task_status(&snapshot, task), "Anzeigen",
+                                    task.id.to_string(), crate::tr!("Aufgabe").to_string(), task_text(task),
+                                    task_status(&snapshot, task), crate::tr!("Anzeigen"),
                                 ),
                                 SessionActivity::Question(question) => (
                                     question.id.to_string(),
                                     if question_field_count(question) > 1 {
-                                        format!("{} Fragen", question_field_count(question))
-                                    } else { "Frage".to_string() },
+                                        crate::tr!("{} Fragen", question_field_count(question))
+                                    } else { crate::tr!("Frage").to_string() },
                                     question_summary(question),
                                     match question.state {
-                                        QuestionState::Pending => "Offen",
-                                        QuestionState::Rejected => "Abgelehnt",
-                                        QuestionState::Unknown => "Ungeklärt",
+                                        QuestionState::Pending => crate::tr!("Offen"),
+                                        QuestionState::Rejected => crate::tr!("Abgelehnt"),
+                                        QuestionState::Unknown => crate::tr!("Ungeklärt"),
                                         _ => question_status(question.state),
                                     },
-                                    if needs_answer(question) { "Beantworten" } else { "Anzeigen" },
+                                    if needs_answer(question) { crate::tr!("Beantworten") } else { crate::tr!("Anzeigen") },
                                 ),
                             };
                             ui.push_id(&id, |ui| {
@@ -1795,8 +1725,26 @@ impl App {
             .collect::<Vec<_>>();
         let follow = tab.follow;
         let show_versions = tab.show_versions;
+        let project = tab.project;
+        let can_prompt = self.snapshot.as_ref().is_some_and(|s|
+            can_prompt_session(s, project, root));
+        if can_prompt {
+            let panel = egui::TopBottomPanel::bottom(egui::Id::new(("session-prompt", root)))
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8)))
+                .show_inside(ui, |ui| {
+                    let mut composer = self.session_prompts.remove(&root)
+                        .unwrap_or_else(|| crate::dialogs::TaskDialog::session(self, project, root));
+                    ui.push_id(root, |ui| composer.show_session_prompt(ui, self));
+                    self.session_prompts.insert(root, composer);
+                });
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-prompt-panel", root)), panel.response.rect));
+            #[cfg(not(test))]
+            let _ = panel;
+        }
         if self.online && entries.is_empty() && !working {
-            ui.label("Noch keine archivierten Nachrichten verfügbar.");
+            ui.label(crate::tr!("Noch keine archivierten Nachrichten verfügbar."));
         }
         let list_key = format!("archive/{root}");
         let mut list = self.take_list(
@@ -1862,16 +1810,16 @@ impl App {
         let Some(w) = s.streams.iter().find(|w| w.id == c.stream_id) else {
             return;
         };
-        if c.kind == CommandKind::RunAgent && ui.button("Vollständiges Sessionarchiv exportieren …").clicked() {
+        if c.kind == CommandKind::RunAgent && ui.button(crate::tr!("Vollständiges Sessionarchiv exportieren …")).clicked() {
             let commands = s.commands.iter().filter(|command| command.kind == CommandKind::RunAgent
                 && command.session_root() == c.session_root()).map(|command|command.id).collect();
             self.backend.export_archive(commands);
             ui.close();
         }
         for (label, operation) in [
-            ("Modell-/Provider-Bereitschaft prüfen …", "readiness"),
-            ("Repository-Refs abrufen …", "fetch"),
-            ("Geprüftes Ergebnis veröffentlichen …", "publish"),
+            (crate::tr!("Modell-/Provider-Bereitschaft prüfen …"), "readiness"),
+            (crate::tr!("Repository-Refs abrufen …"), "fetch"),
+            (crate::tr!("Geprüftes Ergebnis veröffentlichen …"), "publish"),
         ] {
             if ui.button(label).clicked() {
                 let remote = s
@@ -1887,58 +1835,58 @@ impl App {
                         self.project()
                             .map_or_else(ExecutionProfile::default, |p| p.profile.clone())
                     });
-                self.dialog = Some(Dialog::form(label, "Nichtinteraktiver Runner-Helfer. Transport ausdrücklich wählen; SSH erfordert das lokale Runnerprofil. Journal-/Konfigurationspfade gelten auf dem ausführenden Host. Es wird keine OpenCode-TUI gestartet.", "RUNNER_HELPER", format!("runner-helper/{}/{}", c.runner_id, c.id), json!({"request_id":RequestId::new(),"operation":operation,"transport":if remote {"ssh"} else {"local"},"runner_id":c.runner_id,"command_id":c.id,"server":self.server,"journal":"","opencode_registration":"","hosting_config":"","token_file":"","provider_id":profile.provider_id,"model_id":profile.model_id})));
+                self.dialog = Some(Dialog::form(label, crate::tr!("Nichtinteraktiver Runner-Helfer. Transport ausdrücklich wählen; SSH erfordert das lokale Runnerprofil. Journal-/Konfigurationspfade gelten auf dem ausführenden Host. Es wird keine OpenCode-TUI gestartet."), "RUNNER_HELPER", format!("runner-helper/{}/{}", c.runner_id, c.id), json!({"request_id":RequestId::new(),"operation":operation,"transport":if remote {"ssh"} else {"local"},"runner_id":c.runner_id,"command_id":c.id,"server":self.server,"journal":"","opencode_registration":"","hosting_config":"","token_file":"","provider_id":profile.provider_id,"model_id":profile.model_id})));
                 ui.close();
             }
         }
         for (label, kind) in [
             (
-                "Arbeitsbereich vorbereiten …",
+                crate::tr!("Arbeitsbereich vorbereiten …"),
                 CommandKind::PrepareWorkspace,
             ),
-            ("OpenCode-Bereitschaft prüfen …", CommandKind::CheckOpenCode),
+            (crate::tr!("OpenCode-Bereitschaft prüfen …"), CommandKind::CheckOpenCode),
         ] {
             if ui.button(label).clicked() {
-                self.dialog = Some(Dialog::form(label, "Neuen technischen Auftrag an den zugeordneten Runner senden. Bestehende Aufträge werden nicht dupliziert.", "POST", format!("/v1/streams/{}/commands", w.id), json!(EnqueueCommand { request_id: RequestId::new(), expected_revision: w.revision, kind, prompt: None })));
+                self.dialog = Some(Dialog::form(label, crate::tr!("Neuen technischen Auftrag an den zugeordneten Runner senden. Bestehende Aufträge werden nicht dupliziert."), "POST", format!("/v1/streams/{}/commands", w.id), json!(EnqueueCommand { request_id: RequestId::new(), expected_revision: w.revision, kind, prompt: None })));
                 ui.close();
             }
         }
         if let Some(control) = s.controls.iter().find(|v| v.stream_id == w.id) {
             if let Some(proof) = &control.proof {
                 if ui
-                    .button("Ungeklärte Container-Steuerung wiederholen …")
+                    .button(crate::tr!("Ungeklärte Container-Steuerung wiederholen …"))
                     .clicked()
                 {
-                    self.dialog = Some(Dialog::form("Container-Steuerung abgleichen", "Nur die bereits bestätigte Containeridentität verwenden. Kein blinder Neustart und kein Umgehen ungeklärter Ausführung.", "POST", format!("/v1/streams/{}/control/retry", w.id), json!(RetryControl { request_id: RequestId::new(), expected_revision: w.revision, previous_request: control.request_id, expected_proof: proof.clone(), reason: String::new() })));
+                    self.dialog = Some(Dialog::form(crate::tr!("Container-Steuerung abgleichen"), crate::tr!("Nur die bereits bestätigte Containeridentität verwenden. Kein blinder Neustart und kein Umgehen ungeklärter Ausführung."), "POST", format!("/v1/streams/{}/control/retry", w.id), json!(RetryControl { request_id: RequestId::new(), expected_revision: w.revision, previous_request: control.request_id, expected_proof: proof.clone(), reason: String::new() })));
                     ui.close();
                 }
             }
         }
-        if ui.button("Arbeitsbereich-Metadaten").clicked() {
-            self.read("Arbeitsbereiche", "/v1/snapshot".into());
+        if ui.button(crate::tr!("Arbeitsbereich-Metadaten")).clicked() {
+            self.read(crate::tr!("Arbeitsbereiche"), "/v1/snapshot".into());
             ui.close();
         }
         for (label, action) in [
-            ("Arbeitsbereich pausieren …", ControlAction::Pause),
-            ("Arbeitsbereich fortsetzen …", ControlAction::Resume),
+            (crate::tr!("Arbeitsbereich pausieren …"), ControlAction::Pause),
+            (crate::tr!("Arbeitsbereich fortsetzen …"), ControlAction::Resume),
         ] {
             if ui.button(label).clicked() {
-                self.dialog = Some(Dialog::form(label, "Pause und Fortsetzung sind asynchron. Ein unbestätigter Stopp ist kein Nachweis gestoppter Hintergrundprozesse.", "POST", format!("/v1/streams/{}/control", w.id), json!(SetControl { request_id: RequestId::new(), expected_revision: w.revision, action })));
+                self.dialog = Some(Dialog::form(label, crate::tr!("Pause und Fortsetzung sind asynchron. Ein unbestätigter Stopp ist kein Nachweis gestoppter Hintergrundprozesse."), "POST", format!("/v1/streams/{}/control", w.id), json!(SetControl { request_id: RequestId::new(), expected_revision: w.revision, action })));
                 ui.close();
             }
         }
-        if ui.button("Session schließen …").clicked() {
-            self.dialog = Some(Dialog::form("Session schließen", "Eine geschlossene Session steht nicht mehr für neue Folgeaufgaben zur Verfügung. Vorher laufende Arbeit und Fragen prüfen.", "POST", format!("/v1/commands/{}/closure", c.id), json!(CloseSession { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
+        if ui.button(crate::tr!("Session schließen …")).clicked() {
+            self.dialog = Some(Dialog::form(crate::tr!("Session schließen"), crate::tr!("Eine geschlossene Session steht nicht mehr für neue Folgeaufgaben zur Verfügung. Vorher laufende Arbeit und Fragen prüfen."), "POST", format!("/v1/commands/{}/closure", c.id), json!(CloseSession { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
             ui.close();
         }
-        if ui.button("Compaction anfordern …").clicked() {
-            self.dialog = Some(Dialog::form("Session komprimieren", "Die vorhandene Sessionpflege verwenden; Verlauf bleibt im Factory-Archiv zugänglich.", "POST", format!("/v1/commands/{}/compaction", c.id), json!(RequestCompaction { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
+        if ui.button(crate::tr!("Compaction anfordern …")).clicked() {
+            self.dialog = Some(Dialog::form(crate::tr!("Session komprimieren"), crate::tr!("Die vorhandene Sessionpflege verwenden; Verlauf bleibt im Factory-Archiv zugänglich."), "POST", format!("/v1/commands/{}/compaction", c.id), json!(RequestCompaction { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
             ui.close();
         }
-        if ui.button("Checkpoint erstellen …").clicked() {
+        if ui.button(crate::tr!("Checkpoint erstellen …")).clicked() {
             self.dialog = Some(Dialog::form(
-                "Checkpoint erstellen",
-                "Der Runner erstellt einen Git-Snapshot nach den vorhandenen Sicherheitsprüfungen.",
+                crate::tr!("Checkpoint erstellen"),
+                crate::tr!("Der Runner erstellt einen Git-Snapshot nach den vorhandenen Sicherheitsprüfungen."),
                 "POST",
                 format!("/v1/streams/{}/commands", w.id),
                 json!(EnqueueCommand {
@@ -1950,68 +1898,67 @@ impl App {
             ));
             ui.close();
         }
-        if ui.button("Ergebnis-Review …").clicked() {
-            self.dialog = Some(Dialog::form("Ergebnis prüfen", "Checkpoint und erwarteten Zielcommit ausdrücklich auswählen. Der Runner muss Review unterstützen.", "POST", format!("/v1/streams/{}/review", w.id), json!(RequestReview { request_id: RequestId::new(), expected_revision: w.revision, checkpoint_command: c.id, expected_target_commit: String::new() })));
+        if ui.button(crate::tr!("Ergebnis-Review …")).clicked() {
+            self.dialog = Some(Dialog::form(crate::tr!("Ergebnis prüfen"), crate::tr!("Checkpoint und erwarteten Zielcommit ausdrücklich auswählen. Der Runner muss Review unterstützen."), "POST", format!("/v1/streams/{}/review", w.id), json!(RequestReview { request_id: RequestId::new(), expected_revision: w.revision, checkpoint_command: c.id, expected_target_commit: String::new() })));
             ui.close();
         }
-        if ui.button("Review integrieren …").clicked() {
-            self.dialog = Some(Dialog::form("Review integrieren", "Nur einen erfolgreich geprüften Reviewkandidaten integrieren. Git-CAS schützt vor verändertem Zielstand.", "POST", format!("/v1/streams/{}/integrate", w.id), json!(RequestIntegration { request_id: RequestId::new(), expected_revision: w.revision, review_command: c.id })));
+        if ui.button(crate::tr!("Review integrieren …")).clicked() {
+            self.dialog = Some(Dialog::form(crate::tr!("Review integrieren"), crate::tr!("Nur einen erfolgreich geprüften Reviewkandidaten integrieren. Git-CAS schützt vor verändertem Zielstand."), "POST", format!("/v1/streams/{}/integrate", w.id), json!(RequestIntegration { request_id: RequestId::new(), expected_revision: w.revision, review_command: c.id })));
             ui.close();
         }
-        if ui.button("Checkpoint an Runner übergeben …").clicked() {
-            self.dialog = Some(Dialog::form("Arbeitsbereich übergeben", "Checkpoint und Zielrunner prüfen. Ownership wird revisionsgeschützt übertragen; keine unbestätigte laufende Ausführung übergehen.", "POST", format!("/v1/streams/{}/handoff", w.id), json!(HandoffStream { request_id: RequestId::new(), expected_revision: w.revision, checkpoint_command: c.id, target_runner: c.runner_id, reason: String::new() })));
+        if ui.button(crate::tr!("Checkpoint an Runner übergeben …")).clicked() {
+            self.dialog = Some(Dialog::form(crate::tr!("Arbeitsbereich übergeben"), crate::tr!("Checkpoint und Zielrunner prüfen. Ownership wird revisionsgeschützt übertragen; keine unbestätigte laufende Ausführung übergehen."), "POST", format!("/v1/streams/{}/handoff", w.id), json!(HandoffStream { request_id: RequestId::new(), expected_revision: w.revision, checkpoint_command: c.id, target_runner: c.runner_id, reason: String::new() })));
             ui.close();
         }
-        if ui.button("Supervisor konfigurieren …").clicked() {
+        if ui.button(crate::tr!("Supervisor-Einstellungen …")).clicked() {
             if let Some(p) = command_project(&s, c) {
-                self.dialog = Some(Dialog::form("Supervisor konfigurieren", "Aktuelle Policyrevision zuvor in den erweiterten Projekteinstellungen unter Supervisor prüfen. Auswertungen verbrauchen ein ausdrückliches Budget.", "PUT", format!("/v1/projects/{p}/supervisor"), json!(SetSupervisor { request_id: RequestId::new(), expected_revision: Revision(0), stream_id: w.id, enabled: true, evaluation_budget: 12, interval_seconds: 300 })));
+                let mut settings = crate::project_settings::ProjectSettings::new(p);
+                settings.selected = crate::project_settings::ProjectSection::Supervisor;
+                self.dialog = Some(Dialog::ProjectSettings(Box::new(settings)));
             }
             ui.close();
         }
-        if ui.button("Runtime-/Beendigungszustand").clicked() {
+        if ui.button(crate::tr!("Runtime-/Beendigungszustand")).clicked() {
             self.read(
-                "Runtime-Beendigung",
+                crate::tr!("Runtime-Beendigung"),
                 format!("/v1/commands/{}/termination", c.id),
             );
             ui.close();
         }
-        if ui.button("Runtime-Identität / gezielt beenden …").clicked() {
+        if ui.button(crate::tr!("Runtime-Identität / gezielt beenden …")).clicked() {
             self.read(
-                "Bestätigte Runtime-Identität",
+                crate::tr!("Bestätigte Runtime-Identität"),
                 format!("/v1/commands/{}/runtime-binding", c.id),
             );
             ui.close();
         }
-        if ui.button("Archivdateien").clicked() {
-            self.read("Dateiarchiv", format!("/v1/commands/{}/files", c.id));
+        if ui.button(crate::tr!("Archivdateien")).clicked() {
+            self.read(crate::tr!("Dateiarchiv"), format!("/v1/commands/{}/files", c.id));
             ui.close();
         }
     }
 }
 
 pub(crate) fn status_color(status: &str) -> egui::Color32 {
-    match status {
-        "Fehlgeschlagen" | "Abgebrochen" => RED,
-        "Braucht Antwort"
-        | "Blockiert"
-        | "Zustand ungeklärt"
-        | "Unterbrochen"
-        | "Pause noch unbestätigt"
-        | "Beendigung ungeklärt"
-        | "Offen"
-        | "Abgelehnt"
-        | "Ungeklärt"
-        | "Antwort erforderlich"
-        | "Antwort abgelehnt · erneut prüfen"
-        | "Wartet auf Wiederholung"
-        | "Orchestrator wartet"
-        | "Zustellung ungeklärt" => AMBER,
-        "In Bearbeitung" | "Wird gestartet" | "Abgeschlossen" | "Ergebnis vorhanden"
-        | "Beantwortet" => GREEN,
-        "Eingereiht" | "Antwort eingereiht" | "Wartet auf Runner" | "Wartet auf Start"
-        | "Wartet auf Session" | "Wird vorbereitet" | "Orchestrator prüft" => BLUE,
-        _ => MUTED,
-    }
+    if [crate::tr!("Fehlgeschlagen"), crate::tr!("Abgebrochen")].contains(&status) { RED }
+    else if [
+        crate::tr!("Braucht Antwort"), crate::tr!("Blockiert"), crate::tr!("Zustand ungeklärt"),
+        crate::tr!("Unterbrochen"), crate::tr!("Pause noch unbestätigt"), crate::tr!("Beendigung ungeklärt"),
+        crate::tr!("Offen"), crate::tr!("Abgelehnt"), crate::tr!("Ungeklärt"),
+        crate::tr!("Antwort erforderlich"), crate::tr!("Antwort abgelehnt · erneut prüfen"),
+        crate::tr!("Wartet auf Wiederholung"), crate::tr!("Orchestrator wartet"), crate::tr!("Zustellung ungeklärt"),
+        crate::tr!("Wartend"), crate::tr!("Wartet auf Runner"), crate::tr!("Wartet auf Session"),
+        crate::tr!("Projekt pausiert"), crate::tr!("Verteilung pausiert"),
+    ].contains(&status) { AMBER }
+    else if [
+        crate::tr!("In Bearbeitung"), crate::tr!("Wird gestartet"), crate::tr!("Abgeschlossen"),
+        crate::tr!("Ergebnis vorhanden"), crate::tr!("Beantwortet"),
+    ].contains(&status) { GREEN }
+    else if [
+        crate::tr!("Eingereiht"), crate::tr!("Antwort eingereiht"), crate::tr!("Wartet auf Start"),
+        crate::tr!("Wird vorbereitet"), crate::tr!("Orchestrator prüft"), crate::tr!("Wird abgeschlossen"),
+    ].contains(&status) { BLUE }
+    else { MUTED }
 }
 fn event_project(s: &Snapshot, e: &FactoryEvent) -> Option<ProjectId> {
     e.payload

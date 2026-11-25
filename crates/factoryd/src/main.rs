@@ -48,6 +48,19 @@ async fn main() -> Result<()> {
     );
     let store = factoryd::store::Store::open(&args.database)
         .context("cannot initialize Factory database")?;
+    let mut mcp_key = args.database.as_os_str().to_os_string();
+    mcp_key.push(".mcp-key");
+    let mcp_gateway = factoryd::remote_mcp::Gateway::open(
+        &PathBuf::from(mcp_key),
+        store
+            .has_remote_mcp_key()
+            .map_err(|_| anyhow::anyhow!("Cannot check remote MCP vault"))?,
+    )?;
+    let mcp_gateway = match env::var("FACTORY_MCP_PUBLIC_URL") {
+        Ok(origin) => mcp_gateway.with_oauth_origin(&origin)?,
+        Err(env::VarError::NotPresent) => mcp_gateway,
+        Err(error) => return Err(error.into()),
+    };
     if token.is_empty() {
         ensure!(
             store
@@ -59,15 +72,13 @@ async fn main() -> Result<()> {
         );
     }
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    let binary = env::var_os("FACTORY_OPENCODE_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "opencode".into());
+    let binary = env::var_os("FACTORY_OPENCODE_BIN").map(PathBuf::from);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut shutdown = Box::pin(async move {
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
     });
     let (mut opencode, gateway) = tokio::select! {
-        result = managed_opencode::Runtime::start(&args.database, binary) => result?,
+        result = managed_opencode::Runtime::start(&args.database, binary.as_deref()) => result?,
         _ = &mut shutdown => return Ok(()),
     };
     store
@@ -82,11 +93,16 @@ async fn main() -> Result<()> {
     let push = push_config
         .map(|config| tokio::spawn(factoryd::push::run(store.clone(), config, stopping.clone())));
     let supervisor_store = store.clone();
+    let scheduler_wakeup = store.scheduler_wakeup();
     let supervisor_stopping = stopping.clone();
     let supervisor = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let periodic = tokio::select! {
+                _ = interval.tick() => true,
+                _ = scheduler_wakeup.notified() => false,
+            };
             if supervisor_stopping.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
@@ -97,7 +113,9 @@ async fn main() -> Result<()> {
                 .as_millis() as u64;
             if !matches!(
                 tokio::task::spawn_blocking(move || {
-                    store.supervisor_tick(now)?;
+                    if periodic {
+                        store.supervisor_tick(now)?;
+                    }
                     store.scheduler_tick()
                 })
                 .await,
@@ -109,7 +127,9 @@ async fn main() -> Result<()> {
     });
     let serving = axum::serve(
         listener,
-        factoryd::router_with_model_gateway(&token, store, stopping.clone(), Some(gateway)),
+        factoryd::router_with_model_gateway(&token, store, stopping.clone(), Some(gateway))
+            .layer(axum::Extension(mcp_gateway))
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
         shutdown.await;

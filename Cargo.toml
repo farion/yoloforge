@@ -8,7 +8,7 @@ exclude = ["vendor/sdl3-sys"]
 sdl3-sys = { path = "vendor/sdl3-sys" }
 
 [workspace.package]
-version = "0.1.3-dev"
+version = "0.1.3"
 edition = "2021"
 publish = false
 
@@ -24,3 +24,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 factory-core = { path = "crates/factory-core" }
 factory-protocol = { path = "crates/factory-protocol" }
 factory-opencode = { path = "crates/factory-opencode" }
+factory-platform = { path = "crates/factory-platform" }

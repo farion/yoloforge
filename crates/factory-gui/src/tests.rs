@@ -4,6 +4,16 @@ use factory_protocol::*;
 use serde_json::json;
 use std::sync::Arc;
 
+pub(crate) fn click_events(pos: egui::Pos2) -> Vec<egui::Event> {
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+}
+
 pub(crate) fn fixture() -> App {
     let ctx = egui::Context::default();
     let mut app = App::new(&ctx, "http://127.0.0.1:1".into(), None, None);
@@ -24,9 +34,619 @@ pub(crate) fn fixture() -> App {
     })).unwrap();
     app.settings.project = Some(p);
     app.snapshot = Some(Arc::new(snapshot));
+    app.online = true;
     app.dialog = None;
     app.settings_dirty = false;
     app
+}
+
+#[test]
+fn task_advanced_toggle_hides_choices_and_second_divider_by_default() {
+    let mut app = fixture();
+    let project = app.settings.project.unwrap();
+    let mut dialog = Dialog::task(app.server.clone(), project, None);
+    let Dialog::Task(task) = &mut dialog else { unreachable!() };
+    let id = task.id;
+    task.draft.prompt = "Eingabe beim Einklappen behalten".into();
+    task.draft.local_mcps = Some(vec![]);
+    let ctx = app.backend.context().clone();
+    let render = |dialog: &mut Dialog, app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| { assert!(!dialog.show(ctx, app)); });
+    for expanded in [false, true, false] {
+        for _ in 0..4 { let _ = render(&mut dialog, &mut app, vec![]); }
+        let output = render(&mut dialog, &mut app, vec![]);
+        let mut text = vec![];
+        for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+        assert_eq!(text.iter().any(|t| t == "Auto Runner"), expanded);
+        assert_eq!(text.iter().any(|t| t == "MCPs"), expanded);
+        let advanced: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-advanced", id)))).unwrap();
+        let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-action", id, false)))).unwrap();
+        assert!(advanced.right() < submit.left());
+        assert!((advanced.center().y - submit.center().y).abs() < 1.0);
+        let Dialog::Task(task) = &dialog else { unreachable!() };
+        assert_eq!(task.advanced, expanded);
+        assert_eq!(task.draft.prompt, "Eingabe beim Einklappen behalten");
+        assert_eq!(task.draft.local_mcps, Some(vec![]));
+        if expanded {
+            let divider: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-footer-divider", id)))).unwrap();
+            let mcps: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-mcps", id)))).unwrap();
+            assert!(mcps.bottom() < divider.top() && divider.bottom() < submit.top());
+        } else {
+            assert!(ctx.memory(|m| m.area_rect(egui::Id::new(("factory-task", id)))).unwrap().height() < 400.0);
+        }
+        let _ = render(&mut dialog, &mut app, click_events(advanced.center()));
+    }
+    assert!(app.settings.pending.is_empty());
+    let Dialog::Task(fresh) = Dialog::task(app.server.clone(), project, None) else { unreachable!() };
+    assert!(!fresh.advanced);
+}
+
+#[test]
+fn checkboxes_have_a_global_comfortable_gap_before_their_labels() {
+    let app = fixture();
+    let ctx = app.backend.context().clone();
+    assert_eq!(ctx.style().spacing.icon_spacing, 12.0);
+    let mut checked = false;
+    let mut rows = vec![];
+    let output = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            rows.push(("Aktive Checkbox", ui.checkbox(&mut checked, "Aktive Checkbox").rect));
+            ui.add_enabled_ui(false, |ui| {
+                rows.push(("Deaktivierte Checkbox", ui.checkbox(&mut checked, "Deaktivierte Checkbox").rect));
+            });
+        });
+    });
+    for (label, rect) in rows {
+        let text_position = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) if text.galley.job.text == label => Some(text.pos),
+            _ => None,
+        }).unwrap();
+        let gap = text_position.x - rect.left() - ctx.style().spacing.icon_width;
+        assert!(gap >= 11.5, "{label}: {gap}");
+    }
+}
+
+#[test]
+fn task_action_checkboxes_persist_and_offline_has_one_action_without_mcps() {
+    let mut app = fixture();
+    let project = app.settings.project.unwrap();
+    let mut dialog = Dialog::task(app.server.clone(), project, None);
+    let Dialog::Task(task) = &dialog else { unreachable!() };
+    let id = task.id;
+    let ctx = app.backend.context().clone();
+    let render = |dialog: &mut Dialog, app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| { assert!(!dialog.show(ctx, app)); });
+    for _ in 0..3 { let _ = render(&mut dialog, &mut app, vec![]); }
+    for key in ["test-task-keep-open", "test-task-as-draft"] {
+        let rect: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new((key, id)))).unwrap();
+        let _ = render(&mut dialog, &mut app, click_events(rect.center()));
+    }
+    assert!(app.settings.task_keep_open && app.settings.task_as_draft);
+    assert!(app.settings_dirty);
+    let output = render(&mut dialog, &mut app, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert_eq!(text.iter().filter(|t| t.as_str() == "Entwurf & neu").count(), 1);
+    assert!(!text.iter().any(|t| t == "Einreihen" || t == "Einreihen & neu"));
+    let saved = serde_json::to_value(&app.settings).unwrap();
+    let mut restored = fixture();
+    restored.settings = serde_json::from_value(saved).unwrap();
+    restored.online = false;
+    let mut offline = Dialog::task(restored.server.clone(), project, None);
+    let Dialog::Task(task) = &mut offline else { unreachable!() };
+    let offline_id = task.id;
+    task.draft.prompt = "Offline und danach direkt weiter".into();
+    let ctx = restored.backend.context().clone();
+    let render = |dialog: &mut Dialog, app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| { assert!(!dialog.show(ctx, app)); });
+    for _ in 0..3 { let _ = render(&mut offline, &mut restored, vec![]); }
+    let output = render(&mut offline, &mut restored, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|t| t == "Nicht schließen"));
+    assert!(text.iter().any(|t| t == "Vorbereiten & neu"));
+    assert!(!text.iter().any(|t| t == "Entwurf" || t == "MCPs" || t == "Lokal vorbereiten"));
+    let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-action", offline_id, false)))).unwrap();
+    let _ = render(&mut offline, &mut restored, click_events(submit.center()));
+    let _ = render(&mut offline, &mut restored, vec![]);
+    assert!(matches!(&offline, Dialog::Task(task) if task.id != offline_id && task.draft.prompt.is_empty()));
+    assert_eq!(restored.settings.offline_tasks.len(), 1);
+    assert!(restored.settings.pending.is_empty());
+    assert!(restored.settings.task_keep_open && restored.settings.task_as_draft);
+}
+
+#[test]
+fn task_model_choice_is_below_the_prompt_without_surrounding_labels() {
+    let mut app = fixture();
+    crate::model_settings::seed(&mut app, true);
+    let project = app.settings.project.unwrap();
+    let factory = app.models.factory.value.as_mut().unwrap();
+    factory.default_model.as_mut().unwrap().model_id = "gpt-6.2-sol".into();
+    factory.accesses[0].models = vec!["gpt-6.2-sol".into()];
+    app.models.projects.entry(project).or_default().value =
+        Some(factory_protocol::models::ProjectModelSettings {
+            revision: Revision(1), roles: Default::default(),
+        });
+    let mut dialog = Dialog::task(app.server.clone(), project, None);
+    if let Dialog::Task(task) = &mut dialog { task.advanced = true; }
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, dialog: &mut Dialog| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        ..Default::default()
+    }, |ctx| { dialog.show(ctx, app); });
+    for _ in 0..3 { let _ = render(&mut app, &mut dialog); }
+    let output = render(&mut app, &mut dialog);
+    let mut text = vec![];
+    for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|t| t == "Default (gpt-6.2-sol / OpenAI Arbeit)"));
+    assert!(text.iter().any(|t| t == "Auto Runner"));
+    assert!(!text.iter().any(|t| t == "Implementer-Modell" || t == "OpenAI Arbeit · gpt-6.2-sol"));
+    let prompt: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-task-prompt"))).unwrap();
+    let model_position = output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) if text.galley.job.text == "Default (gpt-6.2-sol / OpenAI Arbeit)" => Some(text.pos),
+        _ => None,
+    }).unwrap();
+    assert!(model_position.y >= prompt.bottom());
+    let Dialog::Task(task) = &dialog else { unreachable!() };
+    let rect = |key| ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new((key, task.id)))).unwrap();
+    let model = rect("test-task-model");
+    let runner = rect("test-task-target");
+    let attachments = rect("test-task-attachments");
+    let mcps = rect("test-task-mcps");
+    assert!(model.width() >= 300.0 && model.width() <= 421.0);
+    assert!(model.right() < runner.left() && runner.right() < attachments.left() && attachments.right() < mcps.left());
+    assert!((model.center().y - runner.center().y).abs() < 1.0);
+    let queue: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-action", task.id, false)))).unwrap();
+    assert!(queue.top() > mcps.bottom());
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
+fn offline_shell_redirects_disables_navigation_and_centers_the_orange_notice() {
+    let mut app = fixture();
+    let snapshot = app.snapshot.clone().unwrap();
+    app.cache_projects(&snapshot.projects);
+    app.set_page(Page::Infrastructure);
+    app.dialog = Some(Dialog::FactorySettings);
+    app.backend.emit_for_test(crate::backend::Event::Snapshot(Err("network gone".into())));
+    app.receive();
+    assert!(!app.online);
+    assert_eq!(app.page(), Page::Tasks);
+    assert_eq!(app.active_tab, 0);
+    assert!(app.dialog.is_none());
+    app.snapshot = None; // A restart still has the server-scoped project cache.
+    app.settings = serde_json::from_value(serde_json::to_value(&app.settings).unwrap()).unwrap();
+    assert_eq!(app.project().unwrap().id, snapshot.projects[0].id);
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| app.draw_shell(ctx));
+    for _ in 0..3 { let _ = render(&mut app, vec![]); }
+    let output = render(&mut app, vec![]);
+    let mut text = vec![];
+    for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(!text.iter().any(|t| t == "Keine Verbindung zum Server"
+        || t == "Bereite Aufgaben für ein gespeichertes Projekt vor."));
+    assert!(text.iter().any(|t| t == crate::tr!("Noch keine lokal vorbereiteten Aufgaben für dieses Projekt.")));
+    assert!(text.iter().any(|t| t == Page::Tasks.icon()));
+    let (bounds, state): (egui::Rect, egui::Rect) =
+        ctx.data_mut(|d| d.get_temp(egui::Id::new("test-list-empty-state"))).unwrap();
+    assert!(bounds.height() > 200.0);
+    assert!((bounds.center() - state.center()).length() < 1.0, "{bounds:?} {state:?}");
+    assert!(text.iter().any(|t| t == crate::offline::footer_notice()));
+    let notice: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-offline-footer-notice"))).unwrap();
+    let footer: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-footer-panel"))).unwrap();
+    assert!(footer.contains_rect(notice));
+    assert!((notice.center().x - footer.center().x).abs() < 2.0);
+    let connection: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-footer-connect"))).unwrap();
+    assert!((notice.center().y - connection.center().y).abs() < 2.0, "The notice belongs in the existing footer row");
+    for page in [Page::Infrastructure, Page::Diagnostics, Page::Overview] {
+        let rect: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-factory-navigation", page)))).unwrap();
+        let _ = render(&mut app, click_events(rect.center()));
+        assert_eq!(app.page(), Page::Tasks);
+    }
+    app.set_page(Page::Settings);
+    assert!(app.dialog.is_none());
+    let settings: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-footer-settings"))).unwrap();
+    let _ = render(&mut app, click_events(settings.center()));
+    assert!(app.dialog.is_none());
+    let (_, menu): (egui::Rect, egui::Rect) = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-project-controls"))).unwrap();
+    let output = render(&mut app, click_events(menu.center()));
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(!text.iter().any(|t| t == "Projekteinstellungen"));
+    app.new_task();
+    assert!(matches!(&app.dialog, Some(Dialog::Task(task)) if !task.read_only));
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
+fn offline_task_editor_prepares_locally_with_attachments_and_keeps_closed_edits() {
+    let mut app = fixture();
+    app.online = false;
+    app.new_task();
+    let Some(Dialog::Task(task)) = &mut app.dialog else { panic!("Expected local task editor") };
+    let task_id = task.id;
+    task.draft.prompt = "Offline vorbereiten".into();
+    let file = PromptFile::from_bytes("notizen.txt".into(), b"offline notes").unwrap();
+    task.draft.files = vec![file.clone()];
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| {
+        app.draw_shell(ctx);
+        if let Some(mut dialog) = app.dialog.take() {
+            if !dialog.show(ctx, app) { app.dialog = Some(dialog); }
+        }
+    });
+    for _ in 0..3 { let _ = render(&mut app, vec![]); }
+    let output = render(&mut app, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(!text.iter().any(|t| t == "Entwurf" || t == "Entwurf & neu" || t == egui_phosphor::regular::FLOPPY_DISK));
+    let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-action", task_id, false)))).unwrap();
+    let _ = render(&mut app, click_events(submit.center()));
+    let _ = render(&mut app, vec![]);
+    assert!(app.dialog.is_none());
+    assert!(app.settings.pending.is_empty());
+    assert_eq!(app.settings.offline_tasks.len(), 1);
+    let saved = app.settings.offline_tasks[0].clone();
+    assert_eq!(saved.draft.prompt, "Offline vorbereiten");
+    assert_eq!(saved.draft.files, vec![file]);
+    app.edit_offline_task(saved.id);
+    let Some(Dialog::Task(task)) = &mut app.dialog else { panic!("Expected local task editor") };
+    task.draft.prompt = "Überarbeitung bleibt erhalten".into();
+    app.dialog.take().unwrap().persist_drafts(&mut app);
+    app.settings = serde_json::from_value(serde_json::to_value(&app.settings).unwrap()).unwrap();
+    app.online = true;
+    app.sync_offline_tasks(false);
+    assert!(app.settings.pending.is_empty(), "Unfinished edits must not be uploaded");
+    app.edit_offline_task(saved.id);
+    assert!(matches!(&app.dialog, Some(Dialog::Task(task)) if task.draft.prompt == "Überarbeitung bleibt erhalten"));
+}
+
+#[test]
+fn offline_tasks_sync_only_to_their_factory_as_drafts_and_retry_the_same_request() {
+    use crate::backend::{Event, Failure};
+    let mut app = fixture();
+    let snapshot = app.snapshot.clone().unwrap();
+    app.online = false;
+    let Dialog::Task(mut task) = Dialog::task(app.server.clone(), app.settings.project.unwrap(), None) else { unreachable!() };
+    task.draft.prompt = "Dauerhafte Offline-Aufgabe".into();
+    task.draft.files.push(PromptFile::from_bytes("anhang.txt".into(), b"keep me").unwrap());
+    let id = app.save_offline_task(None, task.draft.clone()).unwrap();
+    app.settings = serde_json::from_value(serde_json::to_value(&app.settings).unwrap()).unwrap();
+    let server = app.server.clone();
+    app.server = "http://another-factory:7432".into();
+    app.online = true;
+    app.sync_offline_tasks(false);
+    assert!(app.settings.pending.is_empty());
+    app.server = server;
+    app.online = false;
+    app.backend.emit_for_test(Event::Snapshot(Ok((*snapshot).clone())));
+    app.receive();
+    assert_eq!(app.settings.pending.len(), 1);
+    let pending = app.settings.pending[0].clone();
+    assert_eq!(pending.body["submission"]["draft"], true);
+    assert_eq!(pending.body["submission"]["task"]["request_id"], json!(id));
+    assert_eq!(pending.body["submission"]["files"], json!(task.draft.files));
+    let mut another = Dialog::task(app.server.clone(), task.draft.project, None);
+    let ctx = app.backend.context().clone();
+    let _ = ctx.run(egui::RawInput::default(), |ctx| { another.show(ctx, &mut app); });
+    assert!(matches!(&another, Dialog::Task(editor) if editor.request.is_none()),
+        "An offline upload must not lock an unrelated new-task editor");
+    // The durable journal can be written just before the sync reference.
+    // Recover that crash boundary without creating another submission.
+    app.settings.offline_tasks[0].sync_request = None;
+    app.settings = serde_json::from_value(serde_json::to_value(&app.settings).unwrap()).unwrap();
+    app.sync_offline_tasks(false);
+    assert_eq!(app.settings.pending.len(), 1);
+    assert_eq!(app.settings.offline_tasks[0].sync_request, Some(pending.id));
+    app.backend.emit_for_test(Event::Request(pending.id, Err(Failure { message: "HTTP technical diagnostic".into(), uncertain: true })));
+    app.receive();
+    assert_eq!(app.settings.offline_tasks.len(), 1);
+    assert_eq!(app.settings.pending.len(), 1);
+    app.sync_offline_tasks(true);
+    assert_eq!(app.settings.pending[0].body, pending.body);
+    assert_eq!(app.settings.offline_tasks[0].sync_request, Some(pending.id));
+    // Even a nominal 200 must not remove data unless it confirms the draft.
+    app.backend.emit_for_test(Event::Request(pending.id, Ok(json!({"unexpected": true}))));
+    app.receive();
+    assert_eq!(app.settings.offline_tasks.len(), 1);
+    assert_eq!(app.settings.pending.len(), 1);
+    let mut ticket = snapshot.tickets[0].clone();
+    ticket.id = TicketId::new();
+    ticket.draft = true;
+    ticket.prompt = Some(task.draft.prompt);
+    ticket.images = task.draft.images;
+    ticket.files = task.draft.files;
+    app.backend.emit_for_test(Event::Request(pending.id, Ok(json!(ticket))));
+    app.receive();
+    assert!(app.settings.offline_tasks.is_empty());
+    assert!(app.settings.pending.is_empty());
+    assert!(app.snapshot.as_ref().unwrap().tickets.iter().any(|t| t.id == ticket.id && t.draft));
+}
+
+#[test]
+fn offline_tasks_keep_missing_projects_and_definite_rejections_locally() {
+    use crate::backend::{Event, Failure};
+    let mut app = fixture();
+    let Dialog::Task(mut task) = Dialog::task(app.server.clone(), app.settings.project.unwrap(), None) else { unreachable!() };
+    task.draft.prompt = "Bleibt lokal".into();
+    let id = app.save_offline_task(None, task.draft.clone()).unwrap();
+    let projects = app.snapshot.as_ref().unwrap().projects.clone();
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).projects.clear();
+    app.sync_offline_tasks(false);
+    assert!(app.settings.pending.is_empty());
+    assert!(app.settings.offline_tasks[0].sync_error.is_some());
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).projects = projects;
+    app.settings.offline_tasks[0].sync_error = None;
+    app.sync_offline_tasks(false);
+    let request = app.settings.pending[0].id;
+    app.backend.emit_for_test(Event::Request(request, Err(Failure { message: "Forbidden HTTP details".into(), uncertain: false })));
+    app.receive();
+    assert!(app.settings.pending.is_empty());
+    assert_eq!(app.settings.offline_tasks[0].id, id);
+    assert!(app.settings.offline_tasks[0].sync_request.is_none());
+    assert!(app.settings.offline_tasks[0].sync_error.is_some());
+    app.sync_offline_tasks(false);
+    assert!(app.settings.pending.is_empty(), "Definite rejections must not loop");
+    assert!(app.action_errors.iter().any(|(_, e)| e.contains("Forbidden HTTP details")));
+    assert!(!app.notices.iter().any(|(message, _)| message.contains("Forbidden HTTP")));
+}
+
+#[test]
+fn native_image_drop_and_clipboard_target_work_in_an_open_session() {
+    let mut app = fixture();
+    let root = app.snapshot.as_ref().unwrap().commands[0].session_root();
+    let project = app.settings.project.unwrap();
+    app.open_session(project, root);
+    let ctx = app.backend.context().clone();
+    for _ in 0..3 { let _ = ctx.run(egui::RawInput::default(), |ctx| app.draw_shell(ctx)); }
+    let target = app.clipboard_image_target().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("session.png");
+    image::RgbaImage::new(2, 2).save(&image).unwrap();
+    let _ = ctx.run(egui::RawInput {
+        dropped_files: vec![egui::DroppedFile { path: Some(image), ..Default::default() }],
+        ..Default::default()
+    }, |ctx| app.handle_file_drop(ctx));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while app.session_prompts[&root].draft.images.is_empty() && std::time::Instant::now() < deadline {
+        app.receive();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(app.session_prompts[&root].draft.images.len(), 1);
+    assert_eq!(app.session_prompts[&root].draft.images[0].name, "session.png");
+    assert_eq!(app.session_prompts[&root].id, target);
+    app.dialog = Some(Dialog::ConnectionInfo);
+    assert_eq!(app.clipboard_image_target(), None, "Do not paste into a session behind another modal");
+    app.dialog = None;
+    let _ = ctx.run(egui::RawInput::default(), |ctx| app.draw_shell(ctx));
+    let restored = crate::dialogs::TaskDialog::session(&app, project, root);
+    assert_eq!(restored.draft.images.len(), 1);
+}
+
+#[test]
+fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup() {
+    let mut app = fixture();
+    app.online = true;
+    let snapshot = app.snapshot.clone().unwrap();
+    let root = snapshot.commands[0].session_root();
+    let project = app.settings.project.unwrap();
+    app.open_session(project, root);
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| app.draw_shell(ctx));
+    let _ = render(&mut app, vec![]);
+    let output = render(&mut app, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|t| t == "Prompten"));
+    assert!(!text.iter().any(|t| t == "Implementer-Modell" || t == "MCPs" || t == "Zuordnung"));
+    for icon in [egui_phosphor::regular::PAPERCLIP, egui_phosphor::regular::CLIPBOARD] {
+        assert!(!text.iter().any(|t| t == icon));
+    }
+    let target = app.clipboard_image_target().unwrap();
+    assert_eq!(target, app.session_prompts[&root].id);
+    app.session_prompts.get_mut(&root).unwrap().draft.prompt = "Bitte direkt hier fortsetzen".into();
+    let file = PromptFile::from_bytes("notes.txt".into(), b"Session attachment").unwrap();
+    app.backend.emit_for_test(crate::backend::Event::Attachment(target, Ok(crate::backend::InputAttachment::File(file.clone()))));
+    app.receive();
+    for _ in 0..3 { let _ = render(&mut app, vec![]); }
+    assert_eq!(app.session_prompts[&root].draft.files, vec![file.clone()]);
+    assert_eq!(app.settings.session_prompts.len(), 1);
+    let restored = crate::dialogs::TaskDialog::session(&app, project, root);
+    assert_eq!(restored.id, target);
+    assert_eq!(restored.draft.files, vec![file.clone()]);
+    let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-session-prompt-submit", root)))).unwrap();
+    let panel: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-session-prompt-panel", root)))).unwrap();
+    let footer: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-footer-panel"))).unwrap();
+    assert!(panel.contains_rect(submit));
+    assert!(panel.bottom() <= footer.top());
+    assert!(footer.top() - panel.bottom() < 32.0);
+    let pos = submit.center();
+    let _ = render(&mut app, vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+    ]);
+    assert_eq!(app.settings.pending.len(), 1);
+    let pending = app.settings.pending[0].clone();
+    assert_eq!(pending.path, format!("/v1/commands/{root}/prompt"));
+    let body: PromptSession = serde_json::from_value(pending.body.clone()).unwrap();
+    assert_eq!(body.request_id, target);
+    assert_eq!(body.files, vec![file]);
+    assert_eq!(body.prompt, "Bitte direkt hier fortsetzen");
+    assert_eq!(app.clipboard_image_target(), None);
+    // A restored outbox entry has no live request after restarting the GUI.
+    app.in_flight.clear();
+    let output = render(&mut app, vec![]);
+    let mut restored_text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut restored_text); }
+    assert!(restored_text.iter().any(|t| t == "Zustellung prüfen"));
+    assert_eq!(app.settings.pending.len(), 1);
+    // An ambiguous network failure must retain the same outbox entry and draft.
+    app.backend.emit_for_test(crate::backend::Event::Request(pending.id, Err(crate::backend::Failure {
+        message: "HTTP detail for diagnosis".into(), uncertain: true,
+    })));
+    app.receive();
+    let _ = render(&mut app, vec![]);
+    assert_eq!(app.settings.pending.len(), 1);
+    assert_eq!(app.session_prompts[&root].id, target);
+    assert_eq!(app.session_prompts[&root].draft.prompt, body.prompt);
+    let mut ticket = snapshot.tickets[0].clone();
+    ticket.id = TicketId::new();
+    ticket.requested_session = Some(root);
+    app.backend.emit_for_test(crate::backend::Event::Request(pending.id, Ok(json!(ticket))));
+    app.receive();
+    assert!(app.settings.pending.is_empty());
+    let composer = app.session_prompts.remove(&root).unwrap();
+    composer.persist(&mut app);
+    assert!(app.settings.session_prompts.is_empty(), "Closing before the next render must not restore an acknowledged draft");
+    app.session_prompts.insert(root, composer);
+    let _ = render(&mut app, vec![]);
+    assert!(app.session_prompts[&root].draft.prompt.is_empty());
+    assert!(app.session_prompts[&root].draft.files.is_empty());
+    assert_ne!(app.session_prompts[&root].id, target);
+    assert!(app.settings.session_prompts.is_empty());
+    assert_eq!(app.notices.last().unwrap().0, "Prompt in die Session eingereiht.");
+}
+
+#[test]
+fn closed_work_sessions_offer_a_prompt_target_but_read_only_sessions_do_not() {
+    for read_only in [true, false] {
+        let mut app = fixture();
+        let root = app.snapshot.as_ref().unwrap().commands[0].session_root();
+        let project = app.settings.project.unwrap();
+        let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        if read_only {
+            snapshot.commands[0].agent_spec.as_mut().unwrap().read_only = true;
+        } else {
+            snapshot.session_closures.push(SessionClosure {
+                request_id: RequestId::new(), root_command_id: root, last_command_id: root,
+                session_id: agent_session_id(root), reason: "Closed".into(), closed_unix_ms: 1,
+            });
+        }
+        app.open_session(project, root);
+        let ctx = app.backend.context().clone();
+        for _ in 0..3 { let _ = ctx.run(egui::RawInput::default(), |ctx| app.draw_shell(ctx)); }
+        assert_eq!(app.session_prompts.contains_key(&root), !read_only);
+        assert_eq!(app.clipboard_image_target().is_some(), !read_only);
+        assert!(app.settings.pending.is_empty(), "Opening the editor must not reactivate a session");
+        assert_eq!(app.snapshot.as_ref().unwrap().session_closures.len(), usize::from(!read_only));
+    }
+}
+
+#[test]
+fn runner_failures_remain_in_diagnostics_after_successful_factory_polls() {
+    let mut app = fixture();
+    let snapshot = app.snapshot.as_ref().unwrap().as_ref().clone();
+    let error = "Lokaler Test-Runner wurde beendet.\nProtokoll: /private/factory-runner.log\n\nError: Konfiguration ungültig";
+    app.local_runners_busy = true;
+    app.backend.emit_for_test(crate::backend::Event::LocalRunners(crate::local_runners::Report {
+        runners: None, result: Err(error.into()),
+    }));
+    app.backend.emit_for_test(crate::backend::Event::Snapshot(Ok(snapshot)));
+    app.receive();
+    assert!(!app.local_runners_busy);
+    assert!(app.error.is_none());
+    assert_eq!(app.action_errors.len(), 1);
+    assert_eq!(app.action_errors[0].1, error);
+    assert!(!app.notices.last().unwrap().0.contains("Konfiguration ungültig"));
+    app.settings.page = Page::Diagnostics;
+    app.query.clear();
+    app.diagnostics_project = true;
+    let ctx = app.backend.context().clone();
+    let mut output = None;
+    for _ in 0..4 {
+        output = Some(ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx)));
+    }
+    let mut text = vec![];
+    for shape in output.unwrap().shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|text| text.contains("Konfiguration ungültig")), "{text:?}");
+    assert!(text.iter().any(|text| text.contains("/private/factory-runner.log")));
+}
+
+#[test]
+fn connection_overview_disconnects_directly_and_keeps_cached_data() {
+    let mut app = fixture();
+    app.online = true;
+    let cached = app.snapshot.clone().unwrap();
+    let settings = serde_json::to_value(&app.settings).unwrap();
+    let generation = app.backend.generation;
+    assert!(app.connect("http://127.0.0.1:1".into(), String::new()).is_err());
+    assert_eq!(app.backend.generation, generation);
+    // This response was queued before the explicit disconnect.
+    app.backend.emit_for_test(crate::backend::Event::Snapshot(Ok((*cached).clone())));
+
+    let mut dialog = Dialog::ConnectionInfo;
+    let ctx = app.backend.context().clone();
+    let mut render = |app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0))),
+        events,
+        ..Default::default()
+    }, |ctx| { assert!(!dialog.show(ctx, app)); });
+    let _ = render(&mut app, vec![]);
+    let frame = render(&mut app, vec![]);
+    let mut text = vec![];
+    for shape in frame.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|text| text == "Trennen"));
+    assert!(!text.iter().any(|text| text == "Verbinden…" || text == "Lokale Factory" || text == "Zugangstoken"));
+    let button: egui::Rect = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-connection-disconnect"))).unwrap();
+    let pos = button.center();
+    let _ = render(&mut app, vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+    ]);
+    app.receive();
+    assert!(!app.online);
+    assert!(!app.connection_active());
+    assert_eq!(app.backend.generation, generation + 1);
+    assert!(Arc::ptr_eq(app.snapshot.as_ref().unwrap(), &cached));
+    assert_eq!(serde_json::to_value(&app.settings).unwrap(), settings);
+    assert_eq!(app.notices.last().unwrap().0, "Verbindung zur Factory getrennt.");
+    let frame = render(&mut app, vec![]);
+    let mut text = vec![];
+    for shape in frame.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|text| text == "Verbinden…"));
+    assert!(text.iter().any(|text| text == "Lokale Factory"));
+    assert!(!text.iter().any(|text| text == "Trennen"));
+    let button: egui::Rect = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-connection-open"))).unwrap();
+    let pos = button.center();
+    let _ = render(&mut app, vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+    ]);
+    assert!(matches!(app.dialog, Some(Dialog::Connection { .. })));
+    let mut connect = app.dialog.take().unwrap();
+    let input = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0))),
+        ..Default::default()
+    };
+    let _ = ctx.run(input(), |ctx| { connect.show(ctx, &mut app); });
+    let frame = ctx.run(input(), |ctx| { connect.show(ctx, &mut app); });
+    let mut text = vec![];
+    for shape in frame.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|text| text == "Serveradresse (HTTPS oder Loopback)"));
+    assert!(text.iter().any(|text| text == "Zugangstoken"));
+    assert!(text.iter().any(|text| text == "Verbinden"));
+    assert!(!text.iter().any(|text| text.contains("Einladung") || text == "Lokale Factory" || text == "Trennen"));
 }
 
 #[test]
@@ -251,11 +871,11 @@ fn sidebar_queue_excludes_drafts_and_tasks_already_working() {
     let app = fixture();
     let mut snapshot = app.snapshot.as_deref().unwrap().clone();
     let project = app.settings.project.unwrap();
-    assert_eq!(queued_task_count(&snapshot, project), 0);
+    assert_eq!(task_queue_counts(&snapshot, project), (0, 0));
     snapshot.commands[0].state = CommandState::Pending;
-    assert_eq!(queued_task_count(&snapshot, project), 1);
+    assert_eq!(task_queue_counts(&snapshot, project), (1, 0));
     snapshot.tickets[0].draft = true;
-    assert_eq!(queued_task_count(&snapshot, project), 0);
+    assert_eq!(task_queue_counts(&snapshot, project), (0, 0));
 }
 
 #[test]
@@ -331,13 +951,13 @@ fn project_create_and_edit_render_basic_fields_and_automatic_runner_default() {
         }
         let output = output.unwrap();
         let dialog_rect = ctx.memory(|m| m.area_rect(modal_id)).unwrap();
-        let title = if project.is_none() { "Neues Projekt" } else { "Projekt bearbeiten" };
+        let title = if project.is_none() { "Neues Projekt" } else { "Allgemein" };
         assert_dialog_header_ink_alignment(&output, dialog_rect, title);
         let mut text = Vec::new();
         for shape in &output.shapes {
             shape_text(&shape.shape, &mut text);
         }
-        for label in ["Name", "Projektkürzel", "Lokaler Pfad", "Runner-Zuordnung", "Automatisch",
+        for label in ["Name", "Projektkürzel", "Lokaler Pfad",
             if project.is_none() { "Projekt anlegen" } else { "Speichern" }] {
             assert!(text.iter().any(|text| text == label), "{text:?}");
         }
@@ -351,10 +971,13 @@ fn project_create_and_edit_render_basic_fields_and_automatic_runner_default() {
         assert!((name.right() - key.right()).abs() <= 1.0);
         assert!((name.right() - folder.right()).abs() <= 1.0, "{name:?} vs {folder:?}");
         assert!((path.center().y - folder.center().y).abs() <= 1.0);
-        let runner_select = ctx.data_mut(|d| {
-            d.get_temp::<egui::Rect>(egui::Id::new("test-project-runner-select"))
-        }).unwrap();
-        assert!((name.right() - runner_select.right()).abs() <= 1.0, "{name:?} vs {runner_select:?}");
+        assert_eq!(text.iter().any(|text| text == "Runner-Zuordnung"), project.is_none());
+        if project.is_none() {
+            let runner_select = ctx.data_mut(|d| {
+                d.get_temp::<egui::Rect>(egui::Id::new("test-project-runner-select"))
+            }).unwrap();
+            assert!((name.right() - runner_select.right()).abs() <= 1.0, "{name:?} vs {runner_select:?}");
+        }
     }
 }
 
@@ -423,7 +1046,7 @@ fn ticket_numbers_are_neutral_pills_searchable_and_never_change_the_prompt() {
     }
     let mut text=vec![];
     for shape in &output.unwrap().shapes {shape_text(&shape.shape,&mut text);}
-    assert!(text.iter().any(|text|text.starts_with("WOAI-7 · Aufgabe anzeigen")));
+    assert!(text.iter().any(|text|text.starts_with("WOAI-7 · Intent anzeigen")));
     assert!(app.settings.pending.is_empty());
 }
 
@@ -591,7 +1214,7 @@ fn session_activity_orders_followups_and_questions_without_leaking_other_session
     s.commands.insert(0, next);
     s.commands.push(foreign);
     s.tickets.push(next_task.clone());
-    s.tickets.push(queued_task);
+    s.tickets.push(queued_task.clone());
     // Even interleaved snapshot rows must be grouped by their execution.
     s.questions.insert(0, next_question.clone());
     s.questions.push(foreign_question);
@@ -601,6 +1224,7 @@ fn session_activity_orders_followups_and_questions_without_leaking_other_session
         SessionActivity::Question(&first_questions[1]),
         SessionActivity::Task(&next_task),
         SessionActivity::Question(&next_question),
+        SessionActivity::Task(&queued_task),
     ];
     assert_eq!(session_activity(&s, root), expected);
     s.questions[1].state = QuestionState::Answered;
@@ -742,6 +1366,7 @@ fn opencode_loads_older_history_at_the_top_without_an_archive_menu_or_duplicate_
 #[test]
 fn global_header_uses_shared_tabs_and_close_only_removes_the_view() {
     let mut app = fixture();
+    app.set_page(Page::Infrastructure);
     let project = app.settings.project.unwrap();
     let command = app.snapshot.as_ref().unwrap().commands[0].clone();
     app.open_session(project, command.session_root());
@@ -761,17 +1386,25 @@ fn global_header_uses_shared_tabs_and_close_only_removes_the_view() {
     let tab = |index| ctx.data_mut(|d| d.get_temp::<(egui::Rect, bool)>(
         egui::Id::new(("test-header-tab", index)),
     )).unwrap();
-    let factory = tab(0usize);
     let session = tab(1usize);
-    assert!(!factory.1 && session.1);
-    assert_eq!(factory.0.width(), session.0.width());
+    assert!(session.1);
+    let logo = ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-header-logo"))).unwrap();
+    assert!(logo.is_positive() && logo.right() < session.0.left());
+    assert!(session.0.left() - logo.right() >= ctx.style().spacing.item_spacing.x + 7.5);
+    assert!((logo.height() - (56.0 * 4.0 / 3.0 - 20.0)).abs() < 1.0);
+    assert!((session.0.bottom() - logo.bottom() - 10.0).abs() < 1.0);
     assert_eq!(session.0.height(), crate::design::SECTION_TAB_HEIGHT);
     let output = draw(&mut app, vec![]);
+    assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+        egui::Shape::LineSegment { points: [start, end], stroke }
+            if start.x <= 1.0 && end.x >= 819.0 && start.y == end.y
+                && (start.y + stroke.width / 2.0 - session.0.bottom()).abs() < 1.0
+    )), "Tabs must touch the header separator");
     let header_text: Vec<_> = output.shapes.iter().filter_map(|shape| {
         if let egui::epaint::Shape::Text(text) = &shape.shape { Some(text) } else { None }
     }).collect();
-    assert!(header_text.iter().any(|text| text.galley.job.text == egui_phosphor::regular::FACTORY
-        && text.pos.y <= factory.0.bottom()));
+    assert!(!header_text.iter().any(|text| text.galley.job.text == "Factory"
+        && text.pos.y < session.0.bottom()));
     assert!(header_text.iter().any(|text| text.galley.job.text == egui_phosphor::regular::TERMINAL_WINDOW
         && text.pos.y <= session.0.bottom()));
     assert!(!header_text.iter().any(|text| text.galley.job.text == "Ansicht und Archiv"));
@@ -789,8 +1422,11 @@ fn global_header_uses_shared_tabs_and_close_only_removes_the_view() {
         egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed:true,modifiers:egui::Modifiers::NONE},
         egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed:false,modifiers:egui::Modifiers::NONE},
     ];
-    let _ = draw(&mut app, click(factory.0.center()));
+    let _ = draw(&mut app, click(logo.center()));
     assert_eq!(app.active_tab, 0);
+    assert_eq!(app.page(), Page::Infrastructure);
+    assert_eq!(app.tabs.len(), 1);
+    assert!(app.dialog.is_none());
     let _ = draw(&mut app, click(session.0.center()));
     assert_eq!(app.active_tab, 1);
     let _ = draw(&mut app, click(egui::pos2(session.0.right()-18.0,session.0.center().y)));
@@ -801,7 +1437,54 @@ fn global_header_uses_shared_tabs_and_close_only_removes_the_view() {
 }
 
 #[test]
-fn header_arrows_page_session_tabs_without_moving_factory_or_changing_selection() {
+fn footer_info_opens_about_with_current_version_and_github_link() {
+    let mut app = fixture();
+    let ctx = app.backend.context().clone();
+    let draw = |app: &mut App, events| ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO, egui::vec2(820.0, 560.0),
+            )),
+            events,
+            ..Default::default()
+        },
+        |ctx| {
+            app.draw_shell(ctx);
+            if let Some(mut dialog) = app.dialog.take() {
+                if !dialog.show(ctx, app) {
+                    app.dialog = Some(dialog);
+                }
+            }
+        },
+    );
+    draw(&mut app, vec![]);
+    let rect = |key| ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(key))).unwrap();
+    let about = rect("test-footer-about");
+    assert!(rect("test-footer-settings").right() < about.left());
+    draw(&mut app, click_events(about.center()));
+    assert!(matches!(app.dialog, Some(crate::dialogs::Dialog::About)));
+    let output = draw(&mut app, vec![]);
+    let (image, info, link) = ctx.data_mut(|d| {
+        d.get_temp::<(egui::Rect, egui::Rect, egui::Rect)>(egui::Id::new("test-about-layout"))
+    }).unwrap();
+    assert!((image.width() / image.height() - 4.0 / 3.0).abs() < 0.01);
+    assert!((image.right() - info.right() - crate::design::DIALOG_PADDING as f32).abs() < 1.0);
+    assert!((image.bottom() - info.bottom() - crate::design::DIALOG_PADDING as f32).abs() < 1.0);
+    for label in ["About", "YoloForge", concat!("v", env!("CARGO_PKG_VERSION")), "License GPL v3.0", "GitHub"] {
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.job.text == label
+        )), "Missing About label: {label}");
+    }
+    let output = draw(&mut app, click_events(link.center()));
+    assert!(output.platform_output.commands.iter().any(|command| matches!(
+        command, egui::OutputCommand::OpenUrl(url) if url.url == crate::dialogs::ABOUT_GITHUB
+    )));
+    draw(&mut app, click_events(rect("test-dialog-close-rect").center()));
+    assert!(app.dialog.is_none());
+}
+
+#[test]
+fn header_arrows_scroll_continuously_and_fill_the_available_width() {
     let mut app = fixture();
     let project = app.settings.project.unwrap();
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
@@ -817,8 +1500,10 @@ fn header_arrows_page_session_tabs_without_moving_factory_or_changing_selection(
         app.open_session(project, root);
     }
     let ctx = app.backend.context().clone();
+    let time = std::cell::Cell::new(0.0);
     let draw = |app: &mut App, events| ctx.run(
         egui::RawInput {
+            time: Some({ let next = time.get() + 1.0 / 60.0; time.set(next); next }),
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO, egui::vec2(820.0, 560.0),
             )),
@@ -827,12 +1512,12 @@ fn header_arrows_page_session_tabs_without_moving_factory_or_changing_selection(
         },
         |ctx| app.draw_shell(ctx),
     );
-    let visible = || ctx.data_mut(|d| d.get_temp::<std::ops::Range<usize>>(
-        egui::Id::new("test-visible-header-tabs"),
+    let scroll = || ctx.data_mut(|d| d.get_temp::<(egui::Rect, f32, f32)>(
+        egui::Id::new("test-header-tab-scroll"),
     )).unwrap();
-    let factory = || ctx.data_mut(|d| d.get_temp::<(egui::Rect, bool)>(
-        egui::Id::new(("test-header-tab", 0usize)),
-    )).unwrap().0;
+    let logo = || ctx.data_mut(|d| d.get_temp::<egui::Rect>(
+        egui::Id::new("test-header-logo"),
+    )).unwrap();
     let arrow = |label| ctx.data_mut(|d| d.get_temp::<egui::Rect>(
         egui::Id::new(("test-icon-button", label)),
     )).unwrap();
@@ -844,23 +1529,47 @@ fn header_arrows_page_session_tabs_without_moving_factory_or_changing_selection(
         ]);
         let _ = draw(app, vec![]);
     };
-    for _ in 0..3 { let _ = draw(&mut app, vec![]); }
-    let initial = visible();
-    let pinned = factory();
-    assert!(initial.start > 0);
-    assert_eq!(initial.end, app.tabs.len());
+    for _ in 0..60 { let _ = draw(&mut app, vec![]); }
+    let (viewport, content, initial_offset) = scroll();
+    let pinned = logo();
+    assert!(initial_offset > 0.0);
+    assert!((initial_offset - (content - viewport.width())).abs() < 1.0);
     assert!(pinned.right() < arrow("Tabs nach links").left());
     assert!(arrow("Tabs nach rechts").right() <= 820.0);
+    assert!((arrow("Tabs nach rechts").left() - viewport.right() - ctx.style().spacing.item_spacing.x).abs() < 1.0);
+    let last: egui::Rect = ctx.data_mut(|d| d.get_temp::<(egui::Rect, bool)>(
+        egui::Id::new(("test-header-tab", app.tabs.len())),
+    )).unwrap().0;
+    assert!((last.right() - viewport.right()).abs() < 1.0);
 
     click(&mut app, arrow("Tabs nach links").center());
-    assert_eq!(visible(), (initial.start - 1)..(initial.end - 1));
-    assert_eq!(factory(), pinned);
+    let moving_offset = scroll().2;
+    assert!(moving_offset < initial_offset && moving_offset > 0.0);
+    for _ in 0..60 { let _ = draw(&mut app, vec![]); }
+    let settled_offset = scroll().2;
+    assert!(settled_offset < moving_offset, "Arrow scrolling should be animated, not an immediate jump");
+    let distance = initial_offset - settled_offset;
+    assert!((distance - viewport.width() * 0.65).abs() < 2.0,
+        "distance={distance}, viewport_width={}, initial_offset={initial_offset}, settled_offset={settled_offset}", viewport.width());
+    assert!((distance - 220.0).abs() > 10.0, "Must not page one tab at a time");
+    assert_eq!(logo(), pinned);
     assert_eq!(app.active_tab, app.tabs.len());
     click(&mut app, arrow("Tabs nach rechts").center());
-    assert_eq!(visible(), initial);
+    for _ in 0..60 { let _ = draw(&mut app, vec![]); }
+    assert!((scroll().2 - initial_offset).abs() < 1.0);
+    // A regular wheel and horizontal trackpad input both scroll the tab strip.
+    for delta in [egui::vec2(0.0, 37.0), egui::vec2(37.0, 0.0)] {
+        let before = scroll().2;
+        let _ = draw(&mut app, vec![
+            egui::Event::PointerMoved(viewport.center()),
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, modifiers: egui::Modifiers::NONE },
+        ]);
+        for _ in 0..60 { let _ = draw(&mut app, vec![]); }
+        assert!(scroll().2 < before);
+    }
     click(&mut app, pinned.center());
     assert_eq!(app.active_tab, 0);
-    assert_eq!(factory(), pinned);
+    assert_eq!(logo(), pinned);
 }
 
 #[test]
@@ -968,6 +1677,7 @@ fn multiline_session_menu_keeps_the_selected_session_identity() {
         .insert(command.session_id(), title.into());
     let ctx = app.backend.context().clone();
     let mut dialog = Dialog::task(app.server.clone(), project, None);
+    if let Dialog::Task(task) = &mut dialog { task.advanced = true; }
     let id = if let Dialog::Task(task) = &dialog {
         task.id
     } else {
@@ -1033,11 +1743,12 @@ fn multiline_session_menu_keeps_the_selected_session_identity() {
 }
 
 #[test]
-fn task_composer_has_attachments_above_prompt_and_a_single_compact_footer() {
+fn task_composer_has_attachments_above_prompt_and_two_footer_rows() {
     let mut app = fixture();
     let ctx = app.backend.context().clone();
     let mut dialog = Dialog::task(app.server.clone(), app.settings.project.unwrap(), None);
     let id = if let Dialog::Task(task) = &mut dialog {
+        task.advanced = true;
         task.draft
             .files
             .push(PromptFile::from_bytes("notizen.txt".into(), b"Vorschau").unwrap());
@@ -1067,11 +1778,13 @@ fn task_composer_has_attachments_above_prompt_and_a_single_compact_footer() {
         "test-icon-button",
         "Bilder und Dateien hinzufügen",
     )));
-    let paste = rect(egui::Id::new((
-        "test-icon-button",
-        "Bild aus Zwischenablage einfügen",
-    )));
+    assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new((
+        "test-icon-button", "Bild aus Zwischenablage einfügen",
+    )))).is_none());
+    let mcps = rect(egui::Id::new(("test-task-mcps", id)));
     let submit = rect(egui::Id::new(("test-task-action", id, false)));
+    let draft = rect(egui::Id::new(("test-task-as-draft", id)));
+    let keep = rect(egui::Id::new(("test-task-keep-open", id)));
     assert!(tile.bottom() <= prompt.top());
     assert!(prompt.bottom() <= target.top());
     assert!(target.width() <= 177.0);
@@ -1079,32 +1792,26 @@ fn task_composer_has_attachments_above_prompt_and_a_single_compact_footer() {
         (target.left() - prompt.left() + 12.0).abs() < 2.0,
         "Assignment must align with the composer left edge: {target:?} {prompt:?}"
     );
-    for action in [add, paste, submit] {
+    for action in [add, mcps] {
         assert!(
             (action.center().y - target.center().y).abs() < 1.0,
             "{target:?} {action:?}"
         );
     }
     assert!(
-        target.right() < add.left() && add.right() < paste.left() && paste.right() < submit.left()
+        target.right() < add.left() && add.right() < mcps.left()
     );
-    for pressed in [true, false] {
-        let pos = paste.center();
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(938.0, 560.0))),
-                events: vec![
-                    egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton {
-                        pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-                ..Default::default()
-            },
-            |ctx| { dialog.show(ctx, &mut app); },
-        );
+    assert!(submit.top() > mcps.bottom());
+    for action in [draft, keep] {
+        assert!((action.center().y - submit.center().y).abs() < 1.0);
     }
-    assert_eq!(app.clipboard_image_request.take(), Some(id));
+    assert!(keep.right() < draft.left() && draft.right() < submit.left());
+    assert!(draft.left() - keep.right() >= 23.0);
+    assert!(submit.left() - draft.right() >= 23.0);
+    assert!((submit.width() - 200.0).abs() < 1.0);
+    assert!((submit.right() - prompt.right() - 12.0).abs() < 2.0);
+    let divider = rect(egui::Id::new(("test-task-footer-divider", id)));
+    assert!(divider.top() > mcps.bottom() && divider.bottom() < submit.top());
     let pos = target.center();
     let draw = |app: &mut App, dialog: &mut Dialog, events| ctx.run(
         egui::RawInput {
@@ -1124,7 +1831,7 @@ fn task_composer_has_attachments_above_prompt_and_a_single_compact_footer() {
     }
     let _ = draw(&mut app, &mut dialog, vec![]);
     let output = draw(&mut app, &mut dialog, vec![]);
-    let label = "Automatisch durch Orchestrator";
+    let label = "Auto Runner";
     let (option_rect, _, _, lines) = ctx.data_mut(|d| {
         d.get_temp::<(egui::Rect, egui::Rect, Option<egui::Rect>, usize)>(
             egui::Id::new(("test-session-choice", label)),
@@ -1133,7 +1840,8 @@ fn task_composer_has_attachments_above_prompt_and_a_single_compact_footer() {
     assert!(option_rect.width() <= 297.0);
     assert_eq!(lines, 1);
     let text = output.shapes.iter().find_map(|shape| match &shape.shape {
-        egui::epaint::Shape::Text(text) if text.galley.job.text == label => Some(text),
+        egui::epaint::Shape::Text(text) if text.galley.job.text == label
+            && option_rect.contains(text.pos + text.galley.mesh_bounds.center().to_vec2()) => Some(text),
         _ => None,
     }).expect("The automatic menu option must be visible");
     let font = egui::TextStyle::Body.resolve(&ctx.style());
@@ -1145,9 +1853,11 @@ fn task_composer_has_attachments_above_prompt_and_a_single_compact_footer() {
 
 #[test]
 fn task_actions_wait_for_confirmation_then_toast_and_close_or_start_fresh() {
-    for (action, draft, stays_open) in [("queue", false, false), ("new", false, true), ("draft", true, false)] {
+    for (action, draft, stays_open) in [("queue", false, false), ("new", false, true), ("draft", true, false), ("draft-new", true, true)] {
         let mut app = fixture();
         app.online = true;
+        app.settings.task_as_draft = draft;
+        app.settings.task_keep_open = stays_open;
         let ctx = app.backend.context().clone();
         let project = app.settings.project.unwrap();
         let mut dialog = Dialog::task(app.server.clone(), project, None);
@@ -1166,12 +1876,10 @@ fn task_actions_wait_for_confirmation_then_toast_and_close_or_start_fresh() {
         for _ in 0..4 {
             assert!(!draw(&mut dialog, &mut app, vec![]).0);
         }
-        let button_id = if action == "new" {
-            egui::Id::new(("test-task-queue-new", task_id))
-        } else {
-            egui::Id::new(("test-task-action", task_id, draft))
-        };
-        let pos = ctx.data_mut(|d| d.get_temp::<egui::Rect>(button_id)).unwrap().center();
+        let button_id = egui::Id::new(("test-task-action", task_id, false));
+        let button_rect = ctx.data_mut(|d| d.get_temp::<egui::Rect>(button_id)).unwrap();
+        assert!((button_rect.width() - 200.0).abs() < 1.0, "{action}: {button_rect:?}");
+        let pos = button_rect.center();
         for pressed in [true, false] {
             assert!(!draw(&mut dialog, &mut app, vec![
                 egui::Event::PointerMoved(pos),
@@ -1205,7 +1913,7 @@ fn task_actions_wait_for_confirmation_then_toast_and_close_or_start_fresh() {
         assert_eq!(closed, !stays_open);
         assert!(app.settings.pending.is_empty());
         assert_eq!(app.notices.len(), 1);
-        assert_eq!(app.notices[0].0, if draft { "Entwurf gespeichert." } else { "Aufgabe eingereiht." });
+        assert_eq!(app.notices[0].0, if draft { crate::tr!("Entwurf gespeichert.") } else { crate::tr!("Aufgabe eingereiht.") });
         let mut text = vec![];
         for shape in &output.shapes {
             shape_text(&shape.shape, &mut text);
@@ -1422,7 +2130,7 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     for shape in &output.shapes {
         shape_text(&shape.shape, &mut text);
     }
-    assert!(text.iter().any(|s| s == "Draft"));
+    assert!(text.iter().any(|s| s == crate::tr!("Draft")));
     assert!(text.iter().any(|s| s == "Bearbeiten"));
     let (action, _) = ctx
         .data_mut(|d| {
@@ -1591,7 +2299,7 @@ fn read_only_task_dialog_preserves_private_drafts_and_journal_and_rejects_drops(
     }
     assert!(text
         .iter()
-        .any(|t| t == "Aufgabe anzeigen · schreibgeschützt"));
+        .any(|t| t == crate::tr!("Aufgabe anzeigen · schreibgeschützt")));
     assert!(text.iter().any(|t| t == "Gespeicherter Auftrag\nGrüße 界"));
     for forbidden in [
         "Einreihen",
@@ -1622,6 +2330,7 @@ fn read_only_task_dialog_preserves_private_drafts_and_journal_and_rejects_drops(
 #[test]
 fn read_only_task_shows_prompt_offline_and_loads_deferred_attachments_without_writes() {
     let mut app = fixture();
+    app.online = false;
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
     s.payloads_deferred = true;
     let ticket = &mut s.tickets[0];
@@ -1827,7 +2536,7 @@ fn task_tabs_show_project_counts_active_selection_and_separate_lists() {
         for shape in &output.shapes {
             shape_text(&shape.shape, &mut text);
         }
-        for expected in ["Queue (2)", "Draft (1)", "Archiv (1)"] {
+        for expected in ["Queue (2)", "Entwurf (1)", "Archiv (1)"] {
             assert!(text.iter().any(|t| t == expected));
         }
         assert_eq!(text.iter().any(|t| t == "Nur im Draft-Tab"), index == 1);
@@ -2337,7 +3046,7 @@ fn session_rows_match_task_style_and_keep_actions_at_bottom_right_in_an_icon_men
             shape_text(&shape.shape, &mut text);
         }
         assert!(text.iter().any(|t| t == "Titel aus OpenCode"));
-        assert!(text.iter().any(|t| t == "Letzte Aufgabe: Aufgabe Grüße"));
+        assert!(text.iter().any(|t| t == "Letzter Intent: Aufgabe Grüße"));
         assert!(text
             .iter()
             .any(|t| t == &format!("Zuletzt aktiv {}", timestamp(activity))));
@@ -2453,11 +3162,13 @@ fn editing_waits_for_admission_and_keeps_full_payload_and_ownership_when_closed(
         TaskEdit {
             ticket: full.clone(),
             edit_token: token,
+            local_mcps: vec!["blender".into()],
         },
     );
     assert!(app.dialog.is_none());
     let saved = &app.settings.task_drafts[0];
     assert_eq!(saved.edit_token, Some(token));
+    assert_eq!(saved.local_mcps.as_deref(), Some(&["blender".into()][..]));
     assert_eq!(saved.files, full.files);
     assert!(app.snapshot.as_ref().unwrap().tickets[0].files[0]
         .data
@@ -2471,6 +3182,7 @@ fn editing_waits_for_admission_and_keeps_full_payload_and_ownership_when_closed(
         TaskEdit {
             ticket: full,
             edit_token: token,
+            local_mcps: Vec::new(),
         },
     );
     let mut dialog = app.dialog.take().unwrap();
@@ -2560,7 +3272,6 @@ fn every_page_and_dialog_renders_at_small_and_large_sizes_without_writes() {
         Page::Sessions,
         Page::Orchestrator,
         Page::Supervisor,
-        Page::Runners,
         Page::Diagnostics,
         Page::Notifications,
         Page::Overview,
@@ -2583,7 +3294,6 @@ fn every_page_and_dialog_renders_at_small_and_large_sizes_without_writes() {
         for mut dialog in [
             Dialog::task(app.server.clone(), project, None),
             Dialog::questions(qs),
-            Dialog::Settings,
             Dialog::FactorySettings,
             Dialog::Pending,
             Dialog::connection(app.server.clone()),
@@ -2630,7 +3340,6 @@ fn pages_keep_the_breadcrumb_without_repeating_the_page_heading() {
         Page::Supervisor,
         Page::Overview,
         Page::Infrastructure,
-        Page::Runners,
         Page::Diagnostics,
         Page::Notifications,
     ] {
@@ -2750,7 +3459,7 @@ fn drafts_offer_editing_without_optional_editable_task_metadata() {
     );
 }
 
-fn shape_text(shape: &egui::epaint::Shape, text: &mut Vec<String>) {
+pub(crate) fn shape_text(shape: &egui::epaint::Shape, text: &mut Vec<String>) {
     match shape {
         egui::epaint::Shape::Text(value) => text.push(value.galley.job.text.clone()),
         egui::epaint::Shape::Vec(shapes) => {
@@ -2825,72 +3534,46 @@ fn diagnostics_use_flat_equal_width_rows_with_details_actions() {
 }
 
 #[test]
-fn runner_rows_match_task_layout_without_metadata_or_ssh_setup() {
+fn saved_runner_page_opens_infrastructure_instead() {
+    assert_eq!(serde_json::from_value::<Page>(json!("Runners")).unwrap(), Page::Infrastructure);
+}
+
+#[test]
+fn empty_project_lists_center_the_matching_icon_and_short_message_below_the_toolbar() {
     let mut app = fixture();
-    app.online = true;
-    app.set_page(Page::Runners);
-    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
-    let local = s.runners[0].id;
-    let command = s.commands[0].clone();
-    s.session_titles.insert(command.session_id(), "Mausbedienung verbessern".into());
-    let mut remote = s.runners[0].clone();
-    remote.id = RunnerId::new();
-    remote.name = "Entfernter Runner".into();
-    remote.location = RunnerLocation::Server;
-    remote.connection = ConnectionState::Unreachable;
-    remote.opencode = OpenCodeStatus::Unavailable;
-    let remote_id = remote.id;
-    s.runners.push(remote);
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.tickets.clear();
+    snapshot.commands.clear();
+    snapshot.questions.clear();
     let ctx = app.backend.context().clone();
-    let draw = |app: &mut App, size, events| ctx.run(
-        egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-            events,
-            ..Default::default()
-        },
-        |ctx| app.draw_shell(ctx),
-    );
-    for size in [egui::vec2(820.0, 560.0), egui::vec2(1360.0, 900.0)] {
-        let mut output = None;
-        for _ in 0..4 { output = Some(draw(&mut app, size, vec![])); }
-        let row = |id| ctx.data_mut(|d| d.get_temp::<egui::Rect>(
-            egui::Id::new(("test-runner-row", id)),
-        )).unwrap();
-        assert!((row(local).width() - row(remote_id).width()).abs() < 1.0);
-        for id in [local, remote_id] {
-            let (title, pill) = ctx.data_mut(|d| d.get_temp::<(egui::Rect, egui::Rect)>(
-                egui::Id::new(("test-runner-heading", id)),
-            )).unwrap();
-            assert!(pill.left() > title.right());
-            assert!((pill.top() - title.top()).abs() < 1.0);
-            assert!(row(id).right() - pill.right() < 20.0);
-            let (icon,name,color) = ctx.data_mut(|d|d.get_temp::<(egui::Rect,egui::Rect,egui::Color32)>(
-                egui::Id::new(("test-runner-icon",id)),
-            )).unwrap();
-            assert!((icon.center().y-name.center().y).abs()<1.0,"Runner name and icon must share a center");
-            assert_eq!(color,if id==local {crate::app::GREEN}else{crate::app::RED});
+    for (page, expected) in [
+        (Page::Tasks, crate::tr!("Keine Aufgaben")),
+        (Page::Questions, "Keine Fragen"),
+        (Page::Sessions, "Keine Sessions"),
+        (Page::Orchestrator, "Keine Orchestrator-Läufe"),
+        (Page::Supervisor, "Keine Supervisor-Läufe"),
+        (Page::Memorizer, "Keine Memorizer-Läufe"),
+    ] {
+        app.set_page(page);
+        for size in [egui::vec2(820.0, 560.0), egui::vec2(1360.0, 900.0)] {
+            let draw = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let _ = ctx.run(draw(), |ctx| app.draw_shell(ctx));
+            let output = ctx.run(draw(), |ctx| app.draw_shell(ctx));
+            let mut text = Vec::new();
+            for shape in &output.shapes {
+                shape_text(&shape.shape, &mut text);
+            }
+            assert!(text.iter().any(|value| value == expected), "{page:?}: {text:?}");
+            assert!(text.iter().any(|value| value == page.icon()), "{page:?}: {text:?}");
+            let (bounds, state): (egui::Rect, egui::Rect) =
+                ctx.data_mut(|d| d.get_temp(egui::Id::new("test-list-empty-state"))).unwrap();
+            assert!(bounds.height() > 200.0);
+            assert!((bounds.center() - state.center()).length() < 1.0, "{bounds:?} {state:?}");
         }
-        let mut text = vec![];
-        for shape in &output.unwrap().shapes { shape_text(&shape.shape, &mut text); }
-        for forbidden in ["SSH-Verbindung", "Runner-Metadaten", "globale Verbindung",
-            "Ready {", "RunAgent", "OpenCode-Instanz", &local.to_string(), &remote_id.to_string()] {
-            assert!(!text.iter().any(|t| t.contains(forbidden)), "{forbidden}: {text:?}");
-        }
-        assert!(text.iter().any(|t| t == "Verbunden"));
-        assert!(text.iter().any(|t| t == crate::design::RUNNER_ICON));
-        assert!(text.iter().any(|t| t == "OpenCode bereit"));
-        assert!(text.iter().any(|t| t == "Mausbedienung verbessern"));
     }
-    let pos = ctx.data_mut(|d| d.get_temp::<egui::Rect>(
-        egui::Id::new(("test-runner-session-open", command.id)),
-    )).unwrap().center();
-    let _ = draw(&mut app, egui::vec2(1360.0, 900.0), vec![
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed:true,modifiers:egui::Modifiers::NONE},
-        egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed:false,modifiers:egui::Modifiers::NONE},
-    ]);
-    assert_eq!(app.tabs[0].root, command.session_root());
-    assert!(app.settings.pending.is_empty());
 }
 
 #[test]
@@ -2934,15 +3617,15 @@ fn notifications_live_below_overview_with_an_unread_count_and_no_header_button()
     };
     let overview = row(Page::Overview);
     let notifications = row(Page::Notifications);
-    let runners = row(Page::Runners);
-    assert!(overview.bottom() < notifications.top() && notifications.bottom() < runners.top());
+    let diagnostics = row(Page::Diagnostics);
+    assert!(overview.bottom() < notifications.top() && notifications.bottom() < diagnostics.top());
     assert_eq!(overview.width(), notifications.width());
     assert!(overview.width() >= 260.0 && overview.right() <= 300.0);
     assert_eq!(overview.height(), crate::design::LIST_ROW_HEIGHT);
     assert!((notifications.top() - overview.bottom() - crate::design::MAIN_MENU_ITEM_GAP).abs() < 0.1);
     let infrastructure = row(Page::Infrastructure);
     assert!((infrastructure.top() - notifications.bottom() - crate::design::MAIN_MENU_ITEM_GAP).abs() < 0.1);
-    assert!((runners.top() - infrastructure.bottom() - crate::design::MAIN_MENU_ITEM_GAP).abs() < 0.1);
+    assert!((diagnostics.top() - infrastructure.bottom() - crate::design::MAIN_MENU_ITEM_GAP).abs() < 0.1);
     assert_eq!(overview.width(), infrastructure.width());
     let mut text = vec![];
     for shape in &output.shapes {
@@ -2996,7 +3679,7 @@ fn notifications_live_below_overview_with_an_unread_count_and_no_header_button()
         shape_text(&shape.shape, &mut text);
     }
     assert!(!text.iter().any(|t| t == "Einstellungen …"));
-    for expected in ["WOAI-1", "Projektmodell fehlt", "Neu", "Zur Aufgabe"] {
+    for expected in ["WOAI-1", "Projektmodell fehlt", "Neu", crate::tr!("Zur Aufgabe")] {
         assert!(text.iter().any(|t| t == expected), "{expected}");
     }
     assert!(!text.iter().any(|t| t.ends_with(" ungelesen")));
@@ -3101,8 +3784,11 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
     let settings = ctx.data_mut(|d| d.get_temp::<egui::Rect>(
         egui::Id::new("test-footer-settings"),
     )).unwrap();
-    assert!(settings.right() > size.x - 16.0 && settings.bottom() > size.y - 40.0);
-    assert!(version.right() < settings.left());
+    let about = ctx.data_mut(|d| d.get_temp::<egui::Rect>(
+        egui::Id::new("test-footer-about"),
+    )).unwrap();
+    assert!(about.right() > size.x - 16.0 && about.bottom() > size.y - 40.0);
+    assert!(version.right() < settings.left() && settings.right() < about.left());
     let footer = ctx
         .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-footer-panel")))
         .unwrap();
@@ -3130,8 +3816,8 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
     assert!((status.left() - url.left()).abs() < 1.0);
     assert!(url.top() >= status.bottom());
     assert!(
-        (version.bottom() - url.bottom()).abs() < 1.0,
-        "Version must align with the second footer line: {version:?} {url:?}"
+        (version.center().y - footer.center().y).abs() < 1.0,
+        "Version must be vertically centered in the footer: {version:?} {footer:?}"
     );
     assert!(
         (version.height() - url.height()).abs() < 1.0,
@@ -3165,11 +3851,11 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
         shape_text(&shape.shape, &mut text);
     }
     for expected in [
-        "Neues Projekt",
-        "Projekt editieren",
+        "Neues Projekt …",
+        crate::tr!("Projekteinstellungen …"),
         "Projekt pausieren",
-        "Projekt löschen",
-        "Erweiterte Projekteinstellungen",
+        "Verbrauch …",
+        "Projekt löschen …",
     ] {
         assert!(text.iter().any(|v| v == expected), "{expected}: {text:?}");
     }
@@ -3179,12 +3865,15 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
         "Letzter Serverabgleich",
         "Einrichtung / Runner / Harness …",
         "Wissen anzeigen",
+        "Projekt editieren",
+        "Erweiterte Projekteinstellungen",
     ] {
         assert!(!text.iter().any(|v| v.contains(removed)), "{removed}");
     }
     let rows = ctx
-        .data_mut(|d| d.get_temp::<[egui::Rect; 4]>(egui::Id::new("test-project-menu-rows")))
+        .data_mut(|d| d.get_temp::<[egui::Rect; 5]>(egui::Id::new("test-project-menu-rows")))
         .unwrap();
+    assert!(rows.windows(2).all(|pair| pair[0].top() < pair[1].top()));
     for row in rows {
         assert!(
             (row.width() - 310.0).abs() < 1.0,
@@ -3206,11 +3895,15 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
         hovered.shapes.iter().any(|s| has_hover(&s.shape, rows[0])),
         "Menu hover must have a clearly contrasting full-width background"
     );
+    let project = app.project().unwrap().id;
+    let _ = draw(&mut app, click_events(rows[3].center()));
+    assert!(matches!(&app.dialog, Some(Dialog::Read { title, path, .. })
+        if title.starts_with("Verbrauch - ") && path == &format!("/v1/projects/{project}/usage")));
     assert!(app.settings.pending.is_empty());
 }
 
 #[test]
-fn orchestrator_settings_live_in_advanced_project_settings_not_above_the_list() {
+fn orchestrator_settings_live_in_project_settings_not_above_the_list() {
     use crate::project_settings::ProjectSection;
     let mut app = fixture();
     let project = app.settings.project.unwrap();
@@ -3243,10 +3936,8 @@ fn orchestrator_settings_live_in_advanced_project_settings_not_above_the_list() 
 
         let mut dialog = Dialog::project_settings(project);
         for (section, method, suffix) in [
-            (ProjectSection::Scheduler, "POST", "scheduler"),
-            (ProjectSection::SessionLimit, "POST", "session-limit"),
+            (ProjectSection::Limits, "POST", "session-limit"),
             (ProjectSection::Supervisor, "GET", "supervisor"),
-            (ProjectSection::SupervisorHistory, "GET", "supervisor/evaluations"),
         ] {
             assert!(ProjectSection::ALL.contains(&section));
             if let Dialog::ProjectSettings(settings) = &mut dialog {
@@ -3266,10 +3957,7 @@ fn orchestrator_settings_live_in_advanced_project_settings_not_above_the_list() 
                     Dialog::Form(form) => {
                         assert_eq!(form.path, expected);
                         assert_eq!(form.method, method);
-                        assert_eq!(
-                            form.body["expected_revision"],
-                            if section == ProjectSection::Scheduler { 0 } else { 1 },
-                        );
+                        assert_eq!(form.body["expected_revision"], 1);
                     }
                     Dialog::Read { path, .. } => {
                         assert_eq!(method, "GET");
@@ -3286,19 +3974,125 @@ fn orchestrator_settings_live_in_advanced_project_settings_not_above_the_list() 
 }
 
 #[test]
-fn advanced_project_navigation_and_close_keep_each_form_draft() {
+fn queued_intent_routing_note_has_clearance_below_the_previous_metadata_field() {
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.commands.clear();
+    snapshot.streams.clear();
+    snapshot.questions.clear();
+    let ticket = &mut snapshot.tickets[0];
+    ticket.execution_command = None;
+    ticket.status = TicketState::Ready;
+    ticket.routing_note = "Wartet auf verfügbaren Runner mit den freigegebenen MCPs".into();
+    let id = ticket.id;
+    app.set_page(Page::Tasks);
+    app.task_filter = 0;
+    let ctx = app.backend.context().clone();
+    for _ in 0..4 {
+        let _ = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+    }
+    let (_, previous): (egui::Rect, egui::Rect) = ctx.data_mut(|d| d.get_temp(
+        egui::Id::new(("test-task-row-metadata-lines", id)))).unwrap();
+    let note: egui::Rect = ctx.data_mut(|d| d.get_temp(
+        egui::Id::new(("test-task-row-routing-note", id)))).unwrap();
+    let gap = note.top() - previous.bottom();
+    assert!((gap - crate::design::TASK_ROUTING_NOTE_GAP).abs() <= 1.0, "{gap}");
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
+fn queued_intent_explains_an_unavailable_assigned_runner_even_with_another_online() {
+    let app = fixture();
+    let mut s = (**app.snapshot.as_ref().unwrap()).clone();
+    let mut ticket = s.tickets[0].clone();
+    ticket.status = TicketState::Backlog;
+    ticket.execution_command = None;
+    s.commands.clear();
+    ticket.routing_note = "Wartet auf verfügbaren Runner mit den freigegebenen MCPs".into();
+    assert_eq!(task_routing_level(&ticket.routing_note), TaskHistoryLevel::Warning);
+    s.scheduler_policies = vec![SchedulerPolicy {
+        project_id: ticket.project_id, revision: Revision(1), enabled: true,
+        runner_ids: vec![RunnerId::new()], max_parallel: 6,
+    }];
+    assert_eq!(task_status(&s, &ticket), crate::tr!("Wartend"));
+    assert_eq!(crate::views::status_color(task_status(&s, &ticket)), crate::app::AMBER);
+    s.tickets[0] = ticket.clone();
+    assert_eq!(task_queue_counts(&s, ticket.project_id), (0, 1));
+    assert_eq!(task_runner_blocker(&s, &ticket),
+        Some(crate::tr!("Kein zugeordneter Runner ist online. Prüfe die Runner-Zuordnung im Projekt.")));
+    s.scheduler_policies[0].runner_ids = vec![s.runners[0].id];
+    assert_eq!(task_runner_blocker(&s, &ticket),
+        Some(crate::tr!("Kein zugeordneter Runner ist für die ausgewählten MCPs bereit.")));
+}
+
+#[test]
+fn project_limits_only_expose_one_value_and_save_with_the_revision_internally() {
+    use crate::project_settings::ProjectSection;
+    let mut app = fixture();
+    app.online = true;
+    let project = app.project().unwrap().id;
+    let mut dialog = Dialog::project_settings(project);
+    let Dialog::ProjectSettings(settings) = &mut dialog else { unreachable!() };
+    settings.selected = ProjectSection::Limits;
+    let ctx = app.backend.context().clone();
+    let mut draw = |events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(950.0, 650.0))),
+        events, ..Default::default()
+    }, |ctx| { dialog.show(ctx, &mut app); });
+    let click = |id| {
+        let rect: egui::Rect = ctx.data_mut(|d| d.get_temp(id)).unwrap();
+        click_events(rect.center())
+    };
+    let _ = draw(vec![]);
+    let _ = draw(vec![]);
+    let output = draw(vec![]);
+    let mut text = Vec::new();
+    for shape in &output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
+    assert_eq!(text.iter().filter(|t| *t == "Gleichzeitig arbeitende Sessions").count(), 1);
+    assert_eq!(text.iter().filter(|t| *t == "Limits").count(), 2, "{text:?}");
+    for forbidden in ["Serverrevision", "Anfragedaten", "Request-ID", "Startbudget", "Verteilung", "Sessionlimit",
+        "Tokenbudget", "Nutzung und Kosten", "Projektwissen", "Wissenskontext", "Wissen hinzufügen"] {
+        assert!(!text.iter().any(|t| t.contains(forbidden)), "{text:?}");
+    }
+    assert!(text.iter().any(|t| t == "6"), "{text:?}");
+    let picker = egui::Id::new("test-project-limit-picker");
+    let picker_rect: egui::Rect = ctx.data_mut(|d| d.get_temp(picker)).unwrap();
+    assert!(picker_rect.width() > 300.0, "{picker_rect:?}");
+    let _ = draw(click(picker));
+    for _ in 0..3 {
+        let _ = draw(vec![]);
+    }
+    let _ = draw(click(egui::Id::new(("test-project-limit-option", 2_u64))));
+    let _ = draw(vec![]);
+    let _ = draw(click(egui::Id::new("test-settings-save")));
+    assert_eq!(app.settings.pending.len(), 1);
+    let request = &app.settings.pending[0];
+    assert_eq!(request.path, format!("/v1/projects/{project}/session-limit"));
+    assert_eq!(request.body["max_sessions"], 2);
+    assert_eq!(request.body["expected_revision"], 1);
+}
+
+#[test]
+fn project_settings_keep_general_and_runner_drafts_separate() {
     use crate::project_settings::ProjectSection;
     let mut app = fixture();
     let ctx = app.backend.context().clone();
     let project = app.settings.project.unwrap();
+    let runner = app.snapshot.as_ref().unwrap().runners[0].id;
+    let title = crate::tr!("Projekteinstellungen - {}", app.project().unwrap().name);
     let mut dialog = Dialog::project_settings(project);
     for size in [egui::vec2(820.0, 560.0), egui::vec2(1360.0, 900.0)] {
-        for section in [ProjectSection::Profile, ProjectSection::Ticket] {
+        for section in [ProjectSection::General, ProjectSection::Runner, ProjectSection::Limits] {
             if let Dialog::ProjectSettings(settings) = &mut dialog {
                 settings.selected = section;
             }
-            for _ in 0..5 {
-                let _ = ctx.run(
+            for frame in 0..5 {
+                let output = ctx.run(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                         ..Default::default()
@@ -3307,6 +4101,17 @@ fn advanced_project_navigation_and_close_keep_each_form_draft() {
                         dialog.show(ctx, &mut app);
                     },
                 );
+                let mut text = Vec::new();
+                for shape in &output.shapes {
+                    shape_text(&shape.shape, &mut text);
+                }
+                if frame == 4 {
+                    assert!(text.contains(&title), "{text:?}");
+                    // In Allgemein the existing name is still painted inside its text field.
+                    let name_count = text.iter().filter(|item| *item == &app.project().unwrap().name).count();
+                    assert!(name_count <= usize::from(section == ProjectSection::General), "{text:?}");
+                    assert!(!text.iter().any(|item| item == "Einrichtung" || item == "Modell und Ausführung"));
+                }
             }
             let rect = ctx
                 .memory(|m| m.area_rect(egui::Id::new(("factory-project-settings", Some(project)))))
@@ -3331,10 +4136,10 @@ fn advanced_project_navigation_and_close_keep_each_form_draft() {
                     .last_mut()
                     .unwrap()
                 {
-                    if section == ProjectSection::Profile {
-                        form.body["profile"]["model_id"] = json!("Mein Modell");
-                    } else {
-                        form.body["title"] = json!("Mein Entwurf");
+                    match section {
+                        ProjectSection::General => form.body["name"] = json!("Mein Projekt"),
+                        ProjectSection::Runner => form.body["runner_mapping"] = json!(ProjectRunnerMapping::Runner(runner)),
+                        _ => form.body["max_sessions"] = json!(3),
                     }
                 }
             }
@@ -3345,30 +4150,33 @@ fn advanced_project_navigation_and_close_keep_each_form_draft() {
         .settings
         .form_drafts
         .iter()
-        .any(|d| d.path == "/v1/tickets" && d.body["title"] == "Mein Entwurf"));
+        .any(|d| d.path == format!("/v1/projects/{project}/session-limit") && d.body["max_sessions"] == 3));
     assert!(app
         .settings
         .form_drafts
         .iter()
-        .any(|d| d.path == format!("/v1/projects/{project}/profile")));
+        .any(|d| d.path == format!("/v1/projects/{project}") && d.body["name"] == "Mein Projekt" && d.body.get("runner_mapping").is_none()));
+    assert!(app.settings.form_drafts.iter().any(|d| d.path == format!("/v1/projects/{project}")
+        && d.body.get("name").is_none() && d.body["runner_mapping"] == json!(ProjectRunnerMapping::Runner(runner))));
     let mut restored = Dialog::project_settings(project);
     if let Dialog::ProjectSettings(settings) = &mut restored {
-        settings.selected = ProjectSection::Ticket;
+        settings.selected = ProjectSection::Limits;
     }
     let _ = ctx.run(egui::RawInput::default(), |ctx| {
         restored.show(ctx, &mut app);
     });
     if let Dialog::ProjectSettings(settings) = restored {
-        if let Dialog::Form(form) = settings.panes[&ProjectSection::Ticket].last().unwrap() {
-            assert_eq!(form.body["title"], "Mein Entwurf");
+        if let Dialog::Form(form) = settings.panes[&ProjectSection::Limits].last().unwrap() {
+            assert_eq!(form.body["max_sessions"], 3);
         }
     }
     assert!(app.settings.pending.is_empty());
 }
 
 #[test]
-fn connection_overview_is_read_only_and_has_status_graph_and_settings_link() {
+fn connection_overview_has_status_graph_and_disconnected_actions() {
     let mut app = fixture();
+    app.online = false;
     let ctx = app.backend.context().clone();
     let mut dialog = Dialog::ConnectionInfo;
     for _ in 0..3 {
@@ -3404,11 +4212,12 @@ fn connection_overview_is_read_only_and_has_status_graph_and_settings_link() {
     for expected in [
         "Dieser Desktop",
         "Factory-Server",
-        "OpenCode",
-        "Verbindungseinstellungen öffnen …",
+        "Verbinden…",
+        "Lokale Factory",
     ] {
         assert!(text.iter().any(|v| v == expected), "{expected}: {text:?}");
     }
+    assert!(!text.iter().any(|v| v.contains("OpenCode") || v.contains("Präsenz")));
     assert!(app.settings.pending.is_empty());
 }
 
@@ -3509,7 +4318,7 @@ fn connection_without_default_explains_setup_before_opening_model_access() {
     for shape in draw(&mut app, &mut dialog, vec![]).shapes {
         shape_text(&shape.shape, &mut text);
     }
-    assert!(text.iter().any(|s| s.contains("noch kein Standardmodell")));
+    assert!(text.iter().any(|s| s.contains("noch kein Default Model")));
     assert!(app.factory_settings.is_none());
     let button: egui::Rect = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-model-setup-continue"))).unwrap();
     let modal: egui::Rect = ctx.data_mut(|data| data.get_temp(egui::Id::new("test-model-setup-rect"))).unwrap();
@@ -3553,6 +4362,90 @@ fn project_pause_submits_directly_and_waits_for_confirmed_state() {
 }
 
 #[test]
+fn devices_show_only_active_accesses_and_revoke_without_raw_management_forms() {
+    use crate::project_settings::{ProjectSection, ProjectSettings};
+    let mut app = fixture();
+    app.online = true;
+    let desktop = Device {
+        id: DeviceId::new(), name: "Mein Desktop".into(), role: DeviceRole::Admin,
+        runner_id: None, revoked: false, created_unix_ms: 1,
+    };
+    let mut runner = Device {
+        id: DeviceId::new(), name: "Lokaler Test-Runner".into(), role: DeviceRole::Runner,
+        runner_id: Some(RunnerId::new()), revoked: false, created_unix_ms: 2,
+    };
+    let old = Device {
+        id: DeviceId::new(), name: "Bereits entfernter Zugang".into(), role: DeviceRole::Operator,
+        runner_id: None, revoked: true, created_unix_ms: 0,
+    };
+    app.access = Some(AccessView { role: DeviceRole::Admin, device_id: Some(desktop.id), runner_id: None });
+    let read = 900;
+    app.responses.insert(read, Ok(json!([desktop, runner, old])));
+    let mut settings = ProjectSettings::factory();
+    settings.selected = ProjectSection::Devices;
+    settings.panes.insert(ProjectSection::Devices, vec![Dialog::Read {
+        title: "Geräte und Zugänge".into(), request: read, path: "/v1/devices".into(),
+    }]);
+    app.factory_settings = Some(settings);
+    let mut dialog = Dialog::FactorySettings;
+    let ctx = app.backend.context().clone();
+    let render = |dialog: &mut Dialog, app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| { assert!(!dialog.show(ctx, app)); });
+    for _ in 0..3 { let _ = render(&mut dialog, &mut app, vec![]); }
+    let output = render(&mut dialog, &mut app, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|t| t == "Mein Desktop"));
+    assert!(text.iter().any(|t| t == "Dieser Desktop"));
+    assert!(text.iter().any(|t| t == "Lokaler Test-Runner"));
+    assert_eq!(text.iter().filter(|t| t.as_str() == ProjectSection::Devices.title()).count(), 2,
+        "Devices needs both a sidebar entry and a heading above its list");
+    assert!(!text.iter().any(|t| t.contains("Bereits entfernter Zugang") || t.contains(&runner.id.to_string()) || t == "Exportieren …"));
+    app.access.as_mut().unwrap().device_id = None;
+    let mut shared_access_text = vec![];
+    for shape in render(&mut dialog, &mut app, vec![]).shapes {
+        shape_text(&shape.shape, &mut shared_access_text);
+    }
+    assert!(!shared_access_text.iter().any(|t| [
+        crate::tr!("Vollständige Daten"), crate::tr!("Aktualisieren"),
+        crate::tr!("Dieser Desktop: gemeinsamer Factory-Zugang, nicht einzeln widerrufbar."),
+    ].contains(&t.as_str())));
+    app.access.as_mut().unwrap().device_id = Some(desktop.id);
+    let revoke: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-device-revoke", runner.id)))).unwrap();
+    let click = |dialog: &mut Dialog, app: &mut App, pos| {
+        let _ = render(dialog, app, vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ]);
+        render(dialog, app, vec![])
+    };
+    let output = click(&mut dialog, &mut app, revoke.center());
+    assert!(app.settings.pending.is_empty(), "Revocation requires explicit confirmation");
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(!text.iter().any(|t| t.contains("Vollständige Anfragedaten") || t == "null"));
+    let confirm: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-device-revoke-confirm"))).unwrap();
+    let _ = click(&mut dialog, &mut app, confirm.center());
+    assert_eq!(app.settings.pending.len(), 1);
+    let request = app.settings.pending[0].clone();
+    assert_eq!(request.path, format!("/v1/devices/{}/revoke", runner.id));
+    runner.revoked = true;
+    app.backend.emit_for_test(crate::backend::Event::Request(request.id, Ok(json!(runner))));
+    app.receive();
+    for _ in 0..3 { let _ = render(&mut dialog, &mut app, vec![]); }
+    let output = render(&mut dialog, &mut app, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(!text.iter().any(|t| t == "Lokaler Test-Runner"));
+    assert!(text.iter().any(|t| t == "Mein Desktop"));
+    assert!(app.settings.pending.is_empty());
+    assert_eq!(app.notices.last().unwrap().0, "Gerätezugang widerrufen.");
+}
+
+#[test]
 fn settings_menu_and_copy_use_normal_body_size_and_sidebar_hover_style() {
     use crate::project_settings::ProjectSection;
     let mut app = fixture();
@@ -3583,7 +4476,7 @@ fn settings_menu_and_copy_use_normal_body_size_and_sidebar_hover_style() {
         .data_mut(|d| {
             d.get_temp::<egui::Rect>(egui::Id::new((
                 "test-project-section",
-                ProjectSection::Invite.title(),
+                ProjectSection::Devices.title(),
             )))
         })
         .unwrap();
@@ -3601,7 +4494,7 @@ fn settings_menu_and_copy_use_normal_body_size_and_sidebar_hover_style() {
                     && ProjectSection::FACTORY
                         .iter()
                         .any(|s| s.title() == t.galley.job.text))
-                    || t.galley.job.text.starts_with("Desktop-Meldungen werden") =>
+                    =>
             {
                 fonts.extend(t.galley.job.sections.iter().map(|s| s.format.font_id.size));
             }
@@ -3623,20 +4516,20 @@ fn settings_menu_and_copy_use_normal_body_size_and_sidebar_hover_style() {
     for shape in &output.shapes {
         collect(&shape.shape, &mut fonts, &mut hover, row);
     }
-    assert!(fonts.len() >= 6);
+    assert!(fonts.len() >= ProjectSection::FACTORY.len());
     assert!(fonts.iter().all(|size| *size == 16.0), "{fonts:?}");
     let mut text = vec![];
     for shape in &output.shapes {
         shape_text(&shape.shape, &mut text);
     }
     assert_eq!(
-        text.iter().filter(|t| t.as_str() == ProjectSection::Desktop.title()).count(),
+        text.iter().filter(|t| t.as_str() == ProjectSection::Devices.title()).count(),
         1,
         "Section name belongs in the sidebar only"
     );
     assert_eq!(
         text.iter()
-            .filter(|t| t.as_str() == "Factory-Einstellungen")
+            .filter(|t| t.as_str() == crate::tr!("Factory-Einstellungen"))
             .count(),
         1,
         "Settings dialog needs one shared header"
@@ -3648,7 +4541,7 @@ fn settings_menu_and_copy_use_normal_body_size_and_sidebar_hover_style() {
 }
 
 #[test]
-fn footer_settings_open_a_dialog_and_keep_drafts_when_closed_and_reopened() {
+fn footer_settings_open_a_trimmed_dialog_and_keep_navigation_when_reopened() {
     use crate::project_settings::ProjectSection;
     let mut app = fixture();
     let ctx = app.backend.context().clone();
@@ -3699,40 +4592,22 @@ fn footer_settings_open_a_dialog_and_keep_drafts_when_closed_and_reopened() {
     );
     assert_eq!(app.page(), Page::Tasks);
     assert!(matches!(app.dialog, Some(Dialog::FactorySettings)));
-    app.factory_settings.as_mut().unwrap().selected = ProjectSection::Invite;
+    app.factory_settings.as_mut().unwrap().selected = ProjectSection::Devices;
     let _ = draw(&mut app, vec![]);
-    let panes = &mut app.factory_settings.as_mut().unwrap().panes;
-    if let Dialog::Form(form) = panes
-        .get_mut(&ProjectSection::Invite)
-        .unwrap()
-        .last_mut()
-        .unwrap()
-    {
-        form.body["ttl_seconds"] = json!(1234);
-    }
     let _ = draw(&mut app, vec![egui::Event::Key {
         key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers::NONE,
     }]);
     assert!(app.dialog.is_none());
-    assert!(app
-        .settings
-        .form_drafts
-        .iter()
-        .any(|d| d.body["ttl_seconds"] == 1234));
-    // Recreate the dialog from its persisted draft, as after a desktop restart.
-    app.factory_settings = None;
+    assert_eq!(app.factory_settings.as_ref().unwrap().selected, ProjectSection::Devices);
     app.set_page(Page::Settings);
     let _ = draw(&mut app, vec![]);
-    app.factory_settings.as_mut().unwrap().selected = ProjectSection::Invite;
-    let _ = draw(&mut app, vec![]);
     assert!(matches!(app.dialog, Some(Dialog::FactorySettings)));
-    let form = app.factory_settings.as_ref().unwrap().panes[&ProjectSection::Invite]
-        .last()
-        .unwrap();
-    if let Dialog::Form(form) = form {
-        assert_eq!(form.body["ttl_seconds"], 1234);
-    } else {
-        panic!("Expected invitation form in the settings dialog");
+    assert_eq!(app.factory_settings.as_ref().unwrap().selected, ProjectSection::Devices);
+    let output = draw(&mut app, vec![]);
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    for removed in ["Gerät einladen", "Gerät widerrufen", "Desktop-Meldungen", "Offene Zustellungen"] {
+        assert!(!text.iter().any(|t| t == removed), "{removed}: {text:?}");
     }
     assert!(app.settings.pending.is_empty());
     app.dialog=None;
@@ -3784,7 +4659,7 @@ fn opencode_points_only_show_while_working_and_archived_errors_are_readable() {
     let mut text = vec![];
     for shape in frame(&mut app).shapes { shape_text(&shape.shape, &mut text); }
     assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(indicator)).is_none());
-    assert!(text.iter().any(|s| s.contains("ChatGPT hat keinen Modell-Stream geliefert")), "{text:?}");
+    assert!(text.iter().any(|s| s.contains("ChatGPT hat keinen Model-Stream geliefert")), "{text:?}");
     assert!(!text.iter().any(|s| s.contains("RAW_GATEWAY_JSON") || s.contains("Noch kein Nachrichtentext") || s.contains("Ausführung mit Fehler beendet")));
 }
 
@@ -3855,7 +4730,7 @@ fn dialog_has_outer_clearance_and_top_right_close_keeps_the_draft() {
         .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-dialog-close-rect")))
         .unwrap();
     assert!(rect.contains_rect(close_rect), "dialog {rect:?}, close {close_rect:?}");
-    assert_dialog_header_ink_alignment(&output.unwrap(), rect, "Neue Aufgabe");
+    assert_dialog_header_ink_alignment(&output.unwrap(), rect, crate::tr!("Neue Aufgabe"));
     let position = close_rect.center();
     let mut closed = false;
     for pressed in [true, false] {
@@ -4098,12 +4973,12 @@ fn task_dialog_grows_before_scrolling_and_keeps_actions_below_the_viewport() {
             .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-task-action", id, false))))
             .unwrap();
         let draft = ctx
-            .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-task-action", id, true))))
+            .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-task-as-draft", id))))
             .unwrap();
         assert!(submit.top()>=viewport.bottom() && draft.top()>=viewport.bottom(),"lines {lines}: submit {submit:?}, draft {draft:?}, viewport {viewport:?}, modal {rect:?}");
         assert!(rect.contains_rect(submit) && rect.contains_rect(draft));
         assert!(
-            submit.left() > draft.right() && (submit.right() - (rect.right() - 24.0)).abs() < 2.0
+            draft.right() < submit.left() && (submit.right() - (rect.right() - 24.0)).abs() < 2.0
         );
     }
     assert!(app.settings.pending.is_empty());

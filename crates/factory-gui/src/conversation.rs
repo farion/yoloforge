@@ -44,7 +44,7 @@ pub fn working_indicator(ui: &mut egui::Ui) {
             .request_repaint_after(std::time::Duration::from_millis(40));
     }
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "OpenCode arbeitet")
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, true, crate::tr!("OpenCode arbeitet"))
     });
     #[cfg(test)]
     ui.ctx()
@@ -94,10 +94,10 @@ fn error_message(error: &Value) -> &str {
         // An older Factory reported HTTP 200 as a rejection when the body
         // didn't have the expected streaming content type.
         Some("Model provider rejected the request (HTTP 200)") => {
-            "ChatGPT hat keinen Modell-Stream geliefert."
+            crate::tr!("ChatGPT hat keinen Modell-Stream geliefert.")
         }
         Some(message) => message,
-        None => "OpenCode hat die Ausführung mit einem Fehler beendet.",
+        None => crate::tr!("OpenCode hat die Ausführung mit einem Fehler beendet."),
     }
 }
 
@@ -268,9 +268,9 @@ pub fn message(
         let message = if failure && !value["error"].is_null() {
             design_error_line(&value["error"])
         } else if failure {
-            "Ausführung mit Fehler beendet".into()
+            crate::tr!("Ausführung mit Fehler beendet").into()
         } else {
-            "Ausführung beendet".into()
+            crate::tr!("Ausführung beendet").into()
         };
         return ui.add_sized(
             [width, 22.0],
@@ -316,7 +316,7 @@ pub fn message(
                     }
                     Part::Text(_) => {}
                     Part::Reasoning(text) => {
-                        egui::CollapsingHeader::new(RichText::new("Überlegungen").color(MUTED))
+                        egui::CollapsingHeader::new(RichText::new(crate::tr!("Überlegungen")).color(MUTED))
                             .show(ui, |ui| markdown(ui, app, text));
                     }
                     Part::Tool(tool) => tool_row(ui, tool),
@@ -324,14 +324,11 @@ pub fn message(
                         if other["type"] == "file" {
                             ui.colored_label(
                                 MUTED,
-                                format!("Anhang: {}", other["name"].as_str().unwrap_or("Datei")),
+                                crate::tr!("Anhang: {}", other["name"].as_str().unwrap_or(crate::tr!("Datei"))),
                             );
                         } else {
                             ui.collapsing(
-                                format!(
-                                    "Weiterer Inhalt: {}",
-                                    other["type"].as_str().unwrap_or("unbekannt")
-                                ),
+                                crate::tr!("Weiterer Inhalt: {}", other["type"].as_str().unwrap_or(crate::tr!("unbekannt"))),
                                 |ui| json_read(ui, other),
                             );
                         }
@@ -380,19 +377,16 @@ pub fn message(
 }
 
 fn design_error_line(error: &Value) -> String {
-    format!(
-        "Fehler: {}",
-        crate::design::elide_first_line(error_message(error), 240)
-    )
+    crate::tr!("Fehler: {}", crate::design::elide_first_line(error_message(error), 240))
 }
 
 fn tool_row(ui: &mut egui::Ui, part: &Value) {
     let status = tool_status(part);
     let state = match status {
         "completed" | "success" => "",
-        "error" | "failed" => " · Fehler",
-        "running" | "streaming" | "pending" => " · läuft",
-        _ => " · Status unbekannt",
+        "error" | "failed" => crate::tr!(" · Fehler"),
+        "running" | "streaming" | "pending" => crate::tr!(" · läuft"),
+        _ => crate::tr!(" · Status unbekannt"),
     };
     let input = tool_input(part);
     let patches = patch_view::patches(part);
@@ -451,7 +445,7 @@ fn tool_row(ui: &mut egui::Ui, part: &Value) {
                         ui.push_id(("patch",index,patch.path),|ui|patch_view::show(ui,patch,patches.len()>1));
                     }
                     if part["state"]["metadata"]["truncated"] == true {
-                        ui.colored_label(AMBER,"Die erfasste Toolausgabe ist gekürzt; nicht als vollständigen Stand behandeln.");
+                        ui.colored_label(AMBER,crate::tr!("Die erfasste Toolausgabe ist gekürzt; nicht als vollständigen Stand behandeln."));
                     }
                     let output = tool_output(part);
                     if !output.is_empty() {
@@ -460,7 +454,7 @@ fn tool_row(ui: &mut egui::Ui, part: &Value) {
                         read_text(ui, &output, true);
                     }
                     if let Some(error) = part["state"].get("error").or_else(|| part.get("error")) {
-                        ui.colored_label(RED, "Toolfehler");
+                        ui.colored_label(RED, crate::tr!("Toolfehler"));
                         json_read(ui, error);
                     }
             }
@@ -498,13 +492,13 @@ fn attachments(ui: &mut egui::Ui, app: &mut App, command: CommandId, entry: &Arc
                             app.dialog = Some(Dialog::image(image));
                         }
                     }
-                    if ui.link(format!("{} speichern …", file.name)).clicked() {
+                    if ui.link(crate::tr!("{} speichern …", file.name)).clicked() {
                         match file.bytes() {
                             Ok(Some(_)) => {
                                 app.backend.save_input_file(file.name.clone(), data.clone())
                             }
                             _ => app.notice(
-                                "Anhang nicht verfügbar oder Integritätsprüfung fehlgeschlagen.",
+                                crate::tr!("Anhang nicht verfügbar oder Integritätsprüfung fehlgeschlagen."),
                             ),
                         }
                     }
@@ -512,7 +506,7 @@ fn attachments(ui: &mut egui::Ui, app: &mut App, command: CommandId, entry: &Arc
             } else {
                 ui.colored_label(
                     AMBER,
-                    format!("{} · nicht verfügbar ({})", file.name, file.status),
+                    crate::tr!("{} · nicht verfügbar ({})", file.name, file.status),
                 );
             }
         });

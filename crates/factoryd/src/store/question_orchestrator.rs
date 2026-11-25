@@ -128,7 +128,7 @@ pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
             || target
                 .agent_progress
                 .as_ref()
-                .is_some_and(|a| a.phase == AgentPhase::Unknown)
+                .is_some_and(|a| matches!(a.phase, AgentPhase::Unknown | AgentPhase::Finalizing))
         {
             continue;
         }

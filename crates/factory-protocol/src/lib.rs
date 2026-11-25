@@ -133,6 +133,26 @@ pub struct RegisterRunner {
     pub opencode: OpenCodeStatus,
 }
 pub const SESSION_LIFECYCLE_CAPABILITY: &str = "session-lifecycle-v1";
+pub const REPO_SKILLS_CAPABILITY: &str = "repo-skills-v1";
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectSkills {
+    pub revision: factory_core::Revision,
+    pub repo_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factory_skills: Vec<FactorySkillRef>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetProjectSkills {
+    pub request_id: factory_core::RequestId,
+    pub expected_revision: factory_core::Revision,
+    pub repo_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factory_skills: Vec<FactorySkillRef>,
+}
+pub mod skills;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,6 +170,9 @@ pub struct Registration {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunnerView {
+    /// Peer IP observed by the Factory (may be a proxy or tunnel endpoint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<std::net::IpAddr>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     pub id: RunnerId,
@@ -207,6 +230,18 @@ pub struct Snapshot {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub controls: Vec<StreamControl>,
+}
+
+/// A user-directed follow-up. All execution settings come from the target session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptSession {
+    pub request_id: RequestId,
+    pub prompt: String,
+    #[serde(default)]
+    pub images: Vec<PromptImage>,
+    #[serde(default)]
+    pub files: Vec<PromptFile>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -280,7 +315,6 @@ pub struct SetScheduler {
     pub enabled: bool,
     pub runner_ids: Vec<RunnerId>,
     pub max_parallel: u8,
-    pub start_budget: u32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -381,6 +415,8 @@ pub struct CommandResult {
 #[serde(deny_unknown_fields)]
 pub struct CreateProject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<ProjectLogo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_mapping: Option<ProjectRunnerMapping>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -413,6 +449,9 @@ pub struct ProjectSetupResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProject {
+    /// Omitted: keep existing logo. Present with image=null: remove it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<ProjectLogoUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_mapping: Option<ProjectRunnerMapping>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -422,6 +461,12 @@ pub struct UpdateProject {
     pub name: Option<String>,
     pub repository: Option<String>,
     pub base_branch: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectLogoUpdate {
+    pub image: Option<ProjectLogo>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -466,6 +511,7 @@ pub struct SubmitTask {
     pub files: Vec<PromptFile>,
 }
 pub mod models;
+pub mod mcp;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BeginTaskEdit {
@@ -478,6 +524,8 @@ pub struct BeginTaskEdit {
 pub struct TaskEdit {
     pub ticket: Ticket,
     pub edit_token: RequestId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_mcps: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

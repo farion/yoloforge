@@ -1,87 +1,18 @@
-name: Rust and process checks
-on: [push, pull_request]
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  android:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
-      - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
-        working-directory: android
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.0
-      - run: cargo build --locked -p factoryd
-      - name: Enable emulator acceleration
-        run: sudo chmod 666 /dev/kvm
-      - uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 36
-          arch: x86_64
-          target: google_apis
-          disable-animations: true
-          script: |
-            ./android/gradlew -p android :app:connectedDebugAndroidTest
-            python3 scripts/smoke-android.py --serial emulator-5554
-      - uses: actions/upload-artifact@v4
-        with:
-          name: yoloforge-android-development
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-  verify:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.0
-          components: rustfmt, clippy
-      - name: Native Linux GUI dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libxkbcommon-dev libwayland-dev wayland-protocols libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libgl1-mesa-dev libegl1-mesa-dev xvfb sway grim wtype python3-gi gir1.2-gtk-3.0 thunar
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
-      - run: cargo build --workspace --locked
-      - name: Desktop API and native egui window smoke
-        run: env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/smoke-gui.py --screenshots target/gui-smoke
-        env:
-          LIBGL_ALWAYS_SOFTWARE: '1'
-      - name: Native Wayland drag-and-drop without Factory services
-        env:
-          YOLOFORGE_WAYLAND_SMOKE_OUTPUT: target/gui-smoke
-          LIBGL_ALWAYS_SOFTWARE: '1'
-        run: |
-          python3 scripts/smoke-gui-wayland.py
-          python3 scripts/smoke-gui-wayland.py --uri-only
-          python3 scripts/smoke-gui-wayland.py --thunar
-          python3 scripts/smoke-gui-wayland.py --covered-clipboard
-      - uses: actions/upload-artifact@v4
-        with:
-          name: yoloforge-gui-smoke
-          path: target/gui-smoke/*.png
-      - run: python3 scripts/smoke-client.py target/debug/yoloforge --stack-limit-mib 1
-      - run: python3 -u scripts/smoke-foundation.py
-      - run: python3 -u scripts/smoke-tui-answers.py
-      - run: python3 -u scripts/smoke-backup.py
-      - run: python3 -u scripts/smoke-archive-files.py
-      - run: python3 -u scripts/smoke-push.py
-      - run: python3 -u scripts/smoke-token-budgets.py
-  windows-tui:
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.0
-      - run: cargo test --locked -p factory-tui --bin yoloforge
-      - run: cargo build --locked -p factory-tui --bin yoloforge
-      - run: python scripts/smoke-client.py target/debug/yoloforge.exe
+  build:
+    uses: ./.github/workflows/build.yml

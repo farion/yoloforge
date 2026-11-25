@@ -5,6 +5,7 @@ use factoryd::store::{Store, StoreError};
 fn project(store: &Store) -> Project {
     store
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),

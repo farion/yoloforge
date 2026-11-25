@@ -11,10 +11,14 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use factory_protocol::models::{is_copilot_access, COPILOT_INTEGRATION};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
 use url::Url;
+
+pub(super) mod key_provider;
+mod copilot;
 
 const CODEX: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -31,10 +35,25 @@ struct Inner {
     keys: Vec<[u8; 32]>,
     client: reqwest::Client,
     upstream: String,
+    #[cfg(test)]
+    copilot_test_upstream: Option<String>,
     pending: tokio::sync::Mutex<BTreeMap<String, PendingAuth>>,
 }
 
 impl Gateway {
+    /// Desktop-managed runners authenticate with their revocable, runner-scoped
+    /// device credential. Operator/admin control tokens are not model keys.
+    async fn allows_runner(&self, headers: &HeaderMap, store: &Store) -> bool {
+        if self.allows(headers) { return true; }
+        let Some(token) = headers.get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "))
+            .filter(|v| (32..=100).contains(&v.len())) else { return false; };
+        let token = token.to_owned();
+        let store = store.clone();
+        matches!(tokio::task::spawn_blocking(move || store.authenticate_device(&token)).await,
+            Ok(Ok(Some(device))) if device.role == factory_core::DeviceRole::Runner && device.runner_id.is_some())
+    }
+
     pub fn managed(url: String, password: String, key: String) -> Result<Self> {
         let central = Registration { url, password };
         let url = Url::parse(&central.url).context("Invalid central OpenCode URL")?;
@@ -63,6 +82,8 @@ impl Gateway {
                 .read_timeout(Duration::from_secs(310))
                 .build()?,
             upstream: CODEX.into(),
+            #[cfg(test)]
+            copilot_test_upstream: None,
             pending: Default::default(),
         })))
     }
@@ -135,25 +156,36 @@ impl Gateway {
     }
 
     pub(super) async fn access_status(&self, store: Store, alias: String) -> &'static str {
+        let provider = factory_protocol::models::KeyModelProvider::from_access_id(&alias);
+        let copilot = is_copilot_access(&alias);
         let Some(credential_id) = self.binding(store, alias).await else {
             return "not_connected";
         };
-        if self.credential(&credential_id).await.is_some() {
+        let ready = match provider {
+            Some(provider) => key_provider::credential(self, provider, &credential_id).await.is_some(),
+            None if copilot => copilot::credential(self, &credential_id).await.is_some(),
+            None => self.credential(&credential_id).await.is_some(),
+        };
+        if ready {
             "ready"
         } else {
             "unavailable"
         }
     }
 
-    fn openai(&self, suffix: &str) -> reqwest::RequestBuilder {
+    fn oauth(&self, alias: &str, suffix: &str) -> reqwest::RequestBuilder {
         self.0
             .client
             .post(format!(
-                "{}/api/integration/openai/connect/oauth{suffix}",
-                self.0.central.url.trim_end_matches('/')
+                "{}/api/integration/{}/connect/oauth{suffix}",
+                self.0.central.url.trim_end_matches('/'), oauth_integration(alias)
             ))
             .basic_auth("opencode", Some(&self.0.central.password))
     }
+}
+
+fn oauth_integration(alias: &str) -> &'static str {
+    if is_copilot_access(alias) { COPILOT_INTEGRATION } else { "openai" }
 }
 
 #[derive(Deserialize)]
@@ -188,6 +220,9 @@ pub(super) fn routes(gateway: Gateway, store: Store) -> Router {
     Router::new()
         .route("/v1/model-gateway/catalog", get(catalog))
         .route("/v1/model-gateway/{access}/responses", post(responses))
+        .route("/v1/model-gateway/{access}/chat/completions", post(key_provider::chat))
+        .route("/v1/model-gateway/{access}/messages", post(key_provider::messages))
+        .route("/v1/model-gateway/{access}/models/{operation}", post(key_provider::gemini))
         .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .with_state((gateway, store))
 }
@@ -206,7 +241,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 async fn catalog(State((gateway, store)): State<(Gateway, Store)>, headers: HeaderMap) -> Response {
-    if !gateway.allows(&headers) {
+    if !gateway.allows_runner(&headers, &store).await {
         return error(StatusCode::UNAUTHORIZED, "Factory model key required");
     }
     let Ok(Ok((settings, bound))) = tokio::task::spawn_blocking(move || {
@@ -233,7 +268,11 @@ async fn responses(
     headers: HeaderMap,
     Json(mut data): Json<Value>,
 ) -> Response {
-    if !gateway.allows(&headers) {
+    if is_copilot_access(&alias) {
+        return copilot::relay((gateway, store), alias, headers, data,
+            factory_protocol::models::ModelTransport::Responses).await;
+    }
+    if !gateway.allows_runner(&headers, &store).await {
         return error(StatusCode::UNAUTHORIZED, "Factory model key required");
     }
     let Some(body) = data.as_object_mut() else {
@@ -430,12 +469,53 @@ fn login_context(
         })
 }
 
-pub(super) async fn begin(
+pub(super) async fn remove_access(
     State(app): State<super::App>,
     axum::Extension(principal): axum::Extension<super::Principal>,
     gateway: Option<axum::Extension<Gateway>>,
     Path(alias): Path<String>,
 ) -> Response {
+    let (gateway, store) = match login_context(app, principal, gateway) {
+        Ok(ctx) => ctx,
+        Err(response) => return response,
+    };
+    // Complete local revocation and credential cleanup even if the UI closes.
+    tokio::spawn(async move {
+        let pending = gateway.0.pending.lock().await;
+        if pending.get(&alias).is_some_and(|p| p.completing || p.expires > crate::unix_ms()) {
+            return error(StatusCode::CONFLICT, "Die Anmeldung für diesen Modellzugang läuft noch.");
+        }
+        let (settings, credential) = match tokio::task::spawn_blocking(move || store.remove_model_access(&alias)).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(err)) => return crate::db_error(err, factory_core::RequestId::new()),
+            Err(_) => return crate::db_error(crate::store::StoreError::Internal, factory_core::RequestId::new()),
+        };
+        drop(pending);
+        let mut credential_removed = true;
+        if let Some(credential) = credential {
+            let mut url = Url::parse(&gateway.0.central.url).expect("validated central URL");
+            url.path_segments_mut().expect("validated central URL")
+                .pop_if_empty().extend(["api", "credential", &credential]);
+            credential_removed = gateway.0.client.delete(url)
+                .basic_auth("opencode", Some(&gateway.0.central.password))
+                .timeout(Duration::from_secs(5))
+                .send().await.is_ok_and(|r| r.status().is_success() || r.status() == StatusCode::NOT_FOUND);
+        }
+        private_json(json!({"settings":settings,"credential_removed":credential_removed}))
+    }).await.unwrap_or_else(|_| {
+        crate::db_error(crate::store::StoreError::Internal, factory_core::RequestId::new())
+    })
+}
+
+pub(super) async fn begin(
+    State(app): State<super::App>,
+    axum::Extension(principal): axum::Extension<super::Principal>,
+    gateway: Option<axum::Extension<Gateway>>,
+    Path((alias, provider)): Path<(String, String)>,
+) -> Response {
+    if provider != oauth_integration(&alias) {
+        return error(StatusCode::NOT_FOUND, "Unknown OAuth provider");
+    }
     let (gateway, store) = match login_context(app, principal, gateway) {
         Ok(ctx) => ctx,
         Err(e) => return e,
@@ -453,18 +533,21 @@ pub(super) async fn begin_named(
     State(app): State<super::App>,
     axum::Extension(principal): axum::Extension<super::Principal>,
     gateway: Option<axum::Extension<Gateway>>,
-    Path(alias): Path<String>,
+    Path((alias, provider)): Path<(String, String)>,
     Json(body): Json<NameAccess>,
 ) -> Response {
+    if provider != oauth_integration(&alias) {
+        return error(StatusCode::NOT_FOUND, "Unknown OAuth provider");
+    }
     let (gateway, store) = match login_context(app, principal, gateway) {
         Ok(ctx) => ctx,
         Err(e) => return e,
     };
     let name = body.name.trim();
     if !crate::valid_text(name, 120)
-        || !alias
+        || !(is_copilot_access(&alias) || alias
             .strip_prefix("factory-openai-")
-            .is_some_and(|id| id.parse::<factory_core::RequestId>().is_ok())
+            .is_some_and(|id| id.parse::<factory_core::RequestId>().is_ok()))
     {
         return error(
             StatusCode::BAD_REQUEST,
@@ -480,6 +563,9 @@ async fn begin_attempt(
     alias: String,
     name: Option<String>,
 ) -> Response {
+    if factory_protocol::models::KeyModelProvider::from_access_id(&alias).is_some() {
+        return error(StatusCode::BAD_REQUEST, "Use an API key for this provider");
+    }
     let catalog = store.clone();
     let Ok(Ok(settings)) = tokio::task::spawn_blocking(move || catalog.factory_models()).await
     else {
@@ -507,17 +593,11 @@ async fn begin_attempt(
         );
     }
     let previous = if let Some(id) = gateway.binding(store.clone(), alias.clone()).await {
-        let account = gateway.entries().await.and_then(|entries| {
-            entries
-                .into_iter()
-                .find(|e| e.id == id && e.integration_id == "openai")
-                .and_then(|e| {
-                    e.value["metadata"]["accountID"]
-                        .as_str()
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_owned)
-                })
-        });
+        let account = match gateway.entries().await.and_then(|entries| entries.into_iter()
+            .find(|e| e.id == id && e.integration_id == oauth_integration(&alias))) {
+            Some(entry) => oauth_account(&gateway, &entry).await,
+            None => None,
+        };
         let Some(account) = account else {
             return error(StatusCode::CONFLICT, "Der bisherige Kontoinhaber lässt sich nicht prüfen. Einen neuen benannten Zugang anlegen.");
         };
@@ -535,21 +615,27 @@ async fn begin_attempt(
             "An OAuth attempt for this access is already in progress",
         );
     }
-    if !wait_for_chatgpt_method(&gateway).await {
-        return error(StatusCode::SERVICE_UNAVAILABLE,
-            "OpenCode lädt die ChatGPT-Anmeldung noch oder bietet sie nicht an. Bitte erneut versuchen.");
+    let copilot = is_copilot_access(&alias);
+    let method = if copilot { "device" } else { "chatgpt-headless" };
+    if !wait_for_oauth_method(&gateway, oauth_integration(&alias), method).await {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "OpenCode bietet diese Anmeldung noch nicht an. Bitte erneut versuchen.");
     }
     let label = format!("{alias}-{}", factory_core::RequestId::new());
+    let mut input = json!({"methodID":method,"label":label});
+    if copilot {
+        input["answer"] = json!({"deploymentType":"github.com"});
+    }
     let response = gateway
-        .openai("")
+        .oauth(&alias, "")
         .timeout(Duration::from_secs(10))
-        .json(&json!({"methodID":"chatgpt-headless","label":label}))
+        .json(&input)
         .send()
         .await;
     let Ok(response) = response.and_then(reqwest::Response::error_for_status) else {
         return error(
             StatusCode::BAD_GATEWAY,
-            "Die ChatGPT-Anmeldung konnte nicht gestartet werden. Bitte erneut versuchen.",
+            if copilot { "Die GitHub-Anmeldung konnte nicht gestartet werden. Bitte erneut versuchen." }
+            else { "Die ChatGPT-Anmeldung konnte nicht gestartet werden. Bitte erneut versuchen." },
         );
     };
     #[derive(Deserialize)]
@@ -569,7 +655,10 @@ async fn begin_attempt(
         || prompt.attempt_id.is_empty()
         || !matches!(prompt.mode.as_str(), "auto" | "code")
         || !Url::parse(&prompt.url)
-            .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("auth.openai.com"))
+            .is_ok_and(|url| url.scheme() == "https" && url.username().is_empty()
+                && url.password().is_none()
+                && url.host_str() == Some(if copilot { "github.com" } else { "auth.openai.com" })
+                && (!copilot || url.path() == "/login/device"))
     {
         return error(StatusCode::BAD_GATEWAY, "Unexpected OpenCode OAuth prompt");
     }
@@ -589,7 +678,7 @@ async fn begin_attempt(
     private_json(json!(prompt))
 }
 
-async fn wait_for_chatgpt_method(gateway: &Gateway) -> bool {
+async fn wait_for_oauth_method(gateway: &Gateway, integration: &str, method: &str) -> bool {
     #[derive(Deserialize)]
     struct Method {
         id: Option<String>,
@@ -605,8 +694,7 @@ async fn wait_for_chatgpt_method(gateway: &Gateway) -> bool {
         data: Integration,
     }
     let url = format!(
-        "{}/api/integration/openai",
-        gateway.0.central.url.trim_end_matches('/')
+        "{}/api/integration/{integration}", gateway.0.central.url.trim_end_matches('/')
     );
     let wait = async {
         loop {
@@ -623,7 +711,7 @@ async fn wait_for_chatgpt_method(gateway: &Gateway) -> bool {
                     r.data
                         .methods
                         .iter()
-                        .any(|m| m.kind == "oauth" && m.id.as_deref() == Some("chatgpt-headless"))
+                        .any(|m| m.kind == "oauth" && m.id.as_deref() == Some(method))
                 }) {
                     return true;
                 }
@@ -718,9 +806,12 @@ pub(super) async fn cancel(
     State(app): State<super::App>,
     axum::Extension(principal): axum::Extension<super::Principal>,
     gateway: Option<axum::Extension<Gateway>>,
-    Path(alias): Path<String>,
+    Path((alias, provider)): Path<(String, String)>,
     Json(body): Json<CancelAuth>,
 ) -> Response {
+    if provider != oauth_integration(&alias) {
+        return error(StatusCode::NOT_FOUND, "Unknown OAuth provider");
+    }
     let (gateway, _) = match login_context(app, principal, gateway) {
         Ok(ctx) => ctx,
         Err(e) => return e,
@@ -736,8 +827,8 @@ pub(super) async fn cancel(
         .0
         .client
         .delete(format!(
-            "{}/api/integration/openai/connect/oauth/{attempt}",
-            gateway.0.central.url.trim_end_matches('/')
+            "{}/api/integration/{}/connect/oauth/{attempt}",
+            gateway.0.central.url.trim_end_matches('/'), oauth_integration(&alias)
         ))
         .basic_auth("opencode", Some(&gateway.0.central.password))
         .timeout(Duration::from_secs(5))
@@ -750,9 +841,12 @@ pub(super) async fn finish(
     State(app): State<super::App>,
     axum::Extension(principal): axum::Extension<super::Principal>,
     gateway: Option<axum::Extension<Gateway>>,
-    Path(alias): Path<String>,
+    Path((alias, provider)): Path<(String, String)>,
     Json(body): Json<FinishAuth>,
 ) -> Response {
+    if provider != oauth_integration(&alias) {
+        return error(StatusCode::NOT_FOUND, "Unknown OAuth provider");
+    }
     let (gateway, store) = match login_context(app, principal, gateway) {
         Ok(ctx) => ctx,
         Err(e) => return e,
@@ -784,13 +878,14 @@ pub(super) async fn finish(
         )
     };
     // Keep the centrally started completion alive even if the desktop request disconnects.
+    let copilot = is_copilot_access(&alias);
     let completion = tokio::spawn(async move {
         let wait = async {
             if auto {
-                wait_for_oauth_result(&gateway, &body.attempt_id).await
+                wait_for_oauth_result(&gateway, &alias, &body.attempt_id).await
             } else {
                 gateway
-                    .openai(&format!("/{}/complete", body.attempt_id))
+                    .oauth(&alias, &format!("/{}/complete", body.attempt_id))
                     .timeout(Duration::from_secs(285))
                     .json(&json!({"code":body.code}))
                     .send()
@@ -806,7 +901,7 @@ pub(super) async fn finish(
         let entry = if completed {
             gateway.entries().await.and_then(|entries| {
                 entries.into_iter().find(|e| {
-                    e.integration_id == "openai" && e.label == label && e.value["type"] == "oauth"
+                    e.integration_id == oauth_integration(&alias) && e.label == label && e.value["type"] == "oauth"
                 })
             })
         } else {
@@ -815,23 +910,28 @@ pub(super) async fn finish(
         let mut wrong_account = false;
         let result = if let Some(entry) = entry {
             let id = alias.clone();
-            let account = entry.value["metadata"]["accountID"]
-                .as_str()
-                .filter(|id| !id.is_empty());
+            let account = oauth_account(&gateway, &entry).await;
             wrong_account = previous
                 .as_ref()
-                .is_some_and(|(_, previous_account)| account != Some(previous_account.as_str()));
+                .is_some_and(|(_, previous_account)| account.as_deref() != Some(previous_account.as_str()));
             if !wrong_account && account.is_some() && name.is_some() {
                 let models = tokio::select! {
                     biased;
                     _ = cancel.notified() => return None,
-                    models = discovered_models(&gateway, &entry.id) => models,
+                    models = async {
+                        if copilot {
+                            copilot::models(&gateway, &entry).await
+                        } else {
+                            discovered_models(&gateway, &entry.id).await.map(|m| (m, Default::default()))
+                        }
+                    } => models,
                 };
-                if let Some(models) = models {
+                if let Some((models, transports)) = models {
                     let access = factory_protocol::models::ModelAccess {
                         id,
                         name: name.expect("validated new access"),
                         models,
+                        transports,
                     };
                     let pending = gateway.0.pending.lock().await;
                     if !pending
@@ -891,21 +991,30 @@ pub(super) async fn finish(
         Ok(None) => private_json(json!({"cancelled":true})),
         Ok(Some((Some(Some(default)), _, _))) => private_json(json!({"connected":true,"automatic_default":default})),
         Ok(Some((Some(None), _, _))) => private_json(json!({"connected":true})),
-        Ok(Some((None, true, _))) => error(StatusCode::CONFLICT, "Das angemeldete ChatGPT-Konto passt nicht zu diesem Zugang. Die bisherige Zuordnung bleibt erhalten."),
-        Ok(Some((None, false, true))) => error(StatusCode::BAD_GATEWAY, "ChatGPT hat die Anmeldung bestätigt, aber die Factory konnte den Zugang oder seine Modelle nicht übernehmen."),
+        Ok(Some((None, true, _))) => error(StatusCode::CONFLICT, "Das angemeldete Konto passt nicht zu diesem Zugang. Die bisherige Zuordnung bleibt erhalten."),
+        Ok(Some((None, false, true))) => error(StatusCode::BAD_GATEWAY, "Die Anmeldung war erfolgreich, aber die Factory konnte den Zugang oder seine Modelle nicht übernehmen."),
         _ => error(
             StatusCode::BAD_GATEWAY,
-            "ChatGPT hat die Anmeldung nicht bestätigt. Bitte versuche es erneut.",
+            if copilot { "GitHub hat die Anmeldung nicht bestätigt. Prüfe, ob dein Konto Zugriff auf Copilot hat." }
+            else { "ChatGPT hat die Anmeldung nicht bestätigt. Bitte versuche es erneut." },
         ),
     }
 }
 
-async fn wait_for_oauth_result(gateway: &Gateway, attempt: &str) -> bool {
+async fn oauth_account(gateway: &Gateway, entry: &Entry) -> Option<String> {
+    if entry.integration_id == COPILOT_INTEGRATION {
+        copilot::account(gateway, entry).await
+    } else {
+        entry.value["metadata"]["accountID"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
+    }
+}
+
+async fn wait_for_oauth_result(gateway: &Gateway, alias: &str, attempt: &str) -> bool {
     // OpenCode starts its callback as soon as it creates an auto attempt.
     // POST /complete would start a second callback on OpenCode 2.4.1.
     let url = format!(
-        "{}/api/integration/openai/connect/oauth/{attempt}",
-        gateway.0.central.url.trim_end_matches('/')
+        "{}/api/integration/{}/connect/oauth/{attempt}",
+        gateway.0.central.url.trim_end_matches('/'), oauth_integration(alias)
     );
     let wait = async {
         loop {
@@ -945,6 +1054,119 @@ mod tests {
     use factory_protocol::models::{
         FactoryModelSettings, ModelAccess, RoleModels, SetFactoryModels,
     };
+
+    #[tokio::test]
+    async fn copilot_device_login_binds_the_account_and_relays_its_native_protocol() {
+        use factory_protocol::models::{ModelTransport, COPILOT_ACCESS_PREFIX};
+        let label = Arc::new(tokio::sync::Mutex::new(None::<String>));
+        let set_label = label.clone();
+        let (mock, upstream_task) = serve(Router::new()
+            .route("/api/integration/github-copilot", get(|| async {
+                Json(json!({"data":{"methods":[{"id":"device","type":"oauth"}]}}))
+            }))
+            .route("/api/integration/github-copilot/connect/oauth", post(move |Json(body): Json<Value>| async move {
+                assert_eq!(body["methodID"], "device");
+                assert_eq!(body["answer"], json!({"deploymentType":"github.com"}));
+                *set_label.lock().await = body["label"].as_str().map(str::to_owned);
+                Json(json!({"data":{"attemptID":"copilot-attempt","mode":"auto",
+                    "url":"https://github.com/login/device","instructions":"Enter code: TEST-0000"}}))
+            }))
+            .route("/api/integration/github-copilot/connect/oauth/copilot-attempt", get(|| async {
+                Json(json!({"data":{"status":"complete"}}))
+            }))
+            .route("/api/credential", get(move || {
+                let label = label.clone();
+                async move {
+                    let label = label.lock().await;
+                    Json(json!({"data":label.iter().map(|label| json!({
+                        "id":"copilot-credential","label":label,"integrationID":"github-copilot","active":true,
+                        "value":{"type":"oauth","methodID":"device","refresh":"only-on-factory","expires":0}
+                    })).collect::<Vec<_>>()}))
+                }
+            }))
+            .route("/user", get(|headers: HeaderMap| async move {
+                assert_eq!(headers[header::AUTHORIZATION], "Bearer only-on-factory");
+                Json(json!({"id":42}))
+            }))
+            .route("/models", get(|headers: HeaderMap| async move {
+                assert_eq!(headers[header::AUTHORIZATION], "Bearer only-on-factory");
+                Json(json!({"data":[{
+                    "id":"gpt-5","supported_endpoints":["/responses"],
+                    "capabilities":{"supports":{"tool_calls":true},"limits":{"max_prompt_tokens":8192,"max_output_tokens":4096}}
+                }]}))
+            }))
+            .route("/responses", post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                assert_eq!(headers[header::AUTHORIZATION], "Bearer only-on-factory");
+                assert_eq!(body["store"], false);
+                ([(header::CONTENT_TYPE, "text/event-stream")], "data: copilot\n\n")
+            }))
+            .route("/api/credential/copilot-credential", axum::routing::delete(|| async {
+                StatusCode::NO_CONTENT
+            }))
+        ).await;
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        store.enable_model_settings().unwrap();
+        let key = "factory-model-gateway-test-key-only";
+        let admin = "factory-admin-test-key-at-least-thirty-two";
+        let mut gateway = Gateway::managed(mock.clone(), "test-password-at-least-thirty-two".into(), key.into()).unwrap();
+        Arc::get_mut(&mut gateway.0).unwrap().copilot_test_upstream = Some(mock);
+        let (base, factory_task) = serve(crate::router_with_model_gateway(
+            admin, store.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)), Some(gateway),
+        )).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let alias = format!("{COPILOT_ACCESS_PREFIX}{}", RequestId::new());
+        let oauth = format!("{base}/v1/model-settings/accesses/{alias}/github-copilot/oauth");
+        let start = client.post(format!("{oauth}/start")).bearer_auth(admin)
+            .header(factory_protocol::VERSION_HEADER, "1").json(&json!({"name":"Copilot test"}))
+            .send().await.unwrap().error_for_status().unwrap().json::<Value>().await.unwrap();
+        assert_eq!(start["url"], "https://github.com/login/device");
+        let done = client.post(format!("{oauth}/complete")).bearer_auth(admin)
+            .header(factory_protocol::VERSION_HEADER, "1").json(&json!({"attempt_id":start["attemptID"]}))
+            .send().await.unwrap().error_for_status().unwrap().json::<Value>().await.unwrap();
+        assert_eq!(done["connected"], true);
+        assert_eq!(store.factory_models().unwrap().accesses[0].transports["gpt-5"], ModelTransport::Responses);
+        let infer = |path| client.post(format!("{base}/v1/model-gateway/{alias}/{path}"))
+            .bearer_auth(key).json(&json!({"model":"gpt-5","input":[],"store":true})).send();
+        assert_eq!(infer("chat/completions").await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(infer("responses").await.unwrap().text().await.unwrap(), "data: copilot\n\n");
+        let remove = |token| client.delete(format!("{base}/v1/model-settings/accesses/{alias}"))
+            .bearer_auth(token).header(factory_protocol::VERSION_HEADER, "1").send();
+        assert_eq!(remove(key).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let removed = remove(admin).await.unwrap().error_for_status().unwrap().json::<Value>().await.unwrap();
+        assert_eq!(removed["credential_removed"], true);
+        assert!(store.model_binding(&alias).unwrap().is_none());
+        let settings = store.factory_models().unwrap();
+        assert!(settings.accesses.is_empty() && settings.default_model.is_none());
+        assert_eq!(infer("responses").await.unwrap().status(), StatusCode::FORBIDDEN);
+        factory_task.abort();
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn runner_model_access_is_revocable_and_does_not_accept_control_credentials() {
+        use factory_core::{DeviceRole, RunnerId};
+        use factory_protocol::{CreateEnrollment, RedeemEnrollment};
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let gateway = Gateway::managed("http://127.0.0.1:1".into(), "p".repeat(40), "k".repeat(40)).unwrap();
+        let headers = |token: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+            headers
+        };
+        assert!(gateway.allows_runner(&headers(&"k".repeat(40)), &store).await);
+        assert!(!gateway.allows_runner(&headers(&"x".repeat(40)), &store).await);
+        for role in [DeviceRole::Admin, DeviceRole::Operator, DeviceRole::Runner] {
+            let invitation = store.create_enrollment(CreateEnrollment {
+                role, runner_id: (role == DeviceRole::Runner).then(RunnerId::new), ttl_seconds: 60,
+            }).unwrap();
+            let credential = store.redeem_enrollment(RedeemEnrollment {
+                code: invitation.code, name: "Test".into(),
+            }).unwrap();
+            assert_eq!(gateway.allows_runner(&headers(&credential.token), &store).await, role == DeviceRole::Runner);
+            store.revoke_device(credential.device.id).unwrap();
+            assert!(!gateway.allows_runner(&headers(&credential.token), &store).await);
+        }
+    }
 
     async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1094,6 +1316,7 @@ mod tests {
                             id: name.into(),
                             name: name.into(),
                             models: vec!["test-model".into()],
+                            transports: Default::default(),
                         })
                         .collect(),
                 },
@@ -1113,6 +1336,7 @@ mod tests {
                 .collect(),
             client: reqwest::Client::builder().no_proxy().build().unwrap(),
             upstream: format!("{mock}/responses"),
+            copilot_test_upstream: None,
             pending: Default::default(),
         }));
         let (factory, server) = serve(crate::router_with_model_gateway(

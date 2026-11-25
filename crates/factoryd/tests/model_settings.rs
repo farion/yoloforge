@@ -24,6 +24,7 @@ fn settings(revision: u64, default: Option<ModelSelection>) -> FactoryModelSetti
                 id: format!("factory-{name}"),
                 name: name.into(),
                 models: vec!["same-model".into()],
+                transports: Default::default(),
             })
             .collect(),
     }
@@ -44,6 +45,7 @@ fn submit(project_id: ProjectId, prompt: &str) -> SaveTask {
 fn project(store: &Store) -> Project {
     store
         .create_project(CreateProject {
+            logo: None,
             request_id: RequestId::new(),
             runner_mapping: None,
             key: None,
@@ -136,6 +138,7 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
                 files: vec![],
             },
             implementer: Some(selection("c")),
+            local_mcps: None,
         })
         .unwrap();
     store.autostart_runner(runner).unwrap();
@@ -198,6 +201,7 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
             files: vec![],
         },
         implementer: Some(selection("a")),
+        local_mcps: None,
     });
     assert!(
         matches!(result, Err(StoreError::Invalid(message)) if message.contains("neue Session"))
@@ -226,6 +230,40 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
     let spec = pending[0].agent_spec.as_ref().unwrap();
     assert_eq!(spec.role, "memorizer");
     assert_eq!(spec.profile.provider_id, "factory-a");
+    let prompt = PromptSession {
+        request_id: RequestId::new(), prompt: "Continue directly with this session's settings".into(),
+        images: vec![], files: vec![],
+    };
+    let follow = store.prompt_session(work.id, prompt.clone()).unwrap();
+    let pins = store.task_models(follow.id).unwrap().unwrap();
+    assert_eq!(pins.implementer, Some(selection("c")), "Inherit session access, not the changed default");
+    assert!(pins.orchestrator.is_none(), "User-directed prompts bypass the orchestrator");
+    let owner = store.snapshot().unwrap().streams.into_iter().find(|s| s.id == work.stream_id).unwrap();
+    store.close_session(work.id, CloseSession {
+        request_id: RequestId::new(), expected_stream_revision: owner.revision, reason: "Close test session".into(),
+    }).unwrap();
+    assert!(store.session_closure(work.id).unwrap().is_some());
+    let new_skill = store.import_factory_skill(factory_protocol::skills::ImportFactorySkill {
+        request_id: RequestId::new(), id: "review".into(), name: "Review".into(),
+        description: "Review checklist".into(), current_version: 0,
+        files: [("SKILL.md".into(), "# Review".into())].into(),
+    }).unwrap();
+    store.set_project_skills(project.id, SetProjectSkills {
+        request_id: RequestId::new(), expected_revision: Revision(0),
+        repo_skills: vec![], factory_skills: vec![new_skill.reference],
+    }).unwrap();
+    assert!(store.prompt_session(work.id, PromptSession {
+        request_id: RequestId::new(), prompt: String::new(), images: vec![], files: vec![],
+    }).is_err());
+    assert!(store.session_closure(work.id).unwrap().is_some(), "Rejected prompts must not reopen the session");
+    assert_eq!(store.prompt_session(work.id, prompt.clone()).unwrap().id, follow.id);
+    assert!(store.session_closure(work.id).unwrap().is_some(), "Replaying an old request is not a new reactivation");
+    let reactivation = PromptSession { request_id: RequestId::new(), ..prompt };
+    let reopened = store.prompt_session(work.id, reactivation.clone()).unwrap();
+    assert_ne!(reopened.id, follow.id);
+    assert_eq!(reopened.requested_session, Some(work.session_root()));
+    assert!(store.session_closure(work.id).unwrap().is_none());
+    assert_eq!(store.prompt_session(work.id, reactivation).unwrap().id, reopened.id);
 }
 
 #[test]

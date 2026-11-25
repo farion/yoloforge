@@ -2,6 +2,7 @@ FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a3
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY vendor ./vendor
 COPY spikes/opencode/Cargo.toml ./spikes/opencode/Cargo.toml
 COPY spikes/opencode/src ./spikes/opencode/src
 RUN cargo build --locked --release -p factoryd
@@ -13,6 +14,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 COPY --from=build /src/target/release/factoryd /usr/local/bin/factoryd
 COPY deploy/install-opencode.sh /tmp/install-opencode.sh
 RUN sh /tmp/install-opencode.sh && rm /tmp/install-opencode.sh
+ENV FACTORY_OPENCODE_BIN=/usr/local/bin/opencode
 COPY --chmod=0755 scripts/factory-backup.py /usr/local/bin/factory-backup
 USER 10001:10001
 WORKDIR /data

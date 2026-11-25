@@ -15,10 +15,14 @@ mod attach;
 mod checkpoint;
 mod compaction;
 mod containment;
+mod control;
 mod hosting;
 mod journal;
 mod managed;
 mod managed_opencode;
+mod local_mcp;
+mod repo_skills;
+mod factory_skills;
 mod presence;
 mod publication;
 mod questions;
@@ -28,6 +32,11 @@ mod setup;
 mod termination;
 mod workspace;
 use journal::{Journal, Record};
+
+#[cfg(all(test, unix))]
+use std::os::unix::fs::symlink as test_symlink_file;
+#[cfg(all(test, windows))]
+use std::os::windows::fs::symlink_file as test_symlink_file;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Location {
@@ -64,6 +73,9 @@ struct Args {
     managed_opencode: Option<PathBuf>,
     #[arg(long)]
     journal: Option<PathBuf>,
+    /// Private loopback control descriptor for a desktop-managed runner.
+    #[arg(long, requires = "journal")]
+    control_file: Option<PathBuf>,
     /// JSON object mapping Factory project IDs to existing local Git repositories.
     #[arg(long)]
     repositories: Option<PathBuf>,
@@ -142,9 +154,14 @@ async fn report(
     }
     let archived = archive::step(client, journal, &mut record, args, registration).await;
     if !matches!(archived, Ok(true)) {
+        let (phase, summary) = if archived.is_ok() {
+            (AgentPhase::Finalizing, "Execution result recorded locally; final session archive pending.")
+        } else {
+            (AgentPhase::Unknown, "Final session archive could not be saved; local result retained and stream reserved.")
+        };
         client.observe_agent(record.command.runner_id,registration,record.command.id,&ObserveAgent {
             ownership_epoch:record.command.ownership_epoch,
-            progress:AgentProgress {session_id:record.command.session_id(),message_id:agent_message_id(record.command.id),phase:AgentPhase::Unknown,summary:"Execution result recorded locally; final session archive pending. Stream remains reserved.".into()},
+            progress:AgentProgress {session_id:record.command.session_id(),message_id:agent_message_id(record.command.id),phase,summary:summary.into()},
         }).await?;
         archived?;
         return Ok(());
@@ -370,7 +387,7 @@ async fn commands(
                 }
                 return Ok(true);
             }
-            let mut progress = agent::step(journal, &mut record, args).await?;
+            let mut progress = agent::step(journal, &mut record, args, Some((client, registration))).await?;
             let allow_compaction = matches!(
                 progress.phase,
                 AgentPhase::Running | AgentPhase::WaitingInput
@@ -667,6 +684,7 @@ async fn run(mut args: Args) -> Result<()> {
     let mut next_command = 0;
     let mut next_cleanup = 0;
     let mut next_presence = std::time::Instant::now();
+    let mut mcp_probe: Option<tokio::task::JoinHandle<()>> = None;
     let mut next_model_catalog = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(child) = &mut managed_child {
@@ -705,7 +723,13 @@ async fn run(mut args: Args) -> Result<()> {
                         TASK_FILES_CAPABILITY.into(),
                         CONTEXT_PLANNING_CAPABILITY.into(),
                         LOCAL_PROJECT_CAPABILITY.into(),
-                    ],
+                    ].into_iter().chain(args.managed_opencode.is_some().then(|| [
+                        factory_protocol::REPO_SKILLS_CAPABILITY.into(),
+                        factory_protocol::mcp::LOCAL_MCP_CAPABILITY.into(),
+                        factory_protocol::mcp::REMOTE_MCP_CAPABILITY.into(),
+                        factory_protocol::mcp::LOCAL_MCP_PROBE_CAPABILITY.into(),
+                        factory_protocol::skills::FACTORY_SKILLS_CAPABILITY.into(),
+                    ]).into_iter().flatten()).collect(),
                     id: args.id,
                     instance_id,
                     name: args.name.clone(),
@@ -726,7 +750,15 @@ async fn run(mut args: Args) -> Result<()> {
                     println!("Runner {} connected; boot {}", args.id, current.boot_id);
                 }
                 was_connected = true;
-                if std::time::Instant::now() >= next_presence {
+                 if std::time::Instant::now() >= next_presence {
+                     if args.managed_opencode.is_some() && mcp_probe.as_ref().is_none_or(|task| task.is_finished()) {
+                         let client = client.clone();
+                         let registration = current.registration_id;
+                         let probe_args = args.clone();
+                         mcp_probe = Some(tokio::spawn(async move {
+                             local_mcp::test_next(&client, &probe_args, registration).await;
+                         }));
+                     }
                     // Observation must not block command processing indefinitely or turn a
                     // missing optional endpoint on an older server into a runner failure.
                     let _ = tokio::time::timeout(
@@ -818,10 +850,19 @@ async fn run(mut args: Args) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let control = control::listen(&args).await?;
+    #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let terminate = async {
+        #[cfg(unix)]
+        terminate.recv().await;
+        #[cfg(windows)]
+        std::future::pending::<()>().await;
+    };
     tokio::select! {
         result = run(args) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),
-        _ = terminate.recv() => Ok(()),
+        _ = terminate => Ok(()),
+        result = control::serve(control) => result,
     }
 }

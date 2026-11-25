@@ -27,6 +27,7 @@ pub enum Event {
     Saved(Result<String, String>),
     OpenNotification(u64, crate::model::Target),
     Local(Result<crate::persistence::LocalConnection, String>),
+    LocalRunners(crate::local_runners::Report),
     Access(Result<AccessView, String>),
     TaskPayload(TicketId, Revision, u64, Result<Ticket, String>),
     TaskHistory(RequestId, Option<u64>, Result<TaskHistoryPage, String>),
@@ -96,16 +97,17 @@ impl Backend {
         let repaint = ctx.clone();
         runtime.spawn(async move {
             while let Some(write) = storage_rx.recv().await {
+                let acknowledged = write.ack.is_some();
                 let result = tokio::task::spawn_blocking(move || crate::persistence::save_settings(&write.settings)).await;
                 if let Some(ack) = write.ack { let _ = ack.send(matches!(result, Ok(Ok(())))); }
                 if let Some(request) = write.request {
                     if matches!(result, Ok(Ok(()))) {
                         tokio::spawn(async move { request.sender.send(Event::Request(request.id, perform_request(&request.client, &request.method, &request.path, &request.body).await)); });
                     } else {
-                        request.sender.send(Event::Request(request.id, Err(Failure { message: "Nicht gesendet: lokales Anfragejournal konnte nicht gespeichert werden.".into(), uncertain: false })));
+                        request.sender.send(Event::Request(request.id, Err(Failure { message: crate::tr!("Nicht gesendet: lokales Anfragejournal konnte nicht gespeichert werden.").into(), uncertain: false })));
                     }
-                } else if !matches!(result, Ok(Ok(()))) {
-                    let _ = error_tx.send(Envelope { generation: u64::MAX, event: Event::Saved(Err("Lokales Speichern fehlgeschlagen. Entwurf vor dem Beenden sichern.".into())) }); repaint.request_repaint();
+                } else if !acknowledged && !matches!(result, Ok(Ok(()))) {
+                    let _ = error_tx.send(Envelope { generation: u64::MAX, event: Event::Saved(Err(crate::tr!("Lokales Speichern fehlgeschlagen. Entwurf vor dem Beenden sichern.").into())) }); repaint.request_repaint();
                 }
             }
         });
@@ -127,6 +129,16 @@ impl Backend {
             ack: None,
         });
     }
+    /// Save a local preference without blocking the UI or applying it before confirmation.
+    pub fn persist_confirmed(&self, settings: crate::persistence::Settings) -> mpsc::Receiver<bool> {
+        let (tx, rx) = mpsc::channel();
+        if let Err(error) = self.storage_tx.send(StorageWrite {
+            settings, request: None, ack: Some(tx),
+        }) {
+            if let Some(ack) = error.0.ack { let _ = ack.send(false); }
+        }
+        rx
+    }
     pub fn flush(&self, settings: crate::persistence::Settings) -> bool {
         let (tx, rx) = std::sync::mpsc::channel();
         if self
@@ -143,6 +155,7 @@ impl Backend {
         rx.recv_timeout(Duration::from_secs(5)).unwrap_or(false)
     }
     pub fn connect(&mut self, server: &str, token: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.is_connected(), crate::tr!("Bitte zuerst die bestehende Verbindung trennen."));
         let client = FactoryClient::new_desktop(server, token, crate::persistence::desktop_client_id()?)?;
         if let Some(task) = self.connection.take() {
             task.abort();
@@ -187,6 +200,17 @@ impl Backend {
             }
         }));
         Ok(())
+    }
+    pub fn is_connected(&self) -> bool {
+        self.client.is_some()
+    }
+    pub fn disconnect(&mut self) {
+        if let Some(task) = self.connection.take() {
+            task.abort();
+        }
+        self.client = None;
+        // Ignore already queued responses from the previous connection.
+        self.generation += 1;
     }
     fn sender(&self) -> Sender {
         Sender {
@@ -374,7 +398,7 @@ impl Backend {
         let s = self.sender();
         self.runtime.spawn_blocking(move || {
             if let Some(paths) = rfd::FileDialog::new()
-                .set_title("Bilder und Dateien anhängen")
+                .set_title(crate::tr!("Bilder und Dateien anhängen"))
                 .pick_files()
             {
                 for path in paths {
@@ -424,7 +448,7 @@ impl Backend {
                     .collect::<Vec<_>>();
                 let image =
                     image::RgbaImage::from_raw(pixels.size[0] as u32, pixels.size[1] as u32, bytes)
-                        .ok_or_else(|| anyhow::anyhow!("Ungültiger Screenshot"))?;
+                        .ok_or_else(|| anyhow::anyhow!("{}", crate::tr!("Ungültiger Screenshot", )))?;
                 let mut data = std::io::Cursor::new(Vec::new());
                 image::DynamicImage::ImageRgba8(image)
                     .write_to(&mut data, image::ImageFormat::Png)?;
@@ -480,8 +504,8 @@ impl Backend {
             let result = async {
                 use std::io::Write;
                 let path = tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_file_name("opencode-archiv.jsonl").save_file()).await?;
-                let Some(path) = path else { return Ok::<_, anyhow::Error>("Export abgebrochen".to_string()); };
-                anyhow::ensure!(!path.exists(), "Zieldatei existiert bereits");
+                let Some(path) = path else { return Ok::<_, anyhow::Error>(crate::tr!("Export abgebrochen").to_string()); };
+                anyhow::ensure!(!path.exists(), crate::tr!("Zieldatei existiert bereits"));
                 let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(std::path::Path::new(".")))?;
                 for command in commands {
                     let mut page = client.archive(command, 0, None).await?;
@@ -492,7 +516,7 @@ impl Backend {
                         let after = page.next_after;
                         if page.entries.is_empty() { break; }
                         page = client.archive(command, after, Some(revision)).await?;
-                        anyhow::ensure!(page.next_after >= after, "Archivcursor rückläufig");
+                        anyhow::ensure!(page.next_after >= after, crate::tr!("Archivcursor rückläufig"));
                     }
                 }
                 writeln!(file, "{{\"export_complete\":true}}")?;
@@ -507,7 +531,7 @@ impl Backend {
         self.runtime.spawn_blocking(move || {
             use base64::Engine;
             let result = (|| -> anyhow::Result<String> {
-                anyhow::ensure!(data.len() <= 6 * 1024 * 1024, "Inline-Datei zu groß");
+                anyhow::ensure!(data.len() <= 6 * 1024 * 1024, crate::tr!("Inline-Datei zu groß"));
                 let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
                 if let Some(path) = rfd::FileDialog::new()
                     .set_file_name(
@@ -521,7 +545,7 @@ impl Backend {
                     crate::persistence::write_new(&path, &bytes)?;
                     Ok(path.display().to_string())
                 } else {
-                    Ok("Export abgebrochen".into())
+                    Ok(crate::tr!("Export abgebrochen").into())
                 }
             })();
             s.send(Event::Saved(result.map_err(|e| e.to_string())));
@@ -532,7 +556,7 @@ impl Backend {
         self.runtime.spawn_blocking(move || {
             match notify_rust::Notification::new().summary("YoloForge").body(&title).appname("YoloForge").action("default", target.notification_label()).timeout(8000).show() {
                 Ok(handle) => handle.wait_for_action(|action| { if action == "default" { s.send(Event::OpenNotification(id, target.clone())); } }),
-                Err(_) => s.send(Event::Saved(Err("Desktop-Benachrichtigungen nicht verfügbar; alle Meldungen bleiben in der App.".into()))),
+                Err(_) => s.send(Event::Saved(Err(crate::tr!("Desktop-Benachrichtigungen nicht verfügbar; alle Meldungen bleiben in der App.").into()))),
             }
         });
     }
@@ -546,35 +570,24 @@ impl Backend {
             ));
         });
     }
-    pub fn enroll(&self, server: String, code: String, name: String) {
-        let s = self.sender();
+    pub fn local_runners(&self, server: String, action: crate::local_runners::Action) {
+        let Some(client) = self.client.clone() else { return; };
+        let mut sender = self.sender();
+        // Local process operations must finish even if the UI changes connections.
+        sender.generation = u64::MAX;
         self.runtime.spawn(async move {
-            let result = async {
-                let c = FactoryClient::new_desktop(&server, "enrollment-without-existing-device-token", crate::persistence::desktop_client_id()?)?;
-                let credential = c.redeem(&RedeemEnrollment { code, name }).await?;
-                // Preserve the one-use credential privately before reporting success.
-                let path = crate::persistence::data_dir()?
-                    .join(format!("device-{}.token", credential.device.id));
-                crate::persistence::write_new(&path, credential.token.as_bytes())?;
-                Ok::<_, anyhow::Error>(crate::persistence::LocalConnection {
-                    server,
-                    token: credential.token,
-                    credential_file: path,
-                })
-            }
-            .await;
-            s.send(Event::Local(result.map_err(|e| e.to_string())));
+            sender.send(Event::LocalRunners(crate::local_runners::perform(&client, &server, action).await));
         });
     }
 }
 fn snapshot_error(error: &ClientError) -> String {
     match error {
         ClientError::Http { status, .. } if status.as_u16() == 404 =>
-            "Dieser Server unterstützt die Desktop-API noch nicht (/v1/desktop/snapshot fehlt). Wahrscheinlich läuft eine ältere factoryd-Version oder die Serveradresse ist falsch. Ein fehlendes Projekt ist nicht die Ursache. Server aktualisieren und neu starten oder über „Verbindung …“ eine separate lokale Factory starten. Neu bauen allein aktualisiert laufende Prozesse nicht.".into(),
+            crate::tr!("Dieser Server unterstützt die Desktop-API noch nicht (/v1/desktop/snapshot fehlt). Wahrscheinlich läuft eine ältere factoryd-Version oder die Serveradresse ist falsch. Ein fehlendes Projekt ist nicht die Ursache. Server aktualisieren und neu starten oder über „Verbindung …“ eine separate lokale Factory starten. Neu bauen allein aktualisiert laufende Prozesse nicht.").into(),
         ClientError::Http { status, .. } if matches!(status.as_u16(), 401 | 403) =>
-            "Zugang zum Server abgelehnt. Unter „Verbindung …“ Serveradresse und Zugangstoken prüfen; ein Projekt muss dafür noch nicht eingerichtet sein.".into(),
+            crate::tr!("Zugang zum Server abgelehnt. Unter „Verbindung …“ Serveradresse und Zugangstoken prüfen; ein Projekt muss dafür noch nicht eingerichtet sein.").into(),
         ClientError::Transport =>
-            "Server nicht erreichbar. Unter „Verbindung …“ einen vorhandenen Server wählen oder eine lokale Factory starten. Die Verbindung wird automatisch erneut geprüft.".into(),
+            crate::tr!("Server nicht erreichbar. Unter „Verbindung …“ einen vorhandenen Server wählen oder eine lokale Factory starten. Die Verbindung wird automatisch erneut geprüft.").into(),
         _ => error.to_string(),
     }
 }
@@ -702,7 +715,7 @@ async fn perform_request(
             .await
             .map_err(|error| {
                 if path.starts_with("/v1/model-settings/accesses/") && path.contains("/oauth") {
-                    let message = error.message.unwrap_or_else(|| "Die Anfrage zur ChatGPT-Anmeldung konnte nicht abgeschlossen werden.".into());
+                    let message = error.message.unwrap_or_else(|| crate::tr!("Die Anfrage zur ChatGPT-Anmeldung konnte nicht abgeschlossen werden.").into());
                     let mut failure = Failure::from(error.error);
                     failure.message = message;
                     return failure;
@@ -710,7 +723,7 @@ async fn perform_request(
                 let missing=matches!(&error.error,ClientError::Http {status,..} if status.as_u16()==404);
                 let mut failure=Failure::from(error);
                 if missing && path.starts_with("/v1/tasks/") && path.ends_with("/edit") {
-                    failure.message="Bearbeitungsreservierung nicht verfügbar. Aktuellen Serverstand prüfen; bei einem älteren Server factoryd aktualisieren und neu starten (Schema 33). Ohne bestätigte Reservierung wird die Aufgabe nicht zum Bearbeiten geöffnet.".into();
+                    failure.message=crate::tr!("Bearbeitungsreservierung nicht verfügbar. Aktuellen Serverstand prüfen; bei einem älteren Server factoryd aktualisieren und neu starten (Schema 33). Ohne bestätigte Reservierung wird die Aufgabe nicht zum Bearbeiten geöffnet.").into();
                 }
                 failure
             })
@@ -741,9 +754,9 @@ fn clipboard_attachment(name: &str, bytes: &[u8]) -> Result<InputAttachment, Str
     let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .and_then(|reader| reader.into_dimensions().map_err(std::io::Error::other))
-        .map_err(|_| "Das Bild in der Zwischenablage konnte nicht gelesen werden.".to_owned())?;
+        .map_err(|_| crate::tr!("Das Bild in der Zwischenablage konnte nicht gelesen werden.").to_owned())?;
     if width == 0 || height == 0 || width > 8192 || height > 8192 {
-        return Err("Bildgröße ungültig (maximal 8192 × 8192).".into());
+        return Err(crate::tr!("Bildgröße ungültig (maximal 8192 × 8192).").into());
     }
     Ok(InputAttachment::Image(image))
 }
@@ -755,17 +768,17 @@ fn clipboard_attachment_keeps_the_screenshot_bytes() {
     image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
         .write_to(&mut png, image::ImageFormat::Png).unwrap();
     let bytes = png.into_inner();
-    let InputAttachment::Image(result) = clipboard_attachment("Zwischenablage.png", &bytes).unwrap()
+    let InputAttachment::Image(result) = clipboard_attachment(crate::tr!("Zwischenablage.png"), &bytes).unwrap()
         else { panic!("Expected an image attachment") };
-    assert_eq!(result, PromptImage::from_bytes("Zwischenablage.png".into(), &bytes).unwrap());
-    assert!(clipboard_attachment("Zwischenablage.png", &bytes[..8]).is_err());
+    assert_eq!(result, PromptImage::from_bytes(crate::tr!("Zwischenablage.png").into(), &bytes).unwrap());
+    assert!(clipboard_attachment(crate::tr!("Zwischenablage.png"), &bytes[..8]).is_err());
 }
 
 fn load_attachment(path: &std::path::Path) -> Result<InputAttachment, String> {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
-        .ok_or("Ungültiger Dateiname")?
+        .ok_or(crate::tr!("Ungültiger Dateiname"))?
         .to_string();
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();

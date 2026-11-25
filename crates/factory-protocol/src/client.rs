@@ -54,6 +54,51 @@ impl From<ClientError> for RequestFailure {
 }
 
 impl FactoryClient {
+    pub async fn factory_skill_bundle(
+        &self, runner: RunnerId, registration: RegistrationId, command: CommandId, skill: &FactorySkillRef,
+    ) -> Result<skills::FactorySkillBundle, ClientError> {
+        if !skill.is_valid() { return Err(ClientError::InvalidResponse); }
+        let bundle: skills::FactorySkillBundle = Self::decode(self.http.get(format!(
+            "{}/v1/runners/{runner}/commands/{command}/skills/{}/{}",self.base,skill.id,skill.version))
+            .header(RUNNER_HEADER,registration.to_string()).send().await).await?;
+        if bundle.reference != *skill || !skills::valid_skill_files(&bundle.files) {
+            return Err(ClientError::InvalidResponse);
+        }
+        Ok(bundle)
+    }
+
+    pub async fn take_local_mcp_probe(
+        &self, runner: RunnerId, registration: RegistrationId,
+    ) -> Result<Option<mcp::LocalMcpProbe>, ClientError> {
+        Self::decode(self.http.post(format!("{}/v1/runners/{runner}/mcp-tests/take", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).send().await).await
+    }
+
+    pub async fn finish_local_mcp_probe(
+        &self, runner: RunnerId, registration: RegistrationId, result: &mcp::LocalMcpProbeView,
+    ) -> Result<mcp::LocalMcpProbeView, ClientError> {
+        Self::decode(self.http.post(format!("{}/v1/runners/{runner}/mcp-tests", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).json(result).send().await).await
+    }
+
+    pub async fn remote_mcp_lease(
+        &self, runner: RunnerId, registration: RegistrationId, command: CommandId, id: &str,
+    ) -> Result<(String, String), ClientError> {
+        if !valid_repo_skill_id(id) {
+            return Err(ClientError::InvalidResponse);
+        }
+        let lease: mcp::RemoteMcpLease = Self::decode(
+            self.http.get(format!("{}/v1/runners/{runner}/commands/{command}/mcp/{id}", self.base))
+                .header(RUNNER_HEADER, registration.to_string()).send().await,
+        ).await?;
+        if lease.path != format!("/mcp-runtime/{runner}/{command}/{id}")
+            || lease.token.len() != 64 || !lease.token.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(ClientError::InvalidResponse);
+        }
+        Ok((format!("{}{}", self.base, lease.path), lease.token))
+    }
+
     pub async fn desktop_snapshot(&self) -> Result<Snapshot, ClientError> {
         Self::decode(
             self.http
@@ -1381,6 +1426,10 @@ impl FactoryClient {
                 .await,
         )
         .await
+    }
+    /// Read-only runtime context scoped to a runner credential.
+    pub async fn runner_snapshot(&self, runner: RunnerId) -> Result<Snapshot, ClientError> {
+        Self::decode(self.http.get(format!("{}/v1/runners/{runner}/snapshot", self.base)).send().await).await
     }
     pub async fn create_project(&self, body: &CreateProject) -> Result<Project, ClientError> {
         Self::decode(

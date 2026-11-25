@@ -342,6 +342,10 @@ pub(super) async fn pending_commands(
             .capabilities
             .iter()
             .any(|c| c == TASK_FILES_CAPABILITY);
+        let repo_skills = guard.entries[&id].input.capabilities.iter().any(|c| c == REPO_SKILLS_CAPABILITY);
+        let factory_skills = guard.entries[&id].input.capabilities.iter().any(|c| c == skills::FACTORY_SKILLS_CAPABILITY);
+        let local_mcp = guard.entries[&id].input.capabilities.iter().any(|c| c == mcp::LOCAL_MCP_CAPABILITY);
+        let remote_mcp = guard.entries[&id].input.capabilities.iter().any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
@@ -349,6 +353,10 @@ pub(super) async fn pending_commands(
             store.pending(id).map(|mut commands| {
                 commands
                     .retain(|c| files || c.agent_spec.as_ref().is_none_or(|s| s.files.is_empty()));
+                commands.retain(|c| repo_skills || c.agent_spec.as_ref().is_none_or(|s| s.repo_skills.is_none()));
+                commands.retain(|c| factory_skills || c.agent_spec.as_ref().is_none_or(|s| s.factory_skills.is_empty()));
+                commands.retain(|c| local_mcp || c.agent_spec.as_ref().is_none_or(|s| s.local_mcps.is_empty()));
+                commands.retain(|c| remote_mcp || c.agent_spec.as_ref().is_none_or(|s| s.remote_mcps.is_empty()));
                 commands.retain(|c| {
                     setup || c.workspace_spec.as_ref().is_none_or(|s| s.setup.is_none())
                 });
@@ -441,6 +449,10 @@ pub(super) async fn ack_command(
         .capabilities
         .iter()
         .any(|c| c == TASK_FILES_CAPABILITY);
+    let repo_skills = guard.entries[&runner].input.capabilities.iter().any(|c| c == REPO_SKILLS_CAPABILITY);
+    let factory_skills = guard.entries[&runner].input.capabilities.iter().any(|c| c == skills::FACTORY_SKILLS_CAPABILITY);
+    let local_mcp = guard.entries[&runner].input.capabilities.iter().any(|c| c == mcp::LOCAL_MCP_CAPABILITY);
+    let remote_mcp = guard.entries[&runner].input.capabilities.iter().any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_context_planning_support(
             runner,
@@ -450,6 +462,10 @@ pub(super) async fn ack_command(
         )?;
         store.require_image_support(runner, id, body.ownership_epoch, images)?;
         store.require_file_support(runner, id, body.ownership_epoch, files)?;
+        store.require_repo_skill_support(runner, id, body.ownership_epoch, repo_skills)?;
+        store.require_factory_skill_support(runner, id, body.ownership_epoch, factory_skills)?;
+        store.require_local_mcp_support(runner, id, body.ownership_epoch, local_mcp)?;
+        store.require_remote_mcp_support(runner, id, body.ownership_epoch, remote_mcp)?;
         store.require_setup_support(runner, id, body.ownership_epoch, setup)?;
         store.require_checkpoint_support(runner, id, body.ownership_epoch, checkpoints)?;
         store.require_review_support(runner, id, body.ownership_epoch, reviews)?;

@@ -5,6 +5,7 @@ use factoryd::store::{Store, StoreError};
 fn project(store: &Store) -> Project {
     store
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),
@@ -337,7 +338,6 @@ fn explicit_scheduler_pause_is_not_undone_by_desktop_task_submission() {
                 enabled: false,
                 runner_ids: vec![runner],
                 max_parallel: 1,
-                start_budget: 12,
             },
         )
         .unwrap();

@@ -5,19 +5,7 @@ use crate::{
 };
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let confirmed = if app.online {
-        app.instances
-            .iter()
-            .filter(|i| now.saturating_sub(i.observed_unix_ms) <= 10_000)
-            .count()
-    } else {
-        0
-    };
-    graph(ui, app.online, confirmed);
+    graph(ui, app.online);
     ui.separator();
     egui::Grid::new("connection-info-details")
         .num_columns(2)
@@ -26,35 +14,28 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             for (name, value) in [
                 ("Server", app.server.clone()),
                 (
-                    "Verbindung",
+                    crate::tr!("Verbindung"),
                     if app.online {
-                        "Verbunden".into()
+                        crate::tr!("Verbunden").into()
                     } else {
                         "Offline".into()
                     },
                 ),
                 (
-                    "Zugriff",
+                    crate::tr!("Zugriff"),
                     app.access.as_ref().map_or_else(
-                        || "Noch nicht bestätigt".into(),
+                        || crate::tr!("Noch nicht bestätigt").into(),
                         |a| format!("{:?}", a.role),
                     ),
                 ),
                 (
-                    "Letzter Datenempfang",
-                    app.updated.map_or_else(
-                        || "Noch keine Daten empfangen".into(),
-                        |t| format!("vor {} Sekunden", t.elapsed().as_secs()),
-                    ),
-                ),
-                (
-                    "Serverversion",
+                    crate::tr!("Serverversion"),
                     app.snapshot
                         .as_ref()
-                        .map_or_else(|| "Unbekannt".into(), |s| s.server_version.clone()),
+                        .map_or_else(|| crate::tr!("Unbekannt").into(), |s| s.server_version.clone()),
                 ),
                 (
-                    "Offene Zustellungen",
+                    crate::tr!("Offene Zustellungen"),
                     app.settings
                         .pending
                         .iter()
@@ -68,53 +49,62 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 ui.end_row();
             }
         });
-    ui.add_space(12.0);
-    ui.label("Die Übersicht zeigt bestätigte Beobachtungen, keine Verbindungsgarantie. Zugangstoken werden hier nicht angezeigt.");
-    if ui.button("Verbindungseinstellungen öffnen …").clicked() {
-        app.dialog = Some(Dialog::connection(app.server.clone()));
-    }
 }
 
-fn graph(ui: &mut egui::Ui, connected: bool, instances: usize) {
+pub fn actions(ui: &mut egui::Ui, app: &mut App) {
+    ui.horizontal(|ui| {
+        if app.connection_active() {
+            let disconnect = ui.button(crate::tr!("Trennen"));
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test-connection-disconnect"), disconnect.rect));
+            if disconnect.clicked() {
+                app.disconnect();
+            }
+        } else {
+            let connect = ui.button(crate::tr!("Verbinden…"));
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test-connection-open"), connect.rect));
+            if connect.clicked() {
+                app.dialog = Some(Dialog::connection(app.server.clone()));
+            }
+            if ui.button(crate::tr!("Lokale Factory")).clicked() {
+                app.backend.start_local();
+                app.dialog = Some(Dialog::LocalFactory { starting: true });
+            }
+        }
+    });
+}
+
+fn graph(ui: &mut egui::Ui, connected: bool) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 160.0),
         egui::Sense::hover(),
     );
-    let width = rect.width() / 3.0;
+    let width = rect.width() / 2.0;
     let nodes = [
         (
             egui_phosphor::regular::DESKTOP,
-            "Dieser Desktop",
-            "Bereit".to_string(),
+            crate::tr!("Dieser Desktop"),
+            crate::tr!("Bereit").to_string(),
             BLUE,
         ),
         (
             egui_phosphor::regular::HARD_DRIVES,
-            "Factory-Server",
+            crate::tr!("Factory-Server"),
             if connected {
-                "Verbunden".into()
+                crate::tr!("Verbunden").into()
             } else {
-                "Nicht verbunden".into()
+                crate::tr!("Nicht verbunden").into()
             },
             if connected { GREEN } else { AMBER },
         ),
-        (
-            egui_phosphor::regular::TERMINAL_WINDOW,
-            "OpenCode",
-            if instances > 0 {
-                format!("{instances} bestätigt")
-            } else {
-                "Präsenz unbekannt".into()
-            },
-            if instances > 0 { GREEN } else { MUTED },
-        ),
     ];
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    let centers: [egui::Pos2; 3] = std::array::from_fn(|i| {
+    let centers: [egui::Pos2; 2] = std::array::from_fn(|i| {
         egui::pos2(rect.left() + width * (i as f32 + 0.5), rect.top() + 42.0)
     });
-    for i in 0..2 {
-        let color = if i == 0 && connected || i == 1 && instances > 0 {
+    for i in 0..1 {
+        let color = if connected {
             GREEN
         } else {
             MUTED.gamma_multiply(0.5)

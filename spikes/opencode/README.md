@@ -4,6 +4,9 @@ Ausführbarer Rust-HTTP-Client für den tatsächlich geprüften Vertrag **2.0.27
 Das ist kein produktiver Runner. Der Client startet/stoppt keinen OpenCode-Service
 und verwaltet keine Provider-Credentials.
 
+Für OpenCode **2.4.1** gibt es einen separaten
+[Spike zur Trennung von Skills und MCPs](../../docs/integration-profiles.md).
+
 ## Ausführen
 
 Voraussetzung: laufender OpenCode-Service 2.0.27 und Rust/Cargo.

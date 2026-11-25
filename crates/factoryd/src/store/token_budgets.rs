@@ -105,6 +105,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let project = store
             .create_project(CreateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id: RequestId::new(),

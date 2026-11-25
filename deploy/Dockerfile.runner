@@ -1,0 +1,21 @@
+# Build context: repository root.
+FROM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY vendor ./vendor
+COPY spikes/opencode/Cargo.toml ./spikes/opencode/Cargo.toml
+COPY spikes/opencode/src ./spikes/opencode/src
+RUN cargo build --locked --release -p factory-runner
+
+FROM ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git openssh-client && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 factory && useradd --uid 10001 --gid factory --create-home factory \
+    && install -d -o factory -g factory -m 0700 /data
+COPY --from=build /src/target/release/factory-runner /usr/local/bin/factory-runner
+COPY deploy/install-opencode.sh /tmp/install-opencode.sh
+RUN sh /tmp/install-opencode.sh && rm /tmp/install-opencode.sh
+ENV FACTORY_OPENCODE_BIN=/usr/local/bin/opencode
+WORKDIR /data
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/factory-runner"]

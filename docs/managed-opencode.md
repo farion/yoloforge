@@ -8,9 +8,12 @@ vor einem Upgrade auf Schema 35 sichern.
 
 `factoryd` startet und beaufsichtigt ein eigenes **OpenCode 2.4.1**, bindet
 es an Loopback und hält dessen Zustand in einem privaten Verzeichnis neben
-der Factory-Datenbank (`factory.sqlite3.opencode/`). Der Container liefert
-das Binary mit; bei direktem Start muss es im `PATH` liegen oder über
-`FACTORY_OPENCODE_BIN` angegeben werden. Es gibt keinen Gateway-Schalter.
+der Factory-Datenbank (`factory.sqlite3.opencode/`). Im Container wird das
+Binary beim Image-Build installiert. Beim direkten Start lädt `factoryd` es bei
+Bedarf in dieses private Verzeichnis, prüft die fest hinterlegte SHA-512-Summe
+und verwendet es bei weiteren Starts wieder. Ein absoluter Pfad in
+`FACTORY_OPENCODE_BIN` hat Vorrang; persönliche Installationen aus dem `PATH`
+werden nicht übernommen. Es gibt keinen Gateway-Schalter.
 
 Der Server erzeugt dort auch `model.key`. Dieser Schlüssel gewährt ausschließlich
 Zugriff auf den Modellkatalog und Modellaufrufe, nicht auf Zugangsdaten oder die
@@ -23,15 +26,17 @@ Den Runner statt mit `--opencode-registration` mit
 
 ```json
 {
-  "binary": "/opt/factory/opencode/2.4.1/opencode",
   "port": 4098,
   "model_key_file": "/pfad/runner-modellschluessel",
   "config": "/pfad/runner-optionen.jsonc"
 }
 ```
 
-`config` ist optional. Das angegebene Binary wird auf Version 2.4.1 geprüft;
-die Bereitstellung des Binaries übernimmt das Deployment. Der Runner startet
+`config` ist optional. Ohne `binary` oder `FACTORY_OPENCODE_BIN` lädt der Runner
+OpenCode beim ersten Start in seinen eigenen privaten Cache neben dem Journal.
+Der Download ist auf Linux x86-64 und ARM64 verfügbar und braucht `tar` und
+`gzip`. Bei jedem Start wird die Version geprüft; ein vorhandener Cache
+benötigt keinen Download. Der Runner startet
 einen eigenen Loopback-Prozess mit privaten HOME-/XDG-Verzeichnissen neben dem
 Journal und ohne geerbte Provider-Umgebungsvariablen. Die Verbindung zur Factory
 erfolgt für Modellaufrufe über HTTPS oder einen lokalen Tunnel. Der Katalog
@@ -39,6 +44,19 @@ wird regelmäßig aktualisiert. Ist der Gateway nicht erreichbar, gibt es keinen
 lokalen Fallback. Der frühere implizite Start des persönlichen
 OpenCode-Hintergrunddiensts entfällt auch für alte Runner; explizit
 registrierte Alt-Instanzen bleiben kompatibel.
+
+Das Runner-Image wird mit `docker build -f deploy/Dockerfile.runner -t yoloforge-runner:development .`
+gebaut und bringt das geprüfte Binary bereits mit. Pro Container eine eigene
+Runner-ID und ein eigenes persistentes `/data` für Journal, Worktrees und
+OpenCode verwenden. Dem Runner außerdem seine Zugangsdaten und die Datei mit
+dem Modellschlüssel bereitstellen. `--server` muss auf die vom Runner erreichbare
+Factory-URL zeigen. Ein getrenntes Docker-Netz ersetzt kein HTTPS: Für zwei
+Container ist eine erreichbare HTTPS-Adresse (z. B. per Reverse Proxy) oder
+ein lokaler Tunnel nötig; `127.0.0.1` allein verweist auf den Runner-Container.
+
+Implementer-, Orchestrator-, Supervisor- und Memorizer-Sessions laufen auf den
+Runnern. Das zentrale OpenCode im Server verwaltet Zugangsdaten für die
+Modell-Anbieter, führt aber keine Aufgaben aus.
 
 Im verwalteten Modus sind Repo-Optionen erlaubt. Anbieter- oder Modellvorgaben
 in den Repo-Konfigurationen, Agenten und Befehlen werden vor dem Prompt
@@ -61,9 +79,37 @@ Zugang wählt die Factory automatisch ein Standardmodell aus dem Katalog, wenn
 noch keines festgelegt ist. Der Hinweis führt zu **Default-Modelle**, wo sich
 das Standardmodell und die optionalen Rollenmodelle ändern lassen. Der
 Aufgaben-Dialog zeigt **Default** und das geerbte Implementer-Modell; die
-Projekt-Rollen stehen in **Erweiterte Projekteinstellungen → Modell-Anbieter**.
+Projekt-Rollen stehen unter **Projekteinstellungen → Modell-Anbieter → Agenten-Overrides**.
 Einen abgelaufenen Zugang kann der Admin dort mit der gleichen
 ChatGPT-Konto-ID erneut anmelden, ohne die Modellreferenzen umzuschreiben.
+
+Für **Google Gemini**, **OpenRouter**, **Anthropic (Claude)** und **LiteLLM**
+unter **Modell-Anbieter → Hinzufügen** einen Namen und den API-Schlüssel
+eingeben. Bei **Ollama** kann der Schlüssel leer bleiben. Die Schlüssel
+bleiben auf dem Server.
+
+- **Google AI Pro oder Ultra:** In [Google AI Studio](https://aistudio.google.com/)
+  das [monatliche API-Guthaben aktivieren](https://aistudio.google.com/docs/google-ai-plans#claim-api-credits),
+  die Abrechnung für das Projekt einrichten und den
+  [Gemini-API-Schlüssel](https://aistudio.google.com/apikey) in Factory eintragen.
+  Das Browser-Kontingent des Abos gilt nicht für externe API-Aufrufe.
+- **LiteLLM und Ollama:** Beim Hinzufügen die **Server-URL** eintragen, z. B.
+  `http://litellm:4000` oder `http://localhost:11434`. Die Adresse muss vom
+  Factory-Server aus erreichbar sein. Öffentliche Adressen benötigen HTTPS.
+  Ohne Eingabe kann der Server wie bisher `FACTORY_LITELLM_URL` bzw.
+  `FACTORY_OLLAMA_URL` als Vorgabe nutzen. Ollama zeigt nur Modelle mit
+  Tool-Unterstützung.
+
+**GitHub Copilot:** Unter **Modell-Anbieter** direkt **GitHub Copilot** auswählen,
+einen Zugang benennen und im Browser den angezeigten Gerätecode bestätigen.
+Factory nutzt die GitHub.com-Anmeldung von OpenCode. Das GitHub-Konto braucht
+Copilot-Zugriff; LiteLLM und ein API-Schlüssel sind nicht nötig. GitHub
+Enterprise mit eigenem Anmeldehost ist noch nicht angebunden.
+
+Für die zusätzlichen Anbieter müssen Factory-Server, Desktop und Runner aktualisiert sein.
+Der Papierkorb entfernt einen Zugang nach Bestätigung samt gespeicherten
+Zugangsdaten und zugehörigen Standard- und Rollen-Einstellungen. Solange ein
+offener Intent auf diesen Zugang festgelegt ist, kann er nicht gelöscht werden.
 
 Die Control-API verwendet die normale Factory-Anmeldung. Typen stehen in
 `crates/factory-protocol/src/models.rs`.
@@ -107,7 +153,7 @@ Provider-Logins. Die echte ChatGPT-Abnahme mit zwei Konten und echten
 Modellaufrufen steht noch aus; siehe
 [Spike](../spikes/opencode/managed_access/README.md).
 
-Der Gateway unterstützt in dieser Vorschau **OpenAI per ChatGPT-Login**.
-Weitere Anbieter und automatische OAuth-Token-Erneuerung fehlen. Abgelaufene Zugänge blockieren
-ohne Kontowechsel. Die zentrale OpenCode-Datenbank bleibt der Credential-Speicher;
-es werden weder Access- noch Refresh-Tokens an Runner übergeben.
+Die automatische OAuth-Token-Erneuerung für ChatGPT fehlt; abgelaufene Zugänge
+blockieren ohne Kontowechsel.
+Die zentrale OpenCode-Datenbank bleibt der Credential-Speicher. API-Schlüssel
+und OAuth-Tokens werden nicht an Runner übergeben.

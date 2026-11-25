@@ -20,7 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
-pub const SCHEMA_VERSION: u32 = 35;
+pub const SCHEMA_VERSION: u32 = 40;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -33,7 +33,7 @@ impl From<serde_json::Error> for StoreError {
 }
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>);
+pub struct Store(Arc<Mutex<Connection>>, Arc<tokio::sync::Notify>);
 
 pub struct DurableSnapshot {
     pub token_totals: ObservedTokenTotals,
@@ -55,6 +55,14 @@ pub struct DurableSnapshot {
 }
 
 impl Store {
+    pub fn scheduler_wakeup(&self) -> Arc<tokio::sync::Notify> {
+        self.1.clone()
+    }
+
+    fn wake_scheduler(&self) {
+        self.1.notify_one();
+    }
+
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
@@ -182,11 +190,28 @@ impl Store {
         if version < 35 {
             tx.execute_batch(include_str!("../migrations/035_models.sql"))?;
         }
+        if version < 36 {
+            tx.execute_batch(include_str!("../migrations/036_repo_skills.sql"))?;
+        }
+        if version < 37 {
+            tx.execute_batch(include_str!("../migrations/037_local_mcps.sql"))?;
+        }
+        if version < 38 {
+            tx.execute_batch(include_str!("../migrations/038_remote_mcps.sql"))?;
+        }
+        if version < 39 {
+            tx.execute_batch(include_str!("../migrations/039_factory_skills.sql"))?;
+        }
+        if version < 40 {
+            tx.execute_batch(include_str!("../migrations/040_remove_start_budget.sql"))?;
+        }
         tx.commit()?;
         // Connection-local view centralizes fencing of removed projects without
         // changing or discarding the historical rows or the database schema version.
         db.execute_batch("CREATE TEMP VIEW active_projects AS SELECT rowid AS rowid,* FROM main.projects WHERE COALESCE(json_extract(data,'$.deleted'),0)=0;")?;
-        Ok(Self(Arc::new(Mutex::new(db))))
+        db.execute_batch("CREATE TEMP TABLE live_mcp_runners(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL, remote INTEGER NOT NULL);")?;
+        db.execute_batch("CREATE TEMP TABLE live_automatic_runners(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL, local_source INTEGER NOT NULL);")?;
+        Ok(Self(Arc::new(Mutex::new(db)), Arc::new(tokio::sync::Notify::new())))
     }
 
     fn mutate<T: Serialize + DeserializeOwned>(
@@ -232,7 +257,11 @@ impl Store {
     pub fn create_project(&self, body: CreateProject) -> Result<Project> {
         self.mutate(body.request_id, "project.create", &body, |tx| {
             project_fields(&body.name, &body.repository, &body.base_branch)?;
+            if let Some(logo) = &body.logo {
+                logo.png_bytes().map_err(StoreError::Invalid)?;
+            }
             let mut project = Project {
+                logo: body.logo.clone(),
                 runner_mapping: None,
                 key: numbering::project_key(tx,&body.name,body.key.as_deref(),None)?,
                 deleted: false,
@@ -331,7 +360,7 @@ impl Store {
                 if project.revision != body.expected_revision {
                     return Err(StoreError::RevisionConflict(project.revision));
                 }
-                if body.name.is_none() && body.repository.is_none() && body.base_branch.is_none() && body.key.is_none() && body.runner_mapping.is_none() {
+                if body.name.is_none() && body.repository.is_none() && body.base_branch.is_none() && body.key.is_none() && body.runner_mapping.is_none() && body.logo.is_none() {
                     return Err(StoreError::Invalid("Project update is empty"));
                 }
                 if body
@@ -354,6 +383,12 @@ impl Store {
                 }
                 if let Some(v) = &body.name {
                     project.name = v.clone();
+                }
+                if let Some(change) = &body.logo {
+                    if let Some(logo) = &change.image {
+                        logo.png_bytes().map_err(StoreError::Invalid)?;
+                    }
+                    project.logo = change.image.clone();
                 }
                 if let Some(key) = &body.key {
                     if key.trim().is_empty() {return Err(StoreError::Invalid("Projektkürzel darf nicht leer sein"));}
@@ -599,6 +634,10 @@ impl Store {
     }
 }
 mod models;
+mod mcp;
+mod remote_mcp;
+mod skills;
+mod factory_skills;
 
 mod archive;
 mod archive_blobs;

@@ -5,6 +5,7 @@ use std::sync::{Arc, Barrier};
 
 fn project() -> CreateProject {
     CreateProject {
+        logo: None,
         runner_mapping: None,
         key: None,
         request_id: RequestId::new(),
@@ -42,6 +43,7 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
     let store = Store::open(&path).unwrap();
     let p = store.create_project(project()).unwrap();
     let body = UpdateProject {
+        logo: None,
         runner_mapping: None,
         key: None,
         request_id: RequestId::new(),
@@ -71,6 +73,7 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
             store.update_project(
                 p.id,
                 UpdateProject {
+                    logo: None,
                     runner_mapping: None,
                     key: None,
                     request_id: RequestId::new(),
@@ -88,6 +91,7 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
         .update_project(
             p.id,
             UpdateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id: RequestId::new(),
@@ -116,6 +120,7 @@ fn project_metadata_is_durable_validated_and_cannot_retarget_existing_streams() 
             store.update_project(
                 other.id,
                 UpdateProject {
+                    logo: None,
                     runner_mapping: None,
                     key: None,
                     request_id: RequestId::new(),
@@ -176,6 +181,7 @@ fn project_runner_selection_persists_and_can_return_to_automatic() {
     let store = Store::open(&path).unwrap();
     assert_eq!(store.snapshot().unwrap().projects[0].runner_mapping, Some(ProjectRunnerMapping::Runner(manual)));
     let change = UpdateProject {
+        logo: None,
         runner_mapping: Some(ProjectRunnerMapping::Automatic),
         key: None,
         request_id: RequestId::new(),
@@ -214,6 +220,7 @@ fn profile_and_metadata_share_one_project_revision() {
         first.update_project(
             id,
             UpdateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id: RequestId::new(),

@@ -15,7 +15,7 @@ Anforderung nicht nachgebaut; die neue Sessionansicht ist bewusst schreibgeschü
 | Lokaler Entwurf / Serverentwurf / Freigabe | Aufgabendialog; Serverentwurf startet nicht |
 | Tickets, Kriterien, Priorität, Status | Technisches Ticket anlegen; Aufgabendetails → Ticket bearbeiten |
 | Abhängigkeiten | Aufgabendetails → Abhängigkeiten |
-| Scheduler, Startbudget, Parallelität | Orchestrator → Verteilung konfigurieren |
+| Anzahl gleichzeitig arbeitender Sessions | Projekteinstellungen → Limits |
 | Projektpause | Projekt verwalten → Projekt pausieren / fortsetzen |
 | Sessionlimit | Scheduler-/Projektkonfiguration, aktuelle Grenze im Orchestrator |
 | Streams erstellen und prüfen | Projekt verwalten → Arbeitsbereich anlegen / Arbeitsbereiche und Aufträge |

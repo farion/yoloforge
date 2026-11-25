@@ -8,7 +8,6 @@ use anyhow::{ensure, Context, Result};
 use factory_core::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     io::{Read, Write},
@@ -95,12 +94,11 @@ pub fn install_bundle(root: &Path, import: &CheckpointImport, bytes: &[u8]) -> R
     );
     fs::create_dir_all(root)?;
     let inbox = fs::canonicalize(root)?.join(".checkpoint-inbox");
-    fs::create_dir_all(&inbox)?;
+    factory_platform::private_dir(&inbox)?;
     ensure!(
         !fs::symlink_metadata(&inbox)?.file_type().is_symlink(),
         "Checkpoint inbox is a symlink"
     );
-    fs::set_permissions(&inbox, fs::Permissions::from_mode(0o700))?;
     persist_bytes(&inbox.join(format!("{}.bundle", import.command_id)), bytes)
 }
 pub fn import_objects(repository: &Path, root: &Path, import: &CheckpointImport) -> Result<String> {
@@ -159,7 +157,7 @@ fn persist_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;
     temp.persist_noclobber(path)?;
-    fs::File::open(parent)?.sync_all()?;
+    factory_platform::sync_dir(parent)?;
     Ok(())
 }
 fn capture(
@@ -273,14 +271,13 @@ fn capture(
         !fs::symlink_metadata(parent)?.file_type().is_symlink(),
         "Checkpoint parent is a symlink"
     );
-    fs::create_dir_all(&plan.directory)?;
+    factory_platform::private_dir(&plan.directory)?;
     ensure!(
         !fs::symlink_metadata(&plan.directory)?
             .file_type()
             .is_symlink(),
         "Checkpoint directory is a symlink"
     );
-    fs::set_permissions(&plan.directory, fs::Permissions::from_mode(0o700))?;
     let bundle = plan.directory.join("checkpoint.bundle");
     let manifest = plan.directory.join("manifest.json");
     if fs::symlink_metadata(&bundle).is_err() {
@@ -321,7 +318,7 @@ fn capture(
         journal.save(record)?;
         fs::File::open(&temp_bundle)?.sync_all()?;
         fs::hard_link(&temp_bundle, &bundle)?;
-        fs::File::open(&plan.directory)?.sync_all()?;
+        factory_platform::sync_dir(&plan.directory)?;
     }
     let artifact = plan
         .artifact
@@ -398,7 +395,7 @@ mod tests {
         fs::remove_file(path.join("deleted")).unwrap();
         fs::write(path.join("untracked-ü"), [0, 1, 2, 255]).unwrap();
         fs::write(path.join("ignored"), "do not archive").unwrap();
-        std::os::unix::fs::symlink("tracked", path.join("link")).unwrap();
+        crate::test_symlink_file("tracked", path.join("link")).unwrap();
         let head = git(path, &["rev-parse", "HEAD"]).unwrap();
         let status = git(path, &["status", "--porcelain=v1"]).unwrap();
         let staged = git(path, &["diff", "--cached", "--binary"]).unwrap();

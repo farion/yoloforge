@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &HeaderMap) {
+pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &HeaderMap, ip: Option<std::net::IpAddr>) {
     if principal.role == DeviceRole::Runner {
         return;
     }
@@ -48,6 +48,7 @@ pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &H
     registry.clients.insert(
         key.clone(),
         ClientPresence {
+            ip,
             id: key,
             name: name.into(),
             device_id: principal.device_id,
@@ -82,6 +83,7 @@ mod client_tests {
             boot_id: BootId::new(),
             store: Store::open(std::path::Path::new(":memory:")).unwrap(),
             stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_probes: Default::default(),
         };
         let operator = Principal {
             role: DeviceRole::Operator,
@@ -90,31 +92,48 @@ mod client_tests {
         };
         let mut headers = HeaderMap::new();
         headers.insert("x-factory-client-id", "invalid".parse().unwrap());
-        observe_client(&app, &operator, &headers).await;
+        observe_client(&app, &operator, &headers, None).await;
         assert!(app.registry.read().await.clients.is_empty());
         for _ in 0..520 {
             headers.insert(
                 "x-factory-client-id",
                 RequestId::new().to_string().parse().unwrap(),
             );
-            observe_client(&app, &operator, &headers).await;
+            observe_client(&app, &operator, &headers, Some("192.0.2.10".parse().unwrap())).await;
         }
         assert_eq!(app.registry.read().await.clients.len(), 512);
+        assert!(app.registry.read().await.clients.values()
+            .all(|client| client.ip == Some("192.0.2.10".parse().unwrap())));
         {
             let mut registry = app.registry.write().await;
             for client in registry.clients.values_mut() {
                 client.observed_unix_ms = 0;
             }
         }
-        observe_client(&app, &operator, &headers).await;
+        observe_client(&app, &operator, &headers, None).await;
         assert_eq!(app.registry.read().await.clients.len(), 1);
         let runner = Principal {
             role: DeviceRole::Runner,
             runner_id: Some(RunnerId::new()),
             device_id: Some(DeviceId::new()),
         };
-        observe_client(&app, &runner, &headers).await;
+        observe_client(&app, &runner, &headers, None).await;
         assert_eq!(app.registry.read().await.clients.len(), 1);
+    }
+
+    #[test]
+    fn peer_ip_comes_from_the_socket_not_untrusted_forwarded_headers() {
+        let mut request = axum::http::Request::builder()
+            .header("x-forwarded-for", "192.0.2.99")
+            .header("forwarded", "for=192.0.2.98")
+            .body(axum::body::Body::empty()).unwrap();
+        assert_eq!(observed_ip(&request), None);
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "[::ffff:192.0.2.10]:1234".parse::<std::net::SocketAddr>().unwrap()));
+        assert_eq!(observed_ip(&request), Some("192.0.2.10".parse().unwrap()));
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "[2001:db8::42]:1234".parse::<std::net::SocketAddr>().unwrap()));
+        assert_eq!(observed_ip(&request), Some("2001:db8::42".parse().unwrap()));
     }
 }
 #[derive(serde::Deserialize)]

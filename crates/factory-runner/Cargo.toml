@@ -10,6 +10,7 @@ clap.workspace = true
 factory-core.workspace = true
 factory-protocol = { workspace = true, features = ["client"] }
 factory-opencode.workspace = true
+factory-platform.workspace = true
 tokio = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -19,7 +20,6 @@ fs2 = "0.4"
 tempfile = "3"
 sha2 = "0.10"
 reqwest.workspace = true
-rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 axum.workspace = true

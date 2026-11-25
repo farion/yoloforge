@@ -164,7 +164,7 @@ impl Store {
             || command
                 .agent_progress
                 .as_ref()
-                .is_some_and(|p| p.phase == AgentPhase::Unknown)
+                .is_some_and(|p| matches!(p.phase, AgentPhase::Unknown | AgentPhase::Finalizing))
             || !matches!(
                 value.state,
                 QuestionState::Pending | QuestionState::Rejected

@@ -18,7 +18,7 @@ pub async fn sync(
     args: &Args,
     registration: RegistrationId,
 ) -> Result<()> {
-    let snapshot = client.snapshot().await?;
+    let snapshot = client.runner_snapshot(args.id).await?;
     let mut latest = BTreeMap::new();
     for c in snapshot
         .commands

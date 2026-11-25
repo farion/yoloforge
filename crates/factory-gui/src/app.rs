@@ -39,6 +39,11 @@ pub struct SessionTab {
 }
 
 pub struct App {
+    pub session_prompts: BTreeMap<CommandId, Box<crate::dialogs::TaskDialog>>,
+    pub local_runners: Vec<crate::local_runners::LocalRunner>,
+    pub local_runners_busy: bool,
+    pub action_errors: Vec<(u64, String)>,
+    restore_local_runners: bool,
     pub factory_flow: crate::overview::FlowState,
     pub markdown_cache: egui_commonmark::CommonMarkCache,
     pub task_payloads: BTreeMap<TicketId, std::sync::Arc<Ticket>>,
@@ -75,9 +80,11 @@ pub struct App {
     pub tabs: Vec<SessionTab>,
     pub active_tab: usize,
     pub dialog: Option<Dialog>,
-    pub clipboard_image_request: Option<RequestId>,
     pub factory_settings: Option<crate::project_settings::ProjectSettings>,
     pub models: crate::model_settings::Models,
+    pub skill_settings: BTreeMap<ProjectId, crate::skill_settings::Pane>,
+    pub factory_skills: crate::factory_skills::Catalog,
+    pub mcp_settings: crate::mcp_settings::Settings,
     pub detail: Option<TicketId>,
     pub question_focus: Option<String>,
     pub query: String,
@@ -90,6 +97,7 @@ pub struct App {
     pub notices: Vec<(String, Instant)>,
     pub next_request: u64,
     pub settings_dirty: bool,
+    pub language_save: Option<(crate::i18n::Language, std::sync::mpsc::Receiver<bool>)>,
     pub next_save: Instant,
     pub previews: BTreeMap<String, Option<Result<egui::TextureHandle, String>>>,
     pub started: Instant,
@@ -124,6 +132,9 @@ impl App {
             crate::persistence::load_settings()
         };
         let mut settings = loaded.as_ref().cloned().unwrap_or_default();
+        #[cfg(test)]
+        { settings.language = crate::i18n::Language::German; }
+        crate::i18n::set_language(settings.language);
         let server = if server == "http://127.0.0.1:7432" && !settings.server.is_empty() {
             settings.server.clone()
         } else {
@@ -139,6 +150,11 @@ impl App {
         let next_request = settings.pending.iter().map(|r| r.id).max().unwrap_or(0) + 1;
         let mut app = Self {
             factory_flow: crate::overview::FlowState::default(),
+            local_runners: vec![],
+            session_prompts: BTreeMap::new(),
+            local_runners_busy: false,
+            action_errors: vec![],
+            restore_local_runners: true,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             task_payloads: BTreeMap::new(),
             task_loading: BTreeMap::new(),
@@ -154,7 +170,7 @@ impl App {
             updated: None,
             error: loaded
                 .err()
-                .map(|e| format!("Einstellungen konnten nicht geladen werden: {e}")),
+                .map(|e| crate::tr!("Einstellungen konnten nicht geladen werden: {e}", e = e)),
             instances: vec![],
             clients: vec![],
             client_error: None,
@@ -176,7 +192,6 @@ impl App {
             tabs: vec![],
             active_tab: 0,
             dialog: None,
-            clipboard_image_request: None,
             factory_settings: None,
             models: Default::default(),
             detail: None,
@@ -186,11 +201,15 @@ impl App {
             show_answered: false,
             sessions_closed: false,
             diagnostics_project: false,
+            skill_settings: BTreeMap::new(),
+            factory_skills: Default::default(),
+            mcp_settings: Default::default(),
             responses: BTreeMap::new(),
             in_flight: BTreeSet::new(),
             notices: vec![],
             next_request,
             settings_dirty: false,
+            language_save: None,
             next_save: Instant::now(),
             previews: BTreeMap::new(),
             started: Instant::now(),
@@ -198,6 +217,15 @@ impl App {
             screenshot_requested: false,
             exit_after_ms,
         };
+        if !cfg!(test) {
+            match crate::local_runners::load() {
+                Ok(runners) => app.local_runners = runners,
+                Err(e) => {
+                    app.error = Some(e.to_string());
+                    app.notice(crate::tr!("Gespeicherte lokale Runner konnten nicht geladen werden."));
+                }
+            }
+        }
         let mut credential_file = None;
         let token = match (
             std::env::var("FACTORY_TOKEN"),
@@ -219,7 +247,7 @@ impl App {
                     .map(|s| s.trim_end().to_string())
             }
             (Ok(_), Some(_)) => {
-                let error = "Nur FACTORY_TOKEN oder FACTORY_TOKEN_FILE setzen, nicht beides.";
+                let error = crate::tr!("Nur FACTORY_TOKEN oder FACTORY_TOKEN_FILE setzen, nicht beides.");
                 app.error = Some(error.into());
                 app.notice(error);
                 None
@@ -231,16 +259,19 @@ impl App {
             }
             if let Err(error) = app.connect(server.clone(), token) {
                 app.error = Some(error);
-                app.notice("Factory-Verbindung konnte nicht eingerichtet werden.");
+                app.notice(crate::tr!("Factory-Verbindung konnte nicht eingerichtet werden."));
             } else {
                 app.settings.credential_file = credential_file;
             }
         } else {
-            app.dialog = Some(Dialog::connection(server));
+            app.dialog = None;
         }
         app
     }
     pub fn connect(&mut self, server: String, token: String) -> Result<(), String> {
+        if self.connection_active() {
+            return Err(crate::tr!("Bitte zuerst die bestehende Verbindung trennen.").into());
+        }
         self.backend
             .connect(&server, &token)
             .map_err(|e| e.to_string())?;
@@ -248,6 +279,7 @@ impl App {
             settings.persist(self);
         }
         self.server = server.clone();
+        self.restore_local_runners = true;
         self.settings.server = server;
         self.settings.credential_file = None;
         self.settings_dirty = true;
@@ -272,19 +304,42 @@ impl App {
         self.events.clear();
         self.event_cursor = 0;
         self.tabs.clear();
+        for (_, composer) in std::mem::take(&mut self.session_prompts) { composer.persist(self); }
         self.active_tab = 0;
         self.detail = None;
         self.responses.clear();
         self.models = Default::default();
+        self.skill_settings.clear();
+        self.factory_skills = Default::default();
+        self.mcp_settings = Default::default();
         self.in_flight.clear();
         self.notifications_initialized = false;
         self.latest_notification = 0;
         Ok(())
     }
+    pub fn connection_active(&self) -> bool {
+        self.online || self.backend.is_connected()
+    }
+    pub fn runner_removed(&self, id: RunnerId) -> bool {
+        self.local_runners.iter().any(|runner|
+            runner.id == id && runner.server == self.server && runner.removed)
+    }
+    pub fn manage_local_runners(&mut self, action: crate::local_runners::Action) {
+        if self.local_runners_busy || !self.online || !self.backend.is_connected() { return; }
+        self.local_runners_busy = true;
+        self.backend.local_runners(self.server.clone(), action);
+    }
+    pub fn disconnect(&mut self) {
+        egui::Popup::close_all(self.backend.context());
+        self.backend.disconnect();
+        self.online = false;
+        self.access = None;
+        self.error = None;
+        self.notice(crate::tr!("Verbindung zur Factory getrennt."));
+        self.enter_offline_mode();
+    }
     pub fn project(&self) -> Option<&Project> {
-        self.snapshot
-            .as_ref()?
-            .projects
+        self.available_projects()
             .iter()
             .find(|p| Some(p.id) == self.settings.project)
     }
@@ -292,6 +347,7 @@ impl App {
         self.settings.page
     }
     pub fn navigate(&mut self, target: Target) {
+        if !self.online { self.enter_offline_mode(); return; }
         match target {
             Target::Task(_, task) => self.view_task(task),
             Target::Questions(project, session) => {
@@ -307,7 +363,7 @@ impl App {
                         self.dialog = Some(Dialog::questions(qs));
                     } else {
                         self.show_answered = true;
-                        self.notice("Keine offene Frage mehr in dieser Session. Bereits beantwortete Fragen werden angezeigt.");
+                        self.notice(crate::tr!("Keine offene Frage mehr in dieser Session. Bereits beantwortete Fragen werden angezeigt."));
                     }
                 }
             }
@@ -329,6 +385,7 @@ impl App {
         self.settings_dirty = true;
     }
     pub fn set_page(&mut self, page: Page) {
+        if !self.online && page != Page::Tasks { return; }
         if page == Page::Settings {
             self.dialog = Some(Dialog::FactorySettings);
             return;
@@ -392,12 +449,13 @@ impl App {
         }
     }
     pub fn open_session(&mut self, project: ProjectId, root: CommandId) {
+        if !self.online { return; }
         if self.snapshot.as_ref().is_none_or(|s| {
             !s.commands
                 .iter()
                 .any(|c| c.session_root() == root && command_project(s, c) == Some(project))
         }) {
-            self.notice("Session ist im aktuellen Serverstand nicht verfügbar. Projekt und Verbindung prüfen.");
+            self.notice(crate::tr!("Session ist im aktuellen Serverstand nicht verfügbar. Projekt und Verbindung prüfen."));
             return;
         }
         if let Some(index) = self.tabs.iter().position(|t| t.root == root) {
@@ -462,7 +520,7 @@ impl App {
             return;
         }
         self.write(
-            if project.paused { "Projekt fortsetzen" } else { "Projekt pausieren" },
+            if project.paused { crate::tr!("Projekt fortsetzen") } else { crate::tr!("Projekt pausieren") },
             "POST", format!("/v1/projects/{}/pause", project.id),
             serde_json::json!(PauseProject { request_id: RequestId::new(),
                 expected_revision: project.revision, paused: !project.paused }),
@@ -479,7 +537,7 @@ impl App {
             .find(|r| r.id == id && r.server == self.server)
         {
             if r.path == "/v1/devices/enrollment" {
-                self.notice("Einladungserstellung hat keinen idempotenten Abgleich. Unklare Einladungen nicht erneut senden; Gültigkeit abwarten oder Gerätezugang prüfen.");
+                self.notice(crate::tr!("Einladungserstellung hat keinen idempotenten Abgleich. Unklare Einladungen nicht erneut senden; Gültigkeit abwarten oder Gerätezugang prüfen."));
                 return;
             }
             self.in_flight.insert(id);
@@ -492,13 +550,15 @@ impl App {
         self.notices.push((message.into(), Instant::now()));
     }
     fn connection_lost(&mut self, error: String) {
+        egui::Popup::close_all(self.backend.context());
         if self.online {
-            self.notice("Verbindung zur Factory unterbrochen.");
+            self.notice(crate::tr!("Verbindung zur Factory unterbrochen."));
         } else if self.error.is_none() {
-            self.notice("Verbindung zur Factory fehlgeschlagen.");
+            self.notice(crate::tr!("Verbindung zur Factory fehlgeschlagen."));
         }
         self.online = false;
         self.error = Some(error);
+        self.enter_offline_mode();
     }
     pub fn task_data(&mut self, ticket: &Ticket) -> Option<std::sync::Arc<Ticket>> {
         if self.snapshot.as_ref().is_none_or(|s| !s.payloads_deferred)
@@ -540,7 +600,7 @@ impl App {
             .cloned();
         if let Some(ticket) = ticket {
             if !self.online {
-                self.notice("Zum sicheren Bearbeiten zuerst mit der Factory verbinden.");
+                self.notice(crate::tr!("Zum sicheren Bearbeiten zuerst mit der Factory verbinden."));
                 return;
             }
             if let Some(pending) = self
@@ -554,7 +614,7 @@ impl App {
                 })
                 .cloned()
             {
-                if let Some((submitted, implementer)) = crate::model_settings::submitted(&pending.path, &pending.body) {
+                if let Some((submitted, implementer, local_mcps)) = crate::model_settings::submitted(&pending.path, &pending.body) {
                     let mut dialog = Dialog::task(self.server.clone(), ticket.project_id, None);
                     if let Dialog::Task(task) = &mut dialog {
                         task.draft = crate::persistence::TaskDraft {
@@ -568,6 +628,7 @@ impl App {
                             files: submitted.files,
                             requested_session: submitted.task.requested_session,
                             implementer,
+                            local_mcps,
                             model_loaded: true,
                         };
                         task.request = Some(pending.id);
@@ -582,7 +643,7 @@ impl App {
                 .as_ref()
                 .is_none_or(|s| !ticket.draft && !s.editable_tasks.contains_key(&id))
             {
-                self.notice("Diese Aufgabe kann nicht mehr bearbeitet werden oder der Server benötigt ein Update.");
+                self.notice(crate::tr!("Diese Aufgabe kann nicht mehr bearbeitet werden oder der Server benötigt ein Update."));
                 return;
             }
             let path = format!("/v1/tasks/{id}/edit");
@@ -603,7 +664,7 @@ impl App {
                     .find(|d| d.server == self.server && d.ticket == Some(id))
                     .and_then(|d| d.edit_token);
                 self.write(
-                    "Aufgabe zum Bearbeiten sichern",
+                    crate::tr!("Aufgabe zum Bearbeiten sichern"),
                     "POST",
                     path,
                     serde_json::json!(BeginTaskEdit {
@@ -615,7 +676,7 @@ impl App {
             };
             self.dialog = Some(Dialog::TaskEditing { id, request });
         } else {
-            self.notice("Aufgabe nicht mehr vorhanden.");
+            self.notice(crate::tr!("Aufgabe nicht mehr vorhanden."));
         }
     }
     pub fn view_task(&mut self, id: TicketId) {
@@ -625,7 +686,7 @@ impl App {
             .and_then(|s| s.tickets.iter().find(|t| t.id == id))
             .cloned()
         else {
-            self.notice("Aufgabe nicht mehr vorhanden.");
+            self.notice(crate::tr!("Aufgabe nicht mehr vorhanden."));
             return;
         };
         let data = self.task_data(&ticket);
@@ -648,7 +709,7 @@ impl App {
             })
             .cloned();
         if newer.as_ref().is_some_and(|t| !t.draft) {
-            self.notice("Aufgabe wurde inzwischen geändert. Bitte den aktuellen Stand prüfen; lokale Entwürfe bleiben erhalten.");
+            self.notice(crate::tr!("Aufgabe wurde inzwischen geändert. Bitte den aktuellen Stand prüfen; lokale Entwürfe bleiben erhalten."));
             return;
         }
         if let Some(snapshot) = self.snapshot.as_mut().filter(|_| newer.is_none()) {
@@ -681,12 +742,15 @@ impl App {
                 {
                     task.draft.revision = ticket.revision;
                 } else {
-                    task.error=Some("Lokaler Entwurf basiert auf einem anderen Serverstand. Bitte vor dem Speichern vergleichen.".into());
+                    task.error=Some(crate::tr!("Lokaler Entwurf basiert auf einem anderen Serverstand. Bitte vor dem Speichern vergleichen.").into());
                 }
             }
             task.draft.edit_token = Some(edit.edit_token);
+            if task.draft.local_mcps.is_none() {
+                task.draft.local_mcps = Some(edit.local_mcps);
+            }
             if newer.is_some() {
-                task.error=Some("Serverstand wurde während der Reservierung geändert. Entwurf und Reservierung bleiben erhalten; bitte vergleichen.".into());
+                task.error=Some(crate::tr!("Serverstand wurde während der Reservierung geändert. Entwurf und Reservierung bleiben erhalten; bitte vergleichen.").into());
             }
             task.persist(self);
         }
@@ -759,10 +823,10 @@ impl App {
             Some(Err(error)) => ui
                 .add_sized(
                     size,
-                    egui::Label::new("Bildvorschau nicht verfügbar").wrap(),
+                    egui::Label::new(crate::tr!("Bildvorschau nicht verfügbar")).wrap(),
                 )
                 .on_hover_text(error),
-            None => ui.add_sized(size, egui::Label::new("Bild lädt …")),
+            None => ui.add_sized(size, egui::Label::new(crate::tr!("Bild lädt …"))),
         }
     }
     pub fn read(&mut self, title: &str, path: String) {
@@ -839,7 +903,7 @@ impl App {
             !self.notifications.iter().any(|n| n.id == *id && n.read)).collect();
         for ids in ids.into_iter().collect::<Vec<_>>().chunks(1000) {
             let body = MarkNotifications { request_id: RequestId::new(), ids: ids.to_vec(), read: true };
-            self.write("Benachrichtigung gelesen", "POST", "/v1/notifications/read".into(), serde_json::json!(body));
+            self.write(crate::tr!("Benachrichtigung gelesen"), "POST", "/v1/notifications/read".into(), serde_json::json!(body));
         }
     }
     pub(crate) fn receive(&mut self) {
@@ -874,7 +938,7 @@ impl App {
                             tab.statuses.clear();
                             tab.loading.clear();
                         }
-                        self.notice("Serverstand zurückgesetzt. Verlaufsdaten werden neu abgeglichen; offene Anfragen bleiben zur Prüfung erhalten.");
+                        self.notice(crate::tr!("Serverstand zurückgesetzt. Verlaufsdaten werden neu abgeglichen; offene Anfragen bleiben zur Prüfung erhalten."));
                     }
                     if self
                         .settings
@@ -883,12 +947,18 @@ impl App {
                     {
                         self.settings.project = s.projects.first().map(|p| p.id);
                     }
+                    self.cache_projects(&s.projects);
                     self.snapshot = Some(std::sync::Arc::new(s));
                     self.updated = Some(Instant::now());
                     self.online = true;
                     self.error = None;
+                    self.sync_offline_tasks(reconnected);
+                    if self.restore_local_runners && !self.local_runners_busy && !cfg!(test) {
+                        self.restore_local_runners = false;
+                        self.manage_local_runners(crate::local_runners::Action::Restore);
+                    }
                     if reconnected {
-                        self.notice("Wieder mit der Factory verbunden.");
+                        self.notice(crate::tr!("Wieder mit der Factory verbunden."));
                     }
                 }
                 Event::Snapshot(Err(e)) => {
@@ -999,7 +1069,7 @@ impl App {
                             self.notification_states_updated = Some(Instant::now());
                         }
                         Err(e) => {
-                            self.notice(format!("Lesestatus konnte nicht aktualisiert werden: {e}"))
+                            self.notice(crate::tr!("Lesestatus konnte nicht aktualisiert werden: {e}", e = e))
                         }
                     }
                 }
@@ -1022,7 +1092,7 @@ impl App {
                                 }
                                 self.unread = if read.read { self.unread.saturating_sub(changed) } else { self.unread + changed };
                             }
-                            Err(error) => self.notice(format!("Lesestatus nicht bestätigt: {}", error.message)),
+                            Err(error) => self.notice(crate::tr!("Lesestatus nicht bestätigt: {}", error.message)),
                         }
                     }
                     if let Some(request) = self
@@ -1045,7 +1115,7 @@ impl App {
                                 .and_then(|v| serde_json::from_value::<RequestId>(v.clone()).ok());
                             match serde_json::from_value::<TaskEdit>(value.clone()) {
                                 Ok(edit) if edit.ticket.draft && request.path==format!("/v1/tasks/{}/edit",edit.ticket.id) && token==Some(edit.edit_token)=>self.accept_task_edit(id,edit),
-                                _=>result=Err(Failure {message:"Reservierung nicht eindeutig bestätigt. Bitte dieselbe gespeicherte Anfrage abgleichen; keinen neuen Bearbeitungsversuch erzeugen.".into(),uncertain:true}),
+                                _=>result=Err(Failure {message:crate::tr!("Reservierung nicht eindeutig bestätigt. Bitte dieselbe gespeicherte Anfrage abgleichen; keinen neuen Bearbeitungsversuch erzeugen.").into(),uncertain:true}),
                             }
                         }
                     }
@@ -1066,27 +1136,106 @@ impl App {
                                             *current = project;
                                         }
                                     }
-                                    self.notice(if paused { "Projekt pausiert." } else { "Projekt fortgesetzt." });
+                                    self.notice(if paused { crate::tr!("Projekt pausiert.") } else { crate::tr!("Projekt fortgesetzt.") });
                                 }
-                                _ => result = Err(Failure { message: "Projektpause nicht eindeutig bestätigt.".into(), uncertain: true }),
+                                _ => result = Err(Failure { message: crate::tr!("Projektpause nicht eindeutig bestätigt.").into(), uncertain: true }),
                             }
                         }
                         if let Err(error) = &result {
                             self.notice(if error.uncertain {
-                                format!("{} Unter „Offene Zustellungen“ abgleichen.", error.message)
+                                crate::tr!("{} In der Diagnose über „Zustellungen prüfen“ abgleichen.", error.message)
                             } else { error.message.clone() });
                         }
                     }
                     let mut task_notice = None;
+                    let offline_task = self.settings.offline_tasks.iter().find(|t| t.sync_request == Some(id)).cloned();
+                    if let (Some(task), Ok(value)) = (&offline_task, &result) {
+                        let confirmed = serde_json::from_value::<Ticket>(value.clone()).ok().is_some_and(|ticket|
+                            ticket.draft && ticket.project_id == task.draft.project
+                                && ticket.prompt.as_deref() == Some(task.draft.prompt.as_str())
+                                && ticket.images == task.draft.images && ticket.files == task.draft.files);
+                        if !confirmed {
+                            result = Err(Failure { message: crate::tr!("Offline-Übertragung nicht eindeutig als Server-Entwurf bestätigt.").into(), uncertain: true });
+                        }
+                    }
+                    if let Some(request) = self.settings.pending.iter().find(|r| r.id == id &&
+                        r.path.starts_with("/v1/devices/") && r.path.ends_with("/revoke")).cloned()
+                    {
+                        if let Ok(value) = &result {
+                            match serde_json::from_value::<Device>(value.clone()) {
+                                Ok(device) if device.revoked && request.path == format!("/v1/devices/{}/revoke", device.id) => {
+                                    for cached in self.responses.values_mut() {
+                                        if let Ok(serde_json::Value::Array(entries)) = cached {
+                                            for entry in entries {
+                                                if entry["id"] == serde_json::json!(device.id) && entry.get("revoked").is_some() {
+                                                    *entry = serde_json::json!(device);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    task_notice = Some(crate::tr!("Gerätezugang widerrufen."));
+                                }
+                                _ => result = Err(Failure { message: crate::tr!("Gerätewiderruf nicht eindeutig bestätigt.").into(), uncertain: true }),
+                            }
+                        }
+                        if let Err(error) = &result {
+                            self.notice(crate::tr!("Gerätezugang konnte nicht bestätigt widerrufen werden. Details stehen in der Diagnose."));
+                            self.action_errors.push((crate::overview::now_ms(), crate::tr!("Gerätezugang: {}", error.message)));
+                        }
+                    }
+                    if let Some(request) = self.settings.pending.iter().find(|r| r.id == id &&
+                        r.path.starts_with("/v1/commands/") && r.path.ends_with("/prompt")).cloned()
+                    {
+                        if let Ok(value) = &result {
+                            match serde_json::from_value::<Ticket>(value.clone()) {
+                                Ok(ticket) if ticket.requested_session.is_some_and(|root|
+                                    request.path == format!("/v1/commands/{root}/prompt")) => {
+                                    self.settings.session_prompts.retain(|saved|
+                                        saved.draft.server != request.server || serde_json::json!(saved.id) != request.body["request_id"]);
+                                    task_notice = Some(crate::tr!("Prompt in die Session eingereiht."));
+                                }
+                                _ => result = Err(Failure { message: crate::tr!("Session-Prompt nicht eindeutig bestätigt.").into(), uncertain: true }),
+                            }
+                        }
+                        if let Err(error) = &result {
+                            self.notice(if error.uncertain {
+                                crate::tr!("Prompt-Zustellung unklar. Bitte dieselbe Anfrage in der Diagnose über „Zustellungen prüfen“ abgleichen.")
+                            } else { crate::tr!("Prompt konnte nicht eingereiht werden. Der Entwurf bleibt erhalten.") });
+                            self.action_errors.push((crate::overview::now_ms(), format!("Session-Prompt ({} · {}): {}", request.server, request.path, error.message)));
+                            if self.action_errors.len() > 50 { self.action_errors.remove(0); }
+                        }
+                    }
+                    let project_update = self.settings.pending.iter().any(|r| r.id == id
+                        && crate::dialogs::is_project_update(&r.method, &r.path));
+                    let batch_update = matches!(&self.dialog, Some(Dialog::ProjectSettings(settings)) if settings.owns_request(id));
+                    if project_update {
+                        match &result {
+                            Ok(value) => {
+                                if let (Ok(project), Some(snapshot)) = (
+                                    serde_json::from_value::<Project>(value.clone()), &mut self.snapshot,
+                                ) {
+                                    if let Some(current) = std::sync::Arc::make_mut(snapshot).projects.iter_mut()
+                                        .find(|p| p.id == project.id && p.revision.0 < project.revision.0)
+                                    {
+                                        *current = project;
+                                    }
+                                }
+                                if !batch_update { self.notice(crate::tr!("Projekteinstellungen gespeichert.")); }
+                            }
+                            Err(error) if !batch_update && error.uncertain => self.notice(crate::tr!("Speichern nicht bestätigt. Bitte Anfrage abgleichen.")),
+                            Err(_) if !batch_update => self.notice(crate::tr!("Projekteinstellungen konnten nicht gespeichert werden.")),
+                            Err(_) => {}
+                        }
+                    }
                     if let Ok(value) = &result {
                         if let Some(request) = self.settings.pending.iter().find(|r| r.id == id) {
                             self.settings.form_drafts.retain(|draft| {
                                 draft.server != request.server
                                     || draft.path != request.path
                                     || draft.method != request.method
-                                    || draft.body.get("project_id") != request.body.get("project_id")
+                                    || !crate::dialogs::same_form_body(&request.method, &request.path, &draft.body, &request.body)
                             });
-                            if let Some((submitted, implementer)) =
+                             if let Some((submitted, implementer, local_mcps)) =
                                 crate::model_settings::submitted(&request.path, &request.body) {
                                     self.settings.task_drafts.retain(|d| {
                                         !(d.server == request.server
@@ -1095,12 +1244,13 @@ impl App {
                                             && d.prompt == submitted.task.prompt
                                             && d.images == submitted.task.images
                                             && d.files == submitted.files
-                                            && d.implementer == implementer)
+                                         && d.implementer == implementer
+                                         && d.local_mcps == local_mcps)
                                     });
                                     task_notice = Some(if submitted.draft {
-                                        "Entwurf gespeichert."
+                                        crate::tr!("Entwurf gespeichert.")
                                     } else {
-                                        "Aufgabe eingereiht."
+                                        crate::tr!("Aufgabe eingereiht.")
                                     });
                             }
                             if request.path.starts_with("/v1/questions/") {
@@ -1113,6 +1263,27 @@ impl App {
                                 }
                             }
                         }
+                    }
+                    if let Some(local) = offline_task {
+                        match &result {
+                            Ok(value) => {
+                                self.settings.offline_tasks.retain(|task| task.id != local.id);
+                                if let (Ok(ticket), Some(snapshot)) = (serde_json::from_value::<Ticket>(value.clone()), &mut self.snapshot) {
+                                    let snapshot = std::sync::Arc::make_mut(snapshot);
+                                    if !snapshot.tickets.iter().any(|t| t.id == ticket.id) { snapshot.tickets.push(ticket); }
+                                }
+                                task_notice = Some(crate::tr!("Offline-Aufgabe als Server-Entwurf übertragen."));
+                            }
+                            Err(error) => {
+                                if let Some(task) = self.settings.offline_tasks.iter_mut().find(|t| t.id == local.id) {
+                                    task.sync_error = Some(error.message.clone());
+                                    if !error.uncertain { task.sync_request = None; }
+                                }
+                                self.action_errors.push((crate::overview::now_ms(), crate::tr!("Offline-Aufgabe ({}): {}", local.project_name, error.message)));
+                                self.notice(crate::tr!("Offline-Aufgabe konnte noch nicht übertragen werden. Sie bleibt lokal erhalten."));
+                            }
+                        }
+                        self.settings_dirty = true;
                     }
                     if let Some(message) = task_notice {
                         self.notice(message);
@@ -1141,7 +1312,7 @@ impl App {
                                         .iter()
                                         .any(|e| e.sequence <= after || e.sample_revision == 0 || (tab.show_versions && matches!(mode, ArchiveRead::Older(before) if e.sequence >= before)))
                                 {
-                                    tab.error = Some("Ungültige Archivseite; bisheriger Verlauf bleibt erhalten.".into());
+                                    tab.error = Some(crate::tr!("Ungültige Archivseite; bisheriger Verlauf bleibt erhalten.").into());
                                     continue;
                                 }
                                 tab.error = None;
@@ -1192,11 +1363,13 @@ impl App {
                 }
                 Event::Attachment(target, result) => match result {
                     Ok(attachment) => {
-                        if let Some(Dialog::Task(task)) = &mut self.dialog {
-                            if task.read_only || task.id != target || task.request.is_some() {
-                                self.notice("Anhang gehört zu einem anderen oder bereits gesendeten Entwurf und wurde nicht übernommen.");
-                                continue;
-                            }
+                        let dialog_task = match &mut self.dialog {
+                            Some(Dialog::Task(task)) if !task.read_only && task.id == target && task.request.is_none() => Some(task.as_mut()),
+                            _ => None,
+                        };
+                        let task = dialog_task.or_else(|| self.session_prompts.values_mut()
+                            .find(|task| task.id == target && task.request.is_none()).map(|task| task.as_mut()));
+                        if let Some(task) = task {
                             match attachment {
                                 InputAttachment::Image(v) => task.draft.images.push(v),
                                 InputAttachment::File(v) => task.draft.files.push(v),
@@ -1207,7 +1380,7 @@ impl App {
                                 .map(str::to_string);
                             task.dirty = true;
                         } else {
-                            self.notice("Anhang nicht übernommen: Bitte den Aufgabendialog geöffnet lassen.");
+                            self.notice(crate::tr!("Anhang gehört zu einem anderen oder bereits gesendeten Entwurf und wurde nicht übernommen."));
                         }
                     }
                     Err(e) => self.notice(e),
@@ -1244,7 +1417,7 @@ impl App {
                             self.task_payloads.insert(id, std::sync::Arc::new(ticket));
                         }
                         Ok(_) => {
-                            self.task_errors.insert(id, (revision, "Aufgabe während des Ladens geändert. Aktuellen Stand prüfen und erneut laden.".into()));
+                            self.task_errors.insert(id, (revision, crate::tr!("Aufgabe während des Ladens geändert. Aktuellen Stand prüfen und erneut laden.").into()));
                         }
                         Err(error) => {
                             self.task_errors.insert(id, (revision, error));
@@ -1267,10 +1440,25 @@ impl App {
                     );
                 }
                 Event::Saved(result) => match result {
-                    Ok(v) => self.notice(format!("Gespeichert: {v}")),
+                    Ok(v) => self.notice(crate::tr!("Gespeichert: {v}", v = v)),
                     Err(e) => self.notice(e),
                 },
                 Event::OpenNotification(id, target) => self.open_notification(id, target),
+                Event::LocalRunners(report) => {
+                    self.local_runners_busy = false;
+                    if let Some(runners) = report.runners { self.local_runners = runners; }
+                    match report.result {
+                        Ok(Some(message)) => self.notice(message),
+                        Ok(None) => {},
+                        Err(error) => {
+                            self.action_errors.push((crate::overview::now_ms(), error));
+                            if self.action_errors.len() > 50 {
+                                self.action_errors.remove(0);
+                            }
+                            self.notice(crate::tr!("Lokaler Runner konnte nicht gestartet oder entfernt werden. Details stehen in der Diagnose."));
+                        }
+                    }
+                },
                 Event::Local(result) => match result {
                     Ok(c) => {
                         if let Err(e) = self.connect(c.server, c.token) {
@@ -1281,7 +1469,12 @@ impl App {
                             self.dialog = None;
                         }
                     }
-                    Err(e) => self.notice(e),
+                    Err(e) => {
+                        if let Some(Dialog::LocalFactory { starting }) = &mut self.dialog {
+                            *starting = false;
+                        }
+                        self.notice(e);
+                    }
                 },
                 Event::Access(result) => {
                     self.access = result.ok();
@@ -1355,6 +1548,12 @@ impl App {
 }
 impl App {
     pub fn on_exit(&mut self) {
+        if let Some((language, ack)) = self.language_save.take() {
+            if ack.recv_timeout(Duration::from_secs(5)).unwrap_or(false) {
+                self.settings.language = language;
+            }
+        }
+        for (_, composer) in std::mem::take(&mut self.session_prompts) { composer.persist(self); }
         if let Some(settings) = self.factory_settings.take() {
             settings.persist(self);
         }
@@ -1362,17 +1561,45 @@ impl App {
             dialog.persist_drafts(self);
         }
         if !self.backend.flush(self.settings.clone()) {
-            eprintln!("YoloForge: letzte Desktop-Einstellungen konnten nicht bestätigt gespeichert werden.");
+            eprintln!("{}", crate::tr!("YoloForge: letzte Desktop-Einstellungen konnten nicht bestätigt gespeichert werden.", ));
         }
     }
     pub fn clipboard_image_target(&self) -> Option<RequestId> {
         match &self.dialog {
             Some(Dialog::Task(task)) if !task.read_only && task.request.is_none() => Some(task.id),
-            _ => None,
+            Some(_) => None,
+            None => self.active_tab.checked_sub(1).and_then(|index| self.tabs.get(index))
+                .filter(|tab| self.snapshot.as_ref().is_some_and(|s|
+                    can_prompt_session(s, tab.project, tab.root)))
+                .and_then(|tab| self.session_prompts.get(&tab.root))
+                .filter(|composer| composer.request.is_none()).map(|composer| composer.id),
+        }
+    }
+
+    pub(crate) fn poll_language_save(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let result = self.language_save.as_ref().and_then(|(_, rx)| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Disconnected) => Some(false),
+            Err(TryRecvError::Empty) => None,
+        });
+        if let Some(saved) = result {
+            let (language, _) = self.language_save.take().unwrap();
+            if saved {
+                self.settings.language = language;
+                crate::i18n::set_language(language);
+                // Persist the latest drafts too, in case another write was queued while saving.
+                self.settings_dirty = true;
+                self.notice(crate::tr!("Language saved."));
+            } else {
+                self.notice(crate::tr!("Could not save language. Please try again."));
+            }
         }
     }
 
     pub fn update(&mut self, ctx: &egui::Context) {
+        self.poll_language_save();
+        crate::i18n::set_language(self.settings.language);
         // Tiling compositors can ignore the requested minimum size. Keep controls
         // reachable even when native DPI scaling leaves fewer than 820 points.
         let native_size = ctx.content_rect().size() * ctx.zoom_factor();
@@ -1399,7 +1626,7 @@ impl App {
             .updated
             .is_some_and(|t| t.elapsed() > Duration::from_secs(10))
         {
-            self.connection_lost("Seit mehr als 10 Sekunden kein Factory-Stand empfangen.".into());
+            self.connection_lost(crate::tr!("Seit mehr als 10 Sekunden kein Factory-Stand empfangen.").into());
         }
         self.poll_tabs();
         if self.page() == Page::Notifications
@@ -1437,7 +1664,7 @@ impl App {
         }
         crate::design::file_drop_overlay(
             ctx,
-            matches!(&self.dialog, Some(Dialog::Task(task)) if !task.read_only && task.request.is_none()),
+            self.clipboard_image_target().is_some(),
         );
         if self.settings_dirty && Instant::now() >= self.next_save {
             self.backend.persist(self.settings.clone());
@@ -1507,6 +1734,7 @@ fn configure_style(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(14.0, 9.0);
     style.spacing.interact_size.y = 36.0;
+    style.spacing.icon_spacing = 12.0;
     style.spacing.scroll = egui::style::ScrollStyle::solid();
     style.visuals.panel_fill = Color32::from_rgb(22, 25, 31);
     style.visuals.window_fill = Color32::from_rgb(30, 34, 42);

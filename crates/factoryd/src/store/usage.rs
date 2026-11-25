@@ -26,13 +26,16 @@ pub(super) fn usage_in(tx: &Transaction<'_>, project: ProjectId) -> Result<Proje
                 json_extract(m.data,'$.tokens') AS tokens,
                 json_extract(m.data,'$.cost') AS cost,
                 json_extract(m.data,'$.time.completed') IS NOT NULL AS completed,
+                CASE WHEN json_type(m.data,'$.time.created')='integer'
+                     THEN json_extract(m.data,'$.time.created') END AS created,
                 json_extract(m.data,'$.type') AS message_type,
                 ROW_NUMBER() OVER (PARTITION BY COALESCE(json_extract(c.data,'$.agent_spec.continuation.root_command_id'),c.id),m.message_id ORDER BY c.rowid DESC,m.sequence DESC) AS rank
             FROM archive_messages m JOIN commands c ON c.id=m.command_id JOIN streams s ON s.id=c.stream_id
             WHERE s.project_id=?1)
-            SELECT role,provider,model,tokens,cost,completed FROM samples WHERE rank=1 AND message_type='assistant'")?;
+            SELECT role,provider,model,tokens,cost,completed,created FROM samples WHERE rank=1 AND message_type='assistant'")?;
     let mut rows = stmt.query([project.to_string()])?;
     let mut groups = std::collections::BTreeMap::new();
+    let mut first_observed_unix_ms: Option<u64> = None;
     while let Some(row) = rows.next()? {
         let key = (
             row.get::<_, String>(0)?,
@@ -51,6 +54,9 @@ pub(super) fn usage_in(tx: &Transaction<'_>, project: ProjectId) -> Result<Proje
         }
         let raw = row.get::<_, Option<String>>(3).ok().flatten();
         if let Some(tokens) = raw.and_then(|v| serde_json::from_str::<TokenUsage>(&v).ok()) {
+            if let Some(created) = row.get::<_, Option<i64>>(6)?.and_then(|ms| u64::try_from(ms).ok()) {
+                first_observed_unix_ms = Some(first_observed_unix_ms.map_or(created, |first| first.min(created)));
+            }
             fn add(a: &mut u64, b: u64) -> Result<()> {
                 *a = a
                     .checked_add(b)
@@ -80,7 +86,7 @@ pub(super) fn usage_in(tx: &Transaction<'_>, project: ProjectId) -> Result<Proje
             group.messages_missing_cost += 1;
         }
     }
-    Ok(ProjectUsage { token_budget:Some(super::token_budgets::load(tx,project)?),project_id:project,groups:groups.into_values().collect(),
+    Ok(ProjectUsage { token_budget:Some(super::token_budgets::load(tx,project)?),project_id:project,groups:groups.into_values().collect(), first_observed_unix_ms,
             source:"Latest archived native messages; incomplete coverage possible; reported cost is not an invoice; reasoning/cache counters are separate and must not be summed blindly".into() })
 }
 

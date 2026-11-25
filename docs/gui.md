@@ -1,9 +1,46 @@
 # YoloForge Desktop
 
-Native Linux-Oberfläche in Rust mit egui und SDL3. Dark Theme und deutsche
-Bedienung, mit derselben Factory, denselben Runnern und denselben Daten wie die
+Native Desktop-Oberfläche für Linux, macOS und Windows in Rust mit egui und SDL3. Dark Theme und wahlweise
+englische oder deutsche Bedienung, mit derselben Factory, denselben Runnern und denselben Daten wie die
 weiterhin vorhandene CLI/TUI. Die GUI ist kein Webview und startet zum Lesen
 von Sessions keine zusätzliche OpenCode-TUI.
+
+Release-Pakete enthalten die GUI und einen nativen Runner. Linux liefert zusätzlich
+`factoryd` für die lokale Factory-Einrichtung mit. Unter macOS und Windows mit
+einer bestehenden Factory verbinden; lokale Runner können auch dort durch die GUI
+verwaltet werden. macOS-Pakete enthalten `YoloForge.app`, Windows-Pakete die `.exe`-Dateien.
+Die Desktop-Pakete sind noch nicht herstellersigniert/notarisiert.
+Details: [Runner-Installation](runner-installation.md), [CI und Releases](ci.md).
+
+## Projektlogo
+
+Projekte können optional ein eigenes Bild erhalten: beim Erstellen oder unter
+**Projekt-Settings → Allgemein**. PNG, JPEG, WebP und GIF bis 16 MiB werden mittig
+quadratisch zugeschnitten und als kleines PNG gespeichert. Das Logo erscheint links
+neben dem Intent-Button; ohne Logo bleibt der Button über die volle Breite erhalten.
+Ersetzen und Entfernen werden erst mit dem Projekt gespeichert. Das Bild wird über
+die Factory synchronisiert und bleibt mit den Cache-Daten auch offline sichtbar.
+
+## Sprache und Begriffe
+
+Unter **Factory settings → Language** bzw. **Factory-Settings → Sprache**
+stehen **Auto**, **English** und **Deutsch** zur Auswahl. **Auto** ist auch für
+bestehende Installationen der Standard: deutsche Systemsprache bedeutet Deutsch,
+ansonsten wird Englisch verwendet. Die Wahl wird erst mit **Save / Speichern**
+übernommen, lokal pro Gerät gespeichert und benötigt keinen Neustart oder
+Serverzugang. Schließen der Settings behält die Auswahl als lokalen GUI-Entwurf.
+
+Die Oberfläche verwendet in beiden Sprachen **Intent / Intents** statt
+Aufgabe/Aufgaben. Factory, Runner, Agent-Namen und Fachbegriffe wie Settings,
+Models, Provider, Skills, Sessions und Tools bleiben englisch. Nutzereingaben,
+vorhandene Daten, Modellantworten und technische Serverausgaben werden nicht
+übersetzt. API-, Datenbank- und interne Typnamen bleiben unverändert.
+
+GUI-Texte liegen zentral in `crates/factory-gui/locales/messages.json` als
+Paare `[Deutsch, English]`. `crate::tr!` liefert statische Labels oder formatierte
+Texte; `build.rs` erzeugt die Makros, sodass Rust Formatargumente in beiden
+Sprachen prüft. Die Katalogschlüssel sind stabil und dürfen ältere Begriffe
+enthalten; sichtbar sind ausschließlich die jeweiligen Übersetzungen.
 
 ## Starten
 
@@ -12,9 +49,10 @@ cargo build --workspace --locked
 cargo run --locked -p factory-gui --bin yoloforge-gui
 ```
 
-Ohne konfigurierten Zugang erscheint der Verbindungsdialog. Dort entweder einen
-vorhandenen Server und Token angeben, einen Geräte-Einladungscode einlösen oder
-**Lokale Factory starten** wählen. Für entfernte Verbindungen ist HTTPS oder
+Ohne konfigurierten Zugang erscheint die Verbindungsübersicht. Dort entweder
+**Verbinden…** wählen und Serveradresse sowie Zugangstoken angeben oder eine
+**Lokale Factory** starten. Bei aktiver Verbindung ist direkt in der Übersicht
+nur **Trennen** verfügbar. Für entfernte Verbindungen ist HTTPS oder
 ein lokaler SSH-Tunnel erforderlich. TLS-Prüfung und Hostschlüsselprüfung werden
 nicht abgeschaltet.
 
@@ -26,8 +64,12 @@ FACTORY_TOKEN_FILE=/absoluter/pfad/device.token \
 ```
 
 `FACTORY_TOKEN` und `FACTORY_TOKEN_FILE` nicht gleichzeitig setzen. Direkt im
-Dialog eingegebene Tokens werden nicht in den Desktop-Einstellungen gespeichert.
-Bei Enrollment und lokalem Start legt die Anwendung private Tokendateien an und
+Dialog eingegebene Tokens werden in einer privaten Datei unter
+`$XDG_CONFIG_HOME/yoloforge/` (standardmäßig `~/.config/yoloforge/`) gespeichert.
+Das Verzeichnis hat Rechte `0700`, die Tokendatei `0600`. Die Desktop-Einstellungen
+merken sich Serveradresse und Dateipfad, nicht den Token selbst. Beim nächsten
+Start wird die Verbindung automatisch wiederhergestellt.
+Beim lokalen Start legt die Anwendung private Tokendateien an und
 merkt sich nur deren Pfad. Der nächste Start kann diese Verbindung wiederverwenden.
 
 ### Lokale Factory
@@ -39,10 +81,47 @@ einen eigenen Datenbestand unter `$XDG_DATA_HOME/yoloforge/local`, standardmäß
 
 - Vorhandene Server auf 7432 und die Daten des Entwicklungsskripts werden nicht verändert.
 - Token, Runner-ID, SQLite-Daten und Journal bleiben erhalten.
-- `factoryd.log` und `factory-runner.log` im lokalen Datenverzeichnis erklären Startfehler.
+- `factoryd.log` im lokalen Datenverzeichnis und `factory-runner.log` im jeweiligen
+  Runner-Verzeichnis erklären Startfehler.
 - Bereits laufende, authentifizierbare lokale Dienste werden wiederverwendet.
 - Fremde Portbelegungen oder unpassende Zugangsdaten werden nicht übernommen.
 - GUI- oder Tab-Schließen beendet keine Dienste, Sessions oder Aufgaben.
+
+### Lokale Runner verwalten
+
+In **Infrastruktur** startet **Lokalen Runner starten** einen zusätzlichen Runner
+auf dem Desktop-Rechner und verbindet ihn mit der aktuell ausgewählten Factory.
+Zum erstmaligen Einrichten wird ein Factory-Admin-Zugang benötigt. Jeder Runner
+bekommt eine eigene dauerhafte ID, ein Journal und einen widerrufbaren
+Runner-Zugang; der Admin-Token wird nicht an den Runner weitergegeben.
+Auch **Lokale Factory** startet automatisch einen solchen Runner.
+
+Die Runner richten ihren eigenen verwalteten OpenCode-Server automatisch ein.
+Sie laden die Factory-Version von OpenCode bei Bedarf herunter, verwenden einen
+dauerhaft gespeicherten Loopback-Port und beziehen den Modellkatalog von der
+Factory. Anbieter und Standardmodelle werden weiterhin zentral in der Factory
+eingerichtet. Die Factory muss den Modellzugang mit Runner-Zugang unterstützen
+(GUI, Runner und Factory zusammen aktualisieren).
+
+Die GUI speichert die Zuordnung unter
+`~/.config/yoloforge/local-runners.json` bzw. `$XDG_CONFIG_HOME/yoloforge/`.
+Private Zugangsdaten, Journal, OpenCode-Laufzeit und Log liegen unter
+`$XDG_DATA_HOME/yoloforge/runners/<runner-id>/`; bereits vorhandene lokale
+Factory-Runner behalten ihr bisheriges Verzeichnis. Nach erneutem Verbinden
+werden vorhandene Prozesse wiederverwendet und fehlende Runner gestartet.
+Ein Dateilock verhindert doppelte Verwaltung durch mehrere GUIs.
+
+Nur GUI-verwaltete lokale Runner haben einen runden X-Button auf der rechten
+oberen Kachelecke. Er öffnet eine Bestätigung; Entfernen stoppt den identifizierten
+Runner mitsamt seinem verwalteten OpenCode, widerruft seinen Zugang und entfernt
+ihn aus der lokalen Startliste. Laufende oder ungeklärte Aufträge blockieren das
+Entfernen. Journale und Arbeitsdaten werden nicht gelöscht, historische
+Serverdaten bleiben bestehen. GUI-Schließen allein beendet keine Runner.
+
+Die Infrastruktur zeigt OpenCode direkt in der Runner-Kachel, ohne separate
+Server-/Projektkacheln. Desktop- und Runner-Kacheln zeigen die von der Factory
+beobachtete IP; hinter Proxies oder Tunneln kann dies deren IP sein. Bei älteren
+Servern ohne IP-Angabe steht „IP unbekannt“. Desktop-IDs stehen nur in den Details.
 - Die Desktop-Präsenz verwendet eine dauerhafte lokale ID in `desktop-client-id`
   neben `desktop.json`. Neustarts, Neuverbindungen und lokale Verbindungsprüfungen
   verwenden dieselbe ID, auch bei gleichzeitig gestarteten GUI-Fenstern. Die ID
@@ -79,26 +158,95 @@ Benachrichtigungen, Infrastructure, Runner und Diagnose bilden darunter den glob
 Das Hauptmenü ist 300 pt breit, seine gleich breiten Zeilen haben passende
 Phosphor-Icons und kompakte 4-pt-Abstände. Die Tabs im Gesamtheader zeigen ein
 Fabrik-Icon für die Factory und das OpenCode-Terminal-Icon für Sessions.
+Der Factory-Tab bleibt fest stehen. Session-Tabs nutzen die gesamte restliche
+Breite und scrollen bei Überlauf weich und pixelweise über Pfeile, Mausrad oder
+Trackpad. Am Rand angeschnittene Tabs zeigen, dass die Leiste weitergeht; es
+werden keine ganzen Tabs seitenweise ausgetauscht.
 Das Zahnrad rechts im Footer öffnet **Factory-Einstellungen** als Dialog mit
-derselben Überschrift, Schließen-X und Bereichsnavigation wie die erweiterten
+derselben Kopfzeilenstruktur, Schließen-X und Bereichsnavigation wie die
 Projekteinstellungen:
-links die Funktionen, rechts Geräte/Zugänge, Einladungen, Widerruf,
-Desktop-Meldungen oder offene Zustellungen. Die Funktionsauswahl und Entwürfe
+links **Modell-Anbieter**, **Default-Modelle**, **Skills**, **MCPs** sowie
+**Geräte und Zugänge**. Die Geräteverwaltung zeigt aktive Zugänge mit Name und
+Rolle; ein Zugang wird direkt am Eintrag mit einer kurzen Bestätigung widerrufen.
+Widerrufene Zugänge und technische Rohdaten werden nicht mehr aufgelistet.
+Separate Bereiche für Einladungen, Widerruf, Desktop-Meldungen und offene
+Zustellungen entfallen. Die Funktionsauswahl und Entwürfe
 bleiben beim Schließen und Wiederöffnen erhalten.
 
-Direkt neben der Projektwahl öffnet ein Icon das Menü mit **Neues Projekt**,
-**Projekt editieren**, **Projekt pausieren**, **Projekt löschen** und
-**Erweiterte Projekteinstellungen**. Die erweiterten Einstellungen sind ebenfalls
-ein zweispaltiger Dialog; Formulare bleiben beim Wechseln und Schließen als
-Entwürfe erhalten. Projektlöschen verlangt den exakten Namen und die aktuelle
+Direkt neben der Projektwahl öffnet ein Icon das Menü mit **Neues Projekt …**,
+**Projekteinstellungen …**, **Projekt pausieren**, **Verbrauch …** und **Projekt löschen …**.
+**Verbrauch …** zeigt erfasste Ein- und Ausgabetokens insgesamt, das Datum der
+ersten Messung und den Durchschnitt je Kalendertag seitdem. Fehlt das Messdatum,
+wird der Durchschnitt ab dem Anlagedatum des Projekts berechnet.
+Die Projekteinstellungen öffnen als zweispaltiger Dialog mit dem Projektnamen
+im Titel. Änderungen an den Einstellungen bleiben beim Seitenwechsel erhalten.
+**Speichern** im gemeinsamen Footer schreibt die Änderungen aus allen Bereichen
+und schließt nach Bestätigung, **Abbrechen** oder Schließen fragt bei offenen
+Änderungen nach. Projektlöschen verlangt den exakten Namen und die aktuelle
 Revision; ausstehende oder angenommene Aufträge verhindern es. Das Projekt
 verschwindet aus dem normalen Betrieb, Historie und Repository-Dateien bleiben erhalten.
 
+Unter **Projekteinstellungen → Skills** können Factory-Admins importierte
+Factory-Skills per Häkchen freigeben und die Version auswählen. Repository-Skills
+aus dem Basisbranch lokal erreichbarer Git-Repositorys erscheinen im separaten
+Abschnitt und lassen sich ebenfalls per Häkchen freigeben. Das erste
+Speichern aktiviert die Freigabeliste; eine leere Liste gibt keine Skills frei.
+Voraussetzung ist ein nativer verwalteter Runner.
+
+Unter **Factory-Einstellungen → MCPs** öffnet **MCP hinzufügen**
+einen Dialog für lokale oder entfernte MCPs. Nach dem Speichern erscheint der
+Eintrag unter **Vorhandene MCPs**. Dort lässt er sich im selben Formular
+bearbeiten oder nach Bestätigung löschen. Projektfreigaben müssen vor dem
+Löschen entfernt werden.
+
+Für lokale MCPs: Name, absoluter Programmpfad auf dem Runner,
+Argumente einzeln und Runner-Zuordnung. Standardmäßig sind alle unterstützten
+Runner aktiviert, auch später hinzugefügte. Abgewählte Runner bleiben als
+ausdrückliche Ausnahmen deaktiviert; entfernte lokale Runner erscheinen nicht
+mehr in der Auswahl. Bestehende Katalogeinträge erhalten ebenfalls diese
+Automatik. Bereits festgeschriebene alte Ausführungsprofile behalten dagegen ihre
+ursprüngliche Zuordnung. Die technische ID wird automatisch
+erzeugt. In den Projekteinstellungen unter **MCPs**
+gilt die Freigabe für den ganzen Server. Ein Häkchen am Eintrag macht ihn im
+Aufgabendialog auswählbar. Dort öffnet der Button **MCPs** unten in der
+Aktionszeile ein Checkbox-Menü; im Formular selbst steht keine MCP-Liste.
+Bei neuen Aufgaben sind standardmäßig alle für das Projekt freigegebenen MCPs
+aktiviert, auch wenn das Menü nicht geöffnet wird. Eigene Abwahlen bleiben im
+Entwurf erhalten. Bereits als erforderlich gespeicherte MCPs bleiben
+automatisch eingebunden, bis ihre Freigabe entfernt wird. Remote-MCPs zeigen
+ihren Verbindungsstatus wie im Factory-Katalog an.
+[Details und aktueller Umfang](integration-profiles.md).
+
+**Gespeicherte Verbindung testen** startet einen lokalen MCP zur Prüfung auf
+dem ausgewählten Runner, ohne ein Tool auszuführen.
+
+Unter **Remote** Name und HTTPS-Endpunkt eingeben und **Authentifizierung
+prüfen** wählen. Für einen offenen MCP erscheinen keine Zugangsdatenfelder.
+Bei erkanntem OAuth ergänzt die Factory die Anbieter-URLs. Ohne öffentlichen
+Factory-Callback meldet sich der Browser lokal bei der Desktop-GUI zurück.
+Sind alle OAuth-Angaben verfügbar, öffnet sich der Browser. Unter dem
+Prüfbutton zeigt YoloForge das Ergebnis an. Erst nach erfolgreicher
+Prüfung kann der MCP gespeichert werden. Nur wenn keine
+Methode eindeutig erkannt wird, erscheint das
+Pulldown zur manuellen Auswahl, etwa für einen API-Key-Header. Schlüssel
+werden maskiert eingegeben und nach dem Speichern nicht mehr angezeigt.
+Die [OAuth-Einrichtung](integration-profiles.md) beschreibt die Voraussetzungen.
+
+Die Authentifizierungsprüfung und **Gespeicherte Verbindung testen** führen
+keine MCP-Tools aus. Die Freigabe erfolgt in den Projekteinstellungen unter
+**MCPs**; eine Runner-Zuordnung ist dafür nicht nötig.
+
+Unter **Factory-Einstellungen → Skills** können Admins eine
+`SKILL.md` oder einen Skill-Ordner mit UTF-8-Begleitdateien importieren. Nach
+der Auswahl zeigt die Vorschau die enthaltenen Dateien sowie Name und
+Beschreibung aus der `SKILL.md`. Eine neue Version überschreibt die
+alte nicht. In den **Erweiterten Projekteinstellungen → Skills**
+wählt man pro Factory-Skill genau eine Version für den Implementer.
+
 Im Footer öffnet links das Connect-Icon die **Verbindungsübersicht** mit einer
-Statusgrafik für Desktop, Factory und OpenCode sowie einem Link zu den
-Verbindungseinstellungen. Unbekannte OpenCode-Präsenz wird nicht als bestätigt
-angezeigt. Die Desktop-Version steht neben dem Zahnrad unten rechts; der Zeitpunkt des letzten
-Datenempfangs ist nur noch in der Übersicht zu sehen.
+Statusgrafik für Desktop und Factory sowie den direkten Aktionen
+**Trennen** bzw. **Verbinden…** und **Lokale Factory**.
+Die Desktop-Version steht neben dem Zahnrad unten rechts.
 
 ### Factory Overview
 
@@ -111,7 +259,8 @@ tatsächlich zugeordneten Runnern und Sessions. Standardmäßig werden alle Proj
 angezeigt; ein Filter beschränkt die Ansicht auf das aktuell ausgewählte Projekt.
 Aufgabenkarten heben sich mit blauer Fläche und einem blauen Seitenakzent von
 den neutralen Stationsköpfen ab. Sie tragen Phosphor-Icon, blaue Ticket-ID-Pill,
-Titel, farbig gefüllte Status-Pill und Projekt. Die ID-Farbe kennzeichnet die
+Titel und farbig gefüllte Status-Pill. Das Projekt ergibt sich aus der Ticket-ID;
+sein vollständiger Name bleibt im Tooltip verfügbar. Die ID-Farbe kennzeichnet die
 Aufgabe, nicht ihren Status: Entwürfe sind violett markiert, eingereihte/aktive
 Aufgaben blau, Rückfragen und Wartezustände gelb, Fehler rot und Erfolge grün.
 Pro Station bzw. Session sind zunächst drei Karten sichtbar;
@@ -120,7 +269,7 @@ Aufgaben stehen dabei vor gewöhnlichen Warteschlangeneinträgen.
 
 Rückfragen bleiben an ihrer Ausführungsstation mit gelbem Rückfrage-Icon und
 pulsierendem Rand; Fehler bleiben sichtbar. Bestätigt erfolgreiche Aufgaben
-verschwinden nach zehn Sekunden aus der Grafik, nicht aus der Factory. Bereits
+verschwinden nach zwei Minuten aus der Grafik, nicht aus der Factory. Bereits
 alte Archivaufgaben werden beim Öffnen nicht erneut eingeblendet. Der
 Erfolgszähler bezieht sich auf alle erfolgreichen Aufgaben im gewählten Filter.
 Ein Kartenklick öffnet die Aufgabe schreibgeschützt; der Kopf einer
@@ -174,19 +323,18 @@ bleiben in den jeweiligen Details zugänglich.
 
 ### Projekte
 
-**Neues Projekt** und **Projekt editieren** zeigen Name, Projektkürzel,
-lokalen Pfad und ein Dropdown für die Runner-Zuordnung. Der Pfad kann
+**Neues Projekt …** und **Projekteinstellungen → Allgemein** zeigen Name,
+Projektkürzel und lokalen Pfad. Der Pfad kann
 eingetippt oder über den Ordnerdialog gewählt werden.
 Bei einem bestehenden Git-Repository wird der ausgecheckte Branch übernommen.
 Ist der Ordner noch nicht vorhanden, kann der Runner ihn beim ersten
 Arbeitsbereich mit `main` anlegen. Bestehende Ordner ohne Git-Repository werden
 nicht verändert. Der ausführende Runner muss den angegebenen Pfad erreichen können.
 
-Die Runner-Zuordnung steht bei neuen Projekten auf **Automatisch**. Ein Runner
-kann alternativ direkt im Dropdown gewählt werden. Änderungen betreffen neue
-Zuweisungen; bestehende Arbeitsbereiche behalten ihren Runner. Weitere
-Runner-Einstellungen und das Ausführungsprofil bleiben in den **erweiterten
-Projekteinstellungen**. Der Pfad lässt sich
+Die Runner-Zuordnung steht bei neuen Projekten auf **Automatisch** und lässt
+sich im Erstellungsdialog oder später unter **Projekteinstellungen →
+Runner-Zuordnung** ändern. Änderungen betreffen neue Zuweisungen; bestehende
+Arbeitsbereiche behalten ihren Runner. Der Pfad lässt sich
 ändern, solange das Projekt noch keine Arbeitsbereiche hat.
 
 ### Aufgaben
@@ -211,7 +359,7 @@ scrollt mit dem Dialog; ältere Einträge können nachgeladen werden.
 Jedes Projekt hat ein eindeutiges Kürzel, jede serverseitig gespeicherte Aufgabe
 eine dauerhafte Ticketnummer, z. B. **TEST-1** oder **WOAI-1**. Das Kürzel wird
 beim Einrichten angegeben (leer = aus dem Namen ableiten) und über
-**Projekt editieren → Projektkürzel** geändert: 1–10 ASCII-Buchstaben/Ziffern,
+**Projekteinstellungen → Allgemein → Projektkürzel** geändert: 1–10 ASCII-Buchstaben/Ziffern,
 beginnend mit einem Buchstaben; Kleinbuchstaben werden großgeschrieben.
 Ein neuer Präfix ändert bestehende Referenzen, aber nie deren laufende Zahlen.
 Frühere Kürzel bleiben für dasselbe Projekt reserviert.
@@ -279,14 +427,25 @@ kleinen Textausschnitt statt einer Grafik, andere Dateien ein Dateisymbol.
 Dateiname, Typ und Größe stehen im Hover-Tooltip. HTML/SVG-Code wird nur als
 Text angezeigt, niemals ausgeführt oder mit externen Ressourcen nachgeladen.
 Der Dialog wächst mit dem Inhalt bis zum verfügbaren Platz; erst dann scrollt
-der Inhalt. Unter dem Textfeld bleibt eine gemeinsame Aktionszeile sichtbar:
-schmale Zuordnung, Icons für Datei-Auswahl und Bild-Zwischenablage sowie rechts
-ein Speicher-Icon und die Buttons **Einreihen & neu** und **Einreihen**. Das
-Speicher-Icon speichert einen Entwurf, ohne Arbeit zu starten. **Einreihen**
-schließt den Dialog nach Bestätigung; **Einreihen & neu** öffnet danach eine leere
-Aufgabe im selben Projekt. Die Bestätigung erscheint als Toast.
+der Inhalt. Unter der Trennlinie steht standardmäßig nur die Aktionszeile.
+Ein kleiner Phosphor-Reglerbutton links blendet die erweiterten Optionen samt
+zweiter Trennlinie ein und aus, ohne ausgewählte Werte zu verwerfen.
+Die erweiterte Zeile enthält die breite
+Modellauswahl (etwa **Default (gpt-6.2-sol / OpenAI Arbeit)**), die Zuordnung mit
+**Auto Runner**, die Datei-Auswahl und **MCPs**. Modellnamen stehen als
+**Modell / Provider**. Eine weitere Trennlinie grenzt die Aktionszeile ab.
+Sie enthält rechtsbündig genau einen Button mit fester Breite (200 pt);
+direkt links daneben stehen mit 24 pt Abstand zwischen den Bedienelementen
+**Nicht schließen** und **Entwurf**. Beide Checkboxen behalten ihren Zustand
+auch nach einem Neustart. Der Button heißt entsprechend **Einreihen**,
+**Einreihen & neu**, **Entwurf** oder **Entwurf & neu**.
+Entwürfe starten keine Arbeit. Mit **Nicht schließen** öffnet sich nach
+Bestätigung eine leere Aufgabe im selben Projekt; sonst schließt der Dialog.
+Offline sind **Entwurf** und **MCPs** ausgeblendet. **Nicht schließen** bleibt:
+Der einzelne Button heißt **Lokal vorbereiten** oder **Vorbereiten & neu**.
+Die Bestätigung erscheint als Toast.
 Icon-Aktionen haben deutsche Tooltips.
-**Strg+V** und das Zwischenablage-Icon übernehmen Screenshots aus der nativen
+**Strg+V** übernimmt Screenshots aus der nativen
 Zwischenablage als Bildanhang. Bei reinem Text fügt **Strg+V** den Text wie gewohnt
 ein; **Strg+Umschalt+V** fügt nur Text ein.
 Strg+C kopiert markierten Prompttext in die Systemzwischenablage. Unter Wayland
@@ -382,7 +541,7 @@ zugeordneten Aufgaben, nicht auf Heartbeats oder dem Zeitpunkt des GUI-Abgleichs
 Geschlossene oder beendete Sessions werden nicht als verfügbare Ziele neuer
 Aufgaben angeboten.
 
-Der OpenCode-Tab ist **schreibgeschützt**:
+Der Verlauf im OpenCode-Tab ist **schreibgeschützt**:
 
 Die Darstellung folgt der OpenCode-CLI: durchgehender Monospace-Verlauf über die
 verfügbare Breite, Markdown mit Hervorhebungen und Syntaxfarben in Codeblöcken,
@@ -420,9 +579,27 @@ in der Verwaltung erreichbar. Es wird kein Terminalhintergrund kopiert.
 - Vollständiger JSONL-Export unabhängig vom bereits im Fenster geladenen Verlauf.
 - Inline-Anhänge und SHA256-geprüfter Export separat gesicherter Archivdateien.
 
+Unter dem Verlauf offener und normal geschlossener Arbeitssessions steht derselbe Prompt-Editor wie bei
+**Aufgabe hinzufügen**, einschließlich Bilder-/Datei-Drop, Anhangvorschauen und
+Bild-Zwischenablage. **Prompten** erstellt eine dauerhafte Hintergrundaufgabe,
+die fest an diese Session gebunden ist. Die Nutzerentscheidung ersetzt die
+Orchestrator-Zuweisung; Runner, Modell und MCPs stammen aus der Session und
+werden nicht erneut ausgewählt. Laufende Arbeit wird nicht unterbrochen:
+Folgeaufgaben warten auf den sicheren Fortsetzungspunkt einschließlich
+Archivbestätigung. Bestehende Pausen, Freigaben und Sicherheitsprüfungen gelten
+weiterhin. Bei einer normal geschlossenen Session reaktiviert die erfolgreiche
+Prompt-Annahme dieselbe Session zusammen mit der neuen Folgeaufgabe in einer
+Transaktion. Ungültige Prompts oder die Wiederholung alter Anfragen reaktivieren
+nichts. Ausdrücklich beendete Laufzeiten und Controller-Auswertungen haben keinen Editor.
+
+Entwürfe bleiben pro Factory und Session erhalten, auch bei Tabwechsel oder
+Neustart. Der Editor leert sich erst nach eindeutiger Serverbestätigung; bei
+unklarer Zustellung wird dieselbe gespeicherte Anfrage geprüft statt eine zweite
+Aufgabe anzulegen. Endpunkt: `POST /v1/commands/{root}/prompt`.
+
 Die Ansicht ist Runner-/Factory-synchronisiert, **kein direktes Token-Streaming**.
-Bereits verlorene, nie erfasste Inhalte kann die GUI nicht rekonstruieren. Es gibt
-keine Chat-Eingabe, Interrupt-Schaltfläche oder Agentsteuerung im OpenCode-Tab.
+Bereits verlorene, nie erfasste Inhalte kann die GUI nicht rekonstruieren.
+Interrupt-Schaltflächen oder direkte Agentsteuerung gibt es im OpenCode-Tab nicht.
 
 ### Orchestrator, Runner und Diagnose
 
@@ -476,11 +653,8 @@ Aufgabendialog. Der Haken und das Öffnen des Ziels markieren die Meldung direkt
 als gelesen. Lesestatus gilt je Geräteidentität; der Bootstrap-Zugang hat einen
 gemeinsamen Lesestatus.
 
-Desktop-Meldungen sind in den Einstellungen zuschaltbar. Sie enthalten Projekt
-und Ereignis, keine Prompts oder Antwortwerte, und funktionieren nur bei laufender
-GUI und verfügbarem Linux-Benachrichtigungsdienst. Historische Meldungen werden
-beim Verbinden nicht als Desktop-Flut erneut ausgeliefert. Die vorhandene
-ntfy-Outbox bleibt ein separater optionaler Hintergrundkanal.
+Ein eigener Einstellungsbereich für Desktop-Meldungen wird nicht mehr angeboten.
+Die vorhandene ntfy-Outbox bleibt ein separater optionaler Hintergrundkanal.
 
 ## Verbindung und unklare Zustellung
 
@@ -489,12 +663,38 @@ werden binäre Anhangdaten nicht bei jedem Live-Abgleich erneut übertragen:
 Desktop-Snapshot und SSE verwenden Metadaten, Originalanhänge werden bei Bedarf
 separat geladen. In Diagnoseereignissen ist die ausgelagerte Nutzlast markiert;
 das vollständige Originalereignis bleibt abrufbar. Bei Ausfall
-bleiben alte Daten sichtbar, aber ausdrücklich als veraltet gekennzeichnet.
-Schreibaktionen sind dann gesperrt. Die App verbindet automatisch neu.
+wechselt die Oberfläche automatisch in den reduzierten Offline-Modus.
+Server-Schreibaktionen sind dann gesperrt. Die App verbindet automatisch neu.
+
+### Aufgaben offline vorbereiten
+
+Ohne Serververbindung bleibt nur **Aufgaben**, **+ Aufgabe** und die gespeicherte
+Projektauswahl aktiv. Alle anderen Menüpunkte, das Projektmenü, Session-Tabs und
+die Factory-Einstellungen sind ausgegraut. Beim Verbindungsabbruch wird eine
+andere Ansicht verlassen; offene Eingaben bleiben gespeichert. Die Verbindung
+kann weiterhin über die Verbindungsübersicht im Footer eingerichtet werden.
+Mittig unten steht orange:
+**Offline-Modus: Aufgaben können nur lokal vorbereitet werden.**
+
+Die reduzierte Liste zeigt lokal vorbereitete Aufgaben des gewählten Projekts.
+Text und Anhänge werden dauerhaft lokal gespeichert; Aufgaben lassen sich
+bearbeiten oder nach Bestätigung entfernen. Ohne zuvor gespeicherte Projekte
+muss zunächst einmal eine Verbindung hergestellt werden.
+
+Nach Wiederverbindung werden vorbereitete Aufgaben automatisch ausschließlich
+an ihre ursprüngliche Factory und ihr ursprüngliches Projekt als **Server-Entwürfe**
+übertragen. Sie starten keine Ausführung; die Freigabe erfolgt anschließend
+explizit über **Einreihen**. Bei unklarer Zustellung wird dieselbe gespeicherte
+Anfrage abgeglichen, nicht eine zweite Aufgabe erzeugt. Erst nach bestätigter
+Übertragung verschwindet die lokale Kopie. Fehlende Projekte oder abgelehnte
+Übertragungen lassen die Aufgabe lokal erhalten; technische Fehlerdetails stehen
+in der Diagnose. Noch offene lokale Überarbeitungen werden erst nach erneutem
+**Lokal vorbereiten** übertragen.
 
 Schreibabsichten werden **vor HTTP** in einem privaten lokalen Journal gespeichert.
 Bei unklarem Ergebnis bleiben Request-ID und Nutzlast unverändert; die Oberfläche
-bietet unter **Offene Zustellungen** den identischen idempotenten Abgleich an.
+bietet in **Diagnose → Zustellungen prüfen** den identischen idempotenten
+Abgleich an. Dieser technische Abgleich ist kein Bereich der Factory-Einstellungen.
 Einladungserstellung ist davon ausgenommen: ihr API fehlt eine idempotente
 Request-ID, deshalb wird ein unklarer Aufruf nicht einfach wiederholt.
 

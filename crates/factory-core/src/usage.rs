@@ -45,6 +45,9 @@ pub struct ProjectUsage {
     pub token_budget: Option<TokenBudget>,
     pub project_id: crate::ProjectId,
     pub groups: Vec<UsageGroup>,
+    /// Earliest native message timestamp with recorded token usage.
+    #[serde(default)]
+    pub first_observed_unix_ms: Option<u64>,
     /// No inference about missing historical messages or unreported provider usage.
     pub source: String,
 }

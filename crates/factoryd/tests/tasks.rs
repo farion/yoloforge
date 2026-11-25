@@ -23,11 +23,77 @@ fn configure_models(s: &Store) {
 }
 
 #[test]
+fn skills_reach_only_the_implementer_and_are_pinned_before_routing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    let project = store.create_project(CreateProject {
+        logo: None,
+        runner_mapping: None,
+        key: None,
+        request_id: RequestId::new(),
+        name: "Skills".into(),
+        repository: "factory:managed".into(),
+        base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&store);
+    let package = store.import_factory_skill(factory_protocol::skills::ImportFactorySkill {
+        request_id:RequestId::new(),id:"checklist".into(), name:"Checklist".into(),
+        description:"Review checklist".into(), current_version:0,
+        files:[("SKILL.md".into(),"Review carefully".into())].into(),
+    }).unwrap();
+    let change = |revision, id: &str| store.set_project_skills(project.id, SetProjectSkills {
+        request_id: RequestId::new(),
+        expected_revision: Revision(revision),
+        repo_skills: vec![id.into()],
+        factory_skills: if revision == 0 {vec![package.reference.clone()]} else {vec![]},
+    }).unwrap();
+    change(0, "review");
+    let task = |requested_session| SaveTask {
+        request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+        project_id: project.id, prompt: "Work".into(), images: vec![], requested_session,
+    };
+    let ticket = store.save_task(task(None)).unwrap();
+    change(1, "docs");
+    let runner = RunnerId::new();
+    store.autostart_runner(runner).unwrap();
+    store.scheduler_tick().unwrap();
+    prepare(&store, &store.pending(runner).unwrap()[0]);
+    store.scheduler_tick().unwrap();
+    let routing = store.pending(runner).unwrap().pop().unwrap();
+    assert!(routing.agent_spec.as_ref().unwrap().read_only);
+    assert!(routing.agent_spec.as_ref().unwrap().repo_skills.is_none());
+    assert!(routing.agent_spec.as_ref().unwrap().factory_skills.is_empty());
+    decide(&store, &routing, r#"{"action":"new","reason":"New workspace"}"#);
+    store.scheduler_tick().unwrap();
+    let preparation = store.pending(runner).unwrap().pop().unwrap();
+    prepare(&store, &preparation);
+    store.scheduler_tick().unwrap();
+    let implementer = store.pending(runner).unwrap().pop().unwrap();
+    assert!(!implementer.agent_spec.as_ref().unwrap().read_only);
+    assert_eq!(implementer.agent_spec.as_ref().unwrap().repo_skills.as_deref(), Some(&["review".into()][..]));
+    assert_eq!(implementer.agent_spec.as_ref().unwrap().factory_skills, [package.reference.clone()]);
+    assert!(store.require_repo_skill_support(runner, implementer.id, implementer.ownership_epoch, false).is_err());
+    store.require_repo_skill_support(runner, implementer.id, implementer.ownership_epoch, true).unwrap();
+    assert!(store.snapshot().unwrap().tickets.iter().any(|t| {
+        t.id == ticket.id && t.execution_command == Some(implementer.id)
+    }));
+    assert!(matches!(store.save_task(task(Some(implementer.id))),
+        Err(factoryd::store::StoreError::Invalid(message)) if message.contains("Skill-Freigabe")));
+    assert!(store.factory_skill_for_command(runner,implementer.id,package.reference.clone()).is_err());
+    store.acknowledge(runner,implementer.id,AckCommand {request_id:RequestId::new(),
+        ownership_epoch:implementer.ownership_epoch}).unwrap();
+    assert!(store.factory_skill_for_command(RunnerId::new(),implementer.id,package.reference.clone()).is_err());
+    let bundle = store.factory_skill_for_command(runner,implementer.id,package.reference).unwrap();
+    assert_eq!(bundle.files["SKILL.md"],"Review carefully");
+}
+
+#[test]
 fn orchestrator_retries_failed_preparation_after_cooldown_and_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let s = Store::open(&path).unwrap();
     let p = s.create_project(CreateProject {
+        logo: None,
         runner_mapping: None,
         key: None,
         request_id: RequestId::new(),
@@ -97,6 +163,7 @@ fn automatic_setup_preserves_user_model_and_missing_model_blocks_agents() {
         let s = Store::open(&path).unwrap();
         let p = s
             .create_project(CreateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id: RequestId::new(),
@@ -160,6 +227,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
         let s = Store::open(&path).unwrap();
         let p = s
             .create_project(CreateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id: RequestId::new(),
@@ -402,6 +470,7 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
         let s = Store::open(&path).unwrap();
         let p = s
             .create_project(CreateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id: RequestId::new(),
@@ -605,12 +674,119 @@ fn route_new(s: &Store, task: TicketId) {
 }
 
 #[test]
+fn committed_intent_wakes_scheduler_and_remapping_moves_future_orchestration() {
+    use futures_util::FutureExt;
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let project = store.create_project(CreateProject {
+        key: None, logo: None, runner_mapping: None, request_id: RequestId::new(),
+        name: "Wakeup".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    let old = RunnerId::new();
+    let new = RunnerId::new();
+    configure_models(&store);
+    let wakeup = store.scheduler_wakeup();
+    let submission = |prompt: &str| SaveTask {
+        request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+        project_id: project.id, requested_session: None, prompt: prompt.into(), images: vec![],
+    };
+    store.submit_task(SubmitTask {
+        task: submission("Draft only"), draft: true, files: vec![], edit_token: None,
+    }).unwrap();
+    assert!(wakeup.notified().now_or_never().is_none());
+    assert!(store.save_task(submission("")).is_err());
+    assert!(wakeup.notified().now_or_never().is_none());
+    let task = store.save_task(submission("Route this intent")).unwrap();
+    assert!(wakeup.notified().now_or_never().is_some());
+    assert!(store.snapshot().unwrap().tickets.iter().any(|ticket| ticket.id == task.id));
+    store.autostart_runner(old).unwrap();
+    store.scheduler_tick().unwrap();
+    let prep = store.pending(old).unwrap().into_iter()
+        .find(|c| c.kind == CommandKind::PrepareWorkspace).unwrap();
+    prepare(&store, &prep);
+    let project = store.snapshot().unwrap().projects.into_iter().find(|p| p.id == project.id).unwrap();
+    store.update_project(project.id, UpdateProject {
+        request_id: RequestId::new(), expected_revision: project.revision,
+        runner_mapping: Some(ProjectRunnerMapping::Runner(new)), name: None, key: None,
+        repository: None, base_branch: None, logo: None,
+    }).unwrap();
+    store.scheduler_tick().unwrap();
+    assert!(store.pending(old).unwrap().is_empty());
+    let prep = store.pending(new).unwrap().into_iter()
+        .find(|c| c.kind == CommandKind::PrepareWorkspace).unwrap();
+    prepare(&store, &prep);
+    store.scheduler_tick().unwrap();
+    assert!(store.pending(new).unwrap().iter()
+        .any(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "orchestrator")));
+}
+
+#[test]
+fn archived_session_with_new_skill_grants_queues_and_sends_to_same_root() {
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let project = store.create_project(CreateProject {
+        logo: None,
+        runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Archived".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&store);
+    let runner = RunnerId::new();
+    let first = store.save_task(SaveTask {
+        request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+        project_id: project.id, prompt: "Initial request".into(), images: vec![], requested_session: None,
+    }).unwrap();
+    configure_models(&store);
+    store.autostart_runner(runner).unwrap();
+    route_new(&store, first.id);
+    let prep = store.pending(runner).unwrap().into_iter()
+        .find(|c| c.kind == CommandKind::PrepareWorkspace).unwrap();
+    prepare(&store, &prep);
+    store.scheduler_tick().unwrap();
+    let original = store.pending(runner).unwrap().into_iter()
+        .find(|c| c.agent_spec.as_ref().is_some_and(|a| !a.read_only)).unwrap();
+    assert!(original.agent_spec.as_ref().unwrap().repo_skills.is_none());
+    complete(&store, &original, CommandOutput::Agent { agent: AgentProgress {
+        session_id: original.session_id(), message_id: agent_message_id(original.id),
+        phase: AgentPhase::Succeeded, summary: "Done".into(),
+    }});
+    store.report_archive(runner, original.id, ReportArchive {
+        ownership_epoch: original.ownership_epoch, batch: ArchiveBatch {
+            session_id: original.session_id(), revision: 1, captured_unix_ms: 1,
+            final_scan_complete: true, messages: vec![],
+        },
+    }).unwrap();
+    let owner = store.snapshot().unwrap().streams.into_iter()
+        .find(|w| w.id == original.stream_id).unwrap();
+    store.close_session(original.id, CloseSession {
+        request_id: RequestId::new(), expected_stream_revision: owner.revision, reason: "Archived".into(),
+    }).unwrap();
+    store.set_project_skills(project.id, SetProjectSkills {
+        request_id: RequestId::new(), expected_revision: Revision(0),
+        repo_skills: vec!["new-skill".into()], factory_skills: vec![],
+    }).unwrap();
+    let queued = store.prompt_session(original.id, PromptSession {
+        request_id: RequestId::new(), prompt: "Follow up in this session".into(), images: vec![], files: vec![],
+    }).unwrap();
+    assert_eq!(queued.requested_session, Some(original.id));
+    assert!(store.session_closure(original.id).unwrap().is_none());
+    store.scheduler_tick().unwrap();
+    store.scheduler_tick().unwrap();
+    let continued = store.pending(runner).unwrap().into_iter()
+        .find(|c| c.id != original.id && c.session_root() == original.id).unwrap();
+    assert_eq!(continued.session_id(), original.session_id());
+    assert_eq!(continued.runner_id, original.runner_id);
+    let spec = continued.agent_spec.unwrap();
+    assert!(spec.prompt.starts_with("Follow up in this session"));
+    assert_eq!(spec.repo_skills, Some(Vec::new()), "Newly approved skills are not inherited");
+    assert!(spec.factory_skills.is_empty());
+}
+
+#[test]
 fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),
@@ -653,7 +829,20 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
         .into_iter()
         .find(|c| c.kind == CommandKind::RunAgent)
         .unwrap();
-    let follow = s.save_task(task("Add multiplication", Some(c.id))).unwrap();
+    let direct = PromptSession {
+        request_id: RequestId::new(), prompt: "Add multiplication".into(), images: vec![],
+        files: vec![PromptFile::from_bytes("details.txt".into(), b"Direct session details").unwrap()],
+    };
+    let routing_count = s.snapshot().unwrap().commands.iter()
+        .filter(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "orchestrator")).count();
+    let follow = s.prompt_session(c.id, direct.clone()).unwrap();
+    assert_eq!(follow.requested_session, Some(c.id));
+    assert_eq!(follow.project_id, p.id);
+    assert_eq!(s.prompt_session(c.id, direct.clone()).unwrap().id, follow.id);
+    let controller = s.snapshot().unwrap().commands.into_iter()
+        .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.read_only)).unwrap();
+    assert!(s.prompt_session(controller.id, PromptSession { request_id: RequestId::new(), ..direct.clone() }).is_err());
+    assert!(s.prompt_session(CommandId::new(), PromptSession { request_id: RequestId::new(), ..direct.clone() }).is_err());
     s.scheduler_tick().unwrap();
     assert!(!s
         .snapshot()
@@ -705,6 +894,11 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
         .unwrap();
     assert_eq!(continued.session_root(), c.id);
     assert_eq!(continued.stream_id, c.stream_id);
+    assert_eq!(continued.runner_id, c.runner_id);
+    assert_eq!(continued.agent_spec.as_ref().unwrap().files, direct.files);
+    assert_eq!(continued.agent_spec.as_ref().unwrap().local_mcps, c.agent_spec.as_ref().unwrap().local_mcps);
+    assert_eq!(s.snapshot().unwrap().commands.iter()
+        .filter(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "orchestrator")).count(), routing_count);
     assert!(continued
         .agent_spec
         .as_ref()
@@ -840,6 +1034,7 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
         let s = Store::open(&dir.path().join("db")).unwrap();
         let p = s
             .create_project(CreateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id: RequestId::new(),
@@ -889,6 +1084,7 @@ fn legacy_missing_folder_failure_gets_one_fenced_replacement_and_scheduler_conti
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),
@@ -1054,6 +1250,7 @@ fn prompt_images_autostart_pause_restart_and_capability_fencing() {
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),
@@ -1202,10 +1399,6 @@ fn prompt_images_autostart_pause_restart_and_capability_fencing() {
     assert_eq!(spec.images, vec![image]);
     assert!(s.require_image_support(runner, c.id, 1, false).is_err());
     assert!(s.require_image_support(runner, c.id, 1, true).is_ok());
-    assert_eq!(
-        s.scheduler_policy(p.id).unwrap().unwrap().remaining_starts,
-        UNLIMITED_STARTS
-    );
     s.acknowledge(
         runner,
         c.id,

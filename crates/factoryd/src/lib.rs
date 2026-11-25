@@ -26,10 +26,14 @@ mod compaction_routes;
 mod desktop;
 mod knowledge_routes;
 mod live;
-mod model_routes;
+mod mcp_probe;
+mod mcp_routes;
 pub mod model_gateway;
+mod model_routes;
+pub mod remote_mcp;
 mod review_routes;
 mod scheduler_routes;
+mod skill_routes;
 mod supervisor_routes;
 mod termination_routes;
 mod work_routes;
@@ -38,6 +42,7 @@ use live::*;
 use work_routes::*;
 
 struct Entry {
+    ip: Option<std::net::IpAddr>,
     input: RegisterRunner,
     registration: RegistrationId,
     seen: Instant,
@@ -57,6 +62,7 @@ struct App {
     boot_id: BootId,
     store: Store,
     stopping: Arc<std::sync::atomic::AtomicBool>,
+    mcp_probes: Arc<tokio::sync::Mutex<mcp_probe::Probes>>,
 }
 
 pub fn router(token: &str, store: Store) -> Router {
@@ -77,6 +83,7 @@ pub fn router_with_shutdown(
         boot_id: BootId::new(),
         store,
         stopping,
+        mcp_probes: Default::default(),
     };
     Router::new()
         .route("/v1/instances", get(desktop::instances))
@@ -89,14 +96,117 @@ pub fn router_with_shutdown(
         .route("/v1/tasks/{id}", get(desktop::task_payload))
         .route("/v1/tasks/{id}/history", get(desktop::task_history))
         .route("/v1/tasks/{id}/models", get(model_routes::task))
-        .route("/v1/model-settings", get(model_routes::factory).put(model_routes::set_factory))
+        .route(
+            "/v1/model-settings",
+            get(model_routes::factory).put(model_routes::set_factory),
+        )
         .route("/v1/model-settings/setup", get(model_routes::setup))
-        .route("/v1/model-settings/accesses/{access}/status", get(model_gateway::status))
-        .route("/v1/model-settings/accesses/{access}/openai/oauth", post(model_gateway::begin))
-        .route("/v1/model-settings/accesses/{access}/openai/oauth/start", post(model_gateway::begin_named))
-        .route("/v1/model-settings/accesses/{access}/openai/oauth/complete", post(model_gateway::finish))
-        .route("/v1/model-settings/accesses/{access}/openai/oauth/cancel", post(model_gateway::cancel))
-        .route("/v1/projects/{id}/models", get(model_routes::project).put(model_routes::set_project))
+        .route(
+            "/v1/model-settings/accesses/{access}",
+            axum::routing::delete(model_gateway::remove_access),
+        )
+        .route(
+            "/v1/model-settings/accesses/{access}/status",
+            get(model_gateway::status),
+        )
+        .route(
+            "/v1/model-settings/accesses/{access}/key",
+            post(model_gateway::key_provider::connect),
+        )
+        .route(
+            "/v1/model-settings/accesses/{access}/{provider}/oauth",
+            post(model_gateway::begin),
+        )
+        .route(
+            "/v1/model-settings/accesses/{access}/{provider}/oauth/start",
+            post(model_gateway::begin_named),
+        )
+        .route(
+            "/v1/model-settings/accesses/{access}/{provider}/oauth/complete",
+            post(model_gateway::finish),
+        )
+        .route(
+            "/v1/model-settings/accesses/{access}/{provider}/oauth/cancel",
+            post(model_gateway::cancel),
+        )
+        .route(
+            "/v1/projects/{id}/models",
+            get(model_routes::project).put(model_routes::set_project),
+        )
+        .route(
+            "/v1/projects/{id}/skills",
+            get(skill_routes::read).put(skill_routes::save),
+        )
+        .route(
+            "/v1/skills",
+            get(skill_routes::catalog).post(skill_routes::import),
+        )
+        .route(
+            "/v1/runners/{runner}/commands/{command}/skills/{id}/{version}",
+            get(skill_routes::bundle),
+        )
+        .route(
+            "/v1/mcp/local",
+            get(mcp_routes::catalog).put(mcp_routes::save_catalog),
+        )
+        .route("/v1/mcp/local/choices", get(mcp_routes::choices))
+        .route("/v1/mcp/local/{id}/test", post(mcp_probe::start))
+        .route("/v1/mcp/local-tests/{id}", get(mcp_probe::status))
+        .route("/v1/runners/{runner}/mcp-tests/take", post(mcp_probe::take))
+        .route("/v1/runners/{runner}/mcp-tests", post(mcp_probe::finish))
+        .route("/v1/mcp/remote", get(remote_mcp::list))
+        .route(
+            "/v1/mcp/remote/discover",
+            post(remote_mcp::discovery::discover),
+        )
+        .route(
+            "/mcp-oauth/client.json",
+            get(remote_mcp::discovery::client_metadata),
+        )
+        .route(
+            "/v1/mcp/remote/{id}",
+            axum::routing::put(remote_mcp::save).delete(remote_mcp::remove),
+        )
+        .route(
+            "/v1/mcp/remote/{id}/test",
+            post(remote_mcp::test_connection),
+        )
+        .route(
+            "/v1/mcp/remote/{id}/oauth/start",
+            post(remote_mcp::oauth::start),
+        )
+        .route(
+            "/v1/mcp/remote/{id}/oauth/prepare",
+            post(remote_mcp::oauth::prepare),
+        )
+        .route(
+            "/v1/mcp/remote/{id}/oauth/commit",
+            post(remote_mcp::oauth::commit),
+        )
+        .route("/v1/mcp/remote/{id}/verify", post(remote_mcp::verify_draft))
+        .route(
+            "/v1/mcp/remote/{id}/oauth/status",
+            post(remote_mcp::oauth::status),
+        )
+        .route(
+            "/v1/mcp/remote/{id}/oauth/complete",
+            post(remote_mcp::oauth::complete_loopback),
+        )
+        .route("/mcp-oauth/callback", get(remote_mcp::oauth::callback))
+        .route(
+            "/v1/runners/{runner}/commands/{command}/mcp/{id}",
+            get(remote_mcp::lease),
+        )
+        .route(
+            "/mcp-runtime/{runner}/{command}/{id}",
+            get(remote_mcp::relay)
+                .post(remote_mcp::relay)
+                .delete(remote_mcp::relay),
+        )
+        .route(
+            "/v1/projects/{id}/mcp/local",
+            get(mcp_routes::project).put(mcp_routes::save_project),
+        )
         .route("/v1/tasks/{id}/edit", post(desktop::begin_task_edit))
         .route("/v1/commands/{id}", get(desktop::command_payload))
         .route("/v1/events/history", get(desktop::event_history))
@@ -221,8 +331,11 @@ pub fn router_with_shutdown(
             post(review_routes::submit_task)
                 .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
         )
-        .route("/v1/tasks/submit-with-model", post(model_routes::submit)
-            .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)))
+        .route(
+            "/v1/tasks/submit-with-model",
+            post(model_routes::submit)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
         .route(
             "/v1/projects/{id}/scheduler",
             get(scheduler_routes::read).post(scheduler_routes::configure),
@@ -291,6 +404,8 @@ pub fn router_with_shutdown(
         .route("/v1/events/stream", get(event_stream))
         .route("/v1/runners/register", post(register))
         .route("/v1/runners/{id}/heartbeat", post(heartbeat))
+        .route("/v1/runners/{id}/snapshot", get(runner_snapshot))
+        .route("/v1/commands/{root}/prompt", post(review_routes::prompt_session))
         .fallback(|| async {
             error(
                 StatusCode::NOT_FOUND,
@@ -303,12 +418,16 @@ pub fn router_with_shutdown(
 }
 
 pub fn router_with_model_gateway(
-    token: &str, store: Store, stopping: Arc<std::sync::atomic::AtomicBool>,
+    token: &str,
+    store: Store,
+    stopping: Arc<std::sync::atomic::AtomicBool>,
     gateway: Option<model_gateway::Gateway>,
 ) -> Router {
     let router = router_with_shutdown(token, store.clone(), stopping);
     match gateway {
-        Some(gateway) => router.layer(axum::Extension(gateway.clone())).merge(model_gateway::routes(gateway, store)),
+        Some(gateway) => router
+            .layer(axum::Extension(gateway.clone()))
+            .merge(model_gateway::routes(gateway, store)),
         None => router,
     }
 }
@@ -326,7 +445,11 @@ fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
         .into_response()
 }
 async fn authenticate(State(app): State<App>, mut request: Request, next: Next) -> Response {
-    if request.uri().path() == "/healthz" {
+    if matches!(
+        request.uri().path(),
+        "/healthz" | "/mcp-oauth/callback" | "/mcp-oauth/client.json"
+    ) || request.uri().path().starts_with("/mcp-runtime/")
+    {
         return next.run(request).await;
     }
     if request.uri().path() == "/v1/enroll" {
@@ -412,7 +535,9 @@ async fn authenticate(State(app): State<App>, mut request: Request, next: Next) 
             "Device role does not permit this route",
         );
     }
-    desktop::observe_client(&app, &principal, request.headers()).await;
+    let ip = observed_ip(&request);
+    desktop::observe_client(&app, &principal, request.headers(), ip).await;
+    request.extensions_mut().insert(ObservedIp(ip));
     request.extensions_mut().insert(principal);
     next.run(request).await
 }
@@ -432,9 +557,20 @@ fn registration(app: &App, id: RegistrationId) -> Json<Registration> {
 fn valid_text(s: &str, max: usize) -> bool {
     !s.trim().is_empty() && s.len() <= max && !s.chars().any(char::is_control)
 }
+#[derive(Clone, Copy)]
+struct ObservedIp(Option<std::net::IpAddr>);
+
+fn observed_ip(request: &Request) -> Option<std::net::IpAddr> {
+    request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|peer| peer.0.ip().to_canonical())
+}
+
 async fn register(
     State(app): State<App>,
     axum::Extension(principal): axum::Extension<Principal>,
+    axum::Extension(peer): axum::Extension<ObservedIp>,
     body: Result<Json<RegisterRunner>, JsonRejection>,
 ) -> Response {
     let Ok(Json(body)) = body else {
@@ -489,9 +625,24 @@ async fn register(
             .capabilities
             .iter()
             .any(|c| c == LOCAL_PROJECT_CAPABILITY);
+        let remote = body
+            .capabilities
+            .iter()
+            .any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
+        let mcp_ready = (remote
+            || body
+                .capabilities
+                .iter()
+                .any(|c| c == mcp::LOCAL_MCP_CAPABILITY))
+            && matches!(body.opencode, OpenCodeStatus::Ready { .. });
+        let ready = matches!(body.opencode, OpenCodeStatus::Ready { .. });
+        let local_source = local && body.location == RunnerLocation::Local
+            && peer.0.is_some_and(|ip| ip.is_loopback());
         if !matches!(
             tokio::task::spawn_blocking(move || {
                 store.autostart_runner(runner)?;
+                store.observe_mcp_runner(runner, mcp_ready, remote)?;
+                store.observe_automatic_runner(runner, ready, local_source)?;
                 if local {
                     store.recover_local_projects(runner)?;
                 }
@@ -506,6 +657,7 @@ async fn register(
     registry.entries.insert(
         body.id,
         Entry {
+            ip: peer.0,
             input: body,
             registration: id,
             seen: now,
@@ -517,6 +669,7 @@ async fn register(
 }
 async fn heartbeat(
     State(app): State<App>,
+    axum::Extension(peer): axum::Extension<ObservedIp>,
     Path(id): Path<String>,
     body: Result<Json<Heartbeat>, JsonRejection>,
 ) -> Response {
@@ -551,6 +704,7 @@ async fn heartbeat(
     }
     entry.seen = Instant::now();
     entry.unix_ms = unix_ms();
+    entry.ip = peer.0;
     entry.input.opencode = body.opencode;
     if entry
         .input
@@ -564,9 +718,26 @@ async fn heartbeat(
             .capabilities
             .iter()
             .any(|c| c == LOCAL_PROJECT_CAPABILITY);
+        let remote = entry
+            .input
+            .capabilities
+            .iter()
+            .any(|c| c == mcp::REMOTE_MCP_CAPABILITY);
+        let mcp_ready = (remote
+            || entry
+                .input
+                .capabilities
+                .iter()
+                .any(|c| c == mcp::LOCAL_MCP_CAPABILITY))
+            && matches!(entry.input.opencode, OpenCodeStatus::Ready { .. });
+        let ready = matches!(entry.input.opencode, OpenCodeStatus::Ready { .. });
+        let local_source = local && entry.input.location == RunnerLocation::Local
+            && peer.0.is_some_and(|ip| ip.is_loopback());
         if !matches!(
             tokio::task::spawn_blocking(move || {
                 store.autostart_runner(id)?;
+                store.observe_mcp_runner(id, mcp_ready, remote)?;
+                store.observe_automatic_runner(id, ready, local_source)?;
                 if local {
                     store.recover_local_projects(id)?;
                 }
@@ -583,6 +754,22 @@ async fn heartbeat(
 }
 async fn snapshot(State(app): State<App>) -> Response {
     snapshot_response(app, false).await
+}
+
+async fn runner_snapshot(State(app): State<App>, Path(id): Path<RunnerId>) -> Response {
+    let boot = app.boot_id;
+    db_call(RequestId::new(), move || {
+        let mut snapshot = app.store.snapshot()?;
+        snapshot.commands.retain(|c| c.runner_id == id);
+        snapshot.streams.retain(|s| s.runner_id == id);
+        snapshot.projects.retain(|p| snapshot.streams.iter().any(|s| s.project_id == p.id)
+            || p.runner_bindings.contains_key(&id) || p.setup.as_ref().is_some_and(|setup| setup.runner_id == id));
+        Ok(serde_json::json!({
+            "protocol_version": PROTOCOL_VERSION, "server_version": env!("CARGO_PKG_VERSION"),
+            "boot_id": boot, "revision": 0, "runners": [],
+            "projects": snapshot.projects, "streams": snapshot.streams, "commands": snapshot.commands,
+        }))
+    }).await
 }
 async fn desktop_snapshot(State(app): State<App>) -> Response {
     snapshot_response(app, true).await
@@ -642,6 +829,7 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
             .entries
             .iter()
             .map(|(id, e)| RunnerView {
+                ip: e.ip,
                 capabilities: e.input.capabilities.clone(),
                 id: *id,
                 name: e.input.name.clone(),

@@ -16,7 +16,7 @@ pub fn timestamp(ms: u64) -> String {
                 .format("%d.%m.%Y %H:%M:%S")
                 .to_string()
         })
-        .unwrap_or_else(|| "unbekannt".into())
+        .unwrap_or_else(|| crate::tr!("unbekannt").into())
 }
 
 #[derive(
@@ -30,12 +30,11 @@ pub enum Page {
     Orchestrator,
     Supervisor,
     Memorizer,
-    Runners,
     Diagnostics,
     Notifications,
     Settings,
     // Preserve the former saved Overview destination.
-    #[serde(rename = "Overview", alias = "Infrastructure")]
+    #[serde(rename = "Overview", alias = "Infrastructure", alias = "Runners")]
     Infrastructure,
     #[serde(rename = "FactoryOverview")]
     Overview,
@@ -50,7 +49,6 @@ impl Page {
             Self::Orchestrator => icons::FLOW_ARROW,
             Self::Supervisor => icons::EYE,
             Self::Memorizer => icons::BRAIN,
-            Self::Runners => crate::design::RUNNER_ICON,
             Self::Diagnostics => icons::CHART_LINE,
             Self::Notifications => icons::BELL,
             Self::Settings => icons::GEAR,
@@ -60,16 +58,15 @@ impl Page {
     }
     pub fn title(self) -> &'static str {
         match self {
-            Self::Tasks => "Aufgaben",
-            Self::Questions => "Fragen",
-            Self::Sessions => "Sessions",
+            Self::Tasks => crate::tr!("Aufgaben"),
+            Self::Questions => crate::tr!("Fragen"),
+            Self::Sessions => "Implementer",
             Self::Orchestrator => "Orchestrator",
             Self::Supervisor => "Supervisor",
             Self::Memorizer => "Memorizer",
-            Self::Runners => "Runner",
-            Self::Diagnostics => "Diagnose",
-            Self::Notifications => "Benachrichtigungen",
-            Self::Settings => "Einstellungen",
+            Self::Diagnostics => crate::tr!("Diagnose"),
+            Self::Notifications => crate::tr!("Benachrichtigungen"),
+            Self::Settings => crate::tr!("Einstellungen"),
             Self::Overview => "Overview",
             Self::Infrastructure => "Infrastructure",
         }
@@ -79,7 +76,6 @@ impl Page {
             self,
             Self::Overview
                 | Self::Infrastructure
-                | Self::Runners
                 | Self::Diagnostics
                 | Self::Notifications
                 | Self::Settings
@@ -99,11 +95,11 @@ pub enum Target {
 impl Target {
     pub fn notification_label(&self) -> &'static str {
         match self {
-            Self::Task(..) => "Zur Aufgabe",
-            Self::Questions(..) => "Zur Rückfrage",
-            Self::Session(..) => "Zur Session",
-            Self::Diagnose(..) => "Zur Diagnose",
-            Self::Orchestrator(..) => "Zum Orchestrator",
+            Self::Task(..) => crate::tr!("Zur Aufgabe"),
+            Self::Questions(..) => crate::tr!("Zur Rückfrage"),
+            Self::Session(..) => crate::tr!("Zur Session"),
+            Self::Diagnose(..) => crate::tr!("Zur Diagnose"),
+            Self::Orchestrator(..) => crate::tr!("Zum Orchestrator"),
         }
     }
 }
@@ -141,41 +137,42 @@ pub fn task_session_command<'a>(s: &'a Snapshot, t: &Ticket) -> Option<&'a Runne
 pub fn command_status(c: &RunnerCommand) -> &'static str {
     if let Some(p) = &c.agent_progress {
         return match p.phase {
-            AgentPhase::Starting => "Wird gestartet",
-            AgentPhase::Running => "In Bearbeitung",
-            AgentPhase::WaitingInput => "Braucht Antwort",
-            AgentPhase::Unknown => "Zustand ungeklärt",
-            AgentPhase::Succeeded => "Ergebnis vorhanden",
-            AgentPhase::Failed => "Fehlgeschlagen",
-            AgentPhase::Interrupted => "Unterbrochen",
+            AgentPhase::Starting => crate::tr!("Wird gestartet"),
+            AgentPhase::Running => crate::tr!("In Bearbeitung"),
+            AgentPhase::WaitingInput => crate::tr!("Braucht Antwort"),
+            AgentPhase::Finalizing => crate::tr!("Wird abgeschlossen"),
+            AgentPhase::Unknown => crate::tr!("Zustand ungeklärt"),
+            AgentPhase::Succeeded => crate::tr!("Ergebnis vorhanden"),
+            AgentPhase::Failed => crate::tr!("Fehlgeschlagen"),
+            AgentPhase::Interrupted => crate::tr!("Unterbrochen"),
         };
     }
     match c.state {
-        CommandState::Pending => "Eingereiht",
-        CommandState::Accepted => "In Bearbeitung",
-        CommandState::Succeeded => "Abgeschlossen",
-        CommandState::Failed => "Fehlgeschlagen",
+        CommandState::Pending => crate::tr!("Eingereiht"),
+        CommandState::Accepted => crate::tr!("In Bearbeitung"),
+        CommandState::Succeeded => crate::tr!("Abgeschlossen"),
+        CommandState::Failed => crate::tr!("Fehlgeschlagen"),
     }
 }
 
 pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
     if t.draft {
-        return "Entwurf";
+        return crate::tr!("Entwurf");
     }
     let paused = s.projects.iter().any(|p| p.id == t.project_id && p.paused);
     if let Some(c) = task_command(s, t) {
         if c.state == CommandState::Pending && paused {
-            return "Projekt pausiert";
+            return crate::tr!("Projekt pausiert");
         }
         if c.kind == CommandKind::PrepareWorkspace
             && matches!(c.state, CommandState::Pending | CommandState::Accepted | CommandState::Succeeded)
         {
-            return "Wird vorbereitet";
+            return crate::tr!("Wird vorbereitet");
         }
         if c.kind == CommandKind::RunAgent && c.state == CommandState::Pending
-            && session_status(s, c) == "Eingereiht"
+            && session_status(s, c) == crate::tr!("Eingereiht")
         {
-            return "Wartet auf Start";
+            return crate::tr!("Wartet auf Start");
         }
         if matches!(c.state, CommandState::Accepted | CommandState::Pending) {
             return session_status(s, c);
@@ -185,13 +182,15 @@ pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
     match t.status {
         TicketState::Backlog | TicketState::Ready => {
             if paused {
-                "Projekt pausiert"
+                crate::tr!("Projekt pausiert")
             } else if s
                 .scheduler_policies
                 .iter()
                 .any(|p| p.project_id == t.project_id && !p.enabled)
             {
-                "Verteilung pausiert"
+                crate::tr!("Verteilung pausiert")
+            } else if task_runner_blocker(s, t).is_some() {
+                crate::tr!("Wartend")
             } else if let Some(status) = task_routing_status(&t.routing_note) {
                 status
             } else if !s
@@ -199,45 +198,63 @@ pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
                 .iter()
                 .any(|r| r.connection == ConnectionState::Online)
             {
-                "Wartet auf Runner"
+                crate::tr!("Wartend")
             } else {
-                "Eingereiht"
+                crate::tr!("Eingereiht")
             }
         }
-        TicketState::InProgress => "In Bearbeitung",
-        TicketState::Blocked => "Blockiert",
-        TicketState::Review => "Ergebnis vorhanden",
-        TicketState::Done => "Abgeschlossen",
-        TicketState::Cancelled => "Abgebrochen",
+        TicketState::InProgress => crate::tr!("In Bearbeitung"),
+        TicketState::Blocked => crate::tr!("Blockiert"),
+        TicketState::Review => crate::tr!("Ergebnis vorhanden"),
+        TicketState::Done => crate::tr!("Abgeschlossen"),
+        TicketState::Cancelled => crate::tr!("Abgebrochen"),
     }
+}
+
+pub fn task_runner_blocker(s: &Snapshot, t: &Ticket) -> Option<&'static str> {
+    if t.draft || t.execution_command.is_some()
+        || !matches!(t.status, TicketState::Backlog | TicketState::Ready)
+        || !t.routing_note.starts_with("Wartet auf verfügbaren Runner")
+    {
+        return None;
+    }
+    let assigned_online = s.scheduler_policies.iter()
+        .find(|p| p.project_id == t.project_id)
+        .is_some_and(|p| s.runners.iter().any(|r|
+            p.runner_ids.contains(&r.id) && r.connection == ConnectionState::Online));
+    Some(if assigned_online {
+        crate::tr!("Kein zugeordneter Runner ist für die ausgewählten MCPs bereit.")
+    } else {
+        crate::tr!("Kein zugeordneter Runner ist online. Prüfe die Runner-Zuordnung im Projekt.")
+    })
 }
 
 /// The existing server protocol records the orchestration stage in routing_note.
 /// Keep older servers and already queued tickets readable without a migration.
 fn task_routing_status(note: &str) -> Option<&'static str> {
     if note == "Orchestrator wird vorbereitet" {
-        Some("Wird vorbereitet")
+        Some(crate::tr!("Wird vorbereitet"))
     } else if note.starts_with("Orchestrator entscheidet") {
-        Some("Orchestrator prüft")
+        Some(crate::tr!("Orchestrator prüft"))
     } else if note.starts_with("Orchestrator-Vorbereitung fehlgeschlagen")
         || note.starts_with("Orchestrator: Lauf fehlgeschlagen")
     {
-        Some("Wartet auf Wiederholung")
+        Some(crate::tr!("Wartet auf Wiederholung"))
     } else if note.starts_with("Orchestrator-Vorbereitung wurde abgebrochen")
         || note.starts_with("Orchestrator kann noch nicht starten")
         || note.starts_with("Orchestrator wartet: Im Ausführungsprofil fehlt ein Modell")
         || note.starts_with("Orchestrierungs-Tokenbudget blockiert")
         || note.starts_with("Ausgewaehlte Session nicht mehr")
     {
-        Some("Blockiert")
+        Some(crate::tr!("Blockiert"))
     } else if note.starts_with("Orchestrator wartet:") {
-        Some("Orchestrator wartet")
+        Some(crate::tr!("Orchestrator wartet"))
     } else if note.starts_with("Wartet auf erfolgreichen Abschluss")
         || note.starts_with("Session wartet")
         || note.starts_with("Fortsetzung wartet")
         || note.starts_with("Orchestrator: vorhandene Session")
     {
-        Some("Wartet auf Session")
+        Some(crate::tr!("Wartet auf Session"))
     } else {
         None
     }
@@ -276,8 +293,8 @@ impl TaskBucket {
     pub fn title(self) -> &'static str {
         match self {
             Self::Current => "Queue",
-            Self::Draft => "Draft",
-            Self::Archive => "Archiv",
+            Self::Draft => crate::tr!("Draft"),
+            Self::Archive => crate::tr!("Archiv"),
         }
     }
     pub fn index(self) -> usize {
@@ -352,17 +369,17 @@ pub fn question_summary(q: &Question) -> String {
         return titles.join(" · ");
     }
     q.external.payload["description"].as_str().filter(|text| !text.trim().is_empty())
-        .unwrap_or(if q.external.kind == QuestionKind::Permission { "Berechtigung" } else { "Rückfrage" })
+        .unwrap_or(if q.external.kind == QuestionKind::Permission { crate::tr!("Berechtigung") } else { crate::tr!("Rückfrage") })
         .to_string()
 }
 
 pub fn question_status(state: QuestionState) -> &'static str {
     match state {
-        QuestionState::Pending => "Antwort erforderlich",
-        QuestionState::AnswerQueued => "Antwort eingereiht",
-        QuestionState::Answered => "Beantwortet",
-        QuestionState::Rejected => "Antwort abgelehnt · erneut prüfen",
-        QuestionState::Unknown => "Zustellung ungeklärt",
+        QuestionState::Pending => crate::tr!("Antwort erforderlich"),
+        QuestionState::AnswerQueued => crate::tr!("Antwort eingereiht"),
+        QuestionState::Answered => crate::tr!("Beantwortet"),
+        QuestionState::Rejected => crate::tr!("Antwort abgelehnt · erneut prüfen"),
+        QuestionState::Unknown => crate::tr!("Zustellung ungeklärt"),
     }
 }
 pub fn session_status(s: &Snapshot, c: &RunnerCommand) -> &'static str {
@@ -370,32 +387,33 @@ pub fn session_status(s: &Snapshot, c: &RunnerCommand) -> &'static str {
         .iter()
         .any(|v| v.root_command_id == c.session_root())
     {
-        return "Session geschlossen";
+        return crate::tr!("Session geschlossen");
     }
     if let Some(v) = s.runtime_terminations.iter().find(|v| v.command_id == c.id) {
         return match v.state {
-            TerminationState::Stopped => "Runtime beendet",
-            TerminationState::Requested => "Beendigung angefordert",
-            TerminationState::Unknown => "Beendigung ungeklärt",
+            TerminationState::Stopped => crate::tr!("Runtime beendet"),
+            TerminationState::Requested => crate::tr!("Beendigung angefordert"),
+            TerminationState::Unknown => crate::tr!("Beendigung ungeklärt"),
         };
     }
     if let Some(v) = s.controls.iter().find(|v| v.stream_id == c.stream_id) {
         match v.state {
             PauseState::HeldBeforeExecution
             | PauseState::SessionInterrupted
-            | PauseState::Frozen => return "Pausiert",
+            | PauseState::Frozen => return crate::tr!("Pausiert"),
             PauseState::Requested | PauseState::InterruptUnverified => {
-                return "Pause noch unbestätigt"
+                return crate::tr!("Pause noch unbestätigt")
             }
-            PauseState::ResumeRequested => return "Fortsetzung angefordert",
+            PauseState::ResumeRequested => return crate::tr!("Fortsetzung angefordert"),
             PauseState::Released => {}
         }
     }
-    if s.questions
+    if !c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::Finalizing)
+        && s.questions
         .iter()
         .any(|q| q.session_id == c.session_id() && needs_answer(q))
     {
-        return "Braucht Antwort";
+        return crate::tr!("Braucht Antwort");
     }
     command_status(c)
 }
@@ -406,7 +424,7 @@ pub fn working_session_command(s: &Snapshot, root: CommandId, selected: Option<C
         selected.is_none_or(|id| id == c.id)
             && c.state == CommandState::Accepted
             && c.agent_progress.as_ref().is_some_and(|p| matches!(p.phase, AgentPhase::Starting | AgentPhase::Running))
-            && matches!(session_status(s, c), "Wird gestartet" | "In Bearbeitung")
+            && [crate::tr!("Wird gestartet"), crate::tr!("In Bearbeitung")].contains(&session_status(s, c))
     }).map(|c| c.id)
 }
 
@@ -479,8 +497,8 @@ pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<Ru
     commands
 }
 
-pub fn queued_task_count(s: &Snapshot, project: ProjectId) -> usize {
-    s.tickets.iter().filter(|t| {
+pub fn task_queue_counts(s: &Snapshot, project: ProjectId) -> (usize, usize) {
+    let queued = s.tickets.iter().filter(|t| {
         if t.project_id != project || t.draft {
             return false;
         }
@@ -491,7 +509,20 @@ pub fn queued_task_count(s: &Snapshot, project: ProjectId) -> usize {
                     && matches!(c.state, CommandState::Accepted | CommandState::Succeeded)),
             _ => false,
         }
-    }).count()
+    });
+    queued.fold((0, 0), |(ready, waiting), ticket| {
+        let status = task_status(s, ticket);
+        if [
+            crate::tr!("Wartend"), crate::tr!("Wartet auf Session"),
+            crate::tr!("Wartet auf Wiederholung"), crate::tr!("Orchestrator wartet"),
+            crate::tr!("Projekt pausiert"), crate::tr!("Verteilung pausiert"),
+            crate::tr!("Blockiert"),
+        ].contains(&status) {
+            (ready, waiting + 1)
+        } else {
+            (ready + 1, waiting)
+        }
+    })
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -516,7 +547,7 @@ pub fn sidebar_session_counts(
         let phase = command.agent_progress.as_ref().map(|p| p.phase);
         let active = command.state == CommandState::Accepted
             && matches!(phase, Some(AgentPhase::Starting | AgentPhase::Running))
-            && matches!(session_status(s, &command), "Wird gestartet" | "In Bearbeitung");
+            && [crate::tr!("Wird gestartet"), crate::tr!("In Bearbeitung")].contains(&session_status(s, &command));
         let runner_online = online && s.runners.iter().any(|runner|
             runner.id == command.runner_id && runner.connection == ConnectionState::Online);
         if page != Page::Sessions {
@@ -552,6 +583,7 @@ pub fn session_activity(s: &Snapshot, root: CommandId) -> Vec<SessionActivity<'_
         .filter(|c| c.kind == CommandKind::RunAgent && c.session_root() == root)
         .collect();
     commands.sort_by_key(|c| c.created_unix_ms);
+    let project = commands.first().and_then(|c| command_project(s, c));
     let mut result = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for c in commands {
@@ -575,6 +607,12 @@ pub fn session_activity(s: &Snapshot, root: CommandId) -> Vec<SessionActivity<'_
             result.push(SessionActivity::Question(question));
         }
     }
+    let mut queued: Vec<_> = s.tickets.iter().filter(|t| {
+        !t.draft && t.requested_session == Some(root) && t.execution_command.is_none()
+            && Some(t.project_id) == project && !seen.contains(&t.id)
+    }).collect();
+    queued.sort_by_key(|t| (t.created_unix_ms, t.id));
+    result.extend(queued.into_iter().map(SessionActivity::Task));
     result
 }
 
@@ -650,9 +688,19 @@ pub fn assignable_sessions(s: &Snapshot, project: ProjectId) -> Vec<RunnerComman
         .collect()
 }
 
+/// A normal closure retires scheduling but can be reopened by a user prompt.
+/// An explicitly terminated runtime must not be restarted through this editor.
+pub fn can_prompt_session(s: &Snapshot, project: ProjectId, root: CommandId) -> bool {
+    s.commands.iter().any(|c| c.kind == CommandKind::RunAgent && c.session_root() == root
+        && command_project(s, c) == Some(project)
+        && c.agent_spec.as_ref().is_some_and(|agent| !agent.read_only))
+        && !s.runtime_terminations.iter().any(|termination| s.commands.iter().any(|c|
+            c.id == termination.command_id && c.session_root() == root))
+}
+
 pub fn session_title(s: &Snapshot, c: &RunnerCommand) -> String {
     if c.kind == CommandKind::PrepareWorkspace {
-        return "Orchestrator-Vorbereitung".into();
+        return crate::tr!("Orchestrator-Vorbereitung").into();
     }
     s.session_titles
         .get(&c.session_id())
@@ -664,10 +712,10 @@ pub fn session_title(s: &Snapshot, c: &RunnerCommand) -> String {
                     return None;
                 }
                 match spec.role.as_str() {
-                    "supervisor" => Some("Supervisor-Auswertung"),
-                    "orchestrator" => Some("Orchestrator-Auswertung"),
-                    "orchestrator-question" => Some("Orchestrator-Rückfragenauswertung"),
-                    "memorizer" | "orchestrator-memory" => Some("Memorizer-Wissensauswertung"),
+                    "supervisor" => Some(crate::tr!("Supervisor-Auswertung")),
+                    "orchestrator" => Some(crate::tr!("Orchestrator-Auswertung")),
+                    "orchestrator-question" => Some(crate::tr!("Orchestrator-Rückfragenauswertung")),
+                    "memorizer" | "orchestrator-memory" => Some(crate::tr!("Memorizer-Wissensauswertung")),
                     _ => None,
                 }
             })
@@ -745,10 +793,10 @@ pub fn session_last_activity(s: &Snapshot, c: &RunnerCommand) -> u64 {
 
 pub fn session_row_status(s: &Snapshot, c: &RunnerCommand) -> &'static str {
     if c.agent_spec.as_ref().is_some_and(|a| a.read_only) && controller_archived(s, c) {
-        return "Archiviert";
+        return crate::tr!("Archiviert");
     }
     if session_closed(s, c) {
-        return "Geschlossen";
+        return crate::tr!("Geschlossen");
     }
     let working = s.commands.iter().any(|command| {
         command.session_root() == c.session_root()
@@ -772,7 +820,7 @@ pub fn session_row_status(s: &Snapshot, c: &RunnerCommand) -> &'static str {
     if working {
         "Working"
     } else {
-        "Offen"
+        crate::tr!("Offen")
     }
 }
 pub fn viewed_execution(
@@ -800,7 +848,7 @@ mod tests {
     fn pages_are_scoped_and_time_is_safe() {
         assert!(Page::Notifications.global());
         assert!(!Page::Questions.global());
-        assert_eq!(Page::Tasks.title(), "Aufgaben");
+        assert_eq!(Page::Tasks.title(), "Intents");
         assert!(!timestamp(0).is_empty());
     }
 }

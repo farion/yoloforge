@@ -12,14 +12,18 @@ bleiben kompatibel. Ab v0.1.1 sind die Komponenten getrennt:
 | Release-Asset | Inhalt |
 | --- | --- |
 | `yoloforge-server-vVERSION-linux-ARCH.tar.gz` | Server-Binary, Dockerfile für dieses Binary, Compose, Backup-Werkzeug, Betriebsdokumentation |
-| `yoloforge-tui-vVERSION-linux-ARCH.tar.gz` | Linux-TUI |
-| `yoloforge-tui-vVERSION-windows-x86_64.zip` | Windows-TUI als `.exe` |
+| `yoloforge-gui-vVERSION-linux-ARCH.tar.gz` | Linux-GUI mit Server und Runner |
+| `yoloforge-gui-vVERSION-macos-ARCH.tar.gz` | macOS-App mit nativem Runner |
+| `yoloforge-gui-vVERSION-windows-x86_64.zip` | Windows-GUI mit nativem Runner |
 | `yoloforge-runner-vVERSION-linux-ARCH.tar.gz` | Separater Linux-Runner und Dienstvorlagen |
+| `yoloforge-runner-vVERSION-macos-ARCH.tar.gz` | Separater macOS-Runner |
+| `yoloforge-runner-vVERSION-windows-x86_64.zip` | Separater Windows-Runner |
 | `*.sha256` | Prüfsumme des jeweiligen Archivs |
-| `server-image.json` | Optionales vorgebautes GHCR-Image, per Digest referenziert |
+| `SHA256SUMS` | Gemeinsame Prüfsummenliste aller zwölf Pakete |
 
-`ARCH` ist `x86_64` oder `aarch64`. Eine Android-APK wird separat veröffentlicht,
-sobald die App implementiert und geprüft ist; derzeit existiert noch keine APK.
+`ARCH` ist `x86_64` oder `aarch64`. Die neue CI baut ausschließlich GUI, Runner
+und Server. TUI-, Android- und GHCR-Image-Builds sind daraus entfernt.
+Siehe [CI und Releases](ci.md) und [Runner-Installation](runner-installation.md).
 
 Ansible lädt das passende **Server-Paket** aus dem neuesten vollständigen Release,
 prüft dessen `.sha256`, entpackt es versioniert und führt im Paketverzeichnis

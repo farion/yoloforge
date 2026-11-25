@@ -9,6 +9,7 @@ mod termination_cases;
 fn setup(store: &Store) -> (RunnerId, RunnerCommand) {
     let p = store
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),

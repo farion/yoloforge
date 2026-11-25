@@ -277,6 +277,7 @@ mod tests {
         )
         .unwrap();
         let args = Args {
+            control_file: None,
             open_session: None,
             fetch_repository: None,
             session_readiness: false,

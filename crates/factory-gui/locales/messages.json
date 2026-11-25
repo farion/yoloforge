@@ -1,0 +1,3698 @@
+{
+  "About": ["About", "About"],
+  "Zurück zur Factory": ["Zurück zur Factory", "Back to Factory"],
+  "License GPL v3.0": ["License GPL v3.0", "License GPL v3.0"],
+  "Wird abgeschlossen": ["Wird abgeschlossen", "Finalizing"],
+  "Ergebnis liegt vor. Der Session-Verlauf wird noch gespeichert.": ["Ergebnis liegt vor. Der Session-Verlauf wird noch gespeichert.", "The result is available. The session history is still being saved."],
+  "Wartend": ["Wartend", "Waiting"],
+  "{queue} eingereiht · {waiting} wartend": ["{queue} eingereiht · {waiting} wartend", "{queue} queued · {waiting} waiting"],
+  "Bilder": ["Bilder", "Images"],
+  "Die Bildauswahl ist noch geöffnet.": ["Die Bildauswahl ist noch geöffnet.", "The image picker is still open."],
+  "Bilder": ["Bilder", "Images"],
+  "Kein zugeordneter Runner ist online. Prüfe die Runner-Zuordnung im Projekt.": ["Kein zugeordneter Runner ist online. Prüfe die Runner-Zuordnung im Projekt.", "No assigned runner is online. Check the runner assignment in the project settings."],
+  "Kein zugeordneter Runner ist für die ausgewählten MCPs bereit.": ["Kein zugeordneter Runner ist für die ausgewählten MCPs bereit.", "No assigned runner is ready for the selected MCPs."],
+  "Projektlogo (optional)": ["Projektlogo (optional)", "Project logo (optional)"],
+  "Projektlogo": ["Projektlogo", "Project logo"],
+  "Projektlogo entfernen": ["Projektlogo entfernen", "Remove project logo"],
+  "Bild ersetzen …": ["Bild ersetzen …", "Replace image …"],
+  "Bild auswählen …": ["Bild auswählen …", "Choose image …"],
+  "Projektbild auswählen": ["Projektbild auswählen", "Choose project image"],
+  "Das Projektbild konnte nicht geladen werden.": ["Das Projektbild konnte nicht geladen werden.", "Could not load the project image."],
+  "Das Projektbild darf höchstens 16 MiB groß sein.": ["Das Projektbild darf höchstens 16 MiB groß sein.", "The project image must not exceed 16 MiB."],
+  "Bitte ein gültiges PNG-, JPEG-, WebP- oder GIF-Bild auswählen.": ["Bitte ein gültiges PNG-, JPEG-, WebP- oder GIF-Bild auswählen.", "Choose a valid PNG, JPEG, WebP or GIF image."],
+  "Das Projektbild ist zu groß. Bitte höchstens 16 Megapixel verwenden.": ["Das Projektbild ist zu groß. Bitte höchstens 16 Megapixel verwenden.", "The project image is too large. Use an image with no more than 16 megapixels."],
+  "PNG, JPEG, WebP oder GIF · wird mittig quadratisch zugeschnitten.": ["PNG, JPEG, WebP oder GIF · wird mittig quadratisch zugeschnitten.", "PNG, JPEG, WebP or GIF · cropped to a centered square."],
+  "Modellzugang gelöscht.": ["Modellzugang gelöscht.", "Model connection deleted."],
+  "Modellzugang löschen": ["Modellzugang löschen", "Delete model connection"],
+  "Modellzugang entfernt. Die Zugangsdaten konnten nicht gelöscht werden.": ["Modellzugang entfernt. Die Zugangsdaten konnten nicht gelöscht werden.", "Model connection removed, but its credentials could not be deleted."],
+  "Das Löschen wurde nicht bestätigt.": ["Das Löschen wurde nicht bestätigt.", "Deletion was not confirmed."],
+  "„{}“ und seine Zugangsdaten aus der Factory löschen?": ["„{}“ und seine Zugangsdaten aus der Factory löschen?", "Delete “{}” and its credentials from Factory?"],
+  "GitHub-Copilot-Zugang benennen": ["GitHub-Copilot-Zugang benennen", "Name the GitHub Copilot connection"],
+  "Mit GitHub verbinden": ["Mit GitHub verbinden", "Connect with GitHub"],
+  "Warte auf GitHub …": ["Warte auf GitHub …", "Waiting for GitHub …"],
+  "Die Factory hat keine gültige GitHub-Anmeldung zurückgegeben.": ["Die Factory hat keine gültige GitHub-Anmeldung zurückgegeben.", "Factory did not return a valid GitHub sign-in."],
+  "Die GitHub-Anmeldung wurde nicht bestätigt.": ["Die GitHub-Anmeldung wurde nicht bestätigt.", "GitHub sign-in was not confirmed."],
+  "GitHub Copilot verbunden.": ["GitHub Copilot verbunden.", "GitHub Copilot connected."],
+  "Die URL muss vom Factory-Server erreichbar sein.": ["Die URL muss vom Factory-Server erreichbar sein.", "The URL must be reachable from the Factory server."],
+  "Server-URL": ["Server-URL", "Server URL"],
+  "OpenCode arbeitet": [
+    "OpenCode arbeitet",
+    "OpenCode is working"
+  ],
+  "ChatGPT hat keinen Modell-Stream geliefert.": [
+    "ChatGPT hat keinen Model-Stream geliefert.",
+    "ChatGPT did not return a model stream."
+  ],
+  "OpenCode hat die Ausführung mit einem Fehler beendet.": [
+    "OpenCode hat die Ausführung mit einem Fehler beendet.",
+    "OpenCode finished execution with an error."
+  ],
+  "Ausführung mit Fehler beendet": [
+    "Ausführung mit Fehler beendet",
+    "Execution failed"
+  ],
+  "Ausführung beendet": [
+    "Ausführung beendet",
+    "Execution finished"
+  ],
+  "Überlegungen": [
+    "Überlegungen",
+    "Reasoning"
+  ],
+  "Anhang: {}": [
+    "Anhang: {}",
+    "Attachment: {}"
+  ],
+  "Datei": [
+    "Datei",
+    "File"
+  ],
+  "Weiterer Inhalt: {}": [
+    "Weiterer Inhalt: {}",
+    "More content: {}"
+  ],
+  "Fehler: {}": [
+    "Fehler: {}",
+    "Error: {}"
+  ],
+  " · Fehler": [
+    " · Fehler",
+    " · error"
+  ],
+  " · läuft": [
+    " · läuft",
+    " · running"
+  ],
+  " · Status unbekannt": [
+    " · Status unbekannt",
+    " · status unknown"
+  ],
+  "Die erfasste Toolausgabe ist gekürzt; nicht als vollständigen Stand behandeln.": [
+    "Die erfasste Toolausgabe ist gekürzt; nicht als vollständigen Stand behandeln.",
+    "The captured tool output is truncated; do not treat it as complete."
+  ],
+  "Toolfehler": [
+    "Toolfehler",
+    "Tool error"
+  ],
+  "{} speichern …": [
+    "{} speichern …",
+    "Save {} …"
+  ],
+  "Anhang nicht verfügbar oder Integritätsprüfung fehlgeschlagen.": [
+    "Anhang nicht verfügbar oder Integritätsprüfung fehlgeschlagen.",
+    "Attachment unavailable or integrity check failed."
+  ],
+  "{} · nicht verfügbar ({})": [
+    "{} · nicht verfügbar ({})",
+    "{} · unavailable ({})"
+  ],
+  "Einstellungen konnten nicht geladen werden: {e}": [
+    "Settings konnten nicht geladen werden: {e}",
+    "Could not load settings: {e}"
+  ],
+  "Gespeicherte lokale Runner konnten nicht geladen werden.": [
+    "Gespeicherte lokale Runner konnten nicht geladen werden.",
+    "Could not load saved local Runners."
+  ],
+  "Nur FACTORY_TOKEN oder FACTORY_TOKEN_FILE setzen, nicht beides.": [
+    "Nur FACTORY_TOKEN oder FACTORY_TOKEN_FILE setzen, nicht beides.",
+    "Set either FACTORY_TOKEN or FACTORY_TOKEN_FILE, not both."
+  ],
+  "Factory-Verbindung konnte nicht eingerichtet werden.": [
+    "Factory-Verbindung konnte nicht eingerichtet werden.",
+    "Could not set up the Factory connection."
+  ],
+  "Bitte zuerst die bestehende Verbindung trennen.": [
+    "Bitte zuerst die bestehende Verbindung trennen.",
+    "Disconnect the existing connection first."
+  ],
+  "Verbindung zur Factory getrennt.": [
+    "Verbindung zur Factory getrennt.",
+    "Disconnected from the Factory."
+  ],
+  "Keine offene Frage mehr in dieser Session. Bereits beantwortete Fragen werden angezeigt.": [
+    "Keine offene Frage mehr in dieser Session. Bereits beantwortete Fragen werden angezeigt.",
+    "No open questions left in this Session. Showing previously answered questions."
+  ],
+  "Session ist im aktuellen Serverstand nicht verfügbar. Projekt und Verbindung prüfen.": [
+    "Session ist im aktuellen Serverstand nicht verfügbar. Projekt und Verbindung prüfen.",
+    "This Session is unavailable in the current server state. Check the project and connection."
+  ],
+  "Projekt fortsetzen": [
+    "Projekt fortsetzen",
+    "Resume project"
+  ],
+  "Projekt pausieren": [
+    "Projekt pausieren",
+    "Pause project"
+  ],
+  "Einladungserstellung hat keinen idempotenten Abgleich. Unklare Einladungen nicht erneut senden; Gültigkeit abwarten oder Gerätezugang prüfen.": [
+    "Einladungserstellung hat keinen idempotenten Abgleich. Unklare Einladungen nicht erneut senden; Gültigkeit abwarten oder Gerätezugang prüfen.",
+    "Invitation creation does not support idempotent reconciliation. Do not resend uncertain invitations; wait for expiry or check device access."
+  ],
+  "Verbindung zur Factory unterbrochen.": [
+    "Verbindung zur Factory unterbrochen.",
+    "Connection to the Factory lost."
+  ],
+  "Verbindung zur Factory fehlgeschlagen.": [
+    "Verbindung zur Factory fehlgeschlagen.",
+    "Connection to the Factory failed."
+  ],
+  "Zum sicheren Bearbeiten zuerst mit der Factory verbinden.": [
+    "Zum sicheren Bearbeiten zuerst mit der Factory verbinden.",
+    "Connect to the Factory before editing safely."
+  ],
+  "Diese Aufgabe kann nicht mehr bearbeitet werden oder der Server benötigt ein Update.": [
+    "Dieser Intent kann nicht mehr bearbeitet werden oder der Server benötigt ein Update.",
+    "This Intent can no longer be edited, or the server needs an update."
+  ],
+  "Aufgabe zum Bearbeiten sichern": [
+    "Intent zum Bearbeiten sichern",
+    "Reserve Intent for editing"
+  ],
+  "Aufgabe nicht mehr vorhanden.": [
+    "Intent nicht mehr vorhanden.",
+    "Intent no longer exists."
+  ],
+  "Aufgabe wurde inzwischen geändert. Bitte den aktuellen Stand prüfen; lokale Entwürfe bleiben erhalten.": [
+    "Der Intent wurde inzwischen geändert. Bitte den aktuellen Stand prüfen; lokale Entwürfe bleiben erhalten.",
+    "The Intent has changed. Check the current state; local drafts are preserved."
+  ],
+  "Lokaler Entwurf basiert auf einem anderen Serverstand. Bitte vor dem Speichern vergleichen.": [
+    "Lokaler Entwurf basiert auf einem anderen Serverstand. Bitte vor dem Speichern vergleichen.",
+    "The local draft is based on a different server state. Compare before saving."
+  ],
+  "Serverstand wurde während der Reservierung geändert. Entwurf und Reservierung bleiben erhalten; bitte vergleichen.": [
+    "Serverstand wurde während der Reservierung geändert. Entwurf und Reservierung bleiben erhalten; bitte vergleichen.",
+    "The server state changed during reservation. The draft and reservation are preserved; please compare."
+  ],
+  "Bildvorschau nicht verfügbar": [
+    "Bildvorschau nicht verfügbar",
+    "Image preview unavailable"
+  ],
+  "Bild lädt …": [
+    "Bild lädt …",
+    "Loading image …"
+  ],
+  "Benachrichtigung gelesen": [
+    "Benachrichtigung gelesen",
+    "Notification read"
+  ],
+  "Serverstand zurückgesetzt. Verlaufsdaten werden neu abgeglichen; offene Anfragen bleiben zur Prüfung erhalten.": [
+    "Serverstand zurückgesetzt. Verlaufsdaten werden neu abgeglichen; offene Anfragen bleiben zur Prüfung erhalten.",
+    "Server state reset. History is being reconciled; pending requests are preserved for review."
+  ],
+  "Wieder mit der Factory verbunden.": [
+    "Wieder mit der Factory verbunden.",
+    "Reconnected to the Factory."
+  ],
+  "Lesestatus konnte nicht aktualisiert werden: {e}": [
+    "Lesestatus konnte nicht aktualisiert werden: {e}",
+    "Could not update read status: {e}"
+  ],
+  "Lesestatus nicht bestätigt: {}": [
+    "Lesestatus nicht bestätigt: {}",
+    "Read status not confirmed: {}"
+  ],
+  "Reservierung nicht eindeutig bestätigt. Bitte dieselbe gespeicherte Anfrage abgleichen; keinen neuen Bearbeitungsversuch erzeugen.": [
+    "Reservierung nicht eindeutig bestätigt. Bitte dieselbe gespeicherte Anfrage abgleichen; keinen neuen Bearbeitungsversuch erzeugen.",
+    "Reservation not clearly confirmed. Reconcile the same saved request; do not create a new editing attempt."
+  ],
+  "Projekt pausiert.": [
+    "Projekt pausiert.",
+    "Project paused."
+  ],
+  "Projekt fortgesetzt.": [
+    "Projekt fortgesetzt.",
+    "Project resumed."
+  ],
+  "Projektpause nicht eindeutig bestätigt.": [
+    "Projektpause nicht eindeutig bestätigt.",
+    "Project pause not clearly confirmed."
+  ],
+  "{} In der Diagnose über „Zustellungen prüfen“ abgleichen.": [
+    "{} In der Diagnose über „Zustellungen prüfen“ abgleichen.",
+    "{} Reconcile using “Check deliveries” in Diagnostics."
+  ],
+  "Offline-Übertragung nicht eindeutig als Server-Entwurf bestätigt.": [
+    "Offline-Übertragung nicht eindeutig als Server-Entwurf bestätigt.",
+    "Offline transfer not clearly confirmed as a server draft."
+  ],
+  "Gerätezugang widerrufen.": [
+    "Gerätezugang widerrufen.",
+    "Device access revoked."
+  ],
+  "Gerätewiderruf nicht eindeutig bestätigt.": [
+    "Gerätewiderruf nicht eindeutig bestätigt.",
+    "Device revocation not clearly confirmed."
+  ],
+  "Gerätezugang konnte nicht bestätigt widerrufen werden. Details stehen in der Diagnose.": [
+    "Gerätezugang konnte nicht bestätigt widerrufen werden. Details stehen in der Diagnose.",
+    "Could not confirm device access revocation. Details are in Diagnostics."
+  ],
+  "Gerätezugang: {}": [
+    "Gerätezugang: {}",
+    "Device access: {}"
+  ],
+  "Prompt in die Session eingereiht.": [
+    "Prompt in die Session eingereiht.",
+    "Prompt queued for the Session."
+  ],
+  "Session-Prompt nicht eindeutig bestätigt.": [
+    "Session-Prompt nicht eindeutig bestätigt.",
+    "Session prompt not clearly confirmed."
+  ],
+  "Prompt-Zustellung unklar. Bitte dieselbe Anfrage in der Diagnose über „Zustellungen prüfen“ abgleichen.": [
+    "Prompt-Zustellung unklar. Bitte dieselbe Anfrage in der Diagnose über „Zustellungen prüfen“ abgleichen.",
+    "Prompt delivery uncertain. Reconcile the same request using “Check deliveries” in Diagnostics."
+  ],
+  "Prompt konnte nicht eingereiht werden. Der Entwurf bleibt erhalten.": [
+    "Prompt konnte nicht eingereiht werden. Der Entwurf bleibt erhalten.",
+    "Could not queue prompt. The draft is preserved."
+  ],
+  "Projekteinstellungen gespeichert.": [
+    "Projekt-Settings gespeichert.",
+    "Project settings saved."
+  ],
+  "Speichern nicht bestätigt. Bitte Anfrage abgleichen.": [
+    "Speichern nicht bestätigt. Bitte Anfrage abgleichen.",
+    "Save not confirmed. Reconcile the request."
+  ],
+  "Projekteinstellungen konnten nicht gespeichert werden.": [
+    "Projekt-Settings konnten nicht gespeichert werden.",
+    "Could not save project settings."
+  ],
+  "Entwurf gespeichert.": [
+    "Entwurf gespeichert.",
+    "Draft saved."
+  ],
+  "Aufgabe eingereiht.": [
+    "Intent eingereiht.",
+    "Intent queued."
+  ],
+  "Offline-Aufgabe als Server-Entwurf übertragen.": [
+    "Offline-Intent als Server-Entwurf übertragen.",
+    "Offline Intent transferred as a server draft."
+  ],
+  "Offline-Aufgabe ({}): {}": [
+    "Offline-Intent ({}): {}",
+    "Offline Intent ({}): {}"
+  ],
+  "Offline-Aufgabe konnte noch nicht übertragen werden. Sie bleibt lokal erhalten.": [
+    "Der Offline-Intent konnte noch nicht übertragen werden. Er bleibt lokal erhalten.",
+    "Could not transfer the offline Intent yet. It is preserved locally."
+  ],
+  "Ungültige Archivseite; bisheriger Verlauf bleibt erhalten.": [
+    "Ungültige Archivseite; bisheriger Verlauf bleibt erhalten.",
+    "Invalid archive page; existing history is preserved."
+  ],
+  "Anhang gehört zu einem anderen oder bereits gesendeten Entwurf und wurde nicht übernommen.": [
+    "Anhang gehört zu einem anderen oder bereits gesendeten Entwurf und wurde nicht übernommen.",
+    "Attachment belongs to another or already submitted draft and was not added."
+  ],
+  "Aufgabe während des Ladens geändert. Aktuellen Stand prüfen und erneut laden.": [
+    "Intent während des Ladens geändert. Aktuellen Stand prüfen und erneut laden.",
+    "Intent changed while loading. Check the current state and reload."
+  ],
+  "Gespeichert: {v}": [
+    "Gespeichert: {v}",
+    "Saved: {v}"
+  ],
+  "Lokaler Runner konnte nicht gestartet oder entfernt werden. Details stehen in der Diagnose.": [
+    "Lokaler Runner konnte nicht gestartet oder entfernt werden. Details stehen in der Diagnose.",
+    "Could not start or remove local Runner. Details are in Diagnostics."
+  ],
+  "YoloForge: letzte Desktop-Einstellungen konnten nicht bestätigt gespeichert werden.": [
+    "YoloForge: letzte Desktop-Settings konnten nicht bestätigt gespeichert werden.",
+    "YoloForge: saving the final desktop settings could not be confirmed."
+  ],
+  "Seit mehr als 10 Sekunden kein Factory-Stand empfangen.": [
+    "Seit mehr als 10 Sekunden kein Factory-Stand empfangen.",
+    "No Factory state received for more than 10 seconds."
+  ],
+  "Kein Benutzerverzeichnis verfügbar": [
+    "Kein Benutzerverzeichnis verfügbar",
+    "No user directory available"
+  ],
+  "Gespeicherte Desktop-ID ist ungültig; Datei wurde nicht verändert": [
+    "Gespeicherte Desktop-ID ist ungültig; Datei wurde nicht verändert",
+    "Saved desktop ID is invalid; file was not modified"
+  ],
+  "Desktop-ID konnte nicht gelesen werden": [
+    "Desktop-ID konnte nicht gelesen werden",
+    "Could not read desktop ID"
+  ],
+  "Desktop-ID konnte nicht dauerhaft gespeichert werden": [
+    "Desktop-ID konnte nicht dauerhaft gespeichert werden",
+    "Could not persist desktop ID"
+  ],
+  "Zugangstoken konnte nicht gespeichert werden": [
+    "Zugangstoken konnte nicht gespeichert werden",
+    "Could not save access token"
+  ],
+  "Datei existiert bereits oder kann nicht angelegt werden": [
+    "Datei existiert bereits oder kann nicht angelegt werden",
+    "File already exists or cannot be created"
+  ],
+  "Datei nicht mehr verfügbar": [
+    "Datei nicht mehr verfügbar",
+    "File no longer available"
+  ],
+  "Datei überschreitet Exportgrenze": [
+    "Datei überschreitet Exportgrenze",
+    "File exceeds export limit"
+  ],
+  "Dateiidentität verändert": [
+    "Dateiidentität verändert",
+    "File identity changed"
+  ],
+  "Ungültige Dateigröße": [
+    "Ungültige Dateigröße",
+    "Invalid file size"
+  ],
+  "SHA256-Prüfung fehlgeschlagen": [
+    "SHA256-Prüfung fehlgeschlagen",
+    "SHA256 verification failed"
+  ],
+  "Anhang": [
+    "Anhang",
+    "Attachment"
+  ],
+  "Export abgebrochen": [
+    "Export abgebrochen",
+    "Export canceled"
+  ],
+  "Programmverzeichnis fehlt": [
+    "Programmverzeichnis fehlt",
+    "Application directory missing"
+  ],
+  "{binary} fehlt neben der GUI. Server und Runner zusammen mit der GUI installieren.": [
+    "{binary} fehlt neben der GUI. Server und Runner zusammen mit der GUI installieren.",
+    "{binary} is missing next to the GUI. Install the server and Runner alongside the GUI."
+  ],
+  "Lokaler Server startet nicht. Diagnose: {}": [
+    "Lokaler Server startet nicht. Diagnose: {}",
+    "Local server failed to start. Diagnostics: {}"
+  ],
+  "Port 17433 gehört nicht zur gespeicherten lokalen Factory oder der Zugang wurde widerrufen. Keine fremden Prozesse verändert.": [
+    "Port 17433 gehört nicht zur gespeicherten lokalen Factory oder der Zugang wurde widerrufen. Keine fremden Prozesse verändert.",
+    "Port 17433 does not belong to the saved local Factory, or access has been revoked. No unrelated processes were modified."
+  ],
+  "Lokaler Server auf Port 17433 läuft, ist aber nicht mit dieser GUI kompatibel oder nicht erreichbar ({error}). Eine ältere laufende factoryd-Version zuerst gezielt neu starten; es werden keine fremden oder laufenden Prozesse automatisch beendet.": [
+    "Lokaler Server auf Port 17433 läuft, ist aber nicht mit dieser GUI kompatibel oder nicht erreichbar ({error}). Eine ältere laufende factoryd-Version zuerst gezielt neu starten; es werden keine fremden oder laufenden Prozesse automatisch beendet.",
+    "The local server on port 17433 is running but incompatible with this GUI or unreachable ({error}). Restart the older factoryd instance explicitly first; no unrelated or running processes are stopped automatically."
+  ],
+  "Gemeldete Eingabe- und Ausgabetokens. Nicht erfasste Nutzung ist nicht enthalten.": [
+    "Gemeldete Eingabe- und Ausgabetokens. Nicht erfasste Nutzung ist nicht enthalten.",
+    "Reported input and output tokens. Unrecorded usage is not included."
+  ],
+  "Noch keine zuordenbaren Tokendaten vorhanden.": [
+    "Noch keine zuordenbaren Tokendaten vorhanden.",
+    "No attributable token data available yet."
+  ],
+  "Tab schließen — Session läuft weiter": [
+    "Tab schließen — Session läuft weiter",
+    "Close tab — Session keeps running"
+  ],
+  "Bilder und Dateien hier loslassen zum Anpinnen": [
+    "Bilder und Dateien hier loslassen zum Anpinnen",
+    "Drop images and files here to attach"
+  ],
+  "Zum Anhängen zuerst eine neue Aufgabe öffnen": [
+    "Zum Anhängen zuerst einen neuen Intent öffnen",
+    "Open a new Intent before adding attachments"
+  ],
+  "Arbeit, Arbeit!": [
+    "Arbeit, Arbeit!",
+    "Work, work!"
+  ],
+  "Was soll getan werden?": [
+    "Was soll getan werden?",
+    "What needs to be done?"
+  ],
+  "Anhang {name} entfernen": [
+    "Anhang {name} entfernen",
+    "Remove attachment {name}"
+  ],
+  "Speichern": [
+    "Speichern",
+    "Save"
+  ],
+  "Dialog schließen · Entwürfe behalten": [
+    "Dialog schließen · Entwürfe behalten",
+    "Close dialog · keep drafts"
+  ],
+  "Verbindung": [
+    "Verbindung",
+    "Connection"
+  ],
+  "Verbunden": [
+    "Verbunden",
+    "Connected"
+  ],
+  "Zugriff": [
+    "Zugriff",
+    "Access"
+  ],
+  "Noch nicht bestätigt": [
+    "Noch nicht bestätigt",
+    "Not confirmed yet"
+  ],
+  "Serverversion": [
+    "Serverversion",
+    "Server version"
+  ],
+  "Unbekannt": [
+    "Unbekannt",
+    "Unknown"
+  ],
+  "Offene Zustellungen": [
+    "Offene Zustellungen",
+    "Pending deliveries"
+  ],
+  "Trennen": [
+    "Trennen",
+    "Disconnect"
+  ],
+  "Verbinden…": [
+    "Verbinden…",
+    "Connect…"
+  ],
+  "Lokale Factory": [
+    "Lokale Factory",
+    "Local Factory"
+  ],
+  "Dieser Desktop": [
+    "Dieser Desktop",
+    "This desktop"
+  ],
+  "Bereit": [
+    "Bereit",
+    "Ready"
+  ],
+  "Factory-Server": [
+    "Factory-Server",
+    "Factory server"
+  ],
+  "Nicht verbunden": [
+    "Nicht verbunden",
+    "Not connected"
+  ],
+  "Vorherige Patchzeilen": [
+    "Vorherige Patchzeilen",
+    "Previous patch lines"
+  ],
+  "Zeilenabschnitt {} / {pages} · {} Patchzeilen": [
+    "Zeilenabschnitt {} / {pages} · {} Patchzeilen",
+    "Line section {} / {pages} · {} patch lines"
+  ],
+  "Weitere Patchzeilen": [
+    "Weitere Patchzeilen",
+    "More patch lines"
+  ],
+  "Sehr lange Patchzeile · vollständiger Text in Abschnitten": [
+    "Sehr lange Patchzeile · vollständiger Text in Abschnitten",
+    "Very long patch line · full text in sections"
+  ],
+  "Offline-Modus: Aufgaben können nur lokal vorbereitet werden.": [
+    "Offline-Modus: Intents können nur lokal vorbereitet werden.",
+    "Offline mode: Intents can only be prepared locally."
+  ],
+  "Nicht mehr verfügbares Projekt": [
+    "Nicht mehr verfügbares Projekt",
+    "Project no longer available"
+  ],
+  "Die Zustellung dieser Aufgabe muss zuerst abgeglichen werden.": [
+    "Die Zustellung dieses Intents muss zuerst abgeglichen werden.",
+    "Delivery of this Intent must be reconciled first."
+  ],
+  "Aufgabe konnte nicht lokal gespeichert werden. Bitte erneut versuchen.": [
+    "Intent konnte nicht lokal gespeichert werden. Bitte erneut versuchen.",
+    "Could not save Intent locally. Please try again."
+  ],
+  "Aufgabe lokal vorbereitet. Sie wird nach Wiederverbindung als Server-Entwurf übertragen.": [
+    "Intent lokal vorbereitet. Er wird nach Wiederverbindung als Server-Entwurf übertragen.",
+    "Intent prepared locally. It will be transferred as a server draft after reconnecting."
+  ],
+  "Das ursprüngliche Projekt existiert auf dieser Factory nicht mehr.": [
+    "Das ursprüngliche Projekt existiert auf dieser Factory nicht mehr.",
+    "The original project no longer exists on this Factory."
+  ],
+  "Eine Offline-Aufgabe konnte keinem Projekt zugeordnet werden. Sie bleibt lokal erhalten.": [
+    "Ein Offline-Intent konnte keinem Projekt zugeordnet werden. Er bleibt lokal erhalten.",
+    "An offline Intent could not be assigned to a project. It is preserved locally."
+  ],
+  "Offline-Aufgabe übertragen": [
+    "Offline-Intent übertragen",
+    "Transfer offline Intent"
+  ],
+  "Noch keine Projekte gespeichert. Verbinde dich mit einer Factory, um Projekte auszuwählen.": [
+    "Noch keine Projekte gespeichert. Verbinde dich mit einer Factory, um Projekte auszuwählen.",
+    "No projects saved yet. Connect to a Factory to select projects."
+  ],
+  "Noch keine lokal vorbereiteten Aufgaben für dieses Projekt.": [
+    "Noch keine lokal vorbereiteten Intents für dieses Projekt.",
+    "No locally prepared Intents for this project yet."
+  ],
+  "Lokal vorbereitete Aufgaben": [
+    "Lokal vorbereitete Intents",
+    "Locally prepared Intents"
+  ],
+  "Aufgabe mit Anhängen": [
+    "Intent mit Anhängen",
+    "Intent with attachments"
+  ],
+  "Übertragung prüfen": [
+    "Übertragung prüfen",
+    "Check transfer"
+  ],
+  "Bearbeitung offen": [
+    "Bearbeitung offen",
+    "Editing pending"
+  ],
+  "Wird übertragen": [
+    "Wird übertragen",
+    "Transferring"
+  ],
+  "Lokal vorbereitet": [
+    "Lokal vorbereitet",
+    "Prepared locally"
+  ],
+  "{} Bilder · {} Dateien": [
+    "{} Bilder · {} Dateien",
+    "{} images · {} files"
+  ],
+  "Bearbeiten": [
+    "Bearbeiten",
+    "Edit"
+  ],
+  "Entfernen …": [
+    "Entfernen …",
+    "Remove …"
+  ],
+  "Zustellung prüfen": [
+    "Zustellung prüfen",
+    "Check delivery"
+  ],
+  "Erneut übertragen": [
+    "Erneut übertragen",
+    "Retry transfer"
+  ],
+  "Mit Factory verbinden": [
+    "Mit Factory verbinden",
+    "Connect to Factory"
+  ],
+  "Lokalen Runner entfernen": [
+    "Lokalen Runner entfernen",
+    "Remove local Runner"
+  ],
+  "Lokale Aufgabe entfernen": [
+    "Lokale Intent entfernen",
+    "Remove local Intent"
+  ],
+  "Aufgabe anzeigen · schreibgeschützt": [
+    "Intent anzeigen · schreibgeschützt",
+    "View Intent · read-only"
+  ],
+  "Aufgabe bearbeiten": [
+    "Intent bearbeiten",
+    "Edit Intent"
+  ],
+  "Neue Aufgabe": [
+    "Neuer Intent",
+    "New Intent"
+  ],
+  "Fragen beantworten": [
+    "Fragen beantworten",
+    "Answer questions"
+  ],
+  "Fragen und Antworten": [
+    "Fragen und Antworten",
+    "Questions and answers"
+  ],
+  "Verbindungsübersicht": [
+    "Verbindungsübersicht",
+    "Connection overview"
+  ],
+  "Factory-Einstellungen": [
+    "Factory-Settings",
+    "Factory settings"
+  ],
+  "OpenCode einrichten": [
+    "OpenCode einrichten",
+    "Set up OpenCode"
+  ],
+  "Default-Modelle eingerichtet": [
+    "Default Models eingerichtet",
+    "Default Models configured"
+  ],
+  "Du bist mit einer Factory verbunden, für die noch kein Standardmodell eingerichtet ist.": [
+    "Du bist mit einer Factory verbunden, für die noch kein Default Model eingerichtet ist.",
+    "You are connected to a Factory with no default Model configured yet."
+  ],
+  "Ein Factory-Admin muss einen Anbieter verbinden und ein Standardmodell auswählen, bevor Aufgaben eingereiht werden können.": [
+    "Ein Factory-Admin muss einen Provider verbinden und ein Default Model auswählen, bevor Intents eingereiht werden können.",
+    "A Factory admin must connect a Provider and select a default Model before Intents can be queued."
+  ],
+  "Verbinde in den Einstellungen einen Anbieter. Die Factory richtet dann automatisch ein Standardmodell ein.": [
+    "Verbinde in den Settings einen Provider. Die Factory richtet dann automatisch ein Default Model ein.",
+    "Connect a Provider in Settings. The Factory will then configure a default Model automatically."
+  ],
+  "Zu den Modell-Anbietern": [
+    "Zu den Model Providern",
+    "Go to Model Providers"
+  ],
+  "Später": [
+    "Später",
+    "Later"
+  ],
+  "Die Factory hat deine Default-Modelle automatisch eingerichtet.": [
+    "Die Factory hat deine Default Models automatisch eingerichtet.",
+    "The Factory has configured your default Models automatically."
+  ],
+  "Standardmodell: {model}": [
+    "Default Model: {model}",
+    "Default Model: {model}"
+  ],
+  "Orchestrator, Implementer und Supervisor verwenden dieses Modell, solange kein eigenes Rollenmodell gewählt ist.": [
+    "Orchestrator, Implementer und Supervisor verwenden dieses Model, solange kein eigenes Rollenmodel gewählt ist.",
+    "Orchestrator, Implementer and Supervisor use this Model unless a role-specific Model is selected."
+  ],
+  "Zu den Default-Modellen": [
+    "Zu den Default Models",
+    "Go to Default Models"
+  ],
+  "Serveradresse (HTTPS oder Loopback)": [
+    "Serveradresse (HTTPS oder Loopback)",
+    "Server address (HTTPS or loopback)"
+  ],
+  "Zugangstoken": [
+    "Zugangstoken",
+    "Access token"
+  ],
+  "Die Verbindung wird für den nächsten Start im Benutzerverzeichnis gespeichert.": [
+    "Die Verbindung wird für den nächsten Start im Benutzerverzeichnis gespeichert.",
+    "The connection is saved in your user directory for the next start."
+  ],
+  "Verbinden": [
+    "Verbinden",
+    "Connect"
+  ],
+  "Verbindung konnte nicht gespeichert werden: {error}": [
+    "Verbindung konnte nicht gespeichert werden: {error}",
+    "Could not save connection: {error}"
+  ],
+  "Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden.": [
+    "Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden.",
+    "Connected, but could not save the connection for the next start."
+  ],
+  "Lokale Dienste starten …": [
+    "Lokale Dienste starten …",
+    "Start local services …"
+  ],
+  "Erneut versuchen": [
+    "Erneut versuchen",
+    "Try again"
+  ],
+  "Laufende Aufgaben bleiben beim Schließen der GUI erhalten.": [
+    "Laufende Intents bleiben beim Schließen der GUI erhalten.",
+    "Running Intents are preserved when the GUI closes."
+  ],
+  "„{name}“ stoppen und aus den gespeicherten lokalen Runnern entfernen?": [
+    "„{name}“ stoppen und aus den gespeicherten lokalen Runnern entfernen?",
+    "Stop “{name}” and remove it from saved local Runners?"
+  ],
+  "Der Runner wird beim nächsten GUI-Start nicht mehr gestartet. Journale und Arbeitsdaten bleiben erhalten.": [
+    "Der Runner wird beim nächsten GUI-Start nicht mehr gestartet. Journale und Arbeitsdaten bleiben erhalten.",
+    "The Runner will not start the next time the GUI launches. Journals and working data are preserved."
+  ],
+  "Dieser Runner hat laufende oder ungeklärte Aufträge. Diese zuerst abschließen.": [
+    "Dieser Runner hat laufende oder ungeklärte Aufträge. Diese zuerst abschließen.",
+    "This Runner has running or unresolved jobs. Complete them first."
+  ],
+  "Runner entfernen": [
+    "Runner entfernen",
+    "Remove Runner"
+  ],
+  "Abbrechen": [
+    "Abbrechen",
+    "Cancel"
+  ],
+  "Diese lokal vorbereitete Aufgabe samt Anhängen entfernen?": [
+    "Diesen lokal vorbereiteten Intent samt Anhängen entfernen?",
+    "Remove this locally prepared Intent and its attachments?"
+  ],
+  "Entfernen": [
+    "Entfernen",
+    "Remove"
+  ],
+  "Die Aufgabe wird serverseitig gegen Einplanung gesichert. Erst nach Bestätigung öffnet sich der Editor mit allen Anhängen.": [
+    "Der Intent wird serverseitig gegen Einplanung gesichert. Erst nach Bestätigung öffnet sich der Editor mit allen Anhängen.",
+    "The Intent is reserved on the server to prevent scheduling. The editor opens with all attachments only after confirmation."
+  ],
+  "Beim Schließen bleibt die Aufgabe als Draft gesichert. Erst „Einreihen“ gibt sie wieder frei.": [
+    "Beim Schließen bleibt der Intent als Draft gesichert. Erst „Einreihen“ gibt ihn wieder frei.",
+    "Closing keeps the Intent reserved as a draft. Only “Queue” releases it."
+  ],
+  "Aufgabe {id}": [
+    "Intent {id}",
+    "Intent {id}"
+  ],
+  "Schließen": [
+    "Schließen",
+    "Close"
+  ],
+  "Verbrauch wird geladen …": [
+    "Verbrauch wird geladen …",
+    "Loading usage …"
+  ],
+  "Wird geladen …": [
+    "Wird geladen …",
+    "Loading …"
+  ],
+  "Exportieren …": [
+    "Exportieren …",
+    "Export …"
+  ],
+  "Vorschau auf maximal 4096 × 4096 Pixel skaliert. Originalbytes bleiben unverändert.": [
+    "Vorschau auf maximal 4096 × 4096 Pixel skaliert. Originalbytes bleiben unverändert.",
+    "Preview scaled to a maximum of 4096 × 4096 pixels. Original bytes remain unchanged."
+  ],
+  "Originalbild speichern …": [
+    "Originalbild speichern …",
+    "Save original image …"
+  ],
+  "Verbrauch konnte nicht geladen werden.": [
+    "Verbrauch konnte nicht geladen werden.",
+    "Could not load usage."
+  ],
+  "Keine Verbrauchsdaten verfügbar.": [
+    "Keine Verbrauchsdaten verfügbar.",
+    "No usage data available."
+  ],
+  "Noch kein Tokenverbrauch erfasst.": [
+    "Noch kein Tokenverbrauch erfasst.",
+    "No token usage recorded yet."
+  ],
+  "Berechnet seit Projektanlage": [
+    "Berechnet seit Projektanlage",
+    "Calculated since project creation"
+  ],
+  "Erfasst seit": [
+    "Erfasst seit",
+    "Recorded since"
+  ],
+  "Tokens insgesamt": [
+    "Tokens insgesamt",
+    "Total tokens"
+  ],
+  "Durchschnitt pro Tag": [
+    "Durchschnitt pro Tag",
+    "Daily average"
+  ],
+  "Nicht verfügbar": [
+    "Nicht verfügbar",
+    "Unavailable"
+  ],
+  "Bestehende Serveraufgaben können erst nach Wiederverbindung geändert werden.": [
+    "Bestehende Server-Intents können erst nach Wiederverbindung geändert werden.",
+    "Existing server Intents can only be edited after reconnecting."
+  ],
+  "Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.": [
+    "Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.",
+    "Enter text or add attachments; prompt limited to 12000 UTF-8 bytes."
+  ],
+  "Bilder und Dateien hinzufügen": [
+    "Bilder und Dateien hinzufügen",
+    "Add images and files"
+  ],
+  "Bild aus Zwischenablage einfügen": [
+    "Bild aus Zwischenablage einfügen",
+    "Paste image from clipboard"
+  ],
+  "Prompten": [
+    "Prompten",
+    "Send prompt"
+  ],
+  "Session prompten": [
+    "Session prompten",
+    "Prompt Session"
+  ],
+  "Verlauf": [
+    "Verlauf",
+    "History"
+  ],
+  "Noch keine Einträge.": [
+    "Noch keine Einträge.",
+    "No entries yet."
+  ],
+  "Verlauf wird geladen …": [
+    "Verlauf wird geladen …",
+    "Loading history …"
+  ],
+  "Verlauf erneut laden": [
+    "Verlauf erneut laden",
+    "Reload history"
+  ],
+  "Ältere Einträge laden": [
+    "Ältere Einträge laden",
+    "Load older entries"
+  ],
+  "Anhänge erneut laden": [
+    "Anhänge erneut laden",
+    "Reload attachments"
+  ],
+  "{} · vollständige Anhangdaten noch nicht verfügbar": [
+    "{} · vollständige Anhangdaten noch nicht verfügbar",
+    "{} · full attachment data not available yet"
+  ],
+  "Der Serverstand hat sich geändert. Eigene Eingaben bleiben erhalten; vor dem Speichern vergleichen.": [
+    "Der Serverstand hat sich geändert. Eigene Eingaben bleiben erhalten; vor dem Speichern vergleichen.",
+    "The server state has changed. Your input is preserved; compare before saving."
+  ],
+  "Serverstand vergleichen": [
+    "Serverstand vergleichen",
+    "Compare server state"
+  ],
+  "Verglichenen Stand als Basis übernehmen": [
+    "Verglichenen Stand als Basis übernehmen",
+    "Use compared state as baseline"
+  ],
+  "Entwurf korrigieren": [
+    "Entwurf korrigieren",
+    "Correct draft"
+  ],
+  "Modellauswahl erneut laden": [
+    "Modelauswahl erneut laden",
+    "Reload Model selection"
+  ],
+  "Bitte die gespeicherte Modellauswahl abwarten.": [
+    "Bitte die gespeicherte Modelauswahl abwarten.",
+    "Wait for the saved Model selection."
+  ],
+  "OpenCode zuerst in den Factory-Einstellungen einrichten.": [
+    "OpenCode zuerst in den Factory-Settings einrichten.",
+    "Set up OpenCode in Factory settings first."
+  ],
+  "Die ausgewählte Session nutzt einen anderen Zugang oder ein anderes Modell. Bitte Auto Runner wählen, damit eine neue Session möglich ist.": [
+    "Die ausgewählte Session nutzt einen anderen Zugang oder ein anderes Model. Bitte Auto Runner wählen, damit eine neue Session möglich ist.",
+    "The selected Session uses different access or a different Model. Choose Auto Runner to allow a new Session."
+  ],
+  "Die zugeordnete Session ist nicht mehr verfügbar. Bitte eine offene Session oder Auto Runner wählen.": [
+    "Die zugeordnete Session ist nicht mehr verfügbar. Bitte eine offene Session oder Auto Runner wählen.",
+    "The assigned Session is no longer available. Choose an open Session or Auto Runner."
+  ],
+  "Entwurf speichern": [
+    "Entwurf speichern",
+    "Save draft"
+  ],
+  "Aufgabe einreihen": [
+    "Intent einreihen",
+    "Queue Intent"
+  ],
+  "OpenCode anzeigen": [
+    "OpenCode anzeigen",
+    "Show OpenCode"
+  ],
+  "Zuordnung: {title}": [
+    "Zuordnung: {title}",
+    "Assignment: {title}"
+  ],
+  "Automatische Zuordnung durch den Orchestrator": [
+    "Automatische Zuordnung durch den Orchestrator",
+    "Automatic assignment by Orchestrator"
+  ],
+  "Zuordnung: {selected}": [
+    "Zuordnung: {selected}",
+    "Assignment: {selected}"
+  ],
+  "MCPs für diese Aufgabe auswählen": [
+    "MCPs für diesen Intent auswählen",
+    "Select MCPs for this Intent"
+  ],
+  "Erweiterte Optionen ausblenden": [
+    "Erweiterte Optionen ausblenden",
+    "Hide advanced options"
+  ],
+  "Erweiterte Optionen anzeigen": [
+    "Erweiterte Optionen anzeigen",
+    "Show advanced options"
+  ],
+  "Lokal vorbereiten": [
+    "Lokal vorbereiten",
+    "Prepare locally"
+  ],
+  "Vorbereiten & neu": [
+    "Vorbereiten & neu",
+    "Prepare & new"
+  ],
+  "Entwurf": [
+    "Entwurf",
+    "Draft"
+  ],
+  "Entwurf & neu": [
+    "Entwurf & neu",
+    "Draft & new"
+  ],
+  "Einreihen": [
+    "Einreihen",
+    "Queue"
+  ],
+  "Einreihen & neu": [
+    "Einreihen & neu",
+    "Queue & new"
+  ],
+  "Nicht schließen": [
+    "Nicht schließen",
+    "Keep open"
+  ],
+  "Noch nicht beantwortet.": [
+    "Noch nicht beantwortet.",
+    "Not answered yet."
+  ],
+  "Ja": [
+    "Ja",
+    "Yes"
+  ],
+  "Nein": [
+    "Nein",
+    "No"
+  ],
+  "Aktion": [
+    "Aktion",
+    "Action"
+  ],
+  "Berechtigung": [
+    "Berechtigung",
+    "Permission"
+  ],
+  "Ziel": [
+    "Ziel",
+    "Target"
+  ],
+  "Geltungsbereich": [
+    "Geltungsbereich",
+    "Scope"
+  ],
+  "Befehl": [
+    "Befehl",
+    "Command"
+  ],
+  "Befehl: {command}": [
+    "Befehl: {command}",
+    "Command: {command}"
+  ],
+  "Rückfrage": [
+    "Rückfrage",
+    "Follow-up question"
+  ],
+  "Frage": [
+    "Frage",
+    "Question"
+  ],
+  "Questions": [
+    "Questions",
+    "Questions"
+  ],
+  "Antwort": [
+    "Antwort",
+    "Answer"
+  ],
+  "Einmal erlaubt": [
+    "Einmal erlaubt",
+    "Allowed once"
+  ],
+  "Dauerhaft erlaubt": [
+    "Dauerhaft erlaubt",
+    "Always allowed"
+  ],
+  "Abgelehnt": [
+    "Abgelehnt",
+    "Denied"
+  ],
+  "Gespeicherter Antwortentwurf stammt aus einer älteren Fragenrevision. Bitte alle Werte prüfen.": [
+    "Gespeicherter Antwortentwurf stammt aus einer älteren Fragenrevision. Bitte alle Werte prüfen.",
+    "The saved answer draft is from an older question revision. Check all values."
+  ],
+  "Serverzustand geändert: {:?}. Entwurf bleibt erhalten.": [
+    "Serverzustand geändert: {:?}. Entwurf bleibt erhalten.",
+    "Server state changed: {:?}. The draft is preserved."
+  ],
+  "Zustellung: {:?}": [
+    "Zustellung: {:?}",
+    "Delivery: {:?}"
+  ],
+  "Einmal erlauben": [
+    "Einmal erlauben",
+    "Allow once"
+  ],
+  "Dauerhaft erlauben (erweiterte Freigabe)": [
+    "Dauerhaft erlauben (erweiterte Freigabe)",
+    "Always allow (extended permission)"
+  ],
+  "Ablehnen": [
+    "Ablehnen",
+    "Deny"
+  ],
+  "Feld ohne Schlüssel": [
+    "Feld ohne Schlüssel",
+    "Field without key"
+  ],
+  "Dieses Frageformat kann hier nicht beantwortet werden.": [
+    "Dieses Frageformat kann hier nicht beantwortet werden.",
+    "This question format cannot be answered here."
+  ],
+  "Aktuelle Frage übernehmen · Eingaben behalten und prüfen": [
+    "Aktuelle Frage übernehmen · Eingaben behalten und prüfen",
+    "Use current question · keep and review input"
+  ],
+  "Alle vorbereiteten Antworten senden": [
+    "Alle vorbereiteten Antworten senden",
+    "Send all prepared answers"
+  ],
+  "Frage beantworten": [
+    "Frage beantworten",
+    "Answer question"
+  ],
+  "Schließen · Antwortentwürfe behalten": [
+    "Schließen · Antwortentwürfe behalten",
+    "Close · keep answer drafts"
+  ],
+  "Frage wurde geändert oder beantwortet. Dialog neu öffnen; alte Eingaben nicht ungeprüft senden.": [
+    "Frage wurde geändert oder beantwortet. Dialog neu öffnen; alte Eingaben nicht ungeprüft senden.",
+    "Question changed or answered. Reopen the dialog; do not submit old input without reviewing it."
+  ],
+  "Bitte jede Berechtigung ausdrücklich entscheiden.": [
+    "Bitte jede Berechtigung ausdrücklich entscheiden.",
+    "Decide each permission explicitly."
+  ],
+  "Unbekanntes Frageformat": [
+    "Unbekanntes Frageformat",
+    "Unknown question format"
+  ],
+  "Feldschlüssel fehlt": [
+    "Feldschlüssel fehlt",
+    "Field key missing"
+  ],
+  "Externes Formular: Bitte zuerst den angezeigten Link verwenden.": [
+    "Externes Formular: Bitte zuerst den angezeigten Link verwenden.",
+    "External form: use the displayed link first."
+  ],
+  "Antwort maximal 32 KiB": [
+    "Antwort maximal 32 KiB",
+    "Answer limited to 32 KiB"
+  ],
+  "Die Ordnerauswahl ist noch geöffnet.": [
+    "Die Ordnerauswahl ist noch geöffnet.",
+    "The folder picker is still open."
+  ],
+  "Bitte einen Projektnamen eingeben.": [
+    "Bitte einen Projektnamen eingeben.",
+    "Enter a project name."
+  ],
+  "Projektkürzel": [
+    "Projektkürzel",
+    "Project key"
+  ],
+  "z. B. WOAI": [
+    "z. B. WOAI",
+    "e.g. WOAI"
+  ],
+  "Leer lassen für ein automatisches Kürzel": [
+    "Leer lassen für ein automatisches Kürzel",
+    "Leave empty for an automatic key"
+  ],
+  "Lokaler Pfad": [
+    "Lokaler Pfad",
+    "Local path"
+  ],
+  "Projektordner auswählen": [
+    "Projektordner auswählen",
+    "Select project folder"
+  ],
+  "Der Pfad ist nach dem Anlegen von Arbeitsbereichen festgeschrieben.": [
+    "Der Pfad ist nach dem Anlegen von Workspaces festgeschrieben.",
+    "The path is fixed after workspaces have been created."
+  ],
+  "Ohne neuen Pfad bleibt das bisherige Repository unverändert.": [
+    "Ohne neuen Pfad bleibt das bisherige Repository unverändert.",
+    "Without a new path, the existing repository remains unchanged."
+  ],
+  "Automatisch": [
+    "Automatisch",
+    "Automatic"
+  ],
+  "Runner nicht verfügbar": [
+    "Runner nicht verfügbar",
+    "Runner unavailable"
+  ],
+  "Runner-Zuordnung": [
+    "Runner-Zuordnung",
+    "Runner assignment"
+  ],
+  "Das Projektkürzel muss mit einem Buchstaben beginnen und darf höchstens 10 Buchstaben oder Ziffern enthalten.": [
+    "Das Projektkürzel muss mit einem Buchstaben beginnen und darf höchstens 10 Buchstaben oder Ziffern enthalten.",
+    "The project key must start with a letter and contain at most 10 letters or digits."
+  ],
+  "Das Projektkürzel darf nicht leer sein.": [
+    "Das Projektkürzel darf nicht leer sein.",
+    "The project key must not be empty."
+  ],
+  "Prüfintervall in Minuten": [
+    "Prüfintervall in Minuten",
+    "Check interval in minutes"
+  ],
+  "Mindestabstand zwischen zwei Supervisor-Prüfungen.": [
+    "Mindestabstand zwischen zwei Supervisor-Prüfungen.",
+    "Minimum interval between Supervisor checks."
+  ],
+  "Gleichzeitig arbeitende Sessions": [
+    "Gleichzeitig arbeitende Sessions",
+    "Concurrently working Sessions"
+  ],
+  "Vollständige Anfragedaten (einschließlich Request-ID)": [
+    "Vollständige Anfragedaten (einschließlich Request-ID)",
+    "Full request data (including Request ID)"
+  ],
+  "Identische Anfrage abgleichen": [
+    "Identische Anfrage abgleichen",
+    "Reconcile identical request"
+  ],
+  "Runner-Helfer ist fehlgeschlagen. Ausgabe und Exitcode im Ergebnis prüfen.": [
+    "Runner-Helfer ist fehlgeschlagen. Ausgabe und Exitcode im Ergebnis prüfen.",
+    "Runner helper failed. Check output and exit code in the result."
+  ],
+  "Bestätigtes Ergebnis": [
+    "Bestätigtes Ergebnis",
+    "Confirmed result"
+  ],
+  "Eingaben korrigieren": [
+    "Eingaben korrigieren",
+    "Correct input"
+  ],
+  "Aktuellen Serverstand mit meinem Entwurf vergleichen": [
+    "Aktuellen Serverstand mit meinem Entwurf vergleichen",
+    "Compare current server state with my draft"
+  ],
+  "Revision erst nach Vergleich übernehmen. Eigene Eingaben bleiben erhalten und werden nicht stillschweigend mit fremden Änderungen zusammengeführt.": [
+    "Revision erst nach Vergleich übernehmen. Eigene Eingaben bleiben erhalten und werden nicht stillschweigend mit fremden Änderungen zusammengeführt.",
+    "Accept revision only after comparing. Your input is preserved and is not silently merged with changes by others."
+  ],
+  "Serverrevision {revision} übernehmen und Entwurf erneut prüfen": [
+    "Serverrevision {revision} übernehmen und Entwurf erneut prüfen",
+    "Use server revision {revision} and review draft again"
+  ],
+  "Projekt löschen": [
+    "Projekt löschen",
+    "Delete project"
+  ],
+  "Projekt anlegen": [
+    "Projekt anlegen",
+    "Create project"
+  ],
+  "Bestätigen und ausführen": [
+    "Bestätigen und ausführen",
+    "Confirm and execute"
+  ],
+  "Bitte eine gültige Geräte-ID auswählen.": [
+    "Bitte eine gültige Geräte-ID auswählen.",
+    "Select a valid device ID."
+  ],
+  "Zugang widerrufen": [
+    "Zugang widerrufen",
+    "Revoke access"
+  ],
+  "Gerätezugang widerrufen": [
+    "Gerätezugang widerrufen",
+    "Revoke device access"
+  ],
+  "Zurück": [
+    "Zurück",
+    "Back"
+  ],
+  "Der lokale Pfad ist zu lang oder enthält ungültige Zeichen.": [
+    "Der lokale Pfad ist zu lang oder enthält ungültige Zeichen.",
+    "The local path is too long or contains invalid characters."
+  ],
+  "Bitte einen absoluten lokalen Pfad angeben.": [
+    "Bitte einen absoluten lokalen Pfad angeben.",
+    "Enter an absolute local path."
+  ],
+  "Der lokale Pfad muss ein Ordner sein.": [
+    "Der lokale Pfad muss ein Ordner sein.",
+    "The local path must be a directory."
+  ],
+  "Bitte ein Git-Repository mit ausgechecktem Branch und mindestens einem Commit oder einen noch nicht vorhandenen Ordner angeben.": [
+    "Bitte ein Git-Repository mit ausgechecktem Branch und mindestens einem Commit oder einen noch nicht vorhandenen Ordner angeben.",
+    "Specify a Git repository with a checked-out branch and at least one commit, or a directory that does not exist yet."
+  ],
+  "Diese Anfragen wurden noch nicht eindeutig bestätigt. Ein Abgleich wiederholt nur die identische gespeicherte Anfrage — keine neue Aufgabe.": [
+    "Diese Anfragen wurden noch nicht eindeutig bestätigt. Ein Abgleich wiederholt nur die identische gespeicherte Anfrage — kein neuer Intent.",
+    "These requests have not been clearly confirmed. Reconciliation repeats only the identical saved request — not a new Intent."
+  ],
+  "Unveränderte gespeicherte Anfrage": [
+    "Unveränderte gespeicherte Anfrage",
+    "Unchanged saved request"
+  ],
+  "Zum zugehörigen Server verbinden, um abzugleichen.": [
+    "Zum zugehörigen Server verbinden, um abzugleichen.",
+    "Connect to the associated server to reconcile."
+  ],
+  "Hinweis verwerfen · unbekannte Einladung bleibt bis Ablauf gültig": [
+    "Hinweis verwerfen · unbekannte Einladung bleibt bis Ablauf gültig",
+    "Dismiss notice · unknown invitation remains valid until expiry"
+  ],
+  "Einladungserstellung wird bei unklarem Ausgang nicht wiederholt. Unbekannter Code läuft gemäß Gültigkeit ab; gegebenenfalls Geräteverwaltung prüfen.": [
+    "Einladungserstellung wird bei unklarem Ausgang nicht wiederholt. Unbekannter Code läuft gemäß Gültigkeit ab; gegebenenfalls Geräteverwaltung prüfen.",
+    "Invitation creation is not retried when the outcome is uncertain. Unknown codes expire according to their validity; check device management if needed."
+  ],
+  "Wird übertragen …": [
+    "Wird übertragen …",
+    "Transferring …"
+  ],
+  "Anfrage bestätigt — Ergebnis und Zustellstatus prüfen.": [
+    "Anfrage bestätigt — Ergebnis und Zustellstatus prüfen.",
+    "Request confirmed — check result and delivery status."
+  ],
+  "Ausgang unklar. Eingaben bleiben gesperrt; Abgleich verwendet dieselbe Request-ID und Nutzlast.": [
+    "Ausgang unklar. Eingaben bleiben gesperrt; Abgleich verwendet dieselbe Request-ID und Nutzlast.",
+    "Outcome uncertain. Input remains locked; reconciliation uses the same Request ID and payload."
+  ],
+  "Bestätigung fehlt. Gespeicherte Anfrage kann abgeglichen werden.": [
+    "Bestätigung fehlt. Gespeicherte Anfrage kann abgeglichen werden.",
+    "Confirmation missing. The saved request can be reconciled."
+  ],
+  "‹ Vorheriger Textabschnitt": [
+    "‹ Vorheriger Textabschnitt",
+    "‹ Previous text section"
+  ],
+  "Abschnitt {} / {pages} · {} Bytes vollständig zugänglich": [
+    "Abschnitt {} / {pages} · {} Bytes vollständig zugänglich",
+    "Section {} / {pages} · {} bytes fully accessible"
+  ],
+  "Nächster Textabschnitt ›": [
+    "Nächster Textabschnitt ›",
+    "Next text section ›"
+  ],
+  "Gesamten Text kopieren": [
+    "Gesamten Text kopieren",
+    "Copy all text"
+  ],
+  "Feld": [
+    "Feld",
+    "Field"
+  ],
+  "Externes Formular öffnen": [
+    "Externes Formular öffnen",
+    "Open external form"
+  ],
+  "Kein gültiger Link zum externen Formular vorhanden.": [
+    "Kein gültiger Link zum externen Formular vorhanden.",
+    "No valid link to the external form available."
+  ],
+  "Eigene Antwort (optional)": [
+    "Eigene Antwort (optional)",
+    "Custom answer (optional)"
+  ],
+  "Dieser Antworttyp wird hier nicht unterstützt.": [
+    "Dieser Antworttyp wird hier nicht unterstützt.",
+    "This answer type is not supported here."
+  ],
+  "Bitte einen gültigen Wert eingeben": [
+    "Bitte einen gültigen Wert eingeben",
+    "Enter a valid value"
+  ],
+  "Textlänge außerhalb der erlaubten Grenzen": [
+    "Textlänge außerhalb der erlaubten Grenzen",
+    "Text length outside the allowed limits"
+  ],
+  "Zahl außerhalb des erlaubten Bereichs": [
+    "Zahl außerhalb des erlaubten Bereichs",
+    "Number outside the allowed range"
+  ],
+  "Anzahl der Auswahlwerte außerhalb der Grenzen": [
+    "Anzahl der Auswahlwerte außerhalb der Grenzen",
+    "Number of selected values outside the limits"
+  ],
+  "Bitte eine angebotene Option auswählen": [
+    "Bitte eine angebotene Option auswählen",
+    "Select one of the offered options"
+  ],
+  "Aktiviert": [
+    "Aktiviert",
+    "Enabled"
+  ],
+  "Ungültiger JSON-Wert. Bitte korrigieren; Senden ist gesperrt.": [
+    "Ungültiger JSON-Wert. Bitte korrigieren; Senden ist gesperrt.",
+    "Invalid JSON value. Correct it before sending."
+  ],
+  "Auf diesem Rechner": [
+    "Auf diesem Rechner",
+    "On this computer"
+  ],
+  "Über das SSH-Profil des Runners": [
+    "Über das SSH-Profil des Runners",
+    "Via the Runner's SSH profile"
+  ],
+  "In Bearbeitung": [
+    "In Bearbeitung",
+    "In progress"
+  ],
+  "Blockiert": [
+    "Blockiert",
+    "Blocked"
+  ],
+  "Abgeschlossen": [
+    "Abgeschlossen",
+    "Completed"
+  ],
+  "Abgebrochen": [
+    "Abgebrochen",
+    "Canceled"
+  ],
+  "Keine Auswahl": [
+    "Keine Auswahl",
+    "No selection"
+  ],
+  "Keine Bindung (nur bei gerätebezogener Runner-Rolle erforderlich)": [
+    "Keine Bindung (nur bei gerätebezogener Runner-Rolle erforderlich)",
+    "No binding (only required for a device-bound Runner role)"
+  ],
+  "Unbegrenzt": [
+    "Unbegrenzt",
+    "Unlimited"
+  ],
+  "Keine aktiven Gerätezugänge.": [
+    "Keine aktiven Gerätezugänge.",
+    "No active device access."
+  ],
+  "Widerrufen …": [
+    "Widerrufen …",
+    "Revoke …"
+  ],
+  "Zugang für „{}“ dauerhaft sperren? Das Gerät kann sich danach nicht mehr verbinden.{}": [
+    "Zugang für „{}“ dauerhaft sperren? Das Gerät kann sich danach nicht mehr verbinden.{}",
+    "Permanently revoke access for “{}”? The device will no longer be able to connect.{}"
+  ],
+  " Das betrifft auch diese Desktop-Verbindung.": [
+    " Das betrifft auch diese Desktop-Verbindung.",
+    " This also affects this desktop connection."
+  ],
+  "Bedienung": [
+    "Bedienung",
+    "Operation"
+  ],
+  "Runner-Zugang": [
+    "Runner-Zugang",
+    "Runner access"
+  ],
+  "Dieser Desktop: gemeinsamer Factory-Zugang, nicht einzeln widerrufbar.": [
+    "Dieser Desktop: gemeinsamer Factory-Zugang, nicht einzeln widerrufbar.",
+    "This desktop: shared Factory access, cannot be revoked individually."
+  ],
+  "Lokales SSH-Profil für nichtinteraktive Runner-Helfer. Hostschlüssel und Zugangsdaten bleiben in der normalen SSH-Konfiguration.": [
+    "Lokales SSH-Profil für nichtinteraktive Runner-Helfer. Hostschlüssel und Zugangsdaten bleiben in der normalen SSH-Konfiguration.",
+    "Local SSH profile for non-interactive Runner helpers. Host keys and credentials remain in the normal SSH configuration."
+  ],
+  "SSH-Profil bearbeiten …": [
+    "SSH-Profil bearbeiten …",
+    "Edit SSH profile …"
+  ],
+  "SSH-Profil speichern": [
+    "SSH-Profil speichern",
+    "Save SSH profile"
+  ],
+  "Absolute Pfade auf dem Runnerhost angeben. Eine zwischenzeitliche Änderung desselben Profils wird nicht überschrieben.": [
+    "Absolute Pfade auf dem Runnerhost angeben. Eine zwischenzeitliche Änderung desselben Profils wird nicht überschrieben.",
+    "Specify absolute paths on the Runner host. Concurrent changes to the same profile will not be overwritten."
+  ],
+  "SSH-Profil entfernen …": [
+    "SSH-Profil entfernen …",
+    "Remove SSH profile …"
+  ],
+  "SSH-Profil entfernen": [
+    "SSH-Profil entfernen",
+    "Remove SSH profile"
+  ],
+  "Die lokale SSH-Zuordnung entfernen; keine Runner oder Sessions werden beendet.": [
+    "Die lokale SSH-Zuordnung entfernen; keine Runner oder Sessions werden beendet.",
+    "Remove the local SSH assignment; no Runners or Sessions will be stopped."
+  ],
+  "Vorbereiten …": [
+    "Vorbereiten …",
+    "Prepare …"
+  ],
+  "OpenCode prüfen …": [
+    "OpenCode prüfen …",
+    "Check OpenCode …"
+  ],
+  "Technischen Auftrag an diesen Arbeitsbereich senden. Die Serverrevision schützt vor parallelen Änderungen.": [
+    "Technischen Auftrag an diesen Workspace senden. Die Serverrevision schützt vor parallelen Änderungen.",
+    "Send a technical job to this workspace. The server revision protects against concurrent changes."
+  ],
+  "Verwalten …": [
+    "Verwalten …",
+    "Manage …"
+  ],
+  "Auftrag {}": [
+    "Auftrag {}",
+    "Job {}"
+  ],
+  "Container {} · gestartet {}": [
+    "Container {} · gestartet {}",
+    "Container {} · started {}"
+  ],
+  "Diese Runtime gezielt beenden …": [
+    "Diese Runtime gezielt beenden …",
+    "Terminate this Runtime …"
+  ],
+  "Runtime unwiderruflich beenden": [
+    "Runtime unwiderruflich beenden",
+    "Terminate Runtime permanently"
+  ],
+  "Nur die bestätigte dedizierte Runtime wird entfernt. Hintergrundprozesse werden erst nach bestätigtem Stopp als beendet behandelt. Worktree und Volumes bleiben erhalten; Archiv kann unvollständig sein.": [
+    "Nur die bestätigte dedizierte Runtime wird entfernt. Hintergrundprozesse werden erst nach bestätigtem Stopp als beendet behandelt. Worktree und Volumes bleiben erhalten; Archiv kann unvollständig sein.",
+    "Only the confirmed dedicated Runtime will be removed. Background processes are only considered stopped after a confirmed stop. Worktree and volumes are preserved; the archive may be incomplete."
+  ],
+  "Keine bestätigte dedizierte Container-Runtime verfügbar. Native Sessionsteuerung ist getrennt über den Arbeitsbereich möglich.": [
+    "Keine bestätigte dedizierte Container-Runtime verfügbar. Native Sessionsteuerung ist getrennt über den Workspace möglich.",
+    "No confirmed dedicated container Runtime available. Native Session control is available separately through the workspace."
+  ],
+  "Keine separat gesicherten Dateien. Inline-Anhänge und Unverfügbarkeitsgründe stehen zusätzlich bei der Originalnachricht.": [
+    "Keine separat gesicherten Dateien. Inline-Anhänge und Unverfügbarkeitsgründe stehen zusätzlich bei der Originalnachricht.",
+    "No separately archived files. Inline attachments and reasons for unavailability are also shown with the original message."
+  ],
+  "{} · {} Bytes · erfasst {}": [
+    "{} · {} Bytes · erfasst {}",
+    "{} · {} bytes · captured {}"
+  ],
+  "SHA256-geprüft exportieren …": [
+    "SHA256-geprüft exportieren …",
+    "Export with SHA256 verification …"
+  ],
+  "Quelle: {} · Branch: {:?} · abgelöst: {}": [
+    "Quelle: {} · Branch: {:?} · abgelöst: {}",
+    "Source: {} · branch: {:?} · superseded: {}"
+  ],
+  "Wissen ablösen …": [
+    "Wissen ablösen …",
+    "Supersede knowledge …"
+  ],
+  "Wissen ablösen": [
+    "Wissen ablösen",
+    "Supersede knowledge"
+  ],
+  "Der Eintrag bleibt historisch erhalten, wird aber nicht mehr automatisch als aktuelles Wissen verwendet.": [
+    "Der Eintrag bleibt historisch erhalten, wird aber nicht mehr automatisch als aktuelles Wissen verwendet.",
+    "The entry is preserved in history but will no longer be used automatically as current knowledge."
+  ],
+  "Metadaten": [
+    "Metadaten",
+    "Metadata"
+  ],
+  "{} · {} Auswertungen verbleibend · Intervall {} s": [
+    "{} · {} Auswertungen verbleibend · Intervall {} s",
+    "{} · {} evaluations remaining · interval {} s"
+  ],
+  "Aktiv": [
+    "Aktiv",
+    "Active"
+  ],
+  "Deaktiviert": [
+    "Deaktiviert",
+    "Disabled"
+  ],
+  "Tokenlimits ändern …": [
+    "Tokenlimits ändern …",
+    "Change token limits …"
+  ],
+  "Tokenbudget ändern": [
+    "Tokenbudget ändern",
+    "Change token budget"
+  ],
+  "Limits gelten für beobachtete Tokenverbräuche. Fehlende historische Angaben sind keine Nullverbräuche. null bedeutet unbegrenzt.": [
+    "Limits gelten für beobachtete Tokenverbräuche. Fehlende historische Angaben sind keine Nullverbräuche. null bedeutet unbegrenzt.",
+    "Limits apply to observed token usage. Missing historical data does not mean zero usage. null means unlimited."
+  ],
+  "Vollständige Daten": [
+    "Vollständige Daten",
+    "Full data"
+  ],
+  "Projektkürzel (z. B. TEST oder WOAI; neu: leer = automatisch)": [
+    "Projektkürzel (z. B. TEST oder WOAI; neu: leer = automatisch)",
+    "Project key (e.g. TEST or WOAI; new: empty = automatic)"
+  ],
+  "Projektname zur Bestätigung": [
+    "Projektname zur Bestätigung",
+    "Project name for confirmation"
+  ],
+  "Erwartete Serverrevision (bei Konflikt aktuellen Stand prüfen)": [
+    "Erwartete Serverrevision (bei Konflikt aktuellen Stand prüfen)",
+    "Expected server revision (check current state if there is a conflict)"
+  ],
+  "Repository / Quelle": [
+    "Repository / Quelle",
+    "Repository / source"
+  ],
+  "Basisbranch": [
+    "Basisbranch",
+    "Base branch"
+  ],
+  "Anbieter-ID": [
+    "Provider-ID",
+    "Provider ID"
+  ],
+  "Modell-ID": [
+    "Model-ID",
+    "Model ID"
+  ],
+  "Startbefehl": [
+    "Startbefehl",
+    "Start command"
+  ],
+  "Testbefehl": [
+    "Testbefehl",
+    "Test command"
+  ],
+  "Automatik aktiv": [
+    "Automatik aktiv",
+    "Automation enabled"
+  ],
+  "Pausiert": [
+    "Pausiert",
+    "Paused"
+  ],
+  "Maximal parallele Aufträge": [
+    "Maximal parallele Aufträge",
+    "Maximum concurrent jobs"
+  ],
+  "Maximal arbeitende Sessions": [
+    "Maximal arbeitende Sessions",
+    "Maximum working Sessions"
+  ],
+  "Auswertungsbudget": [
+    "Auswertungsbudget",
+    "Evaluation budget"
+  ],
+  "Intervall in Sekunden": [
+    "Intervall in Sekunden",
+    "Interval in seconds"
+  ],
+  "Arbeitsbereich-ID": [
+    "Workspace-ID",
+    "Workspace ID"
+  ],
+  "Begründung": [
+    "Begründung",
+    "Reason"
+  ],
+  "Titel": [
+    "Titel",
+    "Title"
+  ],
+  "Beschreibung": [
+    "Beschreibung",
+    "Description"
+  ],
+  "Inhalt": [
+    "Inhalt",
+    "Content"
+  ],
+  "Erfolgskriterien": [
+    "Erfolgskriterien",
+    "Acceptance criteria"
+  ],
+  "Priorität (0–3)": [
+    "Priorität (0–3)",
+    "Priority (0–3)"
+  ],
+  "Aufgaben-IDs": [
+    "Intent-IDs",
+    "Intent IDs"
+  ],
+  "Abhängigkeiten (Aufgaben-IDs)": [
+    "Abhängigkeiten (Intent-IDs)",
+    "Dependencies (Intent IDs)"
+  ],
+  "Rolle": [
+    "Rolle",
+    "Role"
+  ],
+  "Gültigkeit in Sekunden": [
+    "Gültigkeit in Sekunden",
+    "Validity in seconds"
+  ],
+  "Repositorypfad auf dem Runner": [
+    "Repositorypfad auf dem Runner",
+    "Repository path on the Runner"
+  ],
+  "OpenCode-Service-Registrierung auf dem Runner": [
+    "OpenCode-Service-Registrierung auf dem Runner",
+    "OpenCode service registration on the Runner"
+  ],
+  "Allgemein": [
+    "Allgemein",
+    "General"
+  ],
+  "Modell-Anbieter": [
+    "Model Provider",
+    "Model Providers"
+  ],
+  "Default-Modelle": [
+    "Default Models",
+    "Default Models"
+  ],
+  "Geräte und Zugänge": [
+    "Geräte und Zugänge",
+    "Devices and access"
+  ],
+  "Projekteinstellungen": [
+    "Projekt-Settings",
+    "Project settings"
+  ],
+  "Projekteinstellungen - {}": [
+    "Projekt-Settings - {}",
+    "Project settings - {}"
+  ],
+  "Projekteinstellungen werden gespeichert …": [
+    "Projekt-Settings werden gespeichert …",
+    "Saving project settings …"
+  ],
+  "Änderungen verwerfen?": [
+    "Änderungen verwerfen?",
+    "Discard changes?"
+  ],
+  "Ungespeicherte Änderungen an den Projekteinstellungen gehen verloren.": [
+    "Ungespeicherte Änderungen an den Projekt-Settings gehen verloren.",
+    "Unsaved changes to project settings will be lost."
+  ],
+  "Bereits gesendete Anfragen werden dadurch nicht zurückgenommen.": [
+    "Bereits gesendete Anfragen werden dadurch nicht zurückgenommen.",
+    "Requests already sent will not be rolled back."
+  ],
+  "Verwerfen": [
+    "Verwerfen",
+    "Discard"
+  ],
+  "Weiter bearbeiten": [
+    "Weiter bearbeiten",
+    "Continue editing"
+  ],
+  "Das Sessionlimit muss zwischen 1 und 16 liegen.": [
+    "Das Sessionlimit muss zwischen 1 und 16 liegen.",
+    "The Session limit must be between 1 and 16."
+  ],
+  "Für „{}“ ist eine frühere Anfrage offen. Bitte zuerst in der Diagnose über „Zustellungen prüfen“ abgleichen.": [
+    "Für „{}“ ist eine frühere Anfrage offen. Bitte zuerst in der Diagnose über „Zustellungen prüfen“ abgleichen.",
+    "An earlier request for “{}” is pending. Reconcile it first using “Check deliveries” in Diagnostics."
+  ],
+  "Projekteinstellungen ({} · {}): {}": [
+    "Projekt-Settings ({} · {}): {}",
+    "Project settings ({} · {}): {}"
+  ],
+  "Speichern nicht bestätigt. Mit „Speichern“ dieselbe Anfrage erneut prüfen.": [
+    "Speichern nicht bestätigt. Mit „Speichern“ dieselbe Anfrage erneut prüfen.",
+    "Save not confirmed. Use “Save” to check the same request again."
+  ],
+  "„{}“ konnte nicht gespeichert werden. Änderungen bleiben erhalten.": [
+    "„{}“ konnte nicht gespeichert werden. Änderungen bleiben erhalten.",
+    "Could not save “{}”. Changes are preserved."
+  ],
+  "Nicht alle Änderungen gespeichert: „{}“. Die übrigen Änderungen bleiben erhalten.": [
+    "Nicht alle Änderungen gespeichert: „{}“. Die übrigen Änderungen bleiben erhalten.",
+    "Not all changes saved: “{}”. Other changes are preserved."
+  ],
+  "Dieses Projekt ist im aktuellen Serverstand nicht mehr verfügbar. Entwürfe bleiben erhalten.": [
+    "Dieses Projekt ist im aktuellen Serverstand nicht mehr verfügbar. Entwürfe bleiben erhalten.",
+    "This project is no longer available in the current server state. Drafts are preserved."
+  ],
+  "Dieses Projekt ist im aktuellen Serverstand nicht mehr verfügbar.": [
+    "Dieses Projekt ist im aktuellen Serverstand nicht mehr verfügbar.",
+    "This project is no longer available in the current server state."
+  ],
+  "Der Supervisor ist für dieses Projekt noch nicht eingerichtet.": [
+    "Der Supervisor ist für dieses Projekt noch nicht eingerichtet.",
+    "Supervisor is not configured for this project yet."
+  ],
+  "Keine Supervisor-Einstellungen verfügbar.": [
+    "Keine Supervisor-Settings verfügbar.",
+    "No Supervisor settings available."
+  ],
+  "Erneut laden": [
+    "Erneut laden",
+    "Reload"
+  ],
+  "Zurück zur Übersicht": [
+    "Zurück zur Übersicht",
+    "Back to overview"
+  ],
+  "Gerätezugänge konnten nicht geladen werden.": [
+    "Gerätezugänge konnten nicht geladen werden.",
+    "Could not load device access."
+  ],
+  "Aktualisieren": [
+    "Aktualisieren",
+    "Refresh"
+  ],
+  "Diese Ansicht bitte über die Hauptnavigation öffnen.": [
+    "Diese Ansicht bitte über die Hauptnavigation öffnen.",
+    "Open this view using the main navigation."
+  ],
+  "Supervisor-Konfiguration": [
+    "Supervisor-Konfiguration",
+    "Supervisor configuration"
+  ],
+  "PROJEKT": [
+    "PROJEKT",
+    "PROJECT"
+  ],
+  "Projekt auswählen": [
+    "Projekt auswählen",
+    "Select project"
+  ],
+  "Projektmenü": [
+    "Projektmenü",
+    "Project menu"
+  ],
+  "Intent": [
+    "Intent",
+    "Intent"
+  ],
+  "{queue} in der Warteschlange": [
+    "{queue} in der Warteschlange",
+    "{queue} queued"
+  ],
+  "{queue} lokal vorbereitet": [
+    "{queue} lokal vorbereitet",
+    "{queue} prepared locally"
+  ],
+  "{question_count} offen": [
+    "{question_count} offen",
+    "{question_count} open"
+  ],
+  "{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen": [
+    "{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen",
+    "{} working · {} open without confirmed activity · {} open and failed"
+  ],
+  "{} laufend": [
+    "{} laufend",
+    "{} running"
+  ],
+  "OpenCode · schreibgeschützt": [
+    "OpenCode · schreibgeschützt",
+    "OpenCode · read-only"
+  ],
+  "Deine Factory im Blick": [
+    "Deine Factory im Blick",
+    "Your Factory at a glance"
+  ],
+  "Mit einem Server verbinden oder eine lokale Factory starten.": [
+    "Mit einem Server verbinden oder eine lokale Factory starten.",
+    "Connect to a server or start a local Factory."
+  ],
+  "Verbindung einrichten …": [
+    "Verbindung einrichten …",
+    "Set up connection …"
+  ],
+  "Noch kein Projekt": [
+    "Noch kein Projekt",
+    "No project yet"
+  ],
+  "Lege ein Projekt an, um Aufgaben zu verwalten.": [
+    "Lege ein Projekt an, um Intents zu verwalten.",
+    "Create a project to manage Intents."
+  ],
+  "Projekt anlegen …": [
+    "Projekt anlegen …",
+    "Create project …"
+  ],
+  "Ein Anhang enthält keinen lokalen Dateipfad. Bitte über „Dateien/Bilder hinzufügen“ auswählen.": [
+    "Ein Anhang enthält keinen lokalen Dateipfad. Bitte über „Dateien/Bilder hinzufügen“ auswählen.",
+    "An attachment has no local file path. Select it using “Add images and files”."
+  ],
+  "Diese Aufgabenansicht ist schreibgeschützt. Zum Anhängen einen bearbeitbaren Auftrag öffnen.": [
+    "Diese Intent-Ansicht ist schreibgeschützt. Zum Anhängen einen bearbeitbaren Auftrag öffnen.",
+    "This Intent view is read-only. Open an editable Intent to add attachments."
+  ],
+  "Anhänge werden geladen …": [
+    "Anhänge werden geladen …",
+    "Loading attachments …"
+  ],
+  "Diese Aufgabe wurde bereits gesendet. Bitte einen neuen Entwurf öffnen.": [
+    "Dieser Intent wurde bereits gesendet. Bitte einen neuen Entwurf öffnen.",
+    "This Intent has already been sent. Open a new draft."
+  ],
+  "Zum Anhängen bitte einen bearbeitbaren Aufgaben- oder Session-Prompt öffnen.": [
+    "Zum Anhängen bitte einen bearbeitbaren Intents- oder Session-Prompt öffnen.",
+    "Open an editable Intent or Session prompt to add attachments."
+  ],
+  "Tabs nach links": [
+    "Tabs nach links",
+    "Scroll tabs left"
+  ],
+  "Tabs nach rechts": [
+    "Tabs nach rechts",
+    "Scroll tabs right"
+  ],
+  "Neues Projekt …": [
+    "Neues Projekt …",
+    "New project …"
+  ],
+  "Projekteinstellungen …": [
+    "Projekt-Settings …",
+    "Project settings …"
+  ],
+  "Gilt für neue automatische Arbeit. Laufende Prozesse werden nicht gestoppt.": [
+    "Gilt für neue automatische Arbeit. Laufende Prozesse werden nicht gestoppt.",
+    "Applies to new automatic work. Running processes are not stopped."
+  ],
+  "Verbrauch …": [
+    "Verbrauch …",
+    "Usage …"
+  ],
+  "Projekt löschen …": [
+    "Projekt löschen …",
+    "Delete project …"
+  ],
+  "Verbrauch - {}": [
+    "Verbrauch - {}",
+    "Usage - {}"
+  ],
+  "Projekt „{}“ aus der Factory-Auswahl entfernen. Repository-Dateien und Historie bleiben erhalten. Laufende oder eingereihte Aufträge verhindern das Löschen. Zum Bestätigen den vollständigen Projektnamen eingeben.": [
+    "Projekt „{}“ aus der Factory-Auswahl entfernen. Repository-Dateien und Historie bleiben erhalten. Laufende oder eingereihte Aufträge verhindern das Löschen. Zum Bestätigen den vollständigen Projektnamen eingeben.",
+    "Remove project “{}” from the Factory selection. Repository files and history are preserved. Running or queued jobs prevent deletion. Enter the full project name to confirm."
+  ],
+  "Neues Projekt": [
+    "Neues Projekt",
+    "New project"
+  ],
+  "Aufgaben durchsuchen …": [
+    "Intents durchsuchen …",
+    "Search Intents …"
+  ],
+  "Keine passenden Aufgaben": [
+    "Keine passenden Intents",
+    "No matching Intents"
+  ],
+  "Keine Entwürfe": [
+    "Keine Entwürfe",
+    "No drafts"
+  ],
+  "Keine archivierten Aufgaben": [
+    "Keine archivierten Intents",
+    "No archived Intents"
+  ],
+  "Keine Aufgaben": [
+    "Keine Intents",
+    "No Intents"
+  ],
+  "Anzeigen": [
+    "Anzeigen",
+    "View"
+  ],
+  "Anhänge": [
+    "Anhänge",
+    "Attachments"
+  ],
+  "Aufgabe schreibgeschützt anzeigen": [
+    "Intent schreibgeschützt anzeigen",
+    "View Intent read-only"
+  ],
+  "‹ Zur Aufgabenliste": [
+    "‹ Zur Intent-Liste",
+    "‹ Back to Intent list"
+  ],
+  "Aufgabe nicht mehr verfügbar.": [
+    "Intent nicht mehr verfügbar.",
+    "Intent no longer available."
+  ],
+  "Bearbeiten …": [
+    "Bearbeiten …",
+    "Edit …"
+  ],
+  "Technisches Ticket bearbeiten …": [
+    "Technisches Ticket bearbeiten …",
+    "Edit technical ticket …"
+  ],
+  "Ticket bearbeiten": [
+    "Ticket bearbeiten",
+    "Edit ticket"
+  ],
+  "Status und Metadaten des Tickets ändern. Eine Änderung beendet keine laufenden Prozesse.": [
+    "Status und Metadaten des Tickets ändern. Eine Änderung beendet keine laufenden Prozesse.",
+    "Change ticket status and metadata. Changes do not stop running processes."
+  ],
+  "Abhängigkeiten …": [
+    "Abhängigkeiten …",
+    "Dependencies …"
+  ],
+  "Abhängigkeiten": [
+    "Abhängigkeiten",
+    "Dependencies"
+  ],
+  "Alle vorausgesetzten Aufgaben müssen abgeschlossen sein. IDs gelten innerhalb desselben Projekts.": [
+    "Alle vorausgesetzten Intents müssen abgeschlossen sein. IDs gelten innerhalb desselben Projekts.",
+    "All prerequisite Intents must be completed. IDs are scoped to this project."
+  ],
+  "Vollständiger Arbeitsauftrag": [
+    "Vollständiger Arbeitsauftrag",
+    "Full work request"
+  ],
+  "Datei speichern …": [
+    "Datei speichern …",
+    "Save file …"
+  ],
+  "Diagnose": [
+    "Diagnose",
+    "Diagnostics"
+  ],
+  "Verwaltung …": [
+    "Verwaltung …",
+    "Manage …"
+  ],
+  "Auftrag, Ausführungsprofil, Fortschritt und Ergebnis": [
+    "Auftrag, Ausführungsprofil, Fortschritt und Ergebnis",
+    "Job, execution profile, progress and result"
+  ],
+  "Vollständigen Originalauftrag einschließlich Anhängen laden": [
+    "Vollständigen Originalauftrag einschließlich Anhängen laden",
+    "Load full original request including attachments"
+  ],
+  "Originalauftrag": [
+    "Originalauftrag",
+    "Original request"
+  ],
+  "Alle Aufgaben-Metadaten": [
+    "Alle Intent-Metadaten",
+    "All Intent metadata"
+  ],
+  "Fragen durchsuchen …": [
+    "Fragen durchsuchen …",
+    "Search questions …"
+  ],
+  "Offen": [
+    "Offen",
+    "Open"
+  ],
+  "Archiv": [
+    "Archiv",
+    "Archive"
+  ],
+  "Keine passenden Fragen": [
+    "Keine passenden Fragen",
+    "No matching questions"
+  ],
+  "Keine beantworteten Fragen": [
+    "Keine beantworteten Fragen",
+    "No answered questions"
+  ],
+  "Keine Fragen": [
+    "Keine Fragen",
+    "No questions"
+  ],
+  "Beantwortet": [
+    "Beantwortet",
+    "Answered"
+  ],
+  "Teilweise beantwortet": [
+    "Teilweise beantwortet",
+    "Partially answered"
+  ],
+  "Unbeantwortet": [
+    "Unbeantwortet",
+    "Unanswered"
+  ],
+  "Fragen zu: {}": [
+    "Fragen zu: {}",
+    "Questions for: {}"
+  ],
+  "{} offen · {} beantwortet": [
+    "{} offen · {} beantwortet",
+    "{} open · {} answered"
+  ],
+  "Beantworten": [
+    "Beantworten",
+    "Answer"
+  ],
+  "Sessions durchsuchen …": [
+    "Sessions durchsuchen …",
+    "Search Sessions …"
+  ],
+  "Geschlossen": [
+    "Geschlossen",
+    "Closed"
+  ],
+  "passenden ": [
+    "passenden ",
+    "matching "
+  ],
+  "Keine {modifier}{}-Läufe": [
+    "Keine {modifier}{}-Läufe",
+    "No {modifier}{} runs"
+  ],
+  "Keine passenden Sessions": [
+    "Keine passenden Sessions",
+    "No matching Sessions"
+  ],
+  "Keine geschlossenen Sessions": [
+    "Keine geschlossenen Sessions",
+    "No closed Sessions"
+  ],
+  "Keine Sessions": [
+    "Keine Sessions",
+    "No Sessions"
+  ],
+  "Fehlgeschlagen": [
+    "Fehlgeschlagen",
+    "Failed"
+  ],
+  "Keine zugeordnete Aufgabe": [
+    "Kein zugeordneter Intent",
+    "No assigned Intent"
+  ],
+  "Letzte Aufgabe: {task}": [
+    "Letzter Intent: {task}",
+    "Last Intent: {task}"
+  ],
+  "Zuletzt aktiv {}": [
+    "Zuletzt aktiv {}",
+    "Last active {}"
+  ],
+  "Letzte bekannte Änderung an Ausführung, Fragen oder zugeordneter Aufgabe; kein Verbindungs-Heartbeat.": [
+    "Letzte bekannte Änderung an Ausführung, Fragen oder zugeordnetem Intent; kein Verbindungs-Heartbeat.",
+    "Last known change to execution, questions or the assigned Intent; not a connection heartbeat."
+  ],
+  "Zu den Fragen": [
+    "Zu den Fragen",
+    "Go to questions"
+  ],
+  "Metadaten und Ausführung": [
+    "Metadaten und Ausführung",
+    "Metadata and execution"
+  ],
+  "Session-Metadaten": [
+    "Session-Metadaten",
+    "Session metadata"
+  ],
+  "Session verwalten": [
+    "Session verwalten",
+    "Manage Session"
+  ],
+  "Verbindungs- und Ladefehler": [
+    "Verbindungs- und Ladefehler",
+    "Connection and loading errors"
+  ],
+  "Client-Präsenz": [
+    "Client-Präsenz",
+    "Client presence"
+  ],
+  "OpenCode-Präsenz": [
+    "OpenCode-Präsenz",
+    "OpenCode presence"
+  ],
+  "OpenCode-Verlauf ({}): {error}": [
+    "OpenCode-Verlauf ({}): {error}",
+    "OpenCode history ({}): {error}"
+  ],
+  "Aufgabe {id}: {error}": [
+    "Intent {id}: {error}",
+    "Intent {id}: {error}"
+  ],
+  "Nur gewähltes Projekt": [
+    "Nur gewähltes Projekt",
+    "Selected project only"
+  ],
+  "Zustellungen prüfen": [
+    "Zustellungen prüfen",
+    "Check deliveries"
+  ],
+  "Ereignis, Auftrag, Rolle oder Inhalt …": [
+    "Ereignis, Auftrag, Rolle oder Inhalt …",
+    "Event, job, role or content …"
+  ],
+  "Ältere Ereignisse laden": [
+    "Ältere Ereignisse laden",
+    "Load older events"
+  ],
+  "{} Ereignisse geladen": [
+    "{} Ereignisse geladen",
+    "{} events loaded"
+  ],
+  "Dauerhafter Ereigniscursor: {}. Ältere Ereignisse bleiben über die Historie erreichbar.": [
+    "Dauerhafter Ereigniscursor: {}. Ältere Ereignisse bleiben über die Historie erreichbar.",
+    "Persistent event cursor: {}. Older events remain accessible through history."
+  ],
+  "Fehlgeschlagene Aktionen": [
+    "Fehlgeschlagene Aktionen",
+    "Failed actions"
+  ],
+  "fehlgeschlagene aktionen": [
+    "fehlgeschlagene aktionen",
+    "failed actions"
+  ],
+  "Aktion fehlgeschlagen": [
+    "Aktion fehlgeschlagen",
+    "Action failed"
+  ],
+  "Auftrag": [
+    "Auftrag",
+    "Job"
+  ],
+  "Aufgabe": [
+    "Intent",
+    "Intent"
+  ],
+  "Projekt": [
+    "Projekt",
+    "Project"
+  ],
+  "Wissen": [
+    "Wissen",
+    "Knowledge"
+  ],
+  "Verteilung": [
+    "Verteilung",
+    "Routing"
+  ],
+  "Arbeitsbereich": [
+    "Workspace",
+    "Workspace"
+  ],
+  "Ereigniskategorie, kein Live-Status": [
+    "Ereigniskategorie, kein Live-Status",
+    "Event category, not live status"
+  ],
+  "Ereignisdaten": [
+    "Ereignisdaten",
+    "Event data"
+  ],
+  "Vollständiges Originalereignis laden": [
+    "Vollständiges Originalereignis laden",
+    "Load full original event"
+  ],
+  "Originalereignis": [
+    "Originalereignis",
+    "Original event"
+  ],
+  "Weitere Ereignisaktionen": [
+    "Weitere Ereignisaktionen",
+    "More event actions"
+  ],
+  "Benachrichtigungen nicht aktuell verfügbar: {e}": [
+    "Benachrichtigungen nicht aktuell verfügbar: {e}",
+    "Notifications currently unavailable: {e}"
+  ],
+  "Alles als gelesen markieren": [
+    "Alles als gelesen markieren",
+    "Mark all as read"
+  ],
+  "Alle geladenen Benachrichtigungen als gelesen markieren": [
+    "Alle geladenen Benachrichtigungen als gelesen markieren",
+    "Mark all loaded notifications as read"
+  ],
+  "Noch keine Benachrichtigungen vorhanden. Der serverseitige Verlauf erfasst neue Fragen, Abschlüsse und Fehler ab dem GUI-Backend-Update.": [
+    "Noch keine Benachrichtigungen vorhanden. Der serverseitige Verlauf erfasst neue Fragen, Abschlüsse und Fehler ab dem GUI-Backend-Update.",
+    "No notifications yet. Server history records new questions, completions and errors since the GUI backend update."
+  ],
+  "Neu": [
+    "Neu",
+    "New"
+  ],
+  "Als gelesen markieren": [
+    "Als gelesen markieren",
+    "Mark as read"
+  ],
+  "Ältere Meldungen laden": [
+    "Ältere Meldungen laden",
+    "Load older notifications"
+  ],
+  "Aufgaben und Fragen": [
+    "Intents und Fragen",
+    "Intents and questions"
+  ],
+  "Noch keine Aufgaben oder Fragen in dieser Session.": [
+    "Noch keine Intents oder Fragen in dieser Session.",
+    "No Intents or questions in this Session yet."
+  ],
+  "{} Fragen": [
+    "{} Fragen",
+    "{} questions"
+  ],
+  "Ungeklärt": [
+    "Ungeklärt",
+    "Unresolved"
+  ],
+  "Noch keine archivierten Nachrichten verfügbar.": [
+    "Noch keine archivierten Nachrichten verfügbar.",
+    "No archived messages available yet."
+  ],
+  "Vollständiges Sessionarchiv exportieren …": [
+    "Vollständiges Sessionarchiv exportieren …",
+    "Export full Session archive …"
+  ],
+  "Modell-/Provider-Bereitschaft prüfen …": [
+    "Model-/Provider-Bereitschaft prüfen …",
+    "Check Model / Provider readiness …"
+  ],
+  "Repository-Refs abrufen …": [
+    "Repository-Refs abrufen …",
+    "Fetch repository refs …"
+  ],
+  "Geprüftes Ergebnis veröffentlichen …": [
+    "Geprüftes Ergebnis veröffentlichen …",
+    "Publish reviewed result …"
+  ],
+  "Nichtinteraktiver Runner-Helfer. Transport ausdrücklich wählen; SSH erfordert das lokale Runnerprofil. Journal-/Konfigurationspfade gelten auf dem ausführenden Host. Es wird keine OpenCode-TUI gestartet.": [
+    "Nichtinteraktiver Runner-Helfer. Transport ausdrücklich wählen; SSH erfordert das lokale Runnerprofil. Journal-/Konfigurationspfade gelten auf dem ausführenden Host. Es wird keine OpenCode-TUI gestartet.",
+    "Non-interactive Runner helper. Select transport explicitly; SSH requires a local Runner profile. Journal and configuration paths apply to the execution host. No OpenCode TUI is started."
+  ],
+  "Arbeitsbereich vorbereiten …": [
+    "Workspace vorbereiten …",
+    "Prepare workspace …"
+  ],
+  "OpenCode-Bereitschaft prüfen …": [
+    "OpenCode-Bereitschaft prüfen …",
+    "Check OpenCode readiness …"
+  ],
+  "Neuen technischen Auftrag an den zugeordneten Runner senden. Bestehende Aufträge werden nicht dupliziert.": [
+    "Neuen technischen Auftrag an den zugeordneten Runner senden. Bestehende Aufträge werden nicht dupliziert.",
+    "Send a new technical job to the assigned Runner. Existing jobs are not duplicated."
+  ],
+  "Ungeklärte Container-Steuerung wiederholen …": [
+    "Ungeklärte Container-Steuerung wiederholen …",
+    "Retry unresolved container control …"
+  ],
+  "Container-Steuerung abgleichen": [
+    "Container-Steuerung abgleichen",
+    "Reconcile container control"
+  ],
+  "Nur die bereits bestätigte Containeridentität verwenden. Kein blinder Neustart und kein Umgehen ungeklärter Ausführung.": [
+    "Nur die bereits bestätigte Containeridentität verwenden. Kein blinder Neustart und kein Umgehen ungeklärter Ausführung.",
+    "Use only the confirmed container identity. No blind restart or bypassing unresolved execution."
+  ],
+  "Arbeitsbereich-Metadaten": [
+    "Workspace-Metadaten",
+    "Workspace metadata"
+  ],
+  "Arbeitsbereiche": [
+    "Workspaces",
+    "Workspaces"
+  ],
+  "Arbeitsbereich pausieren …": [
+    "Workspace pausieren …",
+    "Pause workspace …"
+  ],
+  "Arbeitsbereich fortsetzen …": [
+    "Workspace fortsetzen …",
+    "Resume workspace …"
+  ],
+  "Pause und Fortsetzung sind asynchron. Ein unbestätigter Stopp ist kein Nachweis gestoppter Hintergrundprozesse.": [
+    "Pause und Fortsetzung sind asynchron. Ein unbestätigter Stopp ist kein Nachweis gestoppter Hintergrundprozesse.",
+    "Pause and resume are asynchronous. An unconfirmed stop is not proof that background processes have stopped."
+  ],
+  "Session schließen …": [
+    "Session schließen …",
+    "Close Session …"
+  ],
+  "Session schließen": [
+    "Session schließen",
+    "Close Session"
+  ],
+  "Eine geschlossene Session steht nicht mehr für neue Folgeaufgaben zur Verfügung. Vorher laufende Arbeit und Fragen prüfen.": [
+    "Eine geschlossene Session steht nicht mehr für neue Folge-Intents zur Verfügung. Vorher laufende Arbeit und Fragen prüfen.",
+    "A closed Session is no longer available for new follow-up Intents. Check running work and questions first."
+  ],
+  "Compaction anfordern …": [
+    "Compaction anfordern …",
+    "Request compaction …"
+  ],
+  "Session komprimieren": [
+    "Session komprimieren",
+    "Compact Session"
+  ],
+  "Die vorhandene Sessionpflege verwenden; Verlauf bleibt im Factory-Archiv zugänglich.": [
+    "Die vorhandene Sessionpflege verwenden; Verlauf bleibt im Factory-Archiv zugänglich.",
+    "Use existing Session maintenance; history remains accessible in the Factory archive."
+  ],
+  "Checkpoint erstellen …": [
+    "Checkpoint erstellen …",
+    "Create checkpoint …"
+  ],
+  "Checkpoint erstellen": [
+    "Checkpoint erstellen",
+    "Create checkpoint"
+  ],
+  "Der Runner erstellt einen Git-Snapshot nach den vorhandenen Sicherheitsprüfungen.": [
+    "Der Runner erstellt einen Git-Snapshot nach den vorhandenen Sicherheitsprüfungen.",
+    "The Runner creates a Git snapshot after the existing safety checks."
+  ],
+  "Ergebnis-Review …": [
+    "Ergebnis-Review …",
+    "Review result …"
+  ],
+  "Ergebnis prüfen": [
+    "Ergebnis prüfen",
+    "Review result"
+  ],
+  "Checkpoint und erwarteten Zielcommit ausdrücklich auswählen. Der Runner muss Review unterstützen.": [
+    "Checkpoint und erwarteten Zielcommit ausdrücklich auswählen. Der Runner muss Review unterstützen.",
+    "Select checkpoint and expected target commit explicitly. The Runner must support Review."
+  ],
+  "Review integrieren …": [
+    "Review integrieren …",
+    "Integrate Review …"
+  ],
+  "Review integrieren": [
+    "Review integrieren",
+    "Integrate Review"
+  ],
+  "Nur einen erfolgreich geprüften Reviewkandidaten integrieren. Git-CAS schützt vor verändertem Zielstand.": [
+    "Nur einen erfolgreich geprüften Reviewkandidaten integrieren. Git-CAS schützt vor verändertem Zielstand.",
+    "Integrate only a successfully checked Review candidate. Git CAS protects against changes to the target state."
+  ],
+  "Checkpoint an Runner übergeben …": [
+    "Checkpoint an Runner übergeben …",
+    "Hand checkpoint to Runner …"
+  ],
+  "Arbeitsbereich übergeben": [
+    "Workspace übergeben",
+    "Hand over workspace"
+  ],
+  "Checkpoint und Zielrunner prüfen. Ownership wird revisionsgeschützt übertragen; keine unbestätigte laufende Ausführung übergehen.": [
+    "Checkpoint und Zielrunner prüfen. Ownership wird revisionsgeschützt übertragen; keine unbestätigte laufende Ausführung übergehen.",
+    "Check checkpoint and target Runner. Ownership transfer is revision-protected; do not bypass unconfirmed running execution."
+  ],
+  "Supervisor-Einstellungen …": [
+    "Supervisor-Settings …",
+    "Supervisor settings …"
+  ],
+  "Runtime-/Beendigungszustand": [
+    "Runtime-/Beendigungszustand",
+    "Runtime / termination state"
+  ],
+  "Runtime-Beendigung": [
+    "Runtime-Beendigung",
+    "Runtime termination"
+  ],
+  "Runtime-Identität / gezielt beenden …": [
+    "Runtime-Identität / gezielt beenden …",
+    "Runtime identity / terminate …"
+  ],
+  "Bestätigte Runtime-Identität": [
+    "Bestätigte Runtime-Identität",
+    "Confirmed Runtime identity"
+  ],
+  "Archivdateien": [
+    "Archivdateien",
+    "Archived files"
+  ],
+  "Dateiarchiv": [
+    "Dateiarchiv",
+    "File archive"
+  ],
+  "Braucht Antwort": [
+    "Braucht Antwort",
+    "Needs answer"
+  ],
+  "Zustand ungeklärt": [
+    "Zustand ungeklärt",
+    "State uncertain"
+  ],
+  "Unterbrochen": [
+    "Unterbrochen",
+    "Interrupted"
+  ],
+  "Pause noch unbestätigt": [
+    "Pause noch unbestätigt",
+    "Pause not confirmed yet"
+  ],
+  "Beendigung ungeklärt": [
+    "Beendigung ungeklärt",
+    "Termination uncertain"
+  ],
+  "Antwort erforderlich": [
+    "Antwort erforderlich",
+    "Answer required"
+  ],
+  "Antwort abgelehnt · erneut prüfen": [
+    "Antwort abgelehnt · erneut prüfen",
+    "Answer rejected · review again"
+  ],
+  "Wartet auf Wiederholung": [
+    "Wartet auf Wiederholung",
+    "Waiting for retry"
+  ],
+  "Orchestrator wartet": [
+    "Orchestrator wartet",
+    "Orchestrator waiting"
+  ],
+  "Zustellung ungeklärt": [
+    "Zustellung ungeklärt",
+    "Delivery uncertain"
+  ],
+  "Wird gestartet": [
+    "Wird gestartet",
+    "Starting"
+  ],
+  "Ergebnis vorhanden": [
+    "Ergebnis vorhanden",
+    "Result available"
+  ],
+  "Eingereiht": [
+    "Eingereiht",
+    "Queued"
+  ],
+  "Antwort eingereiht": [
+    "Antwort eingereiht",
+    "Answer queued"
+  ],
+  "Wartet auf Runner": [
+    "Wartet auf Runner",
+    "Waiting for Runner"
+  ],
+  "Wartet auf Start": [
+    "Wartet auf Start",
+    "Waiting to start"
+  ],
+  "Wartet auf Session": [
+    "Wartet auf Session",
+    "Waiting for Session"
+  ],
+  "Wird vorbereitet": [
+    "Wird vorbereitet",
+    "Preparing"
+  ],
+  "Orchestrator prüft": [
+    "Orchestrator prüft",
+    "Orchestrator reviewing"
+  ],
+  "{} aktiv · {} warten · {} eingereiht": [
+    "{} aktiv · {} warten · {} eingereiht",
+    "{} active · {} waiting · {} queued"
+  ],
+  "Projekt unbekannt": [
+    "Projekt unbekannt",
+    "Unknown project"
+  ],
+  "\nWeitere Aufträge in der Session- und Runner-Ansicht.": [
+    "\nWeitere Aufträge in der Session- und Runner-Ansicht.",
+    "\nMore jobs in the Session and Runner views."
+  ],
+  "IP unbekannt": [
+    "IP unbekannt",
+    "Unknown IP"
+  ],
+  "Kürzlich aktiv": [
+    "Kürzlich aktiv",
+    "Recently active"
+  ],
+  "Kontakt veraltet": [
+    "Kontakt veraltet",
+    "Contact stale"
+  ],
+  "Kontakt vor {} s": [
+    "Kontakt vor {} s",
+    "Last contact {} s ago"
+  ],
+  "Client: {}\nGerät: {}\nLetzter authentifizierter Kontakt: {}\nKeine dauerhafte Verbindungsgarantie. Clients ohne Präsenzheader sind nicht einzeln erkennbar.": [
+    "Client: {}\nGerät: {}\nLetzter authentifizierter Kontakt: {}\nKeine dauerhafte Verbindungsgarantie. Clients ohne Präsenzheader sind nicht einzeln erkennbar.",
+    "Client: {}\nDevice: {}\nLast authenticated contact: {}\nNo guarantee of a persistent connection. Clients without presence headers cannot be identified individually."
+  ],
+  "Gemeinsamer Serverzugang": [
+    "Gemeinsamer Serverzugang",
+    "Shared server access"
+  ],
+  "Lokal geöffnet": [
+    "Lokal geöffnet",
+    "Open locally"
+  ],
+  "Weitere Clients unbekannt": [
+    "Weitere Clients unbekannt",
+    "Other clients unknown"
+  ],
+  "Dieser Desktop ist lokal geöffnet. Es liegen noch keine bestätigten Client-Beobachtungen vor. Ältere Server/Clients benötigen ein Update für die Client-Präsenz.": [
+    "Dieser Desktop ist lokal geöffnet. Es liegen noch keine bestätigten Client-Beobachtungen vor. Ältere Server/Clients benötigen ein Update für die Client-Präsenz.",
+    "This desktop is open locally. No confirmed client observations yet. Older servers / clients need an update for client presence."
+  ],
+  "{}\nVersion: {}\nBoot: {}\nNur der aktuell verbundene Factory-Server ist bekannt.": [
+    "{}\nVersion: {}\nBoot: {}\nNur der aktuell verbundene Factory-Server ist bekannt.",
+    "{}\nVersion: {}\nBoot: {}\nOnly the currently connected Factory server is known."
+  ],
+  "Stand veraltet": [
+    "Stand veraltet",
+    "State stale"
+  ],
+  "Nicht erreichbar": [
+    "Nicht erreichbar",
+    "Unreachable"
+  ],
+  "Kontakt ungeklärt": [
+    "Kontakt ungeklärt",
+    "Contact uncertain"
+  ],
+  "OpenCode: Stand veraltet": [
+    "OpenCode: Stand veraltet",
+    "OpenCode: stale state"
+  ],
+  "OpenCode: {count} Server bestätigt": [
+    "OpenCode: {count} Server bestätigt",
+    "OpenCode: {count} servers confirmed"
+  ],
+  "OpenCode: bereit": [
+    "OpenCode: bereit",
+    "OpenCode: ready"
+  ],
+  "OpenCode: nicht eingerichtet": [
+    "OpenCode: nicht eingerichtet",
+    "OpenCode: not configured"
+  ],
+  "OpenCode: nicht erreichbar": [
+    "OpenCode: nicht erreichbar",
+    "OpenCode: unreachable"
+  ],
+  "OpenCode: Version nicht unterstützt": [
+    "OpenCode: Version nicht unterstützt",
+    "OpenCode: unsupported version"
+  ],
+  "Runner: {}\nOrt: {:?}\nVersion: {}\nLetzter Kontakt: {}\nOpenCode-Fähigkeit: {:?}\n{}{}\nEine konfigurierte OpenCode-Version ist kein Nachweis einer laufenden Instanz.": [
+    "Runner: {}\nOrt: {:?}\nVersion: {}\nLetzter Kontakt: {}\nOpenCode-Fähigkeit: {:?}\n{}{}\nEine konfigurierte OpenCode-Version ist kein Nachweis einer laufenden Instanz.",
+    "Runner: {}\nLocation: {:?}\nVersion: {}\nLast contact: {}\nOpenCode capability: {:?}\n{}{}\nA configured OpenCode version is not proof of a running instance."
+  ],
+  "Präsenz bestätigt": [
+    "Präsenz bestätigt",
+    "Presence confirmed"
+  ],
+  "Präsenz veraltet": [
+    "Präsenz veraltet",
+    "Presence stale"
+  ],
+  "Instanz: {}\nRunner: {}\nBeobachtet: {}\n{}{}\nPräsenz meldet den Dienst, nicht den Fortschritt einzelner Aufträge.": [
+    "Instanz: {}\nRunner: {}\nBeobachtet: {}\n{}{}\nPräsenz meldet den Dienst, nicht den Fortschritt einzelner Aufträge.",
+    "Instance: {}\nRunner: {}\nObserved: {}\n{}{}\nPresence reports the service, not the progress of individual jobs."
+  ],
+  "Präsenz unbekannt": [
+    "Präsenz unbekannt",
+    "Presence unknown"
+  ],
+  "Keine Instanz bestätigt": [
+    "Keine Instanz bestätigt",
+    "No confirmed instance"
+  ],
+  "Für {} liegt keine Instanzmeldung vor. Das bedeutet nicht zwingend, dass OpenCode nicht läuft.": [
+    "Für {} liegt keine Instanzmeldung vor. Das bedeutet nicht zwingend, dass OpenCode nicht läuft.",
+    "No instance report for {}. This does not necessarily mean OpenCode is not running."
+  ],
+  "Runner unbekannt": [
+    "Runner unbekannt",
+    "Unknown Runner"
+  ],
+  "Zuordnung ungeklärt": [
+    "Zuordnung ungeklärt",
+    "Assignment uncertain"
+  ],
+  "Instanz: {}\nRunner: {}\nBeobachtet: {}": [
+    "Instanz: {}\nRunner: {}\nBeobachtet: {}",
+    "Instance: {}\nRunner: {}\nObserved: {}"
+  ],
+  "OpenCode-Instanzen": [
+    "OpenCode-Instanzen",
+    "OpenCode instances"
+  ],
+  "Lokalen Runner starten": [
+    "Lokalen Runner starten",
+    "Start local Runner"
+  ],
+  "Einen zusätzlichen Runner auf diesem Rechner starten und an die verbundene Factory hängen (Admin-Zugang erforderlich).": [
+    "Einen zusätzlichen Runner auf diesem Rechner starten und an die verbundene Factory hängen (Admin-Zugang erforderlich).",
+    "Start an additional Runner on this computer and connect it to the Factory (admin access required)."
+  ],
+  "OpenCode: nicht bestätigt": [
+    "OpenCode: nicht bestätigt",
+    "OpenCode: unconfirmed"
+  ],
+  "Entfernen ausstehend": [
+    "Entfernen ausstehend",
+    "Removal pending"
+  ],
+  "Nicht bestätigt": [
+    "Nicht bestätigt",
+    "Unconfirmed"
+  ],
+  "Lokal gespeichert": [
+    "Lokal gespeichert",
+    "Saved locally"
+  ],
+  "Von dieser GUI verwalteter lokaler Runner. Noch kein aktueller Kontakt bestätigt.": [
+    "Von dieser GUI verwalteter lokaler Runner. Noch kein aktueller Kontakt bestätigt.",
+    "Local Runner managed by this GUI. No current contact confirmed yet."
+  ],
+  "Keine Runner oder Instanzen in diesem Bereich gemeldet.": [
+    "Keine Runner oder Instanzen in diesem Bereich gemeldet.",
+    "No Runners or instances reported in this area."
+  ],
+  "Verzeichnis fehlt": [
+    "Verzeichnis fehlt",
+    "Directory missing"
+  ],
+  "Lokale Runner werden bereits von einer anderen GUI verwaltet": [
+    "Lokale Runner werden bereits von einer anderen GUI verwaltet",
+    "Local Runners are already managed by another GUI"
+  ],
+  "Prozessidentität ist unvollständig": [
+    "Prozessidentität ist unvollständig",
+    "Process identity is incomplete"
+  ],
+  "factory-runner fehlt neben der GUI": [
+    "factory-runner fehlt neben der GUI",
+    "factory-runner missing next to GUI"
+  ],
+  "Mehrere Prozesse für denselben lokalen Runner gefunden; keine Prozesse verändert": [
+    "Mehrere Prozesse für denselben lokalen Runner gefunden; keine Prozesse verändert",
+    "Multiple processes found for the same local Runner; no processes modified"
+  ],
+  "Gespeicherter Runner-Zugang fehlt": [
+    "Gespeicherter Runner-Zugang fehlt",
+    "Saved Runner credentials missing"
+  ],
+  "Runner hat laufende oder ungeklärte Aufträge; automatische OpenCode-Einrichtung wartet bis zum nächsten Verbinden.": [
+    "Runner hat laufende oder ungeklärte Aufträge; automatische OpenCode-Einrichtung wartet bis zum nächsten Verbinden.",
+    "Runner has running or unresolved jobs; automatic OpenCode setup waits until the next connection."
+  ],
+  "Runner läuft, aber die Factory hat die Anmeldung noch nicht bestätigt. Runner bleibt gespeichert.": [
+    "Runner läuft, aber die Factory hat die Anmeldung noch nicht bestätigt. Runner bleibt gespeichert.",
+    "Runner is running, but the Factory has not confirmed registration yet. Runner remains saved."
+  ],
+  "{name} wurde beim Start beendet.\nProtokoll: {}\n\n{}": [
+    "{name} wurde beim Start beendet.\nProtokoll: {}\n\n{}",
+    "{name} exited during startup.\nLog: {}\n\n{}"
+  ],
+  "{name} wurde beim Start beendet. Protokoll: {}": [
+    "{name} wurde beim Start beendet. Protokoll: {}",
+    "{name} exited during startup. Log: {}"
+  ],
+  "Prozessidentität hat sich geändert; kein Prozess beendet": [
+    "Prozessidentität hat sich geändert; kein Prozess beendet",
+    "Process identity changed; no process stopped"
+  ],
+  "Runner beendet sich noch nicht; keine erzwungene Beendigung. Erneut entfernen versuchen.": [
+    "Runner beendet sich noch nicht; keine erzwungene Beendigung. Erneut entfernen versuchen.",
+    "Runner has not exited yet; no forced termination. Try removing it again."
+  ],
+  "Runner hat laufende oder ungeklärte Aufträge. Diese zuerst abschließen.": [
+    "Runner hat laufende oder ungeklärte Aufträge. Diese zuerst abschließen.",
+    "Runner has running or unresolved jobs. Complete them first."
+  ],
+  "Lokaler Runner {}": [
+    "Lokaler Runner {}",
+    "Local Runner {}"
+  ],
+  "Lokaler Runner gestartet.": [
+    "Lokaler Runner gestartet.",
+    "Local Runner started."
+  ],
+  "Dieser Runner wird nicht von der GUI verwaltet": [
+    "Dieser Runner wird nicht von der GUI verwaltet",
+    "This Runner is not managed by the GUI"
+  ],
+  "Lokaler Runner entfernt. Lokale Arbeitsdaten bleiben erhalten.": [
+    "Lokaler Runner entfernt. Lokale Arbeitsdaten bleiben erhalten.",
+    "Local Runner removed. Local working data is preserved."
+  ],
+  "Lokaler Desktop-Runner": [
+    "Lokaler Desktop-Runner",
+    "Local desktop Runner"
+  ],
+  "Entfernen des lokalen Runners zuerst abschließen": [
+    "Entfernen des lokalen Runners zuerst abschließen",
+    "Complete local Runner removal first"
+  ],
+  "Lokaler Test-Runner": [
+    "Lokaler Test-Runner",
+    "Local test Runner"
+  ],
+  "Aufgaben": [
+    "Intents",
+    "Intents"
+  ],
+  "Fragen": [
+    "Fragen",
+    "Questions"
+  ],
+  "Benachrichtigungen": [
+    "Benachrichtigungen",
+    "Notifications"
+  ],
+  "Einstellungen": [
+    "Settings",
+    "Settings"
+  ],
+  "Zur Aufgabe": [
+    "Zur Intent",
+    "Go to Intent"
+  ],
+  "Zur Rückfrage": [
+    "Zur Rückfrage",
+    "Go to question"
+  ],
+  "Zur Session": [
+    "Zur Session",
+    "Go to Session"
+  ],
+  "Zur Diagnose": [
+    "Zur Diagnose",
+    "Go to Diagnostics"
+  ],
+  "Zum Orchestrator": [
+    "Zum Orchestrator",
+    "Go to Orchestrator"
+  ],
+  "Projekt pausiert": [
+    "Projekt pausiert",
+    "Project paused"
+  ],
+  "Verteilung pausiert": [
+    "Verteilung pausiert",
+    "Routing paused"
+  ],
+  "Orchestrator wird vorbereitet": [
+    "Orchestrator wird vorbereitet",
+    "Preparing Orchestrator"
+  ],
+  "Orchestrator entscheidet": [
+    "Orchestrator entscheidet",
+    "Orchestrator deciding"
+  ],
+  "Orchestrator-Vorbereitung fehlgeschlagen": [
+    "Orchestrator-Vorbereitung fehlgeschlagen",
+    "Orchestrator preparation failed"
+  ],
+  "Orchestrator: Lauf fehlgeschlagen": [
+    "Orchestrator: Lauf fehlgeschlagen",
+    "Orchestrator: run failed"
+  ],
+  "Orchestrator-Vorbereitung wurde abgebrochen": [
+    "Orchestrator-Vorbereitung wurde abgebrochen",
+    "Orchestrator preparation canceled"
+  ],
+  "Orchestrator kann noch nicht starten": [
+    "Orchestrator kann noch nicht starten",
+    "Orchestrator cannot start yet"
+  ],
+  "Orchestrator wartet: Im Ausführungsprofil fehlt ein Modell": [
+    "Orchestrator wartet: Im Ausführungsprofil fehlt ein Model",
+    "Orchestrator waiting: execution profile has no Model"
+  ],
+  "Orchestrierungs-Tokenbudget blockiert": [
+    "Orchestrierungs-Tokenbudget blockiert",
+    "Orchestration token budget blocked"
+  ],
+  "Orchestrator wartet:": [
+    "Orchestrator wartet:",
+    "Orchestrator waiting:"
+  ],
+  "Wartet auf erfolgreichen Abschluss": [
+    "Wartet auf erfolgreichen Abschluss",
+    "Waiting for successful completion"
+  ],
+  "Session wartet": [
+    "Session wartet",
+    "Session waiting"
+  ],
+  "Fortsetzung wartet": [
+    "Fortsetzung wartet",
+    "Resume pending"
+  ],
+  "Orchestrator: vorhandene Session": [
+    "Orchestrator: vorhandene Session",
+    "Orchestrator: existing Session"
+  ],
+  "Session geschlossen": [
+    "Session geschlossen",
+    "Session closed"
+  ],
+  "Runtime beendet": [
+    "Runtime beendet",
+    "Runtime terminated"
+  ],
+  "Beendigung angefordert": [
+    "Beendigung angefordert",
+    "Termination requested"
+  ],
+  "Fortsetzung angefordert": [
+    "Fortsetzung angefordert",
+    "Resume requested"
+  ],
+  "Orchestrator-Vorbereitung": [
+    "Orchestrator-Vorbereitung",
+    "Orchestrator preparation"
+  ],
+  "Supervisor-Auswertung": [
+    "Supervisor-Auswertung",
+    "Supervisor evaluation"
+  ],
+  "Orchestrator-Auswertung": [
+    "Orchestrator-Auswertung",
+    "Orchestrator evaluation"
+  ],
+  "Orchestrator-Rückfragenauswertung": [
+    "Orchestrator-Rückfragenauswertung",
+    "Orchestrator question evaluation"
+  ],
+  "Memorizer-Wissensauswertung": [
+    "Memorizer-Wissensauswertung",
+    "Memorizer knowledge evaluation"
+  ],
+  "Archiviert": [
+    "Archiviert",
+    "Archived"
+  ],
+  "MCP-Einstellungen gespeichert.": [
+    "MCP-Settings gespeichert.",
+    "MCP settings saved."
+  ],
+  "MCP-Einstellungen konnten nicht gespeichert werden. Der Entwurf bleibt erhalten.": [
+    "MCP-Settings konnten nicht gespeichert werden. Der Entwurf bleibt erhalten.",
+    "Could not save MCP settings. The draft is preserved."
+  ],
+  "MCP-Einstellungen konnten nicht geladen werden.": [
+    "MCP-Settings konnten nicht geladen werden.",
+    "Could not load MCP settings."
+  ],
+  "MCP-Einstellungen werden geladen …": [
+    "MCP-Settings werden geladen …",
+    "Loading MCP settings …"
+  ],
+  "MCP gelöscht.": [
+    "MCP gelöscht.",
+    "MCP deleted."
+  ],
+  "MCP konnte nicht gelöscht werden.": [
+    "MCP konnte nicht gelöscht werden.",
+    "Could not delete MCP."
+  ],
+  "MCPs hinzufügen": [
+    "MCPs hinzufügen",
+    "Add MCPs"
+  ],
+  "MCP hinzufügen": [
+    "MCP hinzufügen",
+    "Add MCP"
+  ],
+  "Vorhandene MCPs": [
+    "Vorhandene MCPs",
+    "Existing MCPs"
+  ],
+  "Noch keine MCPs vorhanden.": [
+    "Noch keine MCPs vorhanden.",
+    "No MCPs yet."
+  ],
+  "Lokal": [
+    "Lokal",
+    "Local"
+  ],
+  "MCP bearbeiten": [
+    "MCP bearbeiten",
+    "Edit MCP"
+  ],
+  "MCP löschen": [
+    "MCP löschen",
+    "Delete MCP"
+  ],
+  "„{name}“ aus dem Factory-Katalog löschen?": [
+    "„{name}“ aus dem Factory-Katalog löschen?",
+    "Delete “{name}” from the Factory catalog?"
+  ],
+  "Ist der MCP in einem Projekt freigegeben, muss die Freigabe zuerst entfernt werden.": [
+    "Ist der MCP in einem Projekt freigegeben, muss die Freigabe zuerst entfernt werden.",
+    "If the MCP is enabled for a project, remove that permission first."
+  ],
+  "Löschen": [
+    "Löschen",
+    "Delete"
+  ],
+  "Typ": [
+    "Typ",
+    "Type"
+  ],
+  "Das MCP-Programm fehlt auf dem Runner oder ist nicht ausführbar.": [
+    "Das MCP-Programm fehlt auf dem Runner oder ist nicht ausführbar.",
+    "The MCP program is missing on the Runner or is not executable."
+  ],
+  "Der lokale MCP hat nicht erfolgreich geantwortet.": [
+    "Der lokale MCP hat nicht erfolgreich geantwortet.",
+    "The local MCP did not respond successfully."
+  ],
+  "Der lokale MCP-Test konnte nicht abgeschlossen werden.": [
+    "Der lokale MCP-Test konnte nicht abgeschlossen werden.",
+    "The local MCP test could not be completed."
+  ],
+  "Verbindung wird auf dem Runner getestet …": [
+    "Verbindung wird auf dem Runner getestet …",
+    "Testing connection on the Runner …"
+  ],
+  "Runner wählen": [
+    "Runner wählen",
+    "Select Runner"
+  ],
+  "Gespeicherte Verbindung testen": [
+    "Gespeicherte Verbindung testen",
+    "Test saved connection"
+  ],
+  "MCP speichern und einen unterstützten Runner zuordnen.": [
+    "MCP speichern und einen unterstützten Runner zuordnen.",
+    "Save the MCP and assign a supported Runner."
+  ],
+  "Absoluter Programmpfad auf dem Runner": [
+    "Absoluter Programmpfad auf dem Runner",
+    "Absolute program path on the Runner"
+  ],
+  "Argument entfernen": [
+    "Argument entfernen",
+    "Remove argument"
+  ],
+  "Argument hinzufügen": [
+    "Argument hinzufügen",
+    "Add argument"
+  ],
+  "Zugeordnete Runner": [
+    "Zugeordnete Runner",
+    "Assigned Runners"
+  ],
+  "Factory-MCPs freigeben": [
+    "Factory-MCPs freigeben",
+    "Enable Factory MCPs"
+  ],
+  "Nur Factory-Admins können Freigaben ändern.": [
+    "Nur Factory-Admins können Freigaben ändern.",
+    "Only Factory admins can change permissions."
+  ],
+  "In den Factory-Einstellungen sind noch keine MCPs eingetragen.": [
+    "In den Factory-Settings sind noch keine MCPs eingetragen.",
+    "No MCPs configured in Factory settings yet."
+  ],
+  "{id} · nicht im Factory-Katalog": [
+    "{id} · nicht im Factory-Katalog",
+    "{id} · not in Factory catalog"
+  ],
+  "Maximal acht MCPs pro Projekt.": [
+    "Maximal acht MCPs pro Projekt.",
+    "Maximum eight MCPs per project."
+  ],
+  "Für dieses Projekt sind keine MCPs freigegeben.": [
+    "Für dieses Projekt sind keine MCPs freigegeben.",
+    "No MCPs enabled for this project."
+  ],
+  "{} · erforderlich": [
+    "{} · erforderlich",
+    "{} · required"
+  ],
+  "Vom Projekt vorgeschrieben": [
+    "Vom Projekt vorgeschrieben",
+    "Required by project"
+  ],
+  "{stale} · nicht mehr freigegeben": [
+    "{stale} · nicht mehr freigegeben",
+    "{stale} · no longer enabled"
+  ],
+  "MCPs werden geladen …": [
+    "MCPs werden geladen …",
+    "Loading MCPs …"
+  ],
+  "Nicht geprüft": [
+    "Nicht geprüft",
+    "Not tested"
+  ],
+  "OAuth-Anmeldung gespeichert. Verbindung kann jetzt getestet werden.": [
+    "OAuth-Anmeldung gespeichert. Verbindung kann jetzt getestet werden.",
+    "OAuth sign-in saved. The connection can now be tested."
+  ],
+  "OAuth-Anmeldung abgeschlossen, aber der MCP-Eintrag wurde geändert.": [
+    "OAuth-Anmeldung abgeschlossen, aber der MCP-Eintrag wurde geändert.",
+    "OAuth sign-in completed, but the MCP entry has changed."
+  ],
+  "Remote-MCP gespeichert.": [
+    "Remote-MCP gespeichert.",
+    "Remote MCP saved."
+  ],
+  "Remote-MCP konnte nicht gespeichert werden. Bei unklarer Zustellung zuerst neu laden.": [
+    "Remote-MCP konnte nicht gespeichert werden. Bei unklarer Zustellung zuerst neu laden.",
+    "Could not save remote MCP. Reload first if delivery is uncertain."
+  ],
+  "HTTPS-Endpunkt": [
+    "HTTPS-Endpunkt",
+    "HTTPS endpoint"
+  ],
+  "Authentifizierung prüfen": [
+    "Authentifizierung prüfen",
+    "Check authentication"
+  ],
+  "Verbindung erfolgreich": [
+    "Verbindung erfolgreich",
+    "Connection successful"
+  ],
+  "Verbindung fehlgeschlagen": [
+    "Verbindung fehlgeschlagen",
+    "Connection failed"
+  ],
+  "Anmeldung im Browser abschließen …": [
+    "Anmeldung im Browser abschließen …",
+    "Complete sign-in in browser …"
+  ],
+  "Warten beenden": [
+    "Warten beenden",
+    "Stop waiting"
+  ],
+  "Keine": [
+    "Keine",
+    "None"
+  ],
+  "Bearer-Token": [
+    "Bearer-Token",
+    "Bearer token"
+  ],
+  "API-Key-Header": [
+    "API-Key-Header",
+    "API key header"
+  ],
+  "Authentifizierung": [
+    "Authentifizierung",
+    "Authentication"
+  ],
+  "Bitte auswählen": [
+    "Bitte auswählen",
+    "Please select"
+  ],
+  "Header-Name": [
+    "Header-Name",
+    "Header name"
+  ],
+  "Schlüssel hinterlegt · neuen Wert zum Ersetzen eingeben": [
+    "Schlüssel hinterlegt · neuen Wert zum Ersetzen eingeben",
+    "Key saved · enter a new value to replace"
+  ],
+  "Schlüssel": [
+    "Schlüssel",
+    "Key"
+  ],
+  "Blockiert / fehlgeschlagen": [
+    "Blockiert / fehlgeschlagen",
+    "Blocked / failed"
+  ],
+  "Eingang": [
+    "Eingang",
+    "Inbox"
+  ],
+  "Entwürfe & neue Aufgaben": [
+    "Entwürfe & neue Intents",
+    "Drafts & new Intents"
+  ],
+  "Orchestrierung & Start": [
+    "Orchestrierung & Start",
+    "Orchestration & start"
+  ],
+  "Ergebnis": [
+    "Ergebnis",
+    "Result"
+  ],
+  "Erfolg bleibt 2 Minuten": [
+    "Erfolg bleibt 2 Minuten",
+    "Success stays for 2 minutes"
+  ],
+  "Zuordnung unbekannt": [
+    "Zuordnung unbekannt",
+    "Assignment unknown"
+  ],
+  "Keine bestätigte Session": [
+    "Keine bestätigte Session",
+    "No confirmed Session"
+  ],
+  "Unbekannter Runner": [
+    "Unbekannter Runner",
+    "Unknown Runner"
+  ],
+  "Ausführung": [
+    "Ausführung",
+    "Execution"
+  ],
+  "Noch keine Aufgaben zugewiesen": [
+    "Noch keine Intents zugewiesen",
+    "No Intents assigned yet"
+  ],
+  "Lichtimpulse, Heartbeat und Kartenbewegungen ein-/ausschalten": [
+    "Lichtimpulse, Heartbeat und Kartenbewegungen ein-/ausschalten",
+    "Toggle light pulses, heartbeat and card movement"
+  ],
+  "Nur aktuelles Projekt": [
+    "Nur aktuelles Projekt",
+    "Current project only"
+  ],
+  "Noch kein Factory-Stand empfangen. Nach dem Verbinden erscheint hier der Aufgabenfluss.": [
+    "Noch kein Factory-Stand empfangen. Nach dem Verbinden erscheint hier der Intent-Flow.",
+    "No Factory state received yet. The Intent flow appears here after connecting."
+  ],
+  "Projekt: {}": [
+    "Projekt: {}",
+    "Project: {}"
+  ],
+  "{}\n{}\nSession öffnen": [
+    "{}\n{}\nSession öffnen",
+    "{}\n{}\nOpen Session"
+  ],
+  "Session öffnen": [
+    "Session öffnen",
+    "Open Session"
+  ],
+  "Weniger anzeigen": [
+    "Weniger anzeigen",
+    "Show less"
+  ],
+  "{} weitere Aufgaben": [
+    "{} weitere Intents",
+    "{} more Intents"
+  ],
+  "Aufgabenstapel zuklappen": [
+    "Intent-Stapel zuklappen",
+    "Collapse Intent stack"
+  ],
+  "Aufgabenstapel aufklappen": [
+    "Intent-Stapel aufklappen",
+    "Expand Intent stack"
+  ],
+  "Aufgabe öffnen · Session über den Stationskopf": [
+    "Intent öffnen · Session über den Stationskopf",
+    "Open Intent · open Session via station header"
+  ],
+  "Nicht gesendet: lokales Anfragejournal konnte nicht gespeichert werden.": [
+    "Nicht gesendet: lokales Anfragejournal konnte nicht gespeichert werden.",
+    "Not sent: could not save local request journal."
+  ],
+  "Lokales Speichern fehlgeschlagen. Entwurf vor dem Beenden sichern.": [
+    "Lokales Speichern fehlgeschlagen. Entwurf vor dem Beenden sichern.",
+    "Local save failed. Back up the draft before exiting."
+  ],
+  "Bilder und Dateien anhängen": [
+    "Bilder und Dateien anhängen",
+    "Attach images and files"
+  ],
+  "Ungültiger Screenshot": [
+    "Ungültiger Screenshot",
+    "Invalid screenshot"
+  ],
+  "Zieldatei existiert bereits": [
+    "Zieldatei existiert bereits",
+    "Target file already exists"
+  ],
+  "Archivcursor rückläufig": [
+    "Archivcursor rückläufig",
+    "Archive cursor moved backwards"
+  ],
+  "Inline-Datei zu groß": [
+    "Inline-Datei zu groß",
+    "Inline file too large"
+  ],
+  "Desktop-Benachrichtigungen nicht verfügbar; alle Meldungen bleiben in der App.": [
+    "Desktop-Benachrichtigungen nicht verfügbar; alle Meldungen bleiben in der App.",
+    "Desktop notifications unavailable; all notifications remain in the app."
+  ],
+  "Dieser Server unterstützt die Desktop-API noch nicht (/v1/desktop/snapshot fehlt). Wahrscheinlich läuft eine ältere factoryd-Version oder die Serveradresse ist falsch. Ein fehlendes Projekt ist nicht die Ursache. Server aktualisieren und neu starten oder über „Verbindung …“ eine separate lokale Factory starten. Neu bauen allein aktualisiert laufende Prozesse nicht.": [
+    "Dieser Server unterstützt die Desktop-API noch nicht (/v1/desktop/snapshot fehlt). Wahrscheinlich läuft eine ältere factoryd-Version oder die Serveradresse ist falsch. Ein fehlendes Projekt ist nicht die Ursache. Server aktualisieren und neu starten oder über „Verbindung …“ eine separate lokale Factory starten. Neu bauen allein aktualisiert laufende Prozesse nicht.",
+    "This server does not support the desktop API yet (/v1/desktop/snapshot missing). An older factoryd version may be running or the server address may be wrong. A missing project is not the cause. Update and restart the server, or start a separate local Factory using “Connection …”. Rebuilding alone does not update running processes."
+  ],
+  "Zugang zum Server abgelehnt. Unter „Verbindung …“ Serveradresse und Zugangstoken prüfen; ein Projekt muss dafür noch nicht eingerichtet sein.": [
+    "Zugang zum Server abgelehnt. Unter „Verbindung …“ Serveradresse und Zugangstoken prüfen; ein Projekt muss dafür noch nicht eingerichtet sein.",
+    "Server access denied. Check server address and access token under “Connection …”; no project needs to be configured yet."
+  ],
+  "Server nicht erreichbar. Unter „Verbindung …“ einen vorhandenen Server wählen oder eine lokale Factory starten. Die Verbindung wird automatisch erneut geprüft.": [
+    "Server nicht erreichbar. Unter „Verbindung …“ einen vorhandenen Server wählen oder eine lokale Factory starten. Die Verbindung wird automatisch erneut geprüft.",
+    "Server unreachable. Select an existing server or start a local Factory under “Connection …”. The connection is checked again automatically."
+  ],
+  "Ein fehlendes Projekt ist nicht die Ursache": [
+    "Ein fehlendes Projekt ist nicht die Ursache",
+    "A missing project is not the cause"
+  ],
+  "Neu bauen allein": [
+    "Neu bauen allein",
+    "Rebuilding alone"
+  ],
+  "aktuelle Revision": [
+    "aktuelle Revision",
+    "current revision"
+  ],
+  "Die Anfrage zur ChatGPT-Anmeldung konnte nicht abgeschlossen werden.": [
+    "Die Anfrage zur ChatGPT-Anmeldung konnte nicht abgeschlossen werden.",
+    "Could not complete the ChatGPT sign-in request."
+  ],
+  "Bearbeitungsreservierung nicht verfügbar. Aktuellen Serverstand prüfen; bei einem älteren Server factoryd aktualisieren und neu starten (Schema 33). Ohne bestätigte Reservierung wird die Aufgabe nicht zum Bearbeiten geöffnet.": [
+    "Bearbeitungsreservierung nicht verfügbar. Aktuellen Serverstand prüfen; bei einem älteren Server factoryd aktualisieren und neu starten (Schema 33). Ohne bestätigte Reservierung wird der Intent nicht zum Bearbeiten geöffnet.",
+    "Editing reservation unavailable. Check the current server state; for an older server, update and restart factoryd (schema 33). The Intent will not open for editing without a confirmed reservation."
+  ],
+  "Das Bild in der Zwischenablage konnte nicht gelesen werden.": [
+    "Das Bild in der Zwischenablage konnte nicht gelesen werden.",
+    "Could not read the image from the clipboard."
+  ],
+  "Bildgröße ungültig (maximal 8192 × 8192).": [
+    "Bildgröße ungültig (maximal 8192 × 8192).",
+    "Invalid image size (maximum 8192 × 8192)."
+  ],
+  "Zwischenablage.png": [
+    "Zwischenablage.png",
+    "Clipboard.png"
+  ],
+  "Ungültiger Dateiname": [
+    "Ungültiger Dateiname",
+    "Invalid file name"
+  ],
+  "Runner-ID fehlt": [
+    "Runner-ID fehlt",
+    "Runner ID missing"
+  ],
+  "Unbekannte lokale Operation": [
+    "Unbekannte lokale Operation",
+    "Unknown local operation"
+  ],
+  "Operation fehlt": [
+    "Operation fehlt",
+    "Operation missing"
+  ],
+  "Nicht unterstützte Runner-Operation": [
+    "Nicht unterstützte Runner-Operation",
+    "Unsupported Runner operation"
+  ],
+  "Kein SSH-Profil vorhanden; zuerst in der Runneransicht konfigurieren. Kein lokaler Fallback.": [
+    "Kein SSH-Profil vorhanden; zuerst in der Runneransicht konfigurieren. Kein lokaler Fallback.",
+    "No SSH profile available; configure it in the Runner view first. No local fallback."
+  ],
+  "Für diesen Runner existiert ein SSH-Profil. Transport ausdrücklich auf SSH stellen oder Profil entfernen.": [
+    "Für diesen Runner existiert ein SSH-Profil. Transport ausdrücklich auf SSH stellen oder Profil entfernen.",
+    "An SSH profile exists for this Runner. Select SSH transport explicitly or remove the profile."
+  ],
+  "Absoluten Runner-Journalpfad angeben": [
+    "Absoluten Runner-Journalpfad angeben",
+    "Specify an absolute Runner journal path"
+  ],
+  "Runner-Helfer ohne Bestätigung abgebrochen; Ausgang vor Wiederholung prüfen": [
+    "Runner-Helfer ohne Bestätigung abgebrochen; Ausgang vor Wiederholung prüfen",
+    "Runner helper canceled without confirmation; check the outcome before retrying"
+  ],
+  "Skill-Freigaben konnten nicht geladen werden.": [
+    "Skill-Freigaben konnten nicht geladen werden.",
+    "Could not load Skill permissions."
+  ],
+  "Skill-Freigaben werden geladen …": [
+    "Skill-Freigaben werden geladen …",
+    "Loading Skill permissions …"
+  ],
+  "Factory-Skills freigeben": [
+    "Factory-Skills freigeben",
+    "Enable Factory Skills"
+  ],
+  "Noch keine zentralen Skills vorhanden. Skills werden in den Factory-Einstellungen importiert.": [
+    "Noch keine zentralen Skills vorhanden. Skills werden in den Factory-Settings importiert.",
+    "No central Skills yet. Import Skills in Factory settings."
+  ],
+  "Maximal acht Factory-Skills pro Projekt.": [
+    "Maximal acht Factory-Skills pro Projekt.",
+    "Maximum eight Factory Skills per project."
+  ],
+  "Repository-Skills freigeben": [
+    "Repository-Skills freigeben",
+    "Enable repository Skills"
+  ],
+  "Repository-Skills werden gesucht …": [
+    "Repository-Skills werden gesucht …",
+    "Searching repository Skills …"
+  ],
+  "Das Repository kann auf diesem Desktop nicht geprüft werden.": [
+    "Das Repository kann auf diesem Desktop nicht geprüft werden.",
+    "The repository cannot be checked on this desktop."
+  ],
+  "Keine Repository-Skills im Basisbranch gefunden.": [
+    "Keine Repository-Skills im Basisbranch gefunden.",
+    "No repository Skills found in the base branch."
+  ],
+  "{skill} · nicht gefunden": [
+    "{skill} · nicht gefunden",
+    "{skill} · not found"
+  ],
+  "Maximal 32 Repository-Skills pro Projekt.": [
+    "Maximal 32 Repository-Skills pro Projekt.",
+    "Maximum 32 repository Skills per project."
+  ],
+  "YoloForge: SDL3-Fensterbackend {}": [
+    "YoloForge: SDL3-Fensterbackend {}",
+    "YoloForge: SDL3 window backend {}"
+  ],
+  "SDL3-Fenster konnte nicht erstellt werden": [
+    "SDL3-Fenster konnte nicht erstellt werden",
+    "Could not create SDL3 window"
+  ],
+  "Kein Bild in der Zwischenablage (PNG, JPEG, WebP oder GIF).": [
+    "Kein Bild in der Zwischenablage (PNG, JPEG, WebP oder GIF).",
+    "No image in clipboard (PNG, JPEG, WebP or GIF)."
+  ],
+  "Text konnte nicht kopiert werden: {error}": [
+    "Text konnte nicht kopiert werden: {error}",
+    "Could not copy text: {error}"
+  ],
+  "Der Browser konnte nicht geöffnet werden.": [
+    "Der Browser konnte nicht geöffnet werden.",
+    "Could not open the browser."
+  ],
+  "Der markierte Text enthält ein nicht unterstütztes Nullzeichen.": [
+    "Der markierte Text enthält ein nicht unterstütztes Nullzeichen.",
+    "The selected text contains an unsupported null character."
+  ],
+  "Zwischenablage.jpg": [
+    "Zwischenablage.jpg",
+    "Clipboard.jpg"
+  ],
+  "Zwischenablage.webp": [
+    "Zwischenablage.webp",
+    "Clipboard.webp"
+  ],
+  "Zwischenablage.gif": [
+    "Zwischenablage.gif",
+    "Clipboard.gif"
+  ],
+  "Das Bild konnte nicht aus der Zwischenablage gelesen werden.": [
+    "Das Bild konnte nicht aus der Zwischenablage gelesen werden.",
+    "Could not read the image from the clipboard."
+  ],
+  "Das Bild in der Zwischenablage ist leer.": [
+    "Das Bild in der Zwischenablage ist leer.",
+    "The image in the clipboard is empty."
+  ],
+  "Das Bild in der Zwischenablage ist größer als 4 MiB.": [
+    "Das Bild in der Zwischenablage ist größer als 4 MiB.",
+    "The image in the clipboard is larger than 4 MiB."
+  ],
+  "Factory-Skills konnten nicht geladen werden.": [
+    "Factory-Skills konnten nicht geladen werden.",
+    "Could not load Factory Skills."
+  ],
+  "Factory-Skills werden geladen …": [
+    "Factory-Skills werden geladen …",
+    "Loading Factory Skills …"
+  ],
+  "Factory-Skills erneut laden": [
+    "Factory-Skills erneut laden",
+    "Reload Factory Skills"
+  ],
+  "Skill importiert.": [
+    "Skill importiert.",
+    "Skill imported."
+  ],
+  "Skill konnte nicht importiert werden. Der Entwurf bleibt erhalten.": [
+    "Skill konnte nicht importiert werden. Der Entwurf bleibt erhalten.",
+    "Could not import Skill. The draft is preserved."
+  ],
+  "Der Name in der SKILL.md passt nicht zum ausgewählten Skill.": [
+    "Der Name in der SKILL.md passt nicht zum ausgewählten Skill.",
+    "The name in SKILL.md does not match the selected Skill."
+  ],
+  "Die SKILL.md braucht einen gültigen Namen und eine Beschreibung im YAML-Kopf.": [
+    "Die SKILL.md braucht einen gültigen Namen und eine Beschreibung im YAML-Kopf.",
+    "SKILL.md requires a valid name and description in the YAML header."
+  ],
+  "Skill-Dateien konnten nicht gelesen werden. Erlaubt sind SKILL.md und bis zu 64 UTF-8-Dateien ohne Symlinks, zusammen höchstens 256 KiB.": [
+    "Skill-Dateien konnten nicht gelesen werden. Erlaubt sind SKILL.md und bis zu 64 UTF-8-Dateien ohne Symlinks, zusammen höchstens 256 KiB.",
+    "Could not read Skill files. SKILL.md and up to 64 UTF-8 files without symlinks are allowed, up to 256 KiB in total."
+  ],
+  "Skills importieren": [
+    "Skills importieren",
+    "Import Skills"
+  ],
+  "Skill importieren": [
+    "Skill importieren",
+    "Import Skill"
+  ],
+  "Vorhandene Skills": [
+    "Vorhandene Skills",
+    "Existing Skills"
+  ],
+  "Noch keine Factory-Skills vorhanden.": [
+    "Noch keine Factory-Skills vorhanden.",
+    "No Factory Skills yet."
+  ],
+  "Neue Skill-Version importieren": [
+    "Neue Skill-Version importieren",
+    "Import new Skill version"
+  ],
+  "SKILL.md auswählen …": [
+    "SKILL.md auswählen …",
+    "Select SKILL.md …"
+  ],
+  "Skill-Ordner auswählen …": [
+    "Skill-Ordner auswählen …",
+    "Select Skill folder …"
+  ],
+  "Als neue Version v{} importieren": [
+    "Als neue Version v{} importieren",
+    "Import as new version v{}"
+  ],
+  "Unerwartete Antwort der Factory.": [
+    "Unerwartete Antwort der Factory.",
+    "Unexpected response from the Factory."
+  ],
+  "OpenAI Arbeit": [
+    "OpenAI Arbeit",
+    "OpenAI Work"
+  ],
+  "OpenAI-Zugang benennen": [
+    "OpenAI-Zugang benennen",
+    "Name OpenAI access"
+  ],
+  "z. B. OpenAI Arbeit": [
+    "z. B. OpenAI Arbeit",
+    "e.g. OpenAI Work"
+  ],
+  "Dieser Name ist bereits vergeben.": [
+    "Dieser Name ist bereits vergeben.",
+    "This name is already in use."
+  ],
+  "Weiter zur Anmeldung": [
+    "Weiter zur Anmeldung",
+    "Continue to sign-in"
+  ],
+  "Diese Factory wurde ohne zentralen Modell-Gateway gestartet.": [
+    "Diese Factory wurde ohne zentralen Model-Gateway gestartet.",
+    "This Factory was started without a central Model gateway."
+  ],
+  "Verbindung und OpenCode-Einrichtung werden geprüft …": [
+    "Verbindung und OpenCode-Einrichtung werden geprüft …",
+    "Checking connection and OpenCode setup …"
+  ],
+  "Speichern nicht eindeutig bestätigt.": [
+    "Speichern nicht eindeutig bestätigt.",
+    "Save not clearly confirmed."
+  ],
+  "Die Default-Modelle konnten nicht gespeichert werden.": [
+    "Die Default Models konnten nicht gespeichert werden.",
+    "Could not save Default Models."
+  ],
+  "Modell-Anbieter werden geladen …": [
+    "Model Provider werden geladen …",
+    "Loading Model Providers …"
+  ],
+  "Nur Factory-Admins können Zugänge und Standardmodelle ändern.": [
+    "Nur Factory-Admins können Zugänge und Default Models ändern.",
+    "Only Factory admins can change access and default Models."
+  ],
+  "Anbieter hinzufügen": [
+    "Provider hinzufügen",
+    "Add Provider"
+  ],
+  "Hinzufügen": [
+    "Hinzufügen",
+    "Add"
+  ],
+  "Vorhandene Zugänge": [
+    "Vorhandene Zugänge",
+    "Existing access"
+  ],
+  "Noch keine Zugänge verbunden.": [
+    "Noch keine Zugänge verbunden.",
+    "No access connected yet."
+  ],
+  "Zugang nicht verfügbar": [
+    "Zugang nicht verfügbar",
+    "Access unavailable"
+  ],
+  "Mit ChatGPT verbinden": [
+    "Mit ChatGPT verbinden",
+    "Connect with ChatGPT"
+  ],
+  "Erneut anmelden": [
+    "Erneut anmelden",
+    "Sign in again"
+  ],
+  "Wird geprüft …": [
+    "Wird geprüft …",
+    "Checking …"
+  ],
+  "Standardmodell": [
+    "Default Model",
+    "Default Model"
+  ],
+  "Verbinde zuerst einen Anbieter.": [
+    "Verbinde zuerst einen Provider.",
+    "Connect a Provider first."
+  ],
+  "Nicht eingerichtet": [
+    "Nicht eingerichtet",
+    "Not configured"
+  ],
+  "Agenten Overrides": [
+    "Agent Overrides",
+    "Agent overrides"
+  ],
+  "Überschreibe die Modelle pro Agent": [
+    "Überschreibe die Models pro Agent",
+    "Override Models per Agent"
+  ],
+  "Factory-Modelle speichern": [
+    "Factory-Models speichern",
+    "Save Factory Models"
+  ],
+  "Die Factory hat keine gültige ChatGPT-Anmeldung zurückgegeben.": [
+    "Die Factory hat keine gültige ChatGPT-Anmeldung zurückgegeben.",
+    "The Factory did not return a valid ChatGPT sign-in."
+  ],
+  "ChatGPT-Zugang verbunden.": [
+    "ChatGPT-Zugang verbunden.",
+    "ChatGPT access connected."
+  ],
+  "Die ChatGPT-Anmeldung wurde nicht bestätigt.": [
+    "Die ChatGPT-Anmeldung wurde nicht bestätigt.",
+    "ChatGPT sign-in was not confirmed."
+  ],
+  "Code kopieren": [
+    "Code kopieren",
+    "Copy code"
+  ],
+  "Bestätigungscode · mit Enter senden": [
+    "Bestätigungscode · mit Enter senden",
+    "Confirmation code · press Enter to send"
+  ],
+  "Anmeldung wird abgebrochen …": [
+    "Anmeldung wird abgebrochen …",
+    "Canceling sign-in …"
+  ],
+  "Warte auf ChatGPT …": [
+    "Warte auf ChatGPT …",
+    "Waiting for ChatGPT …"
+  ],
+  "Anmeldung wird vorbereitet …": [
+    "Anmeldung wird vorbereitet …",
+    "Preparing sign-in …"
+  ],
+  "Speichern nicht bestätigt. Bitte dieselbe Anfrage abgleichen.": [
+    "Speichern nicht bestätigt. Bitte dieselbe Anfrage abgleichen.",
+    "Save not confirmed. Reconcile the same request."
+  ],
+  "Abgleichen": [
+    "Abgleichen",
+    "Reconcile"
+  ],
+  "Zentrale Modellzugänge sind für diese Factory nicht aktiv.": [
+    "Zentrale Model-Zugänge sind für diese Factory nicht aktiv.",
+    "Central Model access is not enabled for this Factory."
+  ],
+  "Projektmodelle konnten nicht geladen werden.": [
+    "Projektmodels konnten nicht geladen werden.",
+    "Could not load project Models."
+  ],
+  "Modellkatalog lädt …": [
+    "Modelkatalog lädt …",
+    "Loading Model catalog …"
+  ],
+  "Projektmodelle laden …": [
+    "Projektmodels laden …",
+    "Loading project Models …"
+  ],
+  "Aus der Factory: {default}": [
+    "Aus der Factory: {default}",
+    "From Factory: {default}"
+  ],
+  "Agenten-Overrides": [
+    "Agent Overrides",
+    "Agent overrides"
+  ],
+  "Ohne eigene Auswahl gilt das jeweilige Rollenmodell der Factory.": [
+    "Ohne eigene Auswahl gilt das jeweilige Rollenmodel der Factory.",
+    "Without a custom selection, the Factory's role-specific Model applies."
+  ],
+  "Rückmeldung empfangen. Weiter in YoloForge.": [
+    "Rückmeldung empfangen. Weiter in YoloForge.",
+    "Callback received. Continue in YoloForge."
+  ],
+  "Keine passende Anmeldung.": [
+    "Keine passende Anmeldung.",
+    "No matching sign-in."
+  ],
+  "YoloForge Desktop — native Factory-Oberfläche": [
+    "YoloForge Desktop — native Factory-Oberfläche",
+    "YoloForge Desktop — native Factory interface"
+  ],
+  "Modellzugang verbunden.": [
+    "Model-Zugang verbunden.",
+    "Model access connected."
+  ],
+  "Der Modellzugang wurde nicht bestätigt.": [
+    "Der Model-Zugang wurde nicht bestätigt.",
+    "Model access was not confirmed."
+  ],
+  "{} hinzufügen": [
+    "{} hinzufügen",
+    "Add {}"
+  ],
+  "z. B. Arbeit": [
+    "z. B. Arbeit",
+    "e.g. Work"
+  ],
+  "API-Schlüssel": [
+    "API-Schlüssel",
+    "API key"
+  ],
+  "API-Schlüssel einfügen": [
+    "API-Schlüssel einfügen",
+    "Paste API key"
+  ],
+  "Schlüssel in Google AI Studio erstellen": [
+    "Schlüssel in Google AI Studio erstellen",
+    "Create key in Google AI Studio"
+  ],
+  "API-Schlüssel wird geprüft …": [
+    "API-Schlüssel wird geprüft …",
+    "Checking API key …"
+  ],
+  "Die ChatGPT-Anmeldung konnte nicht gestartet werden.": [
+    "Die ChatGPT-Anmeldung konnte nicht gestartet werden.",
+    "Could not start ChatGPT sign-in."
+  ],
+  "Language": [
+    "Sprache",
+    "Language"
+  ],
+  "Language saved.": [
+    "Sprache gespeichert.",
+    "Language saved."
+  ],
+  "Could not save language. Please try again.": [
+    "Sprache konnte nicht gespeichert werden. Bitte erneut versuchen.",
+    "Could not save language. Please try again."
+  ],
+  "Auto uses the system language: German if available, otherwise English.": [
+    "Auto verwendet die Systemsprache: Deutsch bei deutscher Systemsprache, ansonsten Englisch.",
+    "Auto uses the system language: German if available, otherwise English."
+  ],
+  "This setting applies only to this device.": [
+    "Diese Einstellung gilt nur für dieses Gerät.",
+    "This setting applies only to this device."
+  ],
+  "unbekannt": ["unbekannt", "unknown"],
+  "/pfad/zum/projekt": ["/pfad/zum/projekt", "/path/to/project"],
+  "API-Schlüssel (optional)": ["API-Key (optional)", "API key (optional)"],
+  "Draft": ["Entwurf", "Draft"]
+}

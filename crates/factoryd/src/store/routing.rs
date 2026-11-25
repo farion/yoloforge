@@ -77,6 +77,8 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
     )?;
     let project: Project = serde_json::from_str(&project_data)?;
     let pins = super::models::ticket(tx, t.id)?;
+    let repo_skills = super::skills::for_ticket(tx, t.id, t.project_id)?;
+    let local_mcps = super::mcp::for_ticket(tx, t.id, t.project_id)?;
     let mut implementer_profile = project.profile.clone();
     if let Some(model) = pins.as_ref().and_then(|m| m.implementer.as_ref()) {
         match super::models::require_available(tx, model) {
@@ -103,11 +105,14 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
     for c in available.iter().take(16) {
         if c.agent_spec
             .as_ref()
-            .is_none_or(|a| a.profile != implementer_profile)
+            .is_none_or(|a| a.profile != implementer_profile || !repo_skills.matches(a) || !local_mcps.matches(a))
         {
             continue;
         }
         let owner = super::work::stream(tx, c.stream_id)?;
+        if !super::mcp::runner_ready(tx, owner.runner_id, &local_mcps)? {
+            continue;
+        }
         if super::sessions::closed(tx, c.session_root())?
             || super::termination::load(tx, c.id)?.is_some()
         {
@@ -142,13 +147,24 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
         }
         offered.push(c.session_root());
     }
+    if !local_mcps.is_empty() && offered.is_empty() {
+        note(tx, t, "Neue Session: keine vorhandene Session mit passendem MCP-Profil")?;
+        return Ok(Route::New);
+    }
     let evidence = (&t.prompt, &t.description, &t.images, &t.files, &implementer_profile);
-    let serialized = if let Some(model) = orchestrator {
-        serde_json::to_vec(&(evidence, model))?
-    } else {
-        serde_json::to_vec(&evidence)?
+    let serialized = match (orchestrator, repo_skills.repo.as_ref()) {
+        (Some(model), Some(skills)) => serde_json::to_vec(&(evidence, model, skills))?,
+        (None, Some(skills)) => serde_json::to_vec(&(evidence, skills))?,
+        (Some(model), None) => serde_json::to_vec(&(evidence, model))?,
+        (None, None) => serde_json::to_vec(&evidence)?,
     };
-    let input = format!("{:x}", Sha256::digest(serialized));
+    let input = if local_mcps.is_empty() && repo_skills.factory.is_empty() {
+        format!("{:x}", Sha256::digest(serialized))
+    } else if repo_skills.factory.is_empty() {
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&(serialized, &local_mcps))?))
+    } else {
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&(serialized, &local_mcps, &repo_skills.factory))?))
+    };
     let context = serde_json::to_string(&(&catalog, p.max_parallel))?;
     let now = super::super::unix_ms();
     let raw: Option<String> = tx
@@ -222,8 +238,11 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
             |r| r.get(0),
         )
         .optional()?;
-    let owner = if let Some(id) = controller {
-        super::work::stream(tx, id.parse().map_err(|_| StoreError::Internal)?)?
+    let controller = controller
+        .map(|id| super::work::stream(tx, id.parse().map_err(|_| StoreError::Internal)?))
+        .transpose()?;
+    let owner = if let Some(owner) = controller.filter(|owner| p.runner_ids.contains(&owner.runner_id)) {
+        owner
     } else {
         let runner = *p.runner_ids.first().ok_or(StoreError::WorkConflict)?;
         let owner = Store::create_stream_in(
@@ -237,7 +256,8 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
             },
         )?;
         tx.execute(
-            "INSERT INTO orchestrators(project_id,stream_id) VALUES(?1,?2)",
+            "INSERT INTO orchestrators(project_id,stream_id) VALUES(?1,?2)
+             ON CONFLICT(project_id) DO UPDATE SET stream_id=excluded.stream_id",
             params![t.project_id.to_string(), owner.id.to_string()],
         )?;
         owner
@@ -383,7 +403,14 @@ pub(super) fn continue_task(
     tx.execute_batch("SAVEPOINT routed_continue")?;
     // Enqueue before linking this ticket so historical attachments cannot accumulate.
     let pins = super::models::ticket(tx, t.id)?;
-    match Store::enqueue_with_model(
+    let repo_skills = super::skills::for_ticket(tx, t.id, t.project_id)?;
+    let local_mcps = super::mcp::for_ticket(tx, t.id, t.project_id)?;
+    if !super::mcp::runner_ready(tx, owner.runner_id, &local_mcps)? {
+        tx.execute_batch("RELEASE routed_continue")?;
+        note(tx, t, "Wartet auf den Runner der gewählten Session mit passendem MCP-Profil")?;
+        return Ok(None);
+    }
+    match Store::enqueue_with_pins(
         tx,
         owner.id,
         &EnqueueCommand {
@@ -395,6 +422,7 @@ pub(super) fn continue_task(
         Some(previous.id),
         "",
         pins.as_ref().and_then(|m| m.implementer.as_ref()),
+        Some((&repo_skills, &local_mcps)),
     ) {
         Ok(mut c) => {
             c.agent_spec.as_mut().ok_or(StoreError::Internal)?.images = t.images.clone();

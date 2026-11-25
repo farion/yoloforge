@@ -471,12 +471,6 @@ impl Dialog {
                             true,
                             false,
                         ),
-                        Field::text(
-                            "Verbleibendes Startbudget ersetzen (0..1000)",
-                            &policy.map_or(10, |p| p.remaining_starts).to_string(),
-                            true,
-                            false,
-                        ),
                     ],
                 )
             }
@@ -867,9 +861,6 @@ impl Dialog {
                     .collect::<Result<Vec<RunnerId>, _>>()
                     .map_err(|_| "Runnerauswahl ungueltig")?;
                 let max_parallel = value(2).parse::<u8>().map_err(|_| "Parallelitaet: 1..16")?;
-                let start_budget = value(3)
-                    .parse::<u32>()
-                    .map_err(|_| "Startbudget: 0..1000")?;
                 if runner_ids.is_empty() {
                     return Err("Kein Runner ausgewaehlt: zum Runner-Feld wechseln und mit Leertaste markieren".into());
                 }
@@ -879,9 +870,6 @@ impl Dialog {
                 if !(1..=16).contains(&max_parallel) {
                     return Err("Maximal parallele Streams muss zwischen 1 und 16 liegen".into());
                 }
-                if start_budget > 1000 {
-                    return Err("Startbudget muss zwischen 0 und 1000 liegen".into());
-                }
                 Request::Scheduler(
                     id,
                     SetScheduler {
@@ -890,7 +878,6 @@ impl Dialog {
                         enabled: value(0) == "true",
                         runner_ids,
                         max_parallel,
-                        start_budget,
                     },
                 )
             }
@@ -908,6 +895,7 @@ impl Dialog {
                 },
             ),
             Target::NewProject => Request::Project(CreateProject {
+                logo: None,
                 runner_mapping: None,
                 key: None,
                 request_id,
@@ -922,6 +910,7 @@ impl Dialog {
                 Request::UpdateProject(
                     id,
                     UpdateProject {
+                        logo: None,
                         runner_mapping: None,
                         key: None,
                         request_id,
@@ -1463,7 +1452,7 @@ mod tests {
         };
         assert_eq!(id, s.projects[0].id);
         assert_eq!(b.expected_revision, s.projects[0].revision);
-        assert_eq!(b.max_sessions, 1);
+        assert_eq!(b.max_sessions, s.projects[0].max_sessions);
     }
     #[test]
     fn token_budget_form_keeps_exact_request_when_delivery_is_uncertain() {
@@ -1617,6 +1606,7 @@ mod tests {
         let mut s = snapshot();
         let runner = RunnerId::new();
         s.runners.push(RunnerView {
+            ip: None,
             id: runner,
             name: "Laptop".into(),
             capabilities: vec![],
@@ -1672,7 +1662,7 @@ mod tests {
         assert!(a.setup.harness.unwrap().is_object());
     }
     #[test]
-    fn scheduler_rebase_keeps_user_parallelism_but_refreshes_consumed_budget() {
+    fn scheduler_rebase_keeps_user_parallelism_and_refreshes_revision() {
         let mut s = snapshot();
         let id = s.projects[0].id;
         let runner = RunnerId::new();
@@ -1682,7 +1672,6 @@ mod tests {
             enabled: true,
             runner_ids: vec![runner],
             max_parallel: 1,
-            remaining_starts: 10,
         });
         let mut d = Dialog::new(Target::Scheduler(id), &s).unwrap();
         d.fields[2].text = "3".into();
@@ -1696,13 +1685,11 @@ mod tests {
             }),
         );
         s.scheduler_policies[0].revision = Revision(2);
-        s.scheduler_policies[0].remaining_starts = 9;
         control(&mut d, 'r', &s);
         let Request::Scheduler(_, b) = send(&mut d, &s) else {
             panic!()
         };
         assert_eq!(b.max_parallel, 3);
-        assert_eq!(b.start_budget, 9);
         assert_eq!(b.expected_revision, Revision(2));
     }
     #[test]
@@ -1711,6 +1698,7 @@ mod tests {
         let runner = RunnerId::new();
         let id = s.projects[0].id;
         s.runners.push(RunnerView {
+            ip: None,
             id: runner,
             name: "Local-Test".into(),
             capabilities: vec![],
@@ -1726,15 +1714,11 @@ mod tests {
         };
         assert_eq!(b.runner_ids, vec![runner]);
         assert_eq!(b.max_parallel, 1);
-        assert_eq!(b.start_budget, 10);
         d.fields[1].text.clear();
         assert!(matches!(d.build(),Err(e) if e.contains("Kein Runner")));
         d.fields[1].text = runner.to_string();
         d.fields[2].text = "0".into();
         assert!(matches!(d.build(),Err(e) if e.contains("Streams")));
-        d.fields[2].text = "1".into();
-        d.fields[3].text = "1001".into();
-        assert!(matches!(d.build(),Err(e) if e.contains("Startbudget")));
     }
     #[test]
     fn changing_setup_host_loads_its_paths_without_changing_project_harness() {
@@ -1743,6 +1727,7 @@ mod tests {
         let second = RunnerId::new();
         for id in [first, second] {
             s.runners.push(RunnerView {
+                ip: None,
                 id,
                 name: "host".into(),
                 capabilities: vec![],
@@ -1849,6 +1834,7 @@ mod tests {
         assert!(d.build().is_err());
         let runner = RunnerId::new();
         s.runners.push(RunnerView {
+            ip: None,
             id: runner,
             name: "local".into(),
             capabilities: vec![],

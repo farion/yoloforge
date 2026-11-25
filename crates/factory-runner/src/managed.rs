@@ -201,7 +201,7 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
     file.as_file().sync_all()?;
     file.persist_noclobber(dir.join("binding.json"))
         .map_err(|_| anyhow::anyhow!("Managed binding occupied; nothing overwritten"))?;
-    fs::File::open(&dir)?.sync_all()?;
+    factory_platform::sync_dir(&dir)?;
     resolve(&spec, &root)?;
     Ok(())
 }
@@ -259,15 +259,9 @@ fn initialize_local(source: &str, branch: &str, project: ProjectId) -> Result<()
             ("GIT_COMMITTER_EMAIL", "factory@yoloforge.invalid"),
         ],
     )?;
-    rustix::fs::renameat_with(
-        rustix::fs::CWD,
-        &attempt,
-        rustix::fs::CWD,
-        target,
-        rustix::fs::RenameFlags::NOREPLACE,
-    )
+    factory_platform::rename_noreplace(&attempt, target)
     .context("Project folder occupied during creation; prepared repository retained")?;
-    fs::File::open(parent)?.sync_all()?;
+    factory_platform::sync_dir(parent)?;
     Ok(())
 }
 #[cfg(test)]

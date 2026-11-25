@@ -43,6 +43,7 @@ pub struct Attempt {
 }
 
 fn config(args: &Args, stream: StreamId) -> Result<Config> {
+    ensure!(cfg!(target_os = "linux"), "Container containment requires a Linux runner; no weaker isolation fallback is allowed");
     let path = args
         .containment
         .as_ref()

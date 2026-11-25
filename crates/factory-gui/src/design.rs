@@ -13,12 +13,12 @@ pub const HOVER_FILL: Color32 = Color32::from_rgb(54, 65, 81);
 pub const SELECTED_FILL: Color32 = Color32::from_rgb(30, 48, 69);
 /// Twice the main panel's RGB values: lighter, with the same blue-black hue.
 pub const SEPARATOR_COLOR: Color32 = Color32::from_rgb(44, 50, 62);
-pub const FLOW_CARD_SIZE: egui::Vec2 = egui::vec2(244.0, 118.0);
+pub const FLOW_CARD_SIZE: egui::Vec2 = egui::vec2(244.0, 106.0);
 pub const FLOW_MIN_CARD_WIDTH: f32 = 204.0;
 pub const FLOW_CARD_GAP: f32 = 14.0;
 pub const FLOW_COLUMN_GAP: f32 = 48.0;
 pub const FLOW_VISIBLE_CARDS: usize = 3;
-pub const FLOW_SUCCESS_MS: u64 = 10_000;
+pub const FLOW_SUCCESS_MS: u64 = 120_000;
 pub const FLOW_TRANSITION_MS: f32 = 650.0;
 // Task identity is always blue; stage headers remain neutral. Status colors
 // belong to the separate status pill, never to the ticket number.
@@ -72,6 +72,11 @@ pub fn clickable_list_row<R>(
     egui::InnerResponse {inner,response}
 }
 pub const TASK_METADATA_LINE_GAP: f32 = 6.0;
+pub const TASK_ROUTING_NOTE_GAP: f32 = 12.0;
+
+pub fn routing_note_spacing(ui: &mut egui::Ui) {
+    ui.add_space((TASK_ROUTING_NOTE_GAP - ui.spacing().item_spacing.y).max(0.0));
+}
 
 pub const SECTION_TAB_WIDTH: f32 = 112.0;
 pub const SECTION_TAB_HEIGHT: f32 = 36.0;
@@ -110,9 +115,9 @@ pub fn token_pill(ui: &mut egui::Ui, tokens: Option<u64>) {
     ui.scope(|ui| crate::app::badge(ui, token_label(tokens), crate::app::MUTED))
         .response
         .on_hover_text(if tokens.is_some() {
-            "Gemeldete Eingabe- und Ausgabetokens. Nicht erfasste Nutzung ist nicht enthalten."
+            crate::tr!("Gemeldete Eingabe- und Ausgabetokens. Nicht erfasste Nutzung ist nicht enthalten.")
         } else {
-            "Noch keine zuordenbaren Tokendaten vorhanden."
+            crate::tr!("Noch keine zuordenbaren Tokendaten vorhanden.")
         });
 }
 
@@ -286,6 +291,9 @@ pub fn tab(
     tab_with_icon(ui, None, text, selected, width, closable)
 }
 
+const TAB_PADDING_X: f32 = 8.0;
+const TAB_ICON_SPACE: f32 = 28.0;
+
 pub fn tab_with_icon(
     ui: &mut egui::Ui,
     icon: Option<&str>,
@@ -302,7 +310,7 @@ pub fn tab_with_icon(
     );
     let close_response = closable.then(|| {
         ui.interact(close_rect, response.id.with("close"), egui::Sense::click())
-            .on_hover_text("Tab schließen — Session läuft weiter")
+            .on_hover_text(crate::tr!("Tab schließen — Session läuft weiter"))
             .on_hover_cursor(egui::CursorIcon::PointingHand)
     });
     // A child action takes hovered() away from its parent, but the whole tab
@@ -342,33 +350,30 @@ pub fn tab_with_icon(
     } else {
         crate::app::MUTED
     };
+    let icon_space = if icon.is_some() { TAB_ICON_SPACE } else { 0.0 };
+    let close_space = if closable { 32.0 } else { 0.0 };
     let galley = ui.painter().layout_job(elided_text_job(
         text.to_owned(),
         egui::FontId::proportional(16.0),
         color,
-        rect.width() - 16.0 - if closable { 32.0 } else { 0.0 }
-            - if icon.is_some() { 28.0 } else { 0.0 },
+        rect.width() - 2.0 * (TAB_PADDING_X + icon_space) - close_space,
         1,
     ));
     let content_rect = egui::Rect::from_min_max(
-        rect.min + egui::vec2(8.0,0.0),
-        rect.max - egui::vec2(8.0 + if closable { 32.0 } else { 0.0 }, 0.0),
+        rect.min + egui::vec2(TAB_PADDING_X, 0.0),
+        rect.max - egui::vec2(TAB_PADDING_X + close_space, 0.0),
     );
-    let content_width = galley.size().x + if icon.is_some() {28.0} else {0.0};
-    let content_left = content_rect.center().x - content_width/2.0;
-    let position = egui::pos2(
-        content_left + if icon.is_some() {28.0} else {0.0},
-        rect.center().y-galley.size().y/2.0,
-    );
+    let text_rect = egui::Rect::from_center_size(content_rect.center(), galley.size());
+    let position = text_rect.min;
     let _text_center = position+galley.size()/2.0;
     #[cfg(test)]
     ui.ctx().data_mut(|d| d.insert_temp(response.id.with("test-tab-alignment"),
-        (content_left,content_left+content_width,rect)));
+        (text_rect.left(),text_rect.right(),rect)));
     ui.painter().galley(position, galley, color);
     if let Some(icon) = icon {
         ui.painter().text(
-            egui::pos2(content_left+10.0,rect.center().y),
-            egui::Align2::CENTER_CENTER,icon,egui::FontId::proportional(20.0),color,
+            egui::pos2(text_rect.left() - 8.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,icon,egui::FontId::proportional(20.0),color,
         );
     }
     let close = close_response.is_some_and(|close_response| {
@@ -390,7 +395,7 @@ pub fn tab_with_icon(
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Button,
                 ui.is_enabled(),
-                "Tab schließen — Session läuft weiter",
+                crate::tr!("Tab schließen — Session läuft weiter"),
             )
         });
         close_response.clicked()
@@ -466,9 +471,9 @@ pub fn file_drop_overlay(ctx: &egui::Context, accepts_files: bool) {
         rect.center(),
         egui::Align2::CENTER_CENTER,
         if accepts_files {
-            "Bilder und Dateien hier loslassen zum Anpinnen"
+            crate::tr!("Bilder und Dateien hier loslassen zum Anpinnen")
         } else {
-            "Zum Anhängen zuerst eine neue Aufgabe öffnen"
+            crate::tr!("Zum Anhängen zuerst eine neue Aufgabe öffnen")
         },
         egui::FontId::proportional(22.0),
         Color32::WHITE,
@@ -484,6 +489,20 @@ pub fn multiline(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
 
 pub fn input_hint(text: &str) -> RichText {
     RichText::new(text).color(Color32::from_rgb(116, 124, 138)).italics()
+}
+
+fn peon_prompt_hints() -> [&'static str; 2] {
+    [crate::tr!("Arbeit, Arbeit!"), crate::tr!("Was soll getan werden?")]
+}
+
+fn peon_prompt_hint(ui: &egui::Ui) -> &'static str {
+    let id = ui.id().with("peon-prompt-hint");
+    ui.ctx().data_mut(|data| {
+        *data.get_temp_mut_or_insert_with(id, || {
+            let random = egui::Id::new(factory_core::RequestId::new()).value();
+            peon_prompt_hints()[random as usize % peon_prompt_hints().len()]
+        })
+    })
 }
 
 /// OpenCode-like composer. The editor grows with its content; the surrounding
@@ -502,6 +521,7 @@ fn task_prompt_buffer(
     text: &mut dyn egui::TextBuffer,
     rows: usize,
 ) -> egui::Response {
+    let hint = peon_prompt_hint(ui);
     let background = ui.painter().add(egui::epaint::Shape::Noop);
     let mut editor = None;
     let width = ui.available_width();
@@ -515,7 +535,7 @@ fn task_prompt_buffer(
                 multiline(text)
                     .font(egui::FontId::monospace(crate::conversation::CLI_FONT_SIZE))
                     .frame(false)
-                    .hint_text(input_hint("Was soll bearbeitet werden?"))
+                    .hint_text(input_hint(hint))
                     .desired_rows(rows)
                     .desired_width(f32::INFINITY)
                     .show(ui)
@@ -604,7 +624,7 @@ fn attachment_tile_mode(
             .fill(Color32::from_black_alpha(190))
             .corner_radius(4),
     );
-    let label = format!("Anhang {name} entfernen");
+    let label = crate::tr!("Anhang {name} entfernen", name = name);
     close.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
@@ -951,7 +971,46 @@ pub fn section_heading(ui: &mut egui::Ui, title: &str) -> egui::Response {
     ui.label(RichText::new(title).size(20.0).strong())
 }
 
-pub const SETTINGS_FOOTER_HEIGHT: f32 = 40.0;
+/// Center a single empty-list message in the content area below the toolbar.
+pub fn list_empty_state(ui: &mut egui::Ui, icon: &str, message: &str) {
+    let bounds = ui.available_rect_before_wrap();
+    if !bounds.is_positive() || !bounds.is_finite() {
+        return;
+    }
+    ui.allocate_rect(bounds, egui::Sense::hover());
+    let color = crate::app::MUTED;
+    let glyph = ui.painter().layout_no_wrap(icon.to_owned(), egui::FontId::proportional(32.0), color);
+    let text = ui.painter().layout(
+        message.to_owned(), egui::TextStyle::Body.resolve(ui.style()), color, bounds.width(),
+    );
+    let gap = 8.0;
+    let top = bounds.center().y - (glyph.size().y + gap + text.size().y) / 2.0;
+    let icon_pos = egui::pos2(bounds.center().x - glyph.size().x / 2.0, top);
+    let label_rect = egui::Rect::from_min_size(
+        egui::pos2(bounds.center().x - text.size().x / 2.0, top + glyph.size().y + gap),
+        text.size(),
+    );
+    ui.painter().with_clip_rect(bounds).galley(icon_pos, glyph, color);
+    let _label = ui.put(label_rect, egui::Label::new(text).selectable(false));
+    #[cfg(test)]
+    ui.ctx().data_mut(|d| d.insert_temp(
+        egui::Id::new("test-list-empty-state"),
+        (bounds, egui::Rect::from_min_max(egui::pos2(_label.rect.left(), top), _label.rect.right_bottom())),
+    ));
+}
+
+pub const SETTINGS_FOOTER_TOP_GAP: f32 = 12.0;
+const SETTINGS_FOOTER_ACTION_HEIGHT: f32 = 40.0;
+pub const SETTINGS_FOOTER_HEIGHT: f32 = SETTINGS_FOOTER_TOP_GAP + SETTINGS_FOOTER_ACTION_HEIGHT;
+pub const SETTINGS_FIELD_GAP: f32 = 8.0;
+
+/// Keep the label and its input together; separate this field from the next one.
+pub fn settings_field<R>(ui: &mut egui::Ui, label: &str, input: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.label(label);
+    let result = input(ui);
+    ui.add_space(SETTINGS_FIELD_GAP);
+    result
+}
 
 pub fn settings_body_height(ui: &egui::Ui, bottom: f32) -> f32 {
     (bottom - ui.cursor().top() - SETTINGS_FOOTER_HEIGHT - 12.0).max(0.0)
@@ -962,8 +1021,9 @@ pub fn settings_footer<R>(ui: &mut egui::Ui, bottom: f32, draw: impl FnOnce(&mut
     if gap > 0.0 {
         ui.add_space(gap);
     }
+    ui.add_space(SETTINGS_FOOTER_TOP_GAP);
     ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), SETTINGS_FOOTER_HEIGHT),
+        egui::vec2(ui.available_width(), SETTINGS_FOOTER_ACTION_HEIGHT),
         egui::Layout::right_to_left(egui::Align::Center),
         draw,
     ).inner
@@ -971,7 +1031,7 @@ pub fn settings_footer<R>(ui: &mut egui::Ui, bottom: f32, draw: impl FnOnce(&mut
 
 pub fn settings_save_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
     let response = accent_button(
-        ui, egui::Button::new("Speichern"), enabled, crate::app::BLUE.gamma_multiply(0.7),
+        ui, egui::Button::new(crate::tr!("Speichern")), enabled, crate::app::BLUE.gamma_multiply(0.7),
     );
     #[cfg(test)]
     ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test-settings-save"), response.rect));
@@ -1017,7 +1077,7 @@ pub fn dialog_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), title));
 
     let response = ui.interact(close_rect, id.with("close"), egui::Sense::click());
-    let label = "Dialog schließen · Entwürfe behalten";
+    let label = crate::tr!("Dialog schließen · Entwürfe behalten");
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
@@ -1038,6 +1098,26 @@ pub fn dialog_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_footer_leaves_clearance_below_the_content_divider() {
+        let ctx = egui::Context::default();
+        let mut geometry = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let bottom = ui.cursor().top() + 320.0;
+                ui.allocate_space(egui::vec2(ui.available_width(), super::settings_body_height(ui, bottom)));
+                let divider = ui.cursor().top();
+                super::settings_footer(ui, bottom, |ui| {
+                    let button = super::settings_save_button(ui, true);
+                    geometry = Some((divider, button.rect, bottom));
+                });
+            });
+        });
+        let (divider, button, bottom) = geometry.unwrap();
+        assert!(button.top() - divider >= super::SETTINGS_FOOTER_TOP_GAP);
+        assert!(button.bottom() <= bottom);
+    }
+
     #[test]
     fn normal_and_accent_buttons_share_tab_hover_without_borders() {
         let app=crate::tests::fixture();
@@ -1084,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn factory_icon_and_label_are_centered_without_a_phantom_close_slot() {
+    fn factory_label_is_centered_independently_of_its_icon() {
         let app=crate::tests::fixture();
         let ctx=app.backend.context().clone();
         let mut layouts=vec![];
@@ -1436,6 +1516,37 @@ mod tests {
         );
         assert!(remove);
     }
+    #[test]
+    fn peon_prompt_placeholder_is_stable_gray_italic_and_never_becomes_input() {
+        let ctx = egui::Context::default();
+        let mut prompt = String::new();
+        let mut previous = None;
+        for _ in 0..4 {
+            let mut hint = None;
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    hint = Some(peon_prompt_hint(ui));
+                    task_prompt(ui, &mut prompt, 3);
+                });
+            });
+            let hint = hint.unwrap();
+            assert!(peon_prompt_hints().contains(&hint));
+            if let Some(previous) = previous { assert_eq!(hint, previous); }
+            previous = Some(hint);
+            fn find(shape: &egui::epaint::Shape, hint: &str) -> bool {
+                match shape {
+                    egui::epaint::Shape::Text(text) if text.galley.job.text == hint =>
+                        text.galley.job.sections.iter().all(|section|
+                            section.format.italics && section.format.color == Color32::from_rgb(116, 124, 138)),
+                    egui::epaint::Shape::Vec(children) => children.iter().any(|child| find(child, hint)),
+                    _ => false,
+                }
+            }
+            assert!(output.shapes.iter().any(|shape| find(&shape.shape, hint)));
+            assert!(prompt.is_empty());
+        }
+    }
+
     #[test]
     fn task_prompt_has_opencode_surface_accent_and_monospace_editor() {
         let ctx = egui::Context::default();

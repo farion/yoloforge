@@ -8,9 +8,17 @@ Anhänge erscheinen direkt unter dem Text; Ctrl-D entfernt den letzten Anhang.
 Ctrl-S bleibt als Sende-Kürzel verfügbar. Nach bestätigtem Versand schließt der
 Editor automatisch; bei unklarem Versand bleibt der unveränderliche Entwurf erhalten.
 Titel, Priorität, Statuswahl und Scheduler-Aktivierung entfallen.
-Ein kompatibler Runner richtet die Standardplanung mit unbegrenzten Starts ein;
+Neue Projekte erlauben standardmäßig sechs gleichzeitige Arbeitssessions.
+Ein kompatibler Runner richtet die Standardplanung ein;
 ohne explizite Provider-/Modell-ID wird kein Agent gestartet. Neue Prompts
-aktivieren auch eine zuvor konfigurierte Legacy-Planung ohne Startbudget.
+aktivieren auch eine zuvor konfigurierte Legacy-Planung.
+Ein freigegebener Intent weckt den Scheduler direkt nach dem Speichern.
+Entwürfe starten keine Planung. Der periodische Lauf bleibt für spätere
+Wiederholungen und Zustandswechsel erhalten.
+Bei automatischer Runner-Zuordnung kann Factory für neue Intents auf einen
+passenden Online-Runner wechseln. Für lokale Projektpfade braucht der Runner
+eine Projektbindung oder muss auf demselben Rechner laufen. Bestehende Sessions
+und manuelle Runner-Zuordnungen werden nicht verschoben.
 Unter `2` → Projekt → Leertaste lässt sich das Projekt pausieren/fortsetzen.
 Die Pause verhindert neue Starts einschließlich noch nicht angenommener Aufträge;
 bereits angenommene Arbeit läuft weiter. Neue Prompts werden währenddessen gespeichert.
@@ -21,9 +29,9 @@ werden berücksichtigt. `cancelled`
 erfüllt keine Abhängigkeit. Abhängigkeiten müssen im selben Projekt liegen;
 Zyklen und nachträgliche Änderungen bereits zugeordneter Tickets werden abgewiesen.
 
-TUI: `2` → Projekt → `s` für Aktivierung, Runner-Auswahl, Parallelität und
-Startbudget; `3` → Ticket → `d` für Abhängigkeiten. Ein Konflikt beim Budgetverbrauch
-verlangt `Ctrl-R`; unveränderte Felder übernehmen den aktuellen Serverstand.
+TUI: `2` → Projekt → `s` für Aktivierung, Runner-Auswahl und Parallelität;
+`3` → Ticket → `d` für Abhängigkeiten. Bei einem Revisionskonflikt übernimmt
+`Ctrl-R` unveränderte Felder aus dem aktuellen Serverstand.
 Ein einzelner Projekt-Runner wird automatisch vorbelegt; ohne Projektbindung
 gilt das auch für einen einzigen registrierten Runner. Bei mehreren Kandidaten
 erfolgt die Auswahl mit Leertaste. Fehler benennen das konkret ungültige Feld.
@@ -33,17 +41,16 @@ yoloforge ticket dependencies TICKET --expected-revision REV \
   --depends-on PREREQUISITE
 yoloforge scheduler PROJECT
 yoloforge scheduler-set PROJECT --expected-revision 0 --enabled \
-  --runner RUNNER_A --runner RUNNER_B --max-parallel 2 --start-budget 10
+  --runner RUNNER_A --runner RUNNER_B --max-parallel 2
 ```
 
 Zum Deaktivieren dieselbe Konfiguration mit aktueller Revision und ohne
 `--enabled` senden. Bereits eingereihte Aufträge werden dadurch nicht abgebrochen.
-`--request-id` ermöglicht unverändertes Replay. Eine Neukonfiguration ersetzt das
-verbleibende Startbudget; dessen Verbrauch erhöht ebenfalls die Policyrevision.
+`--request-id` ermöglicht unverändertes Replay.
 
 Der Scheduler priorisiert dringende Tickets und verteilt sie auf die konfigurierten
-Runner mit den wenigsten aktiven Streams. Eine Zuweisung verbraucht einen Start,
-legt atomar einen Stream und Worktree-Auftrag an und setzt das Ticket auf
+Runner mit den wenigsten aktiven Streams. Eine Zuweisung legt atomar einen
+Stream und Worktree-Auftrag an und setzt das Ticket auf
 `in_progress`. Der gespeicherte Tickettext wird nach erfolgreicher Vorbereitung
 genau einmal als Agentenauftrag eingereiht. Serverneustarts und konkurrierende
 Ticks erzeugen keine zweite Zuweisung oder einen zweiten Start.
@@ -62,5 +69,5 @@ provisioniert keine Container und beantwortet keine Rückfragen. Dafür gelten
 weiterhin die vorhandenen Runner-Voraussetzungen beziehungsweise offene Pakete.
 
 Lokal geprüft: Abhängigkeitszyklen, Priorisierung, Verteilung, Parallelitätslimit,
-Budget, konkurrierende Datenbankverbindungen und Neustart zwischen Vorbereitung
+konkurrierende Datenbankverbindungen und Neustart zwischen Vorbereitung
 und Agentenstart (`cargo test -p factoryd --test scheduler --locked`).

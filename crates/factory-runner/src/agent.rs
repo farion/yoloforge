@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use factory_core::*;
 use factory_opencode::OpenCodeClient;
+use factory_protocol::client::FactoryClient;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -22,6 +23,10 @@ pub struct Execution {
     interrupt_attempted: bool,
     #[serde(default)]
     previous_assistant: Option<String>,
+    #[serde(default)]
+    mcp_retry_after_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_mcp_registration: Option<RegistrationId>,
 }
 
 fn progress(
@@ -37,7 +42,7 @@ fn progress(
     }
 }
 
-pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result<AgentProgress> {
+pub async fn step(journal: &Journal, record: &mut Record, args: &Args, factory: Option<(&FactoryClient, RegistrationId)>) -> Result<AgentProgress> {
     record.question_snapshot = None;
     let command = record.command.clone();
     let Some(path) = args.opencode_registration.as_ref() else {
@@ -115,6 +120,8 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
             prompt_attempted: false,
             interrupt_attempted: false,
             previous_assistant: None,
+            mcp_retry_after_ms: 0,
+            remote_mcp_registration: None,
         });
         tokio::task::block_in_place(|| journal.save(record))?;
     }
@@ -130,13 +137,27 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args) -> Result
         let execution = record.agent.as_ref().expect("execution initialized");
         if !execution.prompt_attempted {
             if let Err(e) = tokio::task::block_in_place(|| {
-                crate::managed_opencode::validate_workspace(std::path::Path::new(&execution.workspace.path))
+                crate::managed_opencode::validate_workspace_with_profile(
+                    std::path::Path::new(&execution.workspace.path),
+                    command.agent_spec.as_ref().is_some_and(|spec| spec.repo_skills.is_some() || !spec.factory_skills.is_empty() || !spec.local_mcps.is_empty() || !spec.remote_mcps.is_empty()),
+                )
             }) {
                 return Ok(progress(&command, AgentPhase::Failed, e.to_string().chars().take(240).collect::<String>()));
             }
         }
     }
-    match advance(&client, journal, record, args).await {
+    if let Some(ids) = command.agent_spec.as_ref().and_then(|spec| spec.repo_skills.as_deref()) {
+        let execution = record.agent.as_ref().expect("execution initialized");
+        if !execution.prompt_attempted {
+            if args.managed_opencode.is_none() || execution.runtime.is_some() {
+                return Ok(progress(&command, AgentPhase::Failed, "Repo-Skills benötigen den nativen verwalteten Runner"));
+            }
+            if let Err(error) = tokio::task::block_in_place(|| crate::repo_skills::verify(&execution.workspace, ids)) {
+                return Ok(progress(&command, AgentPhase::Failed, error.to_string().chars().take(240).collect::<String>()));
+            }
+        }
+    }
+    match advance(&client, journal, record, args, factory).await {
         Ok(value) => Ok(value),
         Err(_) => Ok(progress(
             &command,
@@ -293,6 +314,7 @@ async fn advance(
     journal: &Journal,
     record: &mut Record,
     args: &Args,
+    factory: Option<(&FactoryClient, RegistrationId)>,
 ) -> Result<AgentProgress> {
     let command = record.command.clone();
     crate::containment::ready(record, args).await?;
@@ -300,6 +322,16 @@ async fn advance(
         .agent_spec
         .as_ref()
         .context("Agent specification missing")?;
+    let mut mcp_names = spec.local_mcps.iter().map(crate::local_mcp::name).collect::<Result<Vec<_>>>()?;
+    let remote_names = spec.remote_mcps.iter().map(crate::local_mcp::remote_name).collect::<Result<Vec<_>>>()?;
+    mcp_names.extend(remote_names.iter().cloned());
+    if !mcp_names.is_empty() && (spec.read_only || args.managed_opencode.is_none()
+        || args.containment.is_some() || spec.local_mcps.iter().any(|mcp| !mcp.enabled_on(args.id)))
+    {
+        return Ok(progress(&command, AgentPhase::Failed, "MCP ist für diese Ausführung nicht freigegeben"));
+    }
+    let skill_names = spec.factory_skills.iter().map(FactorySkillRef::runtime_id).collect::<Vec<_>>();
+    let permissions = factory_opencode::session_permissions(spec.read_only, spec.repo_skills.as_deref(), &skill_names, &mcp_names, args.managed_opencode.is_some());
     if spec.profile.provider_id.trim().is_empty() || spec.profile.model_id.trim().is_empty() {
         return Ok(progress(&command, AgentPhase::Unknown, "Explicit project provider and model required; default model fallback is forbidden. No session or prompt sent."));
     }
@@ -363,7 +395,7 @@ async fn advance(
                 &command.id.to_string(),
                 provider,
                 model,
-                spec.read_only,
+                permissions.clone(),
             )
             .await?;
         return Ok(progress(
@@ -381,6 +413,80 @@ async fn advance(
         "Session identity changed"
     );
     if !execution.prompt_attempted {
+        let observed = session.get("permissions").filter(|value| !value.is_null());
+        if (args.managed_opencode.is_some() || spec.repo_skills.is_some() || !skill_names.is_empty() || !mcp_names.is_empty())
+            && permissions.as_ref() != observed
+        {
+            if args.managed_opencode.is_some()
+                && continuation_permission_upgrade(spec, &skill_names, &mcp_names, observed)
+            {
+                client.set_session_permissions(&session_id, permissions.as_ref().context("Managed permissions missing")?).await?;
+            } else {
+                return Ok(progress(&command, AgentPhase::Failed, "OpenCode meldet abweichende Integrationsfreigaben; kein Prompt gesendet"));
+            }
+        }
+        if !spec.factory_skills.is_empty() {
+            let (factory, registration) = factory.context("Factory-Skill-Verbindung fehlt")?;
+            ensure!(args.managed_opencode.is_some() && !spec.read_only && execution.runtime.is_none(), "Factory-Skills benötigen verwaltete OpenCode-Ausführung");
+            let registration_path = args.opencode_registration.as_deref().context("OpenCode-Registrierung fehlt")?;
+            let mut expected = Vec::with_capacity(spec.factory_skills.len());
+            for (reference, id) in spec.factory_skills.iter().zip(&skill_names) {
+                let bundle = factory.factory_skill_bundle(command.runner_id,registration,command.id,reference).await?;
+                let path = match tokio::task::block_in_place(|| crate::factory_skills::install(registration_path,&bundle)) {
+                    Ok(path) => path,
+                    Err(_) => return Ok(progress(&command,AgentPhase::Failed,"Factory-Skill konnte nicht unverändert bereitgestellt werden")),
+                };
+                expected.push((id,path));
+            }
+            let catalog = client.repo_skill_paths(&execution.workspace.path).await?;
+            let entries = catalog.as_array().context("Skill-Katalog fehlt")?;
+            if expected.iter().any(|(id,path)| !entries.iter().any(|entry|
+                entry["id"] == **id && entry["path"].as_str().is_some_and(|source| std::path::Path::new(source) == path)
+            )) {
+                return Ok(progress(&command,AgentPhase::Starting,"Wartet auf Factory-Skill-Katalog in OpenCode"));
+            }
+        }
+        if let Some(ids) = &spec.repo_skills {
+            if !ids.is_empty() {
+                let catalog = client.repo_skill_paths(&execution.workspace.path).await?;
+                let entries = catalog.as_array().context("Skill-Katalog fehlt")?;
+                for id in ids {
+                    let path = std::path::Path::new(&execution.workspace.path)
+                        .join(".opencode/skills").join(id).join("SKILL.md");
+                    if !entries.iter().any(|entry| entry["id"] == *id
+                        && entry["path"].as_str().is_some_and(|source| std::path::Path::new(source) == path)) {
+                        return Ok(progress(&command, AgentPhase::Failed, format!("Repo-Skill {id} fehlt in OpenCode oder stammt aus einer anderen Quelle")));
+                    }
+                }
+            }
+        }
+        if !mcp_names.is_empty() {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+            let retry = now >= execution.mcp_retry_after_ms;
+            let state = crate::local_mcp::prepare(client, &execution.workspace.path, &spec.local_mcps, &mcp_names, retry).await;
+            let state = if matches!(state, Ok(None)) && !remote_names.is_empty() {
+                let (factory, registration) = factory.context("Factory MCP registration missing")?;
+                let force = execution.remote_mcp_registration != Some(registration);
+                let result = crate::local_mcp::prepare_remote(client, factory, registration, &command,
+                    &execution.workspace.path, &remote_names, retry, force).await;
+                if matches!(result, Ok(None)) && force {
+                    record.agent.as_mut().unwrap().remote_mcp_registration = Some(registration);
+                    tokio::task::block_in_place(|| journal.save(record))?;
+                }
+                result
+            } else { state };
+            if !matches!(state, Ok(None)) {
+                if retry {
+                    record.agent.as_mut().unwrap().mcp_retry_after_ms = now + 10_000;
+                    tokio::task::block_in_place(|| journal.save(record))?;
+                }
+                let message = match state {
+                    Ok(Some(name)) => format!("Wartet auf MCP: {name}"),
+                    _ => "MCP-Verbindung nicht bestätigt; kein Prompt gesendet".into(),
+                };
+                return Ok(progress(&command, AgentPhase::Starting, message));
+            }
+        }
         if let Some(continuation) = &spec.continuation {
             let previous = journal
                 .record(continuation.previous_command_id)?
@@ -619,6 +725,32 @@ async fn advance(
     ))
 }
 
+fn continuation_permission_upgrade(
+    spec: &AgentSpec,
+    skills: &[String],
+    mcps: &[String],
+    observed: Option<&serde_json::Value>,
+) -> bool {
+    if spec.continuation.is_none() || spec.read_only {
+        return false;
+    }
+    let matches = |expected: Option<serde_json::Value>| {
+        expected.as_ref() == observed
+            || (expected.is_none() && observed.is_some_and(|v| v.as_array().is_some_and(Vec::is_empty)))
+    };
+    if skills.is_empty() && matches(factory_opencode::session_permissions(
+        false, spec.repo_skills.as_deref(), &[], mcps, false,
+    )) {
+        return true;
+    }
+    // An older session may not yet have a repo allowlist. Only replace a
+    // verified known old ruleset, and only with an empty repo allowlist.
+    spec.repo_skills.as_ref().is_some_and(Vec::is_empty)
+        && (matches(factory_opencode::session_permissions(false, None, skills, mcps, true))
+            || (skills.is_empty()
+                && matches(factory_opencode::session_permissions(false, None, &[], mcps, false))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,6 +767,27 @@ mod tests {
             Arc,
         },
     };
+
+    #[test]
+    fn archived_continuation_can_narrow_known_legacy_skill_permissions_only() {
+        let mut spec = AgentSpec {
+            repo_skills: Some(vec![]), factory_skills: vec![], local_mcps: vec![], remote_mcps: vec![],
+            files: vec![], images: vec![], role: String::new(), read_only: false,
+            continuation: Some(SessionContinuation {
+                root_command_id: CommandId::new(), previous_command_id: CommandId::new(),
+            }),
+            prompt: String::new(), profile: ExecutionProfile::default(),
+        };
+        let old = factory_opencode::session_permissions(false, None, &[], &[], true);
+        assert!(continuation_permission_upgrade(&spec, &[], &[], old.as_ref()));
+        assert!(continuation_permission_upgrade(&spec, &[], &[], None));
+        let unrelated = json!([{"action":"shell","resource":"*","effect":"allow"}]);
+        assert!(!continuation_permission_upgrade(&spec, &[], &[], Some(&unrelated)));
+        spec.repo_skills = Some(vec!["new-skill".into()]);
+        assert!(!continuation_permission_upgrade(&spec, &[], &[], old.as_ref()));
+        spec.continuation = None;
+        assert!(!continuation_permission_upgrade(&spec, &[], &[], None));
+    }
 
     #[derive(Clone)]
     struct Fake {
@@ -713,6 +866,10 @@ mod tests {
                 base_branch: "main".into(),
             }),
             agent_spec: Some(AgentSpec {
+                repo_skills: None,
+                factory_skills: Vec::new(),
+                local_mcps: Vec::new(),
+                remote_mcps: Vec::new(),
                 files: vec![],
                 role: String::new(),
                 images: vec![],
@@ -756,6 +913,8 @@ mod tests {
             runtime: None,
             model: None,
             previous_assistant: None,
+            mcp_retry_after_ms: 0,
+            remote_mcp_registration: None,
             workspace: Workspace {
                 path: "/prepared".into(),
                 branch: format!("factory/{stream}"),
@@ -771,6 +930,7 @@ mod tests {
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command).unwrap();
         let args = Args {
+            control_file: None,
             open_session: None,
             fetch_repository: None,
             session_readiness: false,
@@ -795,26 +955,26 @@ mod tests {
             workspace_root: Some(PathBuf::from("/prepared")),
         };
         assert_eq!(
-            step(&journal, &mut record, &args).await.unwrap().phase,
+            step(&journal, &mut record, &args, None).await.unwrap().phase,
             AgentPhase::Unknown
         );
         mode.store(1, Ordering::SeqCst);
         assert_eq!(
-            step(&journal, &mut record, &args).await.unwrap().phase,
+            step(&journal, &mut record, &args, None).await.unwrap().phase,
             AgentPhase::Unknown
         );
         mode.store(3, Ordering::SeqCst);
         assert_eq!(
-            step(&journal, &mut record, &args).await.unwrap().phase,
+            step(&journal, &mut record, &args, None).await.unwrap().phase,
             AgentPhase::Unknown
         );
         mode.store(4, Ordering::SeqCst);
         assert_eq!(
-            step(&journal, &mut record, &args).await.unwrap().phase,
+            step(&journal, &mut record, &args, None).await.unwrap().phase,
             AgentPhase::Unknown
         );
         mode.store(2, Ordering::SeqCst);
-        let result = step(&journal, &mut record, &args).await.unwrap();
+        let result = step(&journal, &mut record, &args, None).await.unwrap();
         if automatic_model {
             assert_eq!(result.phase, AgentPhase::Unknown);
             assert!(result

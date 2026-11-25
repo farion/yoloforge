@@ -1,4 +1,14 @@
 use super::*;
+pub(super) async fn prompt_session(
+    State(app): State<App>, Path(root): Path<CommandId>,
+    body: Result<Json<PromptSession>, JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, "Invalid session prompt");
+    };
+    db_call(body.request_id, move || app.store.prompt_session(root, body)).await
+}
+
 pub(super) async fn delete_project(
     State(app): State<App>,
     Path(id): Path<ProjectId>,

@@ -1,6 +1,7 @@
 //! The model gateway's central OpenCode lifecycle belongs to factoryd.
 use anyhow::{ensure, Context, Result};
 use factory_core::RequestId;
+use factory_opencode::distribution::{self, VERSION};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
@@ -12,7 +13,6 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
-const VERSION: &str = "2.4.1";
 const CONFIG_FILES: &[&str] = &[
     "opencode.json",
     "opencode.jsonc",
@@ -41,6 +41,36 @@ fn absent(path: &Path) -> Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(error.into()),
     }
+}
+
+fn check_workspace_config(workspace: &Path, database: &Path) -> Result<()> {
+    for parent in workspace.ancestors() {
+        for file in CONFIG_FILES {
+            let config = parent.join(file);
+            if absent(&config)? {
+                continue;
+            }
+            let fix = if parent.parent().is_some() {
+                format!(
+                    "Use --database with an absolute path outside {}, \
+                     or remove the OpenCode configuration above.",
+                    parent.display()
+                )
+            } else {
+                "Remove the OpenCode configuration above.".to_owned()
+            };
+            anyhow::bail!(
+                "Factory did not start. Its OpenCode would pick up settings from:\n  {}\n\n\
+                 Factory keeps OpenCode's working folder with its database. OpenCode looks for \
+                 settings in that folder and the folders above it. Your database path is:\n  {}\n\n\
+                 {}",
+                config.display(),
+                database.display(),
+                fix,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn secret() -> String {
@@ -80,9 +110,8 @@ pub struct Runtime {
 impl Runtime {
     pub async fn start(
         database: &Path,
-        binary: PathBuf,
+        binary: Option<&Path>,
     ) -> Result<(Self, factoryd::model_gateway::Gateway)> {
-        let binary = resolve_binary(&binary)?;
         let name = database
             .file_name()
             .context("Factory database needs a filename")?;
@@ -99,16 +128,13 @@ impl Runtime {
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("This Factory OpenCode state is already in use")?;
         let workspace = private_dir(&root.join("workspace"))?;
-        ensure!(absent(Path::new("/etc/opencode"))?, "External OpenCode config /etc/opencode is visible; run factoryd in an isolated environment");
-        for parent in workspace.ancestors() {
-            for file in CONFIG_FILES {
-                ensure!(
-                    absent(&parent.join(file))?,
-                    "External OpenCode configuration is visible at {}",
-                    parent.join(file).display()
-                );
-            }
-        }
+        ensure!(
+            absent(Path::new("/etc/opencode"))?,
+            "Factory did not start. Its OpenCode would pick up system-wide settings \
+             from /etc/opencode.\n\n\
+             Remove /etc/opencode or run Factory in a container without it."
+        );
+        check_workspace_config(&workspace, database)?;
         let environment = [
             ("HOME", "home"),
             ("XDG_CONFIG_HOME", "config"),
@@ -122,6 +148,7 @@ impl Runtime {
         .map(|(name, dir)| Ok((name, private_dir(&root.join(dir))?)))
         .collect::<Result<Vec<_>>>()?;
         let port = TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+        let binary = distribution::binary(&root, binary).await?;
         let mut runtime = Self {
             _lock: lock,
             binary,
@@ -139,7 +166,7 @@ impl Runtime {
         ensure!(
             version.status.success()
                 && std::str::from_utf8(&version.stdout)?.trim() == format!("opencode v{VERSION}"),
-            "factoryd requires OpenCode {VERSION}; place it in PATH or set FACTORY_OPENCODE_BIN"
+            "factoryd requires OpenCode {VERSION}; check its cache or FACTORY_OPENCODE_BIN"
         );
         let key_file = root.join("model.key");
         let gateway = factoryd::model_gateway::Gateway::managed(
@@ -246,27 +273,32 @@ impl Runtime {
     }
 }
 
-fn resolve_binary(binary: &Path) -> Result<PathBuf> {
-    if binary.components().count() > 1 {
-        return binary
-            .canonicalize()
-            .context("Factory OpenCode binary not found");
-    }
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .map(|dir| dir.join(binary))
-        .find(|path| {
-            fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-        .context("OpenCode is missing from PATH; install it or set FACTORY_OPENCODE_BIN")?
-        .canonicalize()
-        .context("Factory OpenCode binary not found")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_external_config_and_how_to_resolve_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(".opencode");
+        let database = dir.path().join("data/factory.sqlite3");
+        let workspace = dir.path().join("data/factory.sqlite3.opencode/workspace");
+        fs::create_dir(&config).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+
+        let message = check_workspace_config(&workspace, &database)
+            .unwrap_err()
+            .to_string();
+        for path in [&config, &database] {
+            assert!(message.contains(path.to_str().unwrap()));
+        }
+        assert!(message.contains("folders above it"));
+        assert!(message.ends_with(&format!(
+            "Use --database with an absolute path outside {}, \
+             or remove the OpenCode configuration above.",
+            dir.path().display()
+        )));
+    }
 
     #[tokio::test]
     #[ignore = "requires an explicit OpenCode 2.4.1 binary"]
@@ -274,12 +306,12 @@ mod tests {
         let binary = PathBuf::from(std::env::var_os("FACTORY_TEST_OPENCODE").unwrap());
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("test.sqlite3");
-        let (mut runtime, _) = Runtime::start(&db, binary.clone()).await.unwrap();
+        let (mut runtime, _) = Runtime::start(&db, Some(&binary)).await.unwrap();
         let key_path = dir.path().join("test.sqlite3.opencode/model.key");
         let first_key = fs::read(&key_path).unwrap();
         let url = runtime.url();
         let password = runtime.password.clone();
-        assert!(Runtime::start(&db, binary.clone()).await.is_err());
+        assert!(Runtime::start(&db, Some(&binary)).await.is_err());
         runtime.child.as_mut().unwrap().kill().await.unwrap();
         // Stop waiting once the supervised replacement accepts the same route.
         let verify = async {
@@ -304,7 +336,7 @@ mod tests {
         };
         runtime.shutdown().await;
         drop(runtime);
-        let (mut restarted, _) = Runtime::start(&db, binary).await.unwrap();
+        let (mut restarted, _) = Runtime::start(&db, Some(&binary)).await.unwrap();
         assert_eq!(fs::read(&key_path).unwrap(), first_key);
         assert_eq!(
             fs::symlink_metadata(key_path).unwrap().permissions().mode() & 0o077,

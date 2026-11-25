@@ -9,6 +9,7 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 factory-core.workspace = true
+factory-opencode.workspace = true
 factory-protocol.workspace = true
 tokio = { workspace = true, features = ["process"] }
 sha2 = "0.10"
@@ -22,7 +23,10 @@ reqwest = { workspace = true, features = ["stream"] }
 tiktoken-rs = "0.12.1"
 fs2 = "0.4"
 tempfile = "3"
+ring = "0.17"
+base64 = "0.22"
 
 [dev-dependencies]
+png = "0.18"
 factory-protocol = { workspace = true, features = ["client"] }
 serde_json.workspace = true

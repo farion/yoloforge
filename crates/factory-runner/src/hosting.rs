@@ -11,7 +11,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -132,7 +132,7 @@ fn store(path: &Path, receipt: &Receipt) -> Result<()> {
     file.write_all(&serde_json::to_vec_pretty(receipt)?)?;
     file.as_file().sync_all()?;
     file.persist(path).map_err(|e| e.error)?;
-    File::open(parent)?.sync_all()?;
+    factory_platform::sync_dir(parent)?;
     Ok(())
 }
 fn branch_tip(identity: &Identity) -> Result<Option<String>> {

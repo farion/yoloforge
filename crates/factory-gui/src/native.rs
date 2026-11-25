@@ -26,13 +26,17 @@ pub fn run(server: String, screenshot: Option<PathBuf>, exit_after_ms: Option<u6
     }
     let sdl = sdl3::init().map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let video = sdl.video().map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    eprintln!(
-        "YoloForge: SDL3-Fensterbackend {}",
-        video.current_video_driver()
-    );
+    eprintln!("{}", crate::tr!("YoloForge: SDL3-Fensterbackend {}", video.current_video_driver()));
     let attr = video.gl_attr();
     attr.set_context_profile(sdl3::video::GLProfile::Core);
+    #[cfg(not(target_os = "macos"))]
     attr.set_context_version(3, 3);
+    #[cfg(target_os = "macos")]
+    {
+        // Cocoa exposes 3.2/4.1 core profiles, not an arbitrary 3.3 profile.
+        attr.set_context_version(4, 1);
+        attr.set_context_flags().forward_compatible().set();
+    }
     attr.set_double_buffer(true);
     let mut window = video
         .window("YoloForge", 1360, 900)
@@ -40,7 +44,7 @@ pub fn run(server: String, screenshot: Option<PathBuf>, exit_after_ms: Option<u6
         .resizable()
         .high_pixel_density()
         .build()
-        .context("SDL3-Fenster konnte nicht erstellt werden")?;
+        .context(crate::tr!("SDL3-Fenster konnte nicht erstellt werden"))?;
     window
         .set_minimum_size(820, 560)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -126,14 +130,6 @@ pub fn run(server: String, screenshot: Option<PathBuf>, exit_after_ms: Option<u6
             .or_default()
             .native_pixels_per_point = Some(scale);
         let output = ctx.run(input.raw.take(), |ctx| app.update(ctx));
-        if let Some(target) = app.clipboard_image_request.take() {
-            if app.clipboard_image_target() == Some(target) {
-                let image = clipboard_image().and_then(|image| {
-                    image.ok_or_else(|| "Kein Bild in der Zwischenablage (PNG, JPEG, WebP oder GIF).".into())
-                });
-                deliver_clipboard_image(&mut app, target, image);
-            }
-        }
         input.raw.hovered_files = if input.dragging {
             vec![egui::HoveredFile::default()]
         } else {
@@ -143,12 +139,12 @@ pub fn run(server: String, screenshot: Option<PathBuf>, exit_after_ms: Option<u6
             match command {
                 egui::OutputCommand::CopyText(text) => {
                     if let Err(error) = copy_text(text, &video) {
-                        app.notice(format!("Text konnte nicht kopiert werden: {error}"));
+                        app.notice(crate::tr!("Text konnte nicht kopiert werden: {error}", error = error));
                     }
                 }
                 egui::OutputCommand::OpenUrl(url) => {
                     if webbrowser::open(&url.url).is_err() {
-                        app.notice("Der Browser konnte nicht geöffnet werden.");
+                        app.notice(crate::tr!("Der Browser konnte nicht geöffnet werden."));
                     }
                 }
                 egui::OutputCommand::CopyImage(_) => {}
@@ -232,7 +228,7 @@ fn copy_text(text: &str, video: &sdl3::VideoSubsystem) -> Result<(), String> {
         return Ok(());
     }
     if text.contains('\0') {
-        return Err("Der markierte Text enthält ein nicht unterstütztes Nullzeichen.".into());
+        return Err(crate::tr!("Der markierte Text enthält ein nicht unterstütztes Nullzeichen.").into());
     }
     #[cfg(target_os = "linux")]
     if video.current_video_driver() == "wayland" {
@@ -259,10 +255,10 @@ fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
     use sdl3::sys::{clipboard::*, stdinc::SDL_free};
     let mut error = None;
     for (mime, name) in [
-        (c"image/png", "Zwischenablage.png"),
-        (c"image/jpeg", "Zwischenablage.jpg"),
-        (c"image/webp", "Zwischenablage.webp"),
-        (c"image/gif", "Zwischenablage.gif"),
+        (c"image/png", crate::tr!("Zwischenablage.png")),
+        (c"image/jpeg", crate::tr!("Zwischenablage.jpg")),
+        (c"image/webp", crate::tr!("Zwischenablage.webp")),
+        (c"image/gif", crate::tr!("Zwischenablage.gif")),
     ] {
         let mut len = 0;
         // SAFETY: called only on SDL's video thread. SDL owns the clipboard,
@@ -273,19 +269,19 @@ fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
             }
             let data = SDL_GetClipboardData(mime.as_ptr(), &mut len);
             if data.is_null() {
-                error = Some("Das Bild konnte nicht aus der Zwischenablage gelesen werden.");
+                error = Some(crate::tr!("Das Bild konnte nicht aus der Zwischenablage gelesen werden."));
                 continue;
             }
             let bytes = match len {
                 0 => {
-                    error = Some("Das Bild in der Zwischenablage ist leer.");
+                    error = Some(crate::tr!("Das Bild in der Zwischenablage ist leer."));
                     None
                 }
                 1..=factory_core::IMAGE_BYTES => {
                     Some(std::slice::from_raw_parts(data.cast::<u8>(), len).to_vec())
                 }
                 _ => {
-                    error = Some("Das Bild in der Zwischenablage ist größer als 4 MiB.");
+                    error = Some(crate::tr!("Das Bild in der Zwischenablage ist größer als 4 MiB."));
                     None
                 }
             };

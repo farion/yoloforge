@@ -2,6 +2,8 @@ use super::*;
 /// Volatile, authenticated request observation; not a persistent connection guarantee.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientPresence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<std::net::IpAddr>,
     pub id: String,
     pub name: String,
     pub device_id: Option<DeviceId>,
@@ -49,6 +51,7 @@ pub fn task_routing_level(note: &str) -> TaskHistoryLevel {
         TaskHistoryLevel::Error
     } else if note.starts_with("Orchestrator wartet:") || note.contains("abgebrochen")
         || note.starts_with("Orchestrator kann noch nicht starten")
+        || note.starts_with("Wartet auf ")
         || note.starts_with("Fortsetzung wartet") || note.starts_with("Session wartet")
     {
         TaskHistoryLevel::Warning

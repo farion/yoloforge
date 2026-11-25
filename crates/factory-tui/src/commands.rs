@@ -20,8 +20,6 @@ pub enum Command {
         runner: Vec<RunnerId>,
         #[arg(long, default_value = "1")]
         max_parallel: u8,
-        #[arg(long, default_value = "10")]
-        start_budget: u32,
         #[arg(long)]
         request_id: Option<RequestId>,
     },
@@ -556,7 +554,6 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             enabled,
             runner,
             max_parallel,
-            start_budget,
             request_id,
         } => print(
             &client
@@ -568,7 +565,6 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                         enabled,
                         runner_ids: runner,
                         max_parallel,
-                        start_budget,
                     },
                 )
                 .await?,
@@ -987,6 +983,7 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                 .update_project(
                     id,
                     &UpdateProject {
+                        logo: None,
                         runner_mapping: None,
                         key: None,
                         request_id: request(request_id),
@@ -1261,6 +1258,7 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
         } => print(
             &client
                 .create_project(&CreateProject {
+                    logo: None,
                     runner_mapping: None,
                     key: None,
                     request_id: request(request_id),

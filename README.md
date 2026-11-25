@@ -1,5 +1,7 @@
 # YoloForge
 
+![YoloForge](yoloforge.jpg)
+
 Repository: https://github.com/farion/yoloforge
 
 Der CLI-Einstieg heißt `yoloforge`. `factory` bleibt als kompatibler Alias
@@ -13,10 +15,10 @@ Ein zentraler Rust-Dienst verwaltet Projekte und Aufgaben; Agenten arbeiten auf
 dem Laptop oder Server. Die native [Rust-/egui-GUI](docs/gui.md), die
 Ratatui-Oberfläche und die Android-App bedienen denselben Zustand.
 
-## Native Desktop-GUI (Linux)
+## Native Desktop-GUI (Linux, macOS, Windows)
 
 ```sh
-cargo build --workspace --locked
+cargo build --locked -p factory-gui -p factory-runner
 cargo run --locked -p factory-gui --bin yoloforge-gui
 ```
 
@@ -24,6 +26,10 @@ Dark Theme, Aufgaben-/Fragenverwaltung, schreibgeschützte OpenCode-Tabs,
 Instanzpräsenz, Orchestrator, Runner, Diagnose und globale Benachrichtigungen.
 Ohne Zugang öffnet sich ein Verbindungsdialog mit lokalem Startassistenten.
 [Bedienung und Grenzen](docs/gui.md) · [Funktionszuordnung](docs/gui-parity.md).
+
+GitHub CI baut GUI und Runner für Linux/macOS (x86-64 und ARM64) und Windows
+(x86-64), dazu Server-Pakete für Linux. Versionstags veröffentlichen nur vollständige
+Paketsets mit Prüfsummen. [CI und Releases](docs/ci.md).
 
 ### Screenshots
 

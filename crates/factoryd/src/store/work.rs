@@ -330,6 +330,18 @@ impl Store {
         role: &str,
         pinned: Option<&factory_protocol::models::ModelSelection>,
     ) -> Result<RunnerCommand> {
+        Self::enqueue_with_pins(tx, id, body, previous, role, pinned, None)
+    }
+
+    pub(super) fn enqueue_with_pins(
+        tx: &Transaction<'_>,
+        id: StreamId,
+        body: &EnqueueCommand,
+        previous: Option<CommandId>,
+        role: &str,
+        pinned: Option<&factory_protocol::models::ModelSelection>,
+        integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
+    ) -> Result<RunnerCommand> {
         let supervised = !role.is_empty();
         let mut owner = stream(tx, id)?;
         if body.kind == CommandKind::RunAgent {
@@ -439,6 +451,18 @@ impl Store {
                 |r| r.get(0),
             )?;
             let mut project: Project = serde_json::from_str(&data)?;
+            let (repo_skills, local_mcps) = if supervised {
+                (super::skills::SkillProfile::default(), McpProfile::default())
+            } else if let Some((skills, mcps)) = integrations {
+                (super::skills::SkillProfile {repo:skills.repo.clone(),factory:skills.factory.clone()}, mcps.clone())
+            } else {
+                (super::skills::selected(tx, owner.project_id)?, super::mcp::selected(tx, owner.project_id)?)
+            };
+            if !super::mcp::allowed(tx, owner.project_id, &local_mcps)?
+                || !super::mcp::runner_ready(tx, owner.runner_id, &local_mcps)?
+            {
+                return Err(StoreError::Invalid("Kein verfügbarer Runner für die freigegebenen MCPs"));
+            }
             let model = match pinned {
                 Some(model) => Some(model.clone()),
                 None => super::models::role_selection(tx, owner.project_id, role)?,
@@ -480,7 +504,7 @@ impl Store {
                     || parent
                         .agent_spec
                         .as_ref()
-                        .is_none_or(|s| s.profile != project.profile)
+                        .is_none_or(|s| s.profile != project.profile || !repo_skills.can_continue(s) || !local_mcps.matches(s))
                 {
                     return Err(StoreError::WorkConflict);
                 }
@@ -528,6 +552,10 @@ impl Store {
             validate_images(&images).map_err(StoreError::Invalid)?;
             validate_files(&files).map_err(StoreError::Invalid)?;
             Some(AgentSpec {
+                repo_skills: repo_skills.repo,
+                factory_skills: repo_skills.factory,
+                local_mcps: local_mcps.local,
+                remote_mcps: local_mcps.remote,
                 files,
                 role: role.into(),
                 images,
@@ -596,15 +624,27 @@ impl Store {
             |tx| {
                 let mut value = command(tx, id, runner, body.ownership_epoch)?;
                 if value.state == CommandState::Pending {
-                    if value.kind == CommandKind::RunAgent {
-                        let owner=stream(tx,value.stream_id)?;
+                     if value.kind == CommandKind::RunAgent {
+                         let owner=stream(tx,value.stream_id)?;
+                         if let Some(agent) = &value.agent_spec {
+                             let profile = McpProfile::from_agent(agent);
+                             if !super::mcp::allowed(tx, owner.project_id, &profile)?
+                                 || !super::mcp::runner_ready(tx, runner, &profile)?
+                             {
+                                 return Err(StoreError::WorkConflict);
+                             }
+                         }
                         super::token_budgets::admit(tx,owner.project_id,value.agent_spec.as_ref().map_or("",|a|a.role.as_str()))
                             .map_err(|e| match e { StoreError::Invalid(_) => StoreError::WorkConflict, other => other })?;
                     }
                     let paused:bool=tx.query_row("SELECT COALESCE(json_extract(p.data,'$.paused'),0) FROM active_projects p JOIN streams s ON s.project_id=p.id WHERE s.id=?1",[value.stream_id.to_string()],|r|r.get(0))?;if paused{return Err(StoreError::WorkConflict);}
                     if value.kind==CommandKind::RunAgent && value.agent_spec.as_ref().is_some_and(|a|!a.read_only) {
                         let owner=stream(tx,value.stream_id)?;
-                        let limit:u8=tx.query_row("SELECT COALESCE(json_extract(data,'$.max_sessions'),1) FROM active_projects WHERE id=?1",[owner.project_id.to_string()],|r|r.get(0))?;
+                        let limit = tx.query_row(
+                            "SELECT json_extract(data,'$.max_sessions') FROM active_projects WHERE id=?1",
+                            [owner.project_id.to_string()],
+                            |r| r.get::<_, Option<u8>>(0),
+                        )?.unwrap_or_else(default_session_limit);
                         let active:u64=tx.query_row("SELECT COUNT(DISTINCT c.stream_id) FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.state='accepted' AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0",[owner.project_id.to_string()],|r|r.get(0))?;
                         if active>=u64::from(limit) {return Err(StoreError::WorkConflict);}
                     }
@@ -642,7 +682,7 @@ impl Store {
         id: CommandId,
         body: CommandResult,
     ) -> Result<RunnerCommand> {
-        self.mutate(
+        let result = self.mutate(
             body.request_id,
             &format!("command.result/{runner}/{id}"),
             &body,
@@ -767,7 +807,11 @@ impl Store {
                 )?;
                 Ok(value)
             },
-        )
+        );
+        if result.as_ref().is_ok_and(|command| matches!(command.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent)) {
+            self.wake_scheduler();
+        }
+        result
     }
 }
 

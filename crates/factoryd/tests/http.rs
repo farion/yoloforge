@@ -178,6 +178,7 @@ async fn project_deletion_management_client_is_confirmed_and_replayed() {
                 "POST",
                 "/v1/projects",
                 &serde_json::to_value(CreateProject {
+                    logo: None,
                     runner_mapping: None,
                     key: None,
                     request_id: RequestId::new(),
@@ -336,6 +337,7 @@ async fn project_ticket_routes_expose_revision_conflicts_and_durable_event_curso
     let client = Client::new();
     let project = request(&client, &server, reqwest::Method::POST, "/v1/projects")
         .json(&CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),

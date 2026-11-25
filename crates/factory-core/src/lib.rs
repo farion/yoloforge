@@ -3,16 +3,17 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, time::Duration};
 use uuid::Uuid;
 pub fn default_session_limit() -> u8 {
-    1
+    6
 }
 mod images;
 pub use images::*;
+mod project_logo;
+pub use project_logo::*;
 mod archive_files;
 pub use archive_files::*;
 pub const TASK_IMAGES_CAPABILITY: &str = "task-images-v1";
 pub const CONTEXT_PLANNING_CAPABILITY: &str = "context-planning-v1";
 pub const LOCAL_PROJECT_CAPABILITY: &str = "local-project-create-v1";
-pub const UNLIMITED_STARTS: u32 = u32::MAX;
 
 macro_rules! id {
     ($name:ident) => {
@@ -471,6 +472,15 @@ pub struct ContextTokenCount {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentSpec {
+    /// An explicit allowlist for native repository skills. None is a legacy run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub factory_skills: Vec<FactorySkillRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_mcps: Vec<LocalMcp>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_mcps: Vec<RemoteMcpRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<PromptFile>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -483,6 +493,84 @@ pub struct AgentSpec {
     pub continuation: Option<SessionContinuation>,
     pub prompt: String,
     pub profile: ExecutionProfile,
+}
+
+pub const FACTORY_SKILL_PREFIX: &str = "yf-catalog-";
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactorySkillRef {
+    pub id: String,
+    pub version: u32,
+}
+
+impl FactorySkillRef {
+    pub fn runtime_id(&self) -> String {
+        format!("{FACTORY_SKILL_PREFIX}{}-v{}", self.id, self.version)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.id.len() <= 40 && valid_repo_skill_id(&self.id) && self.version > 0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalMcp {
+    pub id: String,
+    pub name: String,
+    pub command: Vec<String>,
+    pub runners: Vec<RunnerId>,
+    /// Automatic membership also covers runners registered in the future.
+    /// Defaults to false for immutable execution profiles created by older versions.
+    #[serde(default)]
+    pub all_runners: bool,
+    #[serde(default)]
+    pub excluded_runners: Vec<RunnerId>,
+}
+
+impl LocalMcp {
+    pub fn enabled_on(&self, runner: RunnerId) -> bool {
+        if self.all_runners { !self.excluded_runners.contains(&runner) }
+        else { self.runners.contains(&runner) }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemoteMcpRef {
+    pub id: String,
+    pub name: String,
+    pub revision: Revision,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct McpProfile {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<LocalMcp>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote: Vec<RemoteMcpRef>,
+}
+
+impl McpProfile {
+    pub fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.remote.is_empty()
+    }
+
+    pub fn matches(&self, agent: &AgentSpec) -> bool {
+        self.local == agent.local_mcps && self.remote == agent.remote_mcps
+    }
+
+    pub fn from_agent(agent: &AgentSpec) -> Self {
+        Self { local: agent.local_mcps.clone(), remote: agent.remote_mcps.clone() }
+    }
+}
+
+pub fn valid_repo_skill_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.split('-').all(|part| {
+            !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 fn is_false(value: &bool) -> bool {
     !*value
@@ -581,6 +669,7 @@ pub enum AgentPhase {
     Starting,
     Running,
     WaitingInput,
+    Finalizing,
     Unknown,
     Succeeded,
     Failed,
@@ -674,6 +763,8 @@ pub struct Revision(pub u64);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<ProjectLogo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_mapping: Option<ProjectRunnerMapping>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key: String,
@@ -763,7 +854,6 @@ pub struct SchedulerPolicy {
     pub enabled: bool,
     pub runner_ids: Vec<RunnerId>,
     pub max_parallel: u8,
-    pub remaining_starts: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

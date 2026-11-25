@@ -9,14 +9,66 @@ use factory_protocol::*;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+pub(crate) const ABOUT_GITHUB: &str = "https://github.com/farion/yoloforge";
+
+fn show_about(ctx: &egui::Context) -> bool {
+    let available = ctx.content_rect().size() - egui::Vec2::splat(2.0 * design::DIALOG_OUTER_GAP);
+    let width = available.x.min(available.y * 4.0 / 3.0).clamp(1.0, 840.0);
+    let size = egui::vec2(width, width * 3.0 / 4.0);
+    let response = egui::Modal::new(egui::Id::new("yoloforge-about"))
+        .frame(egui::Frame::window(&ctx.style()).inner_margin(0))
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            egui::Image::from_bytes(
+                "bytes://yoloforge-about.jpg",
+                include_bytes!("../../../yoloforge.jpg").as_slice(),
+            )
+            .show_loading_spinner(false)
+            .paint_at(ui, rect);
+
+            let padding = design::DIALOG_PADDING as f32;
+            let content = rect.shrink(padding);
+            let header_band = egui::Rect::from_min_max(
+                rect.min, egui::pos2(rect.right(), content.top() + 36.0),
+            );
+            let shade = egui::Color32::from_black_alpha(185);
+            ui.painter().rect_filled(header_band, 0, shade);
+            let mut header = ui.new_child(egui::UiBuilder::new().id_salt("header").max_rect(content));
+            header.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+            let close = design::dialog_header(&mut header, crate::tr!("About")).clicked();
+
+            let mut footer = ui.new_child(
+                egui::UiBuilder::new().id_salt("info").max_rect(content)
+                    .layout(egui::Layout::bottom_up(egui::Align::Max)),
+            );
+            footer.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+            footer.visuals_mut().hyperlink_color = egui::Color32::WHITE;
+            let backing = footer.painter().add(egui::Shape::Noop);
+            let link = footer.hyperlink_to("GitHub", ABOUT_GITHUB);
+            let license = footer.label(crate::tr!("License GPL v3.0"));
+            let version = footer.label(concat!("v", env!("CARGO_PKG_VERSION")));
+            let name = footer.heading("YoloForge");
+            let info = link.rect.union(license.rect).union(version.rect).union(name.rect);
+            footer.painter().set(backing, egui::Shape::rect_filled(info.expand(12.0), 6, shade));
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| data.insert_temp(
+                egui::Id::new("test-about-layout"), (rect, info, link.rect),
+            ));
+            close
+        });
+    response.inner || response.should_close()
+}
+
 pub enum Dialog {
+    About,
     ConnectionInfo,
     Connection {
         server: String,
         token: String,
-        error: Option<String>,
-        local_starting: bool,
     },
+    LocalFactory { starting: bool },
+    RemoveLocalRunner { id: RunnerId, name: String },
+    RemoveOfflineTask(RequestId),
     Task(Box<TaskDialog>),
     TaskEditing {
         id: TicketId,
@@ -39,15 +91,12 @@ pub enum Dialog {
         key: RequestId,
     },
     Pending,
-    Settings,
-    Enroll {
-        server: String,
-        code: String,
-        name: String,
-        sending: bool,
-    },
 }
 pub struct TaskDialog {
+    pub(crate) advanced: bool,
+    pub(crate) local_task: Option<RequestId>,
+    local_done: bool,
+    session_prompt: bool,
     pub read_only: bool,
     pub payloads_complete: bool,
     pub id: RequestId,
@@ -72,6 +121,7 @@ struct TaskHistory {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TaskSubmitAction {
     SaveDraft,
+    SaveDraftAndNew,
     Queue,
     QueueAndNew,
 }
@@ -87,6 +137,7 @@ pub struct QuestionAnswer {
     restored: bool,
 }
 pub struct FormDialog {
+    pub(crate) settings_baseline: Option<Value>,
     pub id: RequestId,
     pub title: String,
     pub help: String,
@@ -96,6 +147,7 @@ pub struct FormDialog {
     pub request: Option<u64>,
     pub error: Option<String>,
     folder_picker: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    pub(crate) logo_picker: crate::project_logo::Picker,
 }
 impl Dialog {
     pub fn project_settings(project: ProjectId) -> Self {
@@ -121,12 +173,14 @@ impl Dialog {
         Self::Connection {
             server,
             token: String::new(),
-            error: None,
-            local_starting: false,
         }
     }
     pub fn task(server: String, project: ProjectId, ticket: Option<&Ticket>) -> Self {
         Self::Task(Box::new(TaskDialog {
+            advanced: false,
+            local_task: None,
+            local_done: false,
+            session_prompt: false,
             read_only: false,
             payloads_complete: true,
             id: RequestId::new(),
@@ -144,6 +198,7 @@ impl Dialog {
                 images: ticket.map_or_else(Vec::new, |t| t.images.clone()),
                 files: ticket.map_or_else(Vec::new, |t| t.files.clone()),
                 requested_session: ticket.and_then(|t| t.requested_session),
+                local_mcps: None,
                 implementer: None,
                 model_loaded: false,
             },
@@ -204,6 +259,7 @@ impl Dialog {
     }
     pub fn form(title: &str, help: &str, method: &str, path: String, body: Value) -> Self {
         Self::Form(FormDialog {
+            settings_baseline: None,
             id: RequestId::new(),
             title: title.into(),
             help: help.into(),
@@ -213,6 +269,7 @@ impl Dialog {
             request: None,
             error: None,
             folder_picker: None,
+            logo_picker: Default::default(),
         })
     }
     pub fn read(title: String, request: u64, path: String) -> Self {
@@ -223,11 +280,14 @@ impl Dialog {
         }
     }
     pub fn show(&mut self, ctx: &egui::Context, app: &mut App) -> bool {
+        if matches!(self, Self::About) {
+            return show_about(ctx);
+        }
         if let Self::Task(task) = self {
             if !task.read_only
-                && task.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok))
+                && (task.local_done || task.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)))
             {
-                if task.submit_action == TaskSubmitAction::QueueAndNew {
+                if matches!(task.submit_action, TaskSubmitAction::QueueAndNew | TaskSubmitAction::SaveDraftAndNew) {
                     // A new ID isolates late attachments and gives the fresh prompt focus.
                     *self = Self::task(task.draft.server.clone(), task.draft.project, None);
                 } else {
@@ -245,6 +305,9 @@ impl Dialog {
         if matches!(self, Self::Form(form) if form.is_project_editor()) {
             content_size.x = content_size.x.min(520.0);
         }
+        if matches!(self, Self::Read { path, .. } if is_project_usage(path)) {
+            content_size.x = content_size.x.min(460.0);
+        }
         if matches!(self, Self::ModelSetupRequired | Self::ModelDefaultsConfigured { .. }) {
             content_size.x = content_size.x.min(480.0);
         }
@@ -252,38 +315,35 @@ impl Dialog {
         let body_height = (content_size.y - 62.0).max(40.0);
         let height = (body_height - 160.0).max(80.0);
         let title = match &*self {
-            Self::Connection { .. } => "Mit Factory verbinden".into(),
-            Self::Enroll { .. } => "Gerät anmelden".into(),
+            Self::About => unreachable!("About uses its own full-bleed layout"),
+            Self::Connection { .. } => crate::tr!("Mit Factory verbinden").into(),
+            Self::LocalFactory { .. } => crate::tr!("Lokale Factory").into(),
+            Self::RemoveLocalRunner { .. } => crate::tr!("Lokalen Runner entfernen").into(),
+            Self::RemoveOfflineTask(_) => crate::tr!("Lokale Aufgabe entfernen").into(),
             Self::Task(task) => if task.read_only {
-                "Aufgabe anzeigen · schreibgeschützt"
+                crate::tr!("Aufgabe anzeigen · schreibgeschützt")
             } else if task.draft.ticket.is_some() {
-                "Aufgabe bearbeiten"
+                crate::tr!("Aufgabe bearbeiten")
             } else {
-                "Neue Aufgabe"
+                crate::tr!("Neue Aufgabe")
             }
             .into(),
-            Self::TaskEditing { .. } => "Aufgabe zum Bearbeiten sichern".into(),
+            Self::TaskEditing { .. } => crate::tr!("Aufgabe zum Bearbeiten sichern").into(),
             Self::Questions(group) => if group.questions.iter().any(|entry| needs_answer(&entry.question)) {
-                "Fragen beantworten"
+                crate::tr!("Fragen beantworten")
             } else {
-                "Fragen und Antworten"
+                crate::tr!("Fragen und Antworten")
             }.into(),
-            Self::QuestionView(_) => "Fragen und Antworten".into(),
-            Self::Form(form) => form.title.clone(),
-            Self::ProjectSettings(settings) => if settings.project.is_some() {
-                "Erweiterte Projekteinstellungen"
-            } else {
-                "Factory-Einstellungen"
-            }
-            .into(),
-            Self::ConnectionInfo => "Verbindungsübersicht".into(),
-            Self::FactorySettings => "Factory-Einstellungen".into(),
-            Self::ModelSetupRequired => "OpenCode einrichten".into(),
-            Self::ModelDefaultsConfigured { .. } => "Default-Modelle eingerichtet".into(),
-            Self::Read { title, .. } => title.clone(),
+            Self::QuestionView(_) => crate::tr!("Fragen und Antworten").into(),
+            Self::Form(form) => crate::i18n::label(&form.title).into(),
+            Self::ProjectSettings(settings) => settings.title(app),
+            Self::ConnectionInfo => crate::tr!("Verbindungsübersicht").into(),
+            Self::FactorySettings => crate::tr!("Factory-Einstellungen").into(),
+            Self::ModelSetupRequired => crate::tr!("OpenCode einrichten").into(),
+            Self::ModelDefaultsConfigured { .. } => crate::tr!("Default-Modelle eingerichtet").into(),
+            Self::Read { title, .. } => crate::i18n::label(title).into(),
             Self::Image { image, .. } => image.name.clone(),
-            Self::Pending => "Offene Zustellungen".into(),
-            Self::Settings => "Desktop-Einstellungen".into(),
+            Self::Pending => crate::tr!("Offene Zustellungen").into(),
         };
         let title=if let Self::Task(task)=&*self {
             task.draft.ticket.and_then(|id|app.snapshot.as_ref()?.tickets.iter().find(|t|t.id==id))
@@ -311,6 +371,9 @@ impl Dialog {
                 // Give the auto-sized Area the full available limit, not a fixed
                 // height or its previous small content height.
                  ui.set_max_height(content_size.y);
+                 if matches!(self, Self::ProjectSettings(settings) if settings.is_saving()) {
+                     ui.disable();
+                 }
                 let header_top = ui.cursor().top();
                 header_close = design::dialog_header(ui, &title).clicked();
                 ui.separator();
@@ -332,62 +395,111 @@ impl Dialog {
                  }
                  if let Self::ModelSetupRequired = self {
                      ui.add_space(4.0);
-                     ui.label("Du bist mit einer Factory verbunden, für die noch kein Standardmodell eingerichtet ist.");
+                     ui.label(crate::tr!("Du bist mit einer Factory verbunden, für die noch kein Standardmodell eingerichtet ist."));
                      if app.access.as_ref().is_some_and(|access| access.role != DeviceRole::Admin) {
-                         ui.label("Ein Factory-Admin muss einen Anbieter verbinden und ein Standardmodell auswählen, bevor Aufgaben eingereiht werden können.");
+                         ui.label(crate::tr!("Ein Factory-Admin muss einen Anbieter verbinden und ein Standardmodell auswählen, bevor Aufgaben eingereiht werden können."));
                      } else {
-                         ui.label("Verbinde in den Einstellungen einen Anbieter. Die Factory richtet dann automatisch ein Standardmodell ein.");
+                         ui.label(crate::tr!("Verbinde in den Einstellungen einen Anbieter. Die Factory richtet dann automatisch ein Standardmodell ein."));
                      }
                      ui.add_space(8.0);
                      ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                         let settings = design::accent_button(ui, egui::Button::new("Zu den Modell-Anbietern"), true, BLUE.gamma_multiply(0.7));
+                         let settings = design::accent_button(ui, egui::Button::new(crate::tr!("Zu den Modell-Anbietern")), true, BLUE.gamma_multiply(0.7));
                          #[cfg(test)]
                          ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test-model-setup-continue"), settings.rect));
                          if settings.clicked() {
                              crate::model_settings::open_setup(app);
                              close = true;
-                         } else if ui.button("Später").clicked() {
+                         } else if ui.button(crate::tr!("Später")).clicked() {
                              close = true;
                          }
                      }));
                      return;
                  }
                  if let Self::ModelDefaultsConfigured { model } = self {
-                     ui.label("Die Factory hat deine Default-Modelle automatisch eingerichtet.");
-                     ui.label(format!("Standardmodell: {model}"));
-                     ui.label("Orchestrator, Implementer und Supervisor verwenden dieses Modell, solange kein eigenes Rollenmodell gewählt ist.");
+                     ui.label(crate::tr!("Die Factory hat deine Default-Modelle automatisch eingerichtet."));
+                     ui.label(crate::tr!("Standardmodell: {model}", model = model));
+                     ui.label(crate::tr!("Orchestrator, Implementer und Supervisor verwenden dieses Modell, solange kein eigenes Rollenmodell gewählt ist."));
                      ui.add_space(8.0);
                      ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                         if design::accent_button(ui, egui::Button::new("Zu den Default-Modellen"), true, BLUE.gamma_multiply(0.7)).clicked() {
+                         if design::accent_button(ui, egui::Button::new(crate::tr!("Zu den Default-Modellen")), true, BLUE.gamma_multiply(0.7)).clicked() {
                              close = true;
                          }
                      }));
                      return;
                  }
-            let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body")).max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+                 if matches!(self, Self::ConnectionInfo) {
+                     egui::ScrollArea::vertical().id_salt((modal_id, "body"))
+                         .max_height((body_height - 60.0).max(40.0))
+                         .auto_shrink([false, true])
+                         .show(ui, |ui| crate::connection_info::show(ui, app));
+                     ui.add_space(12.0);
+                     crate::connection_info::actions(ui, app);
+                     return;
+                 }
+             let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body")).max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
             match self {
+                Self::About => unreachable!("About uses its own full-bleed layout"),
                 Self::ConnectionInfo=>crate::connection_info::show(ui,app),
-                Self::Connection { server, token, error, local_starting } => {
-                    ui.label("Vorhandenen Server verwenden oder eine eigene lokale Factory starten. Laufende Aufgaben bleiben beim Schließen der GUI erhalten.");
-                    ui.separator(); ui.label("Serveradresse (HTTPS oder Loopback)"); ui.add(design::singleline(server).desired_width(f32::INFINITY));
-                    ui.label("Zugangstoken"); ui.add(design::singleline(token).password(true).desired_width(f32::INFINITY));
-                    ui.small("Token bleiben nur im Arbeitsspeicher. Alternativ FACTORY_TOKEN_FILE beim Start verwenden.");
-                    if let Some(e) = error { ui.colored_label(RED, e.as_str()); }
+                Self::Connection { server, token } => {
+                    ui.label(crate::tr!("Serveradresse (HTTPS oder Loopback)")); ui.add(design::singleline(server).desired_width(f32::INFINITY));
+                    ui.label(crate::tr!("Zugangstoken")); ui.add(design::singleline(token).password(true).desired_width(f32::INFINITY));
+                    ui.small(crate::tr!("Die Verbindung wird für den nächsten Start im Benutzerverzeichnis gespeichert."));
                     ui.horizontal(|ui| {
-                        if design::accent_button(ui,egui::Button::new("Verbinden"),!*local_starting,BLUE.gamma_multiply(0.7)).clicked() {
-                            match app.connect(server.clone(), token.clone()) { Ok(()) => close = true, Err(e) => *error = Some(e) }
+                        if design::accent_button(ui,egui::Button::new(crate::tr!("Verbinden")),!app.connection_active(),BLUE.gamma_multiply(0.7)).clicked() {
+                            match app.connect(server.clone(), token.clone()) {
+                                Ok(()) => {
+                                    let saved = crate::persistence::save_connection_token(server, token)
+                                        .and_then(|path| {
+                                            app.settings.credential_file = Some(path);
+                                            crate::persistence::save_settings(&app.settings)
+                                        });
+                                    if let Err(error) = saved {
+                                        app.error = Some(crate::tr!("Verbindung konnte nicht gespeichert werden: {error}", error = error));
+                                        app.notice(crate::tr!("Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden."));
+                                    }
+                                    close = true;
+                                }
+                                Err(e) => app.notice(e),
+                            }
                         }
-                        if ui.add_enabled(!*local_starting, egui::Button::new("Lokale Factory starten")).clicked() { *local_starting = true; app.backend.start_local(); }
-                        if *local_starting { ui.spinner(); ui.label("Lokale Dienste starten …"); if ui.button("Erneut versuchen").clicked() { *local_starting = false; } }
                     });
-                    if ui.button("Stattdessen Einladungscode einlösen …").clicked() { app.dialog = Some(Self::Enroll { server: server.clone(), code: String::new(), name: "Desktop".into(), sending: false }); }
                 }
-                Self::Enroll { server, code, name, sending } => {
-                    ui.label("Einladungscode von einem Administrator verwenden. Der neue Zugang wird in einer privaten Tokendatei gespeichert.");
-                    ui.label("Server"); ui.add(design::singleline(server)); ui.label("Einladungscode"); ui.add(design::singleline(code).password(true)); ui.label("Gerätename"); ui.add(design::singleline(name));
-                    if ui.add_enabled(!*sending, egui::Button::new("Einladung einlösen")).clicked() { *sending = true; app.backend.enroll(server.clone(), code.clone(), name.clone()); }
-                    if *sending { ui.label("Anmeldung läuft. Bei unklarem Ausgang Einladung nicht blind wiederholen; Geräteverwaltung und private Tokendateien prüfen."); }
-                    close = ui.button("Schließen").clicked();
+                Self::LocalFactory { starting } => {
+                    if *starting {
+                        ui.horizontal(|ui| { ui.spinner(); ui.label(crate::tr!("Lokale Dienste starten …")); });
+                    } else if ui.button(crate::tr!("Erneut versuchen")).clicked() {
+                        *starting = true;
+                        app.backend.start_local();
+                    }
+                    ui.label(crate::tr!("Laufende Aufgaben bleiben beim Schließen der GUI erhalten."));
+                }
+                Self::RemoveLocalRunner { id, name } => {
+                    ui.label(crate::tr!("„{name}“ stoppen und aus den gespeicherten lokalen Runnern entfernen?", name = name));
+                    ui.label(crate::tr!("Der Runner wird beim nächsten GUI-Start nicht mehr gestartet. Journale und Arbeitsdaten bleiben erhalten."));
+                    let busy = app.snapshot.as_ref().is_none_or(|s| crate::local_runners::busy(s, *id));
+                    if busy {
+                        ui.label(crate::tr!("Dieser Runner hat laufende oder ungeklärte Aufträge. Diese zuerst abschließen."));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!busy && app.online && !app.local_runners_busy,
+                            egui::Button::new(crate::tr!("Runner entfernen"))).clicked() {
+                            app.manage_local_runners(crate::local_runners::Action::Remove(*id));
+                            close = true;
+                        }
+                        if ui.button(crate::tr!("Abbrechen")).clicked() { close = true; }
+                    });
+                }
+                Self::RemoveOfflineTask(id) => {
+                    ui.label(crate::tr!("Diese lokal vorbereitete Aufgabe samt Anhängen entfernen?"));
+                    ui.horizontal(|ui| {
+                        let allowed = app.settings.offline_tasks.iter().any(|t| t.id == *id && t.sync_request.is_none());
+                        if ui.add_enabled(allowed, egui::Button::new(crate::tr!("Entfernen"))).clicked() {
+                            app.settings.offline_tasks.retain(|t| t.id != *id);
+                            app.settings_dirty = true;
+                            close = true;
+                        }
+                        if ui.button(crate::tr!("Abbrechen")).clicked() { close = true; }
+                    });
                 }
                 Self::Task(_) => {},
                 Self::ProjectSettings(_)=>{},
@@ -395,40 +507,59 @@ impl Dialog {
                  Self::ModelSetupRequired=>{},
                  Self::ModelDefaultsConfigured { .. }=>{},
                 Self::TaskEditing {id,request} => {
-                    ui.label("Die Aufgabe wird serverseitig gegen Einplanung gesichert. Erst nach Bestätigung öffnet sich der Editor mit allen Anhängen.");
-                    ui.label("Beim Schließen bleibt die Aufgabe als Draft gesichert. Erst „Einreihen“ gibt sie wieder frei.");
+                    ui.label(crate::tr!("Die Aufgabe wird serverseitig gegen Einplanung gesichert. Erst nach Bestätigung öffnet sich der Editor mit allen Anhängen."));
+                    ui.label(crate::tr!("Beim Schließen bleibt die Aufgabe als Draft gesichert. Erst „Einreihen“ gibt sie wieder frei."));
                     request_status(ui,app,*request);
-                    ui.small(format!("Aufgabe {id}"));
-                    close = ui.button("Schließen").clicked();
+                    ui.small(crate::tr!("Aufgabe {id}", id = id));
+                    close = ui.button(crate::tr!("Schließen")).clicked();
                 }
                 Self::Questions(group) => close = group.show(ui, app, height),
                 Self::QuestionView(questions) => question_answers(ui, questions),
-                Self::Form(form) => close = form.show(ui, app, height),
+                Self::Form(form) => close = form.show(ui, app, if form.is_project_editor() { body_height } else { height }),
+                Self::Read { request, path, .. } if is_project_usage(path) => {
+                    match app.responses.get(request) {
+                        Some(Ok(value)) => match serde_json::from_value::<ProjectUsage>(value.clone()) {
+                            Ok(report) => {
+                                let created = app.snapshot.as_ref()
+                                    .and_then(|s| s.projects.iter().find(|p| p.id == report.project_id))
+                                    .map(|p| p.created_unix_ms);
+                                project_usage_summary(ui, &report, created, chrono::Local::now().date_naive());
+                            }
+                            Err(_) => usage_load_failed(ui, app, modal_id),
+                        },
+                        Some(Err(_)) => usage_load_failed(ui, app, modal_id),
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(crate::tr!("Verbrauch wird geladen …"));
+                            });
+                        }
+                    }
+                }
                 Self::Read { request, path, .. } => {
                     egui::ScrollArea::both().id_salt("read-dialog").max_height(height).show(ui, |ui| {
                         match app.responses.get(request).cloned() {
                             Some(Ok(value)) => { read_content(ui, app, &value, path); },
                             Some(Err(e)) => { ui.colored_label(RED, &e.message); },
-                            None => { ui.spinner(); ui.label("Wird geladen …"); },
+                            None => { ui.spinner(); ui.label(crate::tr!("Wird geladen …")); },
                         }
                     });
-                    ui.horizontal(|ui| { if ui.button("Schließen").clicked() { close = true; }
-                        if let Some(Ok(v)) = app.responses.get(request) { if ui.button("Exportieren …").clicked() { app.backend.save_json("yoloforge-details.json", v.clone()); } }
+                    ui.horizontal(|ui| { if ui.button(crate::tr!("Schließen")).clicked() { close = true; }
+                        if path != "/v1/devices" {
+                            if let Some(Ok(v)) = app.responses.get(request) { if ui.button(crate::tr!("Exportieren …")).clicked() { app.backend.save_json("yoloforge-details.json", v.clone()); } }
+                        }
                     });
                 }
                 Self::Image { image, key } => {
                     egui::ScrollArea::both().max_height(height).show(ui, |ui| {
                         app.preview_image(ui, format!("full/{key}"), image, egui::vec2(width, height), true);
                     });
-                    ui.small("Vorschau auf maximal 4096 × 4096 Pixel skaliert. Originalbytes bleiben unverändert.");
-                    if ui.button("Originalbild speichern …").clicked() { app.backend.save_input_file(image.name.clone(), image.data.clone()); }
-                    close = ui.button("Schließen").clicked();
+                    ui.small(crate::tr!("Vorschau auf maximal 4096 × 4096 Pixel skaliert. Originalbytes bleiben unverändert."));
+                    if ui.button(crate::tr!("Originalbild speichern …")).clicked() { app.backend.save_input_file(image.name.clone(), image.data.clone()); }
+                    close = ui.button(crate::tr!("Schließen")).clicked();
                 }
                 Self::Pending => {
                     close=pending_requests(ui,app,height,true);
-                }
-                Self::Settings => {
-                    close=desktop_settings(ui,app,height,true);
                 }
             }
             });
@@ -439,7 +570,15 @@ impl Dialog {
         if matches!(self, Self::ModelSetupRequired) {
             ctx.data_mut(|data| data.insert_temp(egui::Id::new("test-model-setup-rect"), response.response.rect));
         }
-        if header_close || response.should_close() {
+        if let Self::ProjectSettings(settings) = self {
+            if !close && !settings.confirmation_open() && !settings.is_saving()
+                && (header_close || response.should_close()) {
+                close = settings.request_close(app);
+            }
+            if !close {
+                close = settings.overlay(ctx, app);
+            }
+        } else if header_close || response.should_close() {
             close = true;
         }
         if !close && matches!(self, Self::FactorySettings) {
@@ -473,7 +612,192 @@ impl Dialog {
     }
 }
 
+fn is_project_usage(path: &str) -> bool {
+    path.strip_prefix("/v1/projects/")
+        .and_then(|path| path.strip_suffix("/usage"))
+        .is_some_and(|id| id.parse::<ProjectId>().is_ok())
+}
+
+fn usage_load_failed(ui: &mut egui::Ui, app: &mut App, modal_id: egui::Id) {
+    let first = ui.ctx().data_mut(|data| {
+        let key = modal_id.with("usage-error-notified");
+        let notified = data.get_temp::<bool>(key).unwrap_or(false);
+        data.insert_temp(key, true);
+        !notified
+    });
+    if first {
+        app.notice(crate::tr!("Verbrauch konnte nicht geladen werden."));
+    }
+    ui.label(crate::tr!("Keine Verbrauchsdaten verfügbar."));
+}
+
+fn project_usage_summary(
+    ui: &mut egui::Ui,
+    report: &ProjectUsage,
+    project_created_unix_ms: Option<u64>,
+    today: chrono::NaiveDate,
+) {
+    if !report.groups.iter().any(|group| group.assistant_messages > group.messages_missing_tokens) {
+        ui.label(crate::tr!("Noch kein Tokenverbrauch erfasst."));
+        return;
+    }
+    // Match the session counters: use input and output, not the separate
+    // cache/reasoning counters, whose overlap depends on the provider.
+    let total: u128 = report.groups.iter().map(|group| {
+        u128::from(group.tokens.input) + u128::from(group.tokens.output)
+    }).sum();
+    let local_date = |ms| {
+        i64::try_from(ms).ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|date| date.with_timezone(&chrono::Local).date_naive())
+            .filter(|date| *date <= today)
+    };
+    let observed = report.first_observed_unix_ms.and_then(local_date);
+    let created = project_created_unix_ms.filter(|ms| *ms != 0).and_then(local_date);
+    let start = observed.or(created);
+    let since_label = if observed.is_none() && created.is_some() {
+        crate::tr!("Berechnet seit Projektanlage")
+    } else {
+        crate::tr!("Erfasst seit")
+    };
+    let average = start.map(|start| {
+        let days = (today - start).num_days() as u128 + 1;
+        (total + days / 2) / days
+    });
+    for (label, value) in [
+        (crate::tr!("Tokens insgesamt"), german_count(total)),
+        (since_label, start.map_or_else(|| crate::tr!("Unbekannt").into(), |date| date.format("%d.%m.%Y").to_string())),
+        (crate::tr!("Durchschnitt pro Tag"), average.map_or_else(|| crate::tr!("Nicht verfügbar").into(), |count| format!("{} Tokens", german_count(count)))),
+    ] {
+        design::settings_field(ui, label, |ui| { ui.strong(value); });
+    }
+}
+
+fn german_count(value: u128) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.bytes().enumerate() {
+        if index != 0 && (digits.len() - index).is_multiple_of(3) {
+            formatted.push('.');
+        }
+        formatted.push(char::from(digit));
+    }
+    formatted
+}
+
 impl TaskDialog {
+    pub(crate) fn offline(draft: TaskDraft, id: RequestId) -> Box<Self> {
+        let Dialog::Task(mut task) = Dialog::task(draft.server.clone(), draft.project, None) else { unreachable!() };
+        task.draft = draft;
+        task.local_task = Some(id);
+        task
+    }
+
+    fn prepare_offline(&mut self, app: &mut App, action: TaskSubmitAction) {
+        if self.draft.ticket.is_some() {
+            app.notice(crate::tr!("Bestehende Serveraufgaben können erst nach Wiederverbindung geändert werden."));
+            return;
+        }
+        if self.draft.prompt.len() > 12000 || (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty()) {
+            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+            return;
+        }
+        if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
+            self.error = Some(error.into());
+            return;
+        }
+        match app.save_offline_task(self.local_task, self.draft.clone()) {
+            Ok(id) => {
+                self.local_task = Some(id);
+                self.local_done = true;
+                self.submit_action = action;
+                self.error = None;
+                self.dirty = false;
+                if app.online { app.sync_offline_tasks(false); }
+            }
+            Err(error) => app.notice(error),
+        }
+    }
+    pub(crate) fn session(app: &App, project: ProjectId, root: CommandId) -> Box<Self> {
+        let Dialog::Task(mut composer) = Dialog::task(app.server.clone(), project, None) else { unreachable!() };
+        composer.session_prompt = true;
+        composer.draft.requested_session = Some(root);
+        if let Some(saved) = app.settings.session_prompts.iter().find(|saved|
+            saved.draft.server == app.server && saved.draft.requested_session == Some(root))
+        {
+            composer.id = saved.id;
+            composer.draft = saved.draft.clone();
+        }
+        composer
+    }
+
+    pub(crate) fn show_session_prompt(&mut self, ui: &mut egui::Ui, app: &mut App) {
+        let root = self.draft.requested_session.expect("Session composer target");
+        let path = format!("/v1/commands/{root}/prompt");
+        if self.request.is_none() {
+            self.request = app.settings.pending.iter().find(|r|
+                r.server == self.draft.server && r.path == path && r.body["request_id"] == json!(self.id)).map(|r| r.id);
+        }
+        if let Some(id) = self.request {
+            match app.responses.get(&id) {
+                Some(Ok(_)) => {
+                    self.draft.prompt.clear();
+                    self.draft.images.clear();
+                    self.draft.files.clear();
+                    self.image_keys.clear();
+                    self.id = RequestId::new();
+                    self.request = None;
+                    self.focused = false;
+                    self.dirty = true;
+                }
+                Some(Err(error)) if !error.uncertain => {
+                    self.request = None;
+                    self.id = RequestId::new();
+                    self.dirty = true;
+                }
+                _ => {},
+            }
+        }
+        egui::ScrollArea::vertical().id_salt(("session-prompt-editor", root))
+            .max_height((ui.ctx().content_rect().height() * 0.35).clamp(100.0, 280.0))
+            .auto_shrink([false, true])
+            .show(ui, |ui| self.show_body(ui, app));
+        ui.horizontal(|ui| {
+            let editable = self.request.is_none();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let submit = design::accent_button(ui, egui::Button::new(crate::tr!("Prompten")), app.online && editable, BLUE.gamma_multiply(0.7));
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-prompt-submit", root)), submit.rect));
+                if submit.clicked() {
+                    if self.draft.prompt.len() > 12000 ||
+                        (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty()) {
+                        self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+                    } else if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
+                        self.error = Some(error.into());
+                    } else {
+                        self.error = None;
+                        self.persist(app);
+                        self.request = Some(app.write(crate::tr!("Session prompten"), "POST", path.clone(), json!(PromptSession {
+                            request_id: self.id, prompt: self.draft.prompt.clone(),
+                            images: self.draft.images.clone(), files: self.draft.files.clone(),
+                        })));
+                        self.dirty = true;
+                    }
+                }
+                if let Some(id) = self.request {
+                    if app.responses.get(&id).is_some_and(|r| r.as_ref().is_err_and(|e| e.uncertain))
+                        || (!app.in_flight.contains(&id) && !app.responses.contains_key(&id)) {
+                        if ui.button(crate::tr!("Zustellung prüfen")).clicked() { app.retry(id); }
+                    } else { ui.spinner(); }
+                }
+            });
+        });
+        if self.dirty {
+            self.persist(app);
+            self.dirty = false;
+        }
+    }
+
     pub(crate) fn receive_history(&mut self, before: Option<u64>, result: Result<TaskHistoryPage, String>) {
         self.history.loading = false;
         match result {
@@ -514,38 +838,51 @@ impl TaskDialog {
         }
         ui.add_space(8.0);
         ui.separator();
-        ui.strong("Verlauf");
+        ui.strong(crate::tr!("Verlauf"));
+        if let Some(reason) = app.snapshot.as_ref().and_then(|s| {
+            let ticket = s.tickets.iter().find(|t| t.id == ticket)?;
+            task_runner_blocker(s, ticket)
+        }) {
+            design::routing_note_spacing(ui);
+            ui.colored_label(AMBER, reason);
+        }
         for entry in &self.history.entries {
             ui.horizontal_top(|ui| {
                 ui.colored_label(MUTED, timestamp(entry.created_unix_ms));
+                let level = if entry.level == TaskHistoryLevel::Info {
+                    task_routing_level(&entry.message)
+                } else {
+                    entry.level
+                };
                 ui.add(egui::Label::new(egui::RichText::new(&entry.message)
-                    .color(design::history_color(entry.level, ui.visuals().text_color()))).wrap());
+                    .color(design::history_color(level, ui.visuals().text_color()))).wrap());
             });
         }
         if self.history.entries.is_empty() {
             if let Some(ticket) = app.snapshot.as_ref().and_then(|s| s.tickets.iter().find(|t| t.id == ticket))
                 .filter(|t| !t.routing_note.is_empty())
             {
+                design::routing_note_spacing(ui);
                 ui.colored_label(
                     design::history_color(task_routing_level(&ticket.routing_note), ui.visuals().text_color()),
                     format!("{} · {}", timestamp(ticket.updated_unix_ms), ticket.routing_note),
                 );
             } else if app.online && !self.history.loading && self.history.error.is_none() {
-                ui.colored_label(MUTED, "Noch keine Einträge.");
+                ui.colored_label(MUTED, crate::tr!("Noch keine Einträge."));
             }
         }
         if !app.online {
             return;
         }
         if self.history.loading {
-            ui.label("Verlauf wird geladen …");
+            ui.label(crate::tr!("Verlauf wird geladen …"));
         } else if self.history.error.is_some() {
-            if ui.button("Verlauf erneut laden").clicked() {
+            if ui.button(crate::tr!("Verlauf erneut laden")).clicked() {
                 self.history.error = None;
                 self.history.cursor = None;
             }
         } else if let Some(before) = self.history.next_before {
-            if ui.button("Ältere Einträge laden").clicked() {
+            if ui.button(crate::tr!("Ältere Einträge laden")).clicked() {
                 self.history.loading = true;
                 app.backend.task_history(self.id, ticket, Some(before));
             }
@@ -577,7 +914,7 @@ impl TaskDialog {
             if ui
                 .add_enabled(
                     self.draft.ticket.is_some_and(|id| !app.task_loading.contains_key(&id)),
-                    egui::Button::new("Anhänge erneut laden"),
+                    egui::Button::new(crate::tr!("Anhänge erneut laden")),
                 )
                 .clicked()
             {
@@ -592,10 +929,7 @@ impl TaskDialog {
                     let detail = if self.payloads_complete {
                         design::attachment_details(&image.mime, &image.data)
                     } else {
-                        format!(
-                            "{} · vollständige Anhangdaten noch nicht verfügbar",
-                            image.mime
-                        )
+                        crate::tr!("{} · vollständige Anhangdaten noch nicht verfügbar", image.mime)
                     };
                     design::attachment_preview_tile(ui, &image.name, &detail, |ui| {
                         if self.payloads_complete {
@@ -618,10 +952,7 @@ impl TaskDialog {
                     let detail = if self.payloads_complete {
                         design::attachment_details(&file.mime, &file.data)
                     } else {
-                        format!(
-                            "{} · vollständige Anhangdaten noch nicht verfügbar",
-                            file.mime
-                        )
+                        crate::tr!("{} · vollständige Anhangdaten noch nicht verfügbar", file.mime)
                     };
                     design::attachment_preview_tile(ui, &file.name, &detail, |ui| {
                         if self.payloads_complete {
@@ -644,7 +975,10 @@ impl TaskDialog {
         height: f32,
         modal_id: egui::Id,
     ) -> bool {
-        let footer_height = ui.spacing().interact_size.y + 2.0 * ui.spacing().item_spacing.y + 8.0;
+        let expanded = !self.read_only && self.advanced;
+        let rows = if expanded { 2.0 } else { 1.0 };
+        let footer_height = rows * ui.spacing().interact_size.y + (rows + 1.0) * ui.spacing().item_spacing.y
+            + if expanded { 44.0 } else { 20.0 };
         let _body = egui::ScrollArea::vertical()
             .id_salt((modal_id, "body"))
             .max_height((height - footer_height).max(40.0))
@@ -653,7 +987,11 @@ impl TaskDialog {
                 self.show_body(ui, app);
             });
         ui.separator();
-        let close = ui.horizontal(|ui| self.show_footer(ui, app)).inner;
+        let close = if self.read_only {
+            ui.horizontal(|ui| self.show_footer(ui, app)).inner
+        } else {
+            self.show_footer(ui, app)
+        };
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(
@@ -676,6 +1014,30 @@ impl TaskDialog {
         if self.read_only {
             return;
         }
+        if let Some(id) = self.local_task {
+            if !self.local_done {
+                if let Some(task) = app.settings.offline_tasks.iter_mut().find(|t| t.id == id) {
+                    task.edit = Some(self.draft.clone());
+                    app.settings_dirty = true;
+                }
+            }
+            return;
+        }
+        if self.session_prompt {
+            app.settings.session_prompts.retain(|saved|
+                saved.draft.server != self.draft.server || saved.draft.requested_session != self.draft.requested_session);
+            if self.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)) {
+                app.settings_dirty = true;
+                return;
+            }
+            if !self.draft.prompt.is_empty() || !self.draft.images.is_empty() || !self.draft.files.is_empty() || self.request.is_some() {
+                app.settings.session_prompts.push(crate::persistence::SessionPromptDraft {
+                    id: self.id, draft: self.draft.clone(),
+                });
+            }
+            app.settings_dirty = true;
+            return;
+        }
         app.settings.task_drafts.retain(|d| {
             !(d.server == self.draft.server
                 && d.project == self.draft.project
@@ -684,7 +1046,8 @@ impl TaskDialog {
         if !self.draft.prompt.is_empty()
             || !self.draft.images.is_empty()
             || !self.draft.files.is_empty()
-            || self.draft.implementer.is_some()
+             || self.draft.implementer.is_some()
+             || self.draft.local_mcps.is_some()
             || (self.draft.edit_token.is_some()
                 && !self
                     .request
@@ -696,6 +1059,9 @@ impl TaskDialog {
     }
     fn show_body(&mut self, ui: &mut egui::Ui, app: &mut App) {
         ui.spacing_mut().item_spacing.y = 6.0;
+        if !self.read_only && !self.session_prompt && app.online {
+            self.load_model(app);
+        }
         if self.read_only {
             if app.models.managed() {
                 if let Some(ticket) = self.draft.ticket {
@@ -719,14 +1085,14 @@ impl TaskDialog {
                 .and_then(|s| s.tickets.iter().find(|t| Some(t.id) == self.draft.ticket))
                 .filter(|t| t.revision != self.draft.revision)
             {
-                ui.colored_label(AMBER,"Der Serverstand hat sich geändert. Eigene Eingaben bleiben erhalten; vor dem Speichern vergleichen.");
-                ui.collapsing("Serverstand vergleichen", |ui| {
+                ui.colored_label(AMBER,crate::tr!("Der Serverstand hat sich geändert. Eigene Eingaben bleiben erhalten; vor dem Speichern vergleichen."));
+                ui.collapsing(crate::tr!("Serverstand vergleichen"), |ui| {
                     ui.add(
                         egui::Label::new(current.prompt.as_deref().unwrap_or(&current.description))
                             .wrap(),
                     );
                     if ui
-                        .button("Verglichenen Stand als Basis übernehmen")
+                        .button(crate::tr!("Verglichenen Stand als Basis übernehmen"))
                         .clicked()
                     {
                         self.draft.revision = current.revision;
@@ -736,7 +1102,7 @@ impl TaskDialog {
                 });
             }
         }
-        if self.request.is_none() {
+        if self.request.is_none() && !self.session_prompt && self.local_task.is_none() {
             self.request = app
                 .settings
                 .pending
@@ -744,7 +1110,10 @@ impl TaskDialog {
                 .find(|r| {
                     r.server == app.server
                         && crate::model_settings::pending_task(&r.path, &r.body).is_some_and(|task|
-                            task["project_id"] == json!(self.draft.project) && task["id"] == json!(self.draft.ticket))
+                            task["project_id"] == json!(self.draft.project) && task["id"] == json!(self.draft.ticket)
+                                && !app.settings.offline_tasks.iter().any(|local| task["request_id"] == json!(local.id))
+                                && (self.draft.ticket.is_some() || task["prompt"] == json!(self.draft.prompt)
+                                    && task["images"] == json!(self.draft.images)))
                 })
                 .map(|r| r.id);
         }
@@ -758,7 +1127,6 @@ impl TaskDialog {
                 .collect();
         }
         ui.add_enabled_ui(!locked, |ui| {
-            self.show_model(ui, app);
             let mut remove_image = None;
             let mut remove_file = None;
             if !self.draft.images.is_empty() || !self.draft.files.is_empty() {
@@ -811,23 +1179,23 @@ impl TaskDialog {
                 self.dirty = true;
             }
         });
-        self.show_history(ui, app);
+        if !self.session_prompt { self.show_history(ui, app); }
         if let Some(error) = &self.error {
             ui.colored_label(RED, error);
         }
-        if let Some(id) = self.request {
+        if let Some(id) = self.request.filter(|_| !self.session_prompt) {
             request_status(ui, app, id);
             if app
                 .responses
                 .get(&id)
                 .is_some_and(|v| v.as_ref().is_err_and(|e| !e.uncertain))
-                && ui.button("Entwurf korrigieren").clicked()
+                && ui.button(crate::tr!("Entwurf korrigieren")).clicked()
             {
                 self.request = None;
             }
         }
     }
-    fn show_model(&mut self, ui: &mut egui::Ui, app: &mut App) {
+    fn load_model(&mut self, app: &mut App) {
         if !app.models.managed() { return; }
         crate::model_settings::load_project(app, self.draft.project);
         if let Some(ticket) = self.draft.ticket {
@@ -839,42 +1207,47 @@ impl TaskDialog {
                 }
             }
         }
-        ui.label("Implementer-Modell");
+    }
+    fn show_model(&mut self, ui: &mut egui::Ui, app: &mut App) {
+        if !app.models.managed() { return; }
         if let Some(error) = &self.model.error {
             ui.colored_label(RED, error);
             if let Some(ticket) = self.draft.ticket {
-                if ui.button("Modellauswahl erneut laden").clicked() && app.online {
+                if ui.button(crate::tr!("Modellauswahl erneut laden")).clicked() && app.online {
                     self.model.fetch(app, &format!("/v1/tasks/{ticket}/models"));
                 }
             }
         }
-        let Some(catalog) = &app.models.factory.value else { return; };
+        let Some(catalog) = app.models.factory.value.as_ref() else { return; };
+        let default_label = crate::model_settings::effective_implementer(app, self.draft.project)
+            .map_or_else(|| "Default".into(), |model| format!("Default ({})",
+                crate::model_settings::label(&catalog.accesses, model)));
         let available = app.models.ready_catalog();
         ui.add_enabled_ui(self.draft.ticket.is_none() || self.draft.model_loaded, |ui| {
             if crate::model_settings::choice(ui, ("task-implementer", self.id), &available,
-                &mut self.draft.implementer, "Default")
+                &mut self.draft.implementer, &default_label)
             {
                 self.dirty = true;
                 self.draft.model_loaded = true;
             }
         });
-        if self.draft.implementer.is_none() {
-            if let Some(model) = crate::model_settings::effective_implementer(app, self.draft.project) {
-                ui.colored_label(MUTED, crate::model_settings::label(&catalog.accesses, model));
-            }
-        }
     }
 
     fn submit(&mut self, app: &mut App, action: TaskSubmitAction) {
+        if !app.online || self.local_task.is_some() {
+            self.prepare_offline(app, action);
+            return;
+        }
         if app.models.managed() && self.draft.ticket.is_some() && !self.draft.model_loaded {
-            self.error = Some("Bitte die gespeicherte Modellauswahl abwarten.".into());
+            self.error = Some(crate::tr!("Bitte die gespeicherte Modellauswahl abwarten.").into());
             return;
         }
-        if app.models.needs_setup() && action != TaskSubmitAction::SaveDraft {
-            self.error = Some("OpenCode zuerst in den Factory-Einstellungen einrichten.".into());
+        let save_draft = matches!(action, TaskSubmitAction::SaveDraft | TaskSubmitAction::SaveDraftAndNew);
+        if app.models.needs_setup() && !save_draft {
+            self.error = Some(crate::tr!("OpenCode zuerst in den Factory-Einstellungen einrichten.").into());
             return;
         }
-        if action != TaskSubmitAction::SaveDraft && app.models.managed() {
+        if !save_draft && app.models.managed() {
             let effective = self.draft.implementer.as_ref()
                 .or_else(|| crate::model_settings::effective_implementer(app, self.draft.project));
             if let Some((root, model)) = self.draft.requested_session.zip(effective) {
@@ -882,7 +1255,7 @@ impl TaskDialog {
                     .and_then(|c| c.agent_spec.as_ref()).is_some_and(|agent|
                         agent.profile.provider_id != model.access_id || agent.profile.model_id != model.model_id)
                 {
-                    self.error = Some("Die ausgewählte Session nutzt einen anderen Zugang oder ein anderes Modell. Bitte Automatisch wählen, damit eine neue Session möglich ist.".into());
+                    self.error = Some(crate::tr!("Die ausgewählte Session nutzt einen anderen Zugang oder ein anderes Modell. Bitte Auto Runner wählen, damit eine neue Session möglich ist.").into());
                     return;
                 }
             }
@@ -892,13 +1265,13 @@ impl TaskDialog {
                 !assignable_sessions(snapshot, self.draft.project).iter().any(|c| c.session_root() == root)
             })
         }) {
-            self.error = Some("Die zugeordnete Session ist nicht mehr verfügbar. Bitte eine offene Session oder Automatisch wählen.".into());
+            self.error = Some(crate::tr!("Die zugeordnete Session ist nicht mehr verfügbar. Bitte eine offene Session oder Auto Runner wählen.").into());
             return;
         }
         if self.draft.prompt.len() > 12000
             || (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty())
         {
-            self.error = Some("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.".into());
+            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
             return;
         }
         if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
@@ -918,13 +1291,14 @@ impl TaskDialog {
                 prompt: self.draft.prompt.clone(),
                 images: self.draft.images.clone(),
             },
-            draft: action == TaskSubmitAction::SaveDraft,
+            draft: save_draft,
             files: self.draft.files.clone(),
         };
-        let label = if body.draft { "Entwurf speichern" } else { "Aufgabe einreihen" };
-        let (path, value) = if app.models.managed() || self.draft.implementer.is_some() {
+        let label = if body.draft { crate::tr!("Entwurf speichern") } else { crate::tr!("Aufgabe einreihen") };
+        let (path, value) = if app.models.managed() || self.draft.implementer.is_some() || self.draft.local_mcps.is_some() {
             ("/v1/tasks/submit-with-model", json!(factory_protocol::models::SubmitTaskWithModel {
-                submission: body, implementer: self.draft.implementer.clone()
+                submission: body, implementer: self.draft.implementer.clone(),
+                local_mcps: self.draft.local_mcps.clone(),
             }))
         } else { ("/v1/tasks/submit", json!(body)) };
         self.request = Some(app.write(label, "POST", path.into(), value));
@@ -938,9 +1312,9 @@ impl TaskDialog {
             });
             return ui
                 .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut close = ui.button("Schließen").clicked();
+                    let mut close = ui.button(crate::tr!("Schließen")).clicked();
                     if let Some(root) = execution {
-                        let open = ui.button("OpenCode anzeigen");
+                        let open = ui.button(crate::tr!("OpenCode anzeigen"));
                         #[cfg(test)]
                         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new(("test-task-dialog-opencode", self.id)), open.rect));
                         if open.clicked() {
@@ -959,43 +1333,36 @@ impl TaskDialog {
                                     .and_then(|t| task_command(s, t))
                                     .map(|c| session_title(s, c))
                             })
-                            .unwrap_or_else(|| "Automatisch".into());
-                        ui.add(egui::Label::new(format!("Zuordnung: {title}")).truncate())
+                            .unwrap_or_else(|| "Auto Runner".into());
+                        ui.add(egui::Label::new(crate::tr!("Zuordnung: {title}", title = title)).truncate())
                             .on_hover_text(title);
                     });
                     close
                 })
                 .inner;
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let enabled = app.online && self.request.is_none();
-            let queue = design::accent_button(ui, egui::Button::new("Einreihen"), enabled, BLUE.gamma_multiply(0.7))
-                .on_hover_text("Aufgabe einreihen und Dialog schließen");
-            let queue_new = ui.add_enabled(enabled, egui::Button::new("Einreihen & neu"))
-                .on_hover_text("Aufgabe einreihen und eine neue Aufgabe öffnen");
-            let save = design::icon_button(ui, egui_phosphor::regular::FLOPPY_DISK, "Entwurf speichern", enabled);
-            #[cfg(test)]
-            ui.ctx().data_mut(|data| {
-                data.insert_temp(egui::Id::new(("test-task-action", self.id, false)), queue.rect);
-                data.insert_temp(egui::Id::new(("test-task-action", self.id, true)), save.rect);
-                data.insert_temp(egui::Id::new(("test-task-queue-new", self.id)), queue_new.rect);
-            });
-            if queue.clicked() {
-                self.submit(app, TaskSubmitAction::Queue);
-            } else if queue_new.clicked() {
-                self.submit(app, TaskSubmitAction::QueueAndNew);
-            } else if save.clicked() {
-                self.submit(app, TaskSubmitAction::SaveDraft);
-            }
+        ui.add_space(8.0);
+        if self.advanced {
+        ui.horizontal(|ui| {
             let editable=self.request.is_none();
-            let left_width=ui.available_width();
-            ui.allocate_ui_with_layout(egui::vec2(left_width,36.0),egui::Layout::left_to_right(egui::Align::Center),|ui| {
+            if app.online && app.models.managed() {
+                let model_width = (ui.available_width() - 292.0).clamp(220.0, 420.0);
+                ui.add_enabled_ui(editable, |ui| {
+                    let _model_control = ui.scope(|ui| {
+                        ui.set_width(model_width);
+                        self.show_model(ui, app);
+                    });
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-model", self.id)), _model_control.response.rect));
+                });
+            }
+            if app.online && self.local_task.is_none() {
             let choices=app.snapshot.as_ref().map(|s|assignable_sessions(s,self.draft.project)).unwrap_or_default();
             let selected=match self.draft.requested_session {
-                None=>"Automatisch".to_string(),
-                Some(root)=>choices.iter().find(|c|c.session_root()==root).and_then(|c|app.snapshot.as_ref().map(|s|session_title(s,c))).unwrap_or_else(||"Nicht verfügbar".into()),
+                None=>"Auto Runner".to_string(),
+                Some(root)=>choices.iter().find(|c|c.session_root()==root).and_then(|c|app.snapshot.as_ref().map(|s|session_title(s,c))).unwrap_or_else(||crate::tr!("Nicht verfügbar").into()),
             };
-            let width=(ui.available_width()-2.0*(design::ICON_BUTTON_SIZE+ui.spacing().item_spacing.x)).clamp(80.0,176.0);
+             let width=156.0;
             ui.add_enabled_ui(editable,|ui| {
                 let combo=egui::ComboBox::from_id_salt(("task-target",self.id)).selected_text(&selected).width(width)
                     .wrap_mode(egui::TextWrapMode::Truncate)
@@ -1003,7 +1370,7 @@ impl TaskDialog {
                     .show_ui(ui,|ui| {
                         ui.set_width((ui.ctx().content_rect().width()-64.0).clamp(160.0,296.0));
                         ui.spacing_mut().item_spacing.y=2.0;
-                        if design::session_choice(ui,"Automatisch durch Orchestrator",None,self.draft.requested_session.is_none()).clicked() {
+                        if design::session_choice(ui,"Auto Runner",None,self.draft.requested_session.is_none()).on_hover_text(crate::tr!("Automatische Zuordnung durch den Orchestrator")).clicked() {
                             self.dirty|=self.draft.requested_session.take().is_some();
                             ui.close();
                         }
@@ -1017,17 +1384,88 @@ impl TaskDialog {
                                 }
                             }
                         }
-                    }).response.on_hover_text(format!("Zuordnung: {selected}"))
+                    }).response.on_hover_text(crate::tr!("Zuordnung: {selected}", selected = selected))
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 #[cfg(test)]
                 ui.ctx().data_mut(|data|data.insert_temp(egui::Id::new(("test-task-target",self.id)),combo.rect));
                 #[cfg(not(test))]
                 let _=combo;
             });
-            if design::icon_button(ui,egui_phosphor::regular::PAPERCLIP,"Bilder und Dateien hinzufügen",editable).clicked() {app.backend.pick_attachments(self.id);}
-            if design::icon_button(ui,egui_phosphor::regular::CLIPBOARD,"Bild aus Zwischenablage einfügen",editable).clicked() {
-                app.clipboard_image_request = Some(self.id);
             }
+             let attachments = design::icon_button(ui,egui_phosphor::regular::PAPERCLIP,crate::tr!("Bilder und Dateien hinzufügen"),editable);
+             #[cfg(test)]
+             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-attachments", self.id)), attachments.rect));
+             if attachments.clicked() {app.backend.pick_attachments(self.id);}
+              if app.online {
+              ui.add_enabled_ui(editable, |ui| {
+                 let (button, _) = egui::containers::menu::MenuButton::new("MCPs")
+                     .config(egui::containers::menu::MenuConfig::new()
+                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                     .ui(ui, |ui| {
+                         ui.set_min_width(220.0);
+                         let changed = egui::ScrollArea::vertical()
+                             .max_height((ui.ctx().content_rect().height() - 128.0).clamp(80.0, 320.0))
+                             .show(ui, |ui| crate::mcp_settings::task_choices(ui, app, self.draft.project, &mut self.draft.local_mcps)).inner;
+                         if changed {
+                             self.dirty = true;
+                         }
+                      });
+                 #[cfg(test)]
+                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-mcps", self.id)), button.rect));
+                   button.on_hover_text(crate::tr!("MCPs für diese Aufgabe auswählen"))
+                       .on_hover_cursor(egui::CursorIcon::PointingHand);
+               });
+              }
+        });
+        ui.add_space(8.0);
+        let _separator = ui.separator();
+        #[cfg(test)]
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-footer-divider", self.id)), _separator.rect));
+        ui.add_space(8.0);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 24.0;
+            let advanced = design::icon_button(ui, egui_phosphor::regular::SLIDERS_HORIZONTAL,
+                if self.advanced { crate::tr!("Erweiterte Optionen ausblenden") } else { crate::tr!("Erweiterte Optionen anzeigen") }, true);
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-advanced", self.id)), advanced.rect));
+            if advanced.clicked() { self.advanced = !self.advanced; }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let local = !app.online || self.local_task.is_some();
+            let enabled = (app.online || self.draft.ticket.is_none()) && self.request.is_none();
+            let keep = app.settings.task_keep_open;
+            let draft = !local && app.settings.task_as_draft;
+            let label = match (local, draft, keep) {
+                (true, _, false) => crate::tr!("Lokal vorbereiten"),
+                (true, _, true) => crate::tr!("Vorbereiten & neu"),
+                (false, true, false) => crate::tr!("Entwurf"),
+                (false, true, true) => crate::tr!("Entwurf & neu"),
+                (false, false, false) => crate::tr!("Einreihen"),
+                (false, false, true) => crate::tr!("Einreihen & neu"),
+            };
+            let submit = design::accent_button(ui, egui::Button::new(label).min_size(egui::vec2(200.0, 36.0)), enabled, BLUE.gamma_multiply(0.7));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-action", self.id, false)), submit.rect));
+            if submit.clicked() {
+                self.submit(app, match (draft, keep) {
+                    (false, false) => TaskSubmitAction::Queue,
+                    (false, true) => TaskSubmitAction::QueueAndNew,
+                    (true, false) => TaskSubmitAction::SaveDraft,
+                    (true, true) => TaskSubmitAction::SaveDraftAndNew,
+                });
+            }
+            ui.add_enabled_ui(enabled && self.request.is_none(), |ui| {
+                if !local {
+                    let draft = ui.checkbox(&mut app.settings.task_as_draft, crate::tr!("Entwurf"));
+                    if draft.changed() { app.settings_dirty = true; }
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-as-draft", self.id)), draft.rect));
+                }
+                let keep = ui.checkbox(&mut app.settings.task_keep_open, crate::tr!("Nicht schließen"));
+                if keep.changed() { app.settings_dirty = true; }
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-keep-open", self.id)), keep.rect));
+            });
             });
         });
         false
@@ -1043,9 +1481,9 @@ fn answer_text(value: &Value, schema: Option<&Value>) -> String {
         return label.to_string();
     }
     match value {
-        Value::Null => "Noch nicht beantwortet.".into(),
+        Value::Null => crate::tr!("Noch nicht beantwortet.").into(),
         Value::String(text) => text.clone(),
-        Value::Bool(value) => if *value { "Ja" } else { "Nein" }.into(),
+        Value::Bool(value) => if *value { crate::tr!("Ja") } else { crate::tr!("Nein") }.into(),
         Value::Number(value) => value.to_string(),
         Value::Array(values) => values.iter().map(|v| answer_text(v, schema)).collect::<Vec<_>>().join("\n"),
         Value::Object(values) => values.iter()
@@ -1060,15 +1498,15 @@ fn permission_details(ui: &mut egui::Ui, question: &Question) {
     }
     // Keep the requested operation visible without exposing the raw payload.
     for (key, label) in [
-        ("action", "Aktion"), ("permission", "Berechtigung"),
-        ("resource", "Ziel"), ("patterns", "Geltungsbereich"), ("command", "Befehl"),
+        ("action", crate::tr!("Aktion")), ("permission", crate::tr!("Berechtigung")),
+        ("resource", crate::tr!("Ziel")), ("patterns", crate::tr!("Geltungsbereich")), ("command", crate::tr!("Befehl")),
     ] {
         if let Some(value) = question.external.payload.get(key).filter(|v| !v.is_null()) {
             read_text(ui, &format!("{label}: {}", answer_text(value, None)), false);
         }
     }
     if let Some(command) = question.external.payload["metadata"]["command"].as_str() {
-        read_text(ui, &format!("Befehl: {command}"), false);
+        read_text(ui, &crate::tr!("Befehl: {command}", command = command), false);
     }
 }
 
@@ -1077,7 +1515,7 @@ fn question_answers(ui: &mut egui::Ui, questions: &[Question]) {
     let mut first = true;
     for question in questions {
         let title = question.external.payload["title"].as_str().unwrap_or(
-            if question.external.kind == QuestionKind::Permission { "Berechtigung" } else { "Rückfrage" },
+            if question.external.kind == QuestionKind::Permission { crate::tr!("Berechtigung") } else { crate::tr!("Rückfrage") },
         );
         let fields: Vec<_> = question.external.payload["fields"].as_array()
             .into_iter().flatten().filter(|field| field["hidden"] != true).collect();
@@ -1097,7 +1535,7 @@ fn question_answers(ui: &mut egui::Ui, questions: &[Question]) {
                 ui.add_space(8.0);
             }
             first = false;
-            design::question_heading(ui, "Frage");
+            design::question_heading(ui, crate::tr!("Frage"));
             // Native forms may have a generic container title ("Questions").
             // Prefer the actual field question instead of repeating that wrapper.
             if !generic_question_title(title) {
@@ -1116,19 +1554,19 @@ fn question_answers(ui: &mut egui::Ui, questions: &[Question]) {
                 }
             }
             ui.add_space(8.0);
-            design::question_heading(ui, "Antwort");
+            design::question_heading(ui, crate::tr!("Antwort"));
             let answer = question.answer.as_ref().and_then(|answer| {
                 field.map_or(Some(answer), |field| field["key"].as_str().and_then(|key| answer.get(key)))
             });
             let text = if question.external.kind == QuestionKind::Permission {
                 match answer.and_then(|answer| answer["decision"].as_str()) {
-                    Some("once") => "Einmal erlaubt".into(),
-                    Some("always") => "Dauerhaft erlaubt".into(),
-                    Some("reject") => "Abgelehnt".into(),
-                    _ => answer.map_or_else(|| "Noch nicht beantwortet.".into(), |v| answer_text(v, field)),
+                    Some("once") => crate::tr!("Einmal erlaubt").into(),
+                    Some("always") => crate::tr!("Dauerhaft erlaubt").into(),
+                    Some("reject") => crate::tr!("Abgelehnt").into(),
+                    _ => answer.map_or_else(|| crate::tr!("Noch nicht beantwortet.").into(), |v| answer_text(v, field)),
                 }
             } else {
-                answer.map_or_else(|| "Noch nicht beantwortet.".into(), |v| answer_text(v, field))
+                answer.map_or_else(|| crate::tr!("Noch nicht beantwortet.").into(), |v| answer_text(v, field))
             };
             read_text(ui, &text, false);
         }
@@ -1153,7 +1591,7 @@ impl QuestionDialog {
                     entry.values = draft.values.clone();
                     entry.decision = draft.decision.clone();
                     if draft.revision != entry.question.revision {
-                        self.error = Some("Gespeicherter Antwortentwurf stammt aus einer älteren Fragenrevision. Bitte alle Werte prüfen.".into());
+                        self.error = Some(crate::tr!("Gespeicherter Antwortentwurf stammt aus einer älteren Fragenrevision. Bitte alle Werte prüfen.").into());
                     }
                 }
                 entry.request = app
@@ -1186,12 +1624,12 @@ impl QuestionDialog {
                     ui.push_id(entry.question.id, |ui| {
                         ui.vertical(|ui| {
                             let q = &entry.question;
-                            design::question_heading(ui, "Frage");
+                            design::question_heading(ui, crate::tr!("Frage"));
                             let title = q.external.payload["title"].as_str().unwrap_or(
                                 if q.external.kind == QuestionKind::Permission {
-                                    "Berechtigung"
+                                    crate::tr!("Berechtigung")
                                 } else {
-                                    "Rückfrage"
+                                    crate::tr!("Rückfrage")
                                 },
                             );
                             if !generic_question_title(title) {
@@ -1212,36 +1650,33 @@ impl QuestionDialog {
                             if changed {
                                 ui.colored_label(
                                     AMBER,
-                                    format!(
-                                        "Serverzustand geändert: {:?}. Entwurf bleibt erhalten.",
-                                        current.as_ref().map(|q| q.state)
-                                    ),
+                                    crate::tr!("Serverzustand geändert: {:?}. Entwurf bleibt erhalten.", current.as_ref().map(|q| q.state)),
                                 );
                             }
                             if let Some(id) = entry.request {
                                 request_status(ui, app, id);
                                 if let Some(v) = current.as_ref() {
-                                    ui.label(format!("Zustellung: {:?}", v.state));
+                                    ui.label(crate::tr!("Zustellung: {:?}", v.state));
                                 }
                             }
                             ui.add_space(8.0);
-                            design::question_heading(ui, "Antwort");
+                            design::question_heading(ui, crate::tr!("Antwort"));
                             ui.add_enabled_ui(entry.request.is_none() && !changed, |ui| {
                                 if q.external.kind == QuestionKind::Permission {
                                     ui.radio_value(
                                         &mut entry.decision,
                                         "once".into(),
-                                        "Einmal erlauben",
+                                        crate::tr!("Einmal erlauben"),
                                     );
                                     ui.radio_value(
                                         &mut entry.decision,
                                         "always".into(),
-                                        "Dauerhaft erlauben (erweiterte Freigabe)",
+                                        crate::tr!("Dauerhaft erlauben (erweiterte Freigabe)"),
                                     );
                                     ui.radio_value(
                                         &mut entry.decision,
                                         "reject".into(),
-                                        "Ablehnen",
+                                        crate::tr!("Ablehnen"),
                                     );
                                 } else if let Some(fields) = q.external.payload["fields"].as_array()
                                 {
@@ -1253,7 +1688,7 @@ impl QuestionDialog {
                                             continue;
                                         }
                                         let Some(key) = schema["key"].as_str() else {
-                                            ui.colored_label(RED, "Feld ohne Schlüssel");
+                                            ui.colored_label(RED, crate::tr!("Feld ohne Schlüssel"));
                                             continue;
                                         };
                                         question_field(
@@ -1265,14 +1700,14 @@ impl QuestionDialog {
                                 } else {
                                     ui.colored_label(
                                         RED,
-                                        "Dieses Frageformat kann hier nicht beantwortet werden.",
+                                        crate::tr!("Dieses Frageformat kann hier nicht beantwortet werden."),
                                     );
                                 }
                             });
                             let rejected = entry.request.and_then(|id| app.responses.get(&id)).is_some_and(|v| v.as_ref().is_err_and(|e| !e.uncertain));
                             if changed || rejected {
                                 if let Some(current) = current.as_ref().filter(|q| needs_answer(q)) {
-                                    if ui.button("Aktuelle Frage übernehmen · Eingaben behalten und prüfen").clicked() { reload = Some(current.clone()); }
+                                    if ui.button(crate::tr!("Aktuelle Frage übernehmen · Eingaben behalten und prüfen")).clicked() { reload = Some(current.clone()); }
                                 }
                             }
                         });
@@ -1284,7 +1719,7 @@ impl QuestionDialog {
             ui.colored_label(RED, e);
         }
         if design::accent_button(
-                ui, egui::Button::new("Alle vorbereiteten Antworten senden"),
+                ui, egui::Button::new(crate::tr!("Alle vorbereiteten Antworten senden")),
                 app.online && self.questions.iter().any(|q| q.request.is_none() && needs_answer(&q.question)),
                 BLUE.gamma_multiply(0.7),
             )
@@ -1312,7 +1747,7 @@ impl QuestionDialog {
                 for (index, body) in bodies {
                     let q = &mut self.questions[index];
                     q.request = Some(app.write(
-                        "Frage beantworten",
+                        crate::tr!("Frage beantworten"),
                         "POST",
                         format!("/v1/questions/{}/answer", q.question.id),
                         json!(body),
@@ -1356,7 +1791,7 @@ impl QuestionDialog {
                 app.settings_dirty = true;
             }
         }
-        ui.button("Schließen · Antwortentwürfe behalten").clicked()
+        ui.button(crate::tr!("Schließen · Antwortentwürfe behalten")).clicked()
     }
 }
 impl QuestionAnswer {
@@ -1368,23 +1803,23 @@ impl QuestionAnswer {
             .and_then(|s| s.questions.iter().find(|v| v.id == q.id))
             .is_none_or(|v| v.revision != q.revision || !needs_answer(v))
         {
-            return Err("Frage wurde geändert oder beantwortet. Dialog neu öffnen; alte Eingaben nicht ungeprüft senden.".into());
+            return Err(crate::tr!("Frage wurde geändert oder beantwortet. Dialog neu öffnen; alte Eingaben nicht ungeprüft senden.").into());
         }
         let answer = if q.external.kind == QuestionKind::Permission {
             if self.decision.is_empty() {
-                return Err("Bitte jede Berechtigung ausdrücklich entscheiden.".into());
+                return Err(crate::tr!("Bitte jede Berechtigung ausdrücklich entscheiden.").into());
             }
             json!({"decision": self.decision})
         } else {
             let mut answer = serde_json::Map::new();
             let fields = q.external.payload["fields"]
                 .as_array()
-                .ok_or("Unbekanntes Frageformat")?;
+                .ok_or(crate::tr!("Unbekanntes Frageformat"))?;
             for schema in fields {
                 if !field_enabled(schema, &self.values) || schema["type"] == "external" {
                     continue;
                 }
-                let key = schema["key"].as_str().ok_or("Feldschlüssel fehlt")?;
+                let key = schema["key"].as_str().ok_or(crate::tr!("Feldschlüssel fehlt"))?;
                 let value = self.values.get(key).unwrap_or(&Value::Null);
                 if value.is_null() && schema["required"] != true {
                     continue;
@@ -1395,13 +1830,13 @@ impl QuestionAnswer {
             }
             if !fields.is_empty() && fields.iter().all(|s| s["type"] == "external") {
                 return Err(
-                    "Externes Formular: Bitte zuerst den angezeigten Link verwenden.".into(),
+                    crate::tr!("Externes Formular: Bitte zuerst den angezeigten Link verwenden.").into(),
                 );
             }
             Value::Object(answer)
         };
         if answer.to_string().len() > 32768 {
-            return Err("Antwort maximal 32 KiB".into());
+            return Err(crate::tr!("Antwort maximal 32 KiB").into());
         }
         Ok(AnswerQuestion {
             request_id: RequestId::new(),
@@ -1412,14 +1847,59 @@ impl QuestionAnswer {
 }
 
 impl FormDialog {
-    fn is_project_editor(&self) -> bool {
-        (self.method == "POST" && self.path == "/v1/projects")
-            || (self.method == "PATCH"
-                && self.path.strip_prefix("/v1/projects/")
-                    .is_some_and(|id| id.parse::<ProjectId>().is_ok()))
+    pub(crate) fn stage_in_project_settings(&mut self) {
+        if self.saves_project_settings() && self.settings_baseline.is_none() {
+            self.settings_baseline = Some(self.body.clone());
+        }
     }
 
-    fn project_fields(&mut self, ui: &mut egui::Ui, app: &App) -> bool {
+    pub(crate) fn settings_dirty(&self) -> bool {
+        self.settings_baseline.as_ref().is_some_and(|baseline| {
+            self.body.as_object().is_some_and(|body| body.iter().any(|(key, value)| {
+                !matches!(key.as_str(), "request_id" | "expected_revision") && baseline.get(key) != Some(value)
+            }))
+        })
+    }
+
+    pub(crate) fn settings_payload(&self, app: &App) -> Result<Value, String> {
+        if self.is_project_editor() {
+            if self.logo_picker.busy() {
+                return Err(crate::tr!("Die Bildauswahl ist noch geöffnet.").into());
+            }
+            if self.folder_picker.is_some() {
+                return Err(crate::tr!("Die Ordnerauswahl ist noch geöffnet.").into());
+            }
+            if !self.is_runner_mapping() && self.body["name"].as_str().is_none_or(|name| name.trim().is_empty()) {
+                return Err(crate::tr!("Bitte einen Projektnamen eingeben.").into());
+            }
+            self.project_request(app)
+        } else {
+            Ok(self.body.clone())
+        }
+    }
+
+    pub(crate) fn saves_project_settings(&self) -> bool {
+        self.is_project_update()
+            || self.path.starts_with("/v1/projects/") && ["/session-limit", "/supervisor", "/token-budget"]
+                .iter().any(|suffix| self.path.ends_with(suffix))
+    }
+    pub(crate) fn is_project_update(&self) -> bool {
+        is_project_update(&self.method, &self.path)
+    }
+
+    pub(crate) fn is_runner_mapping(&self) -> bool {
+        self.is_project_update() && self.body.get("name").is_none()
+    }
+
+    pub(crate) fn matches_body(&self, other: &Value) -> bool {
+        same_form_body(&self.method, &self.path, &self.body, other)
+    }
+
+    fn is_project_editor(&self) -> bool {
+        (self.method == "POST" && self.path == "/v1/projects") || self.is_project_update()
+    }
+
+    fn project_fields(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
         use std::sync::mpsc::TryRecvError;
 
         if let Some(picker) = &self.folder_picker {
@@ -1446,19 +1926,17 @@ impl FormDialog {
         let mut key = self.body["key"].as_str().unwrap_or("").to_owned();
         let mut path = self.body["repository"].as_str().unwrap_or("").to_owned();
         let mut changed = false;
-        ui.label("Name");
-        let name_field = ui.add(design::singleline(&mut name).desired_width(f32::INFINITY));
+        let name_field = design::settings_field(ui, "Name", |ui| {
+            ui.add(design::singleline(&mut name).desired_width(f32::INFINITY))
+        });
         changed |= name_field.changed();
-        ui.add_space(8.0);
-        ui.label("Projektkürzel");
-        let key_field = ui.add(
+        let key_field = design::settings_field(ui, crate::tr!("Projektkürzel"), |ui| ui.add(
             design::singleline(&mut key)
-                .hint_text(design::input_hint(if editing { "z. B. WOAI" } else { "Leer lassen für ein automatisches Kürzel" }))
+                .hint_text(design::input_hint(if editing { crate::tr!("z. B. WOAI") } else { crate::tr!("Leer lassen für ein automatisches Kürzel") }))
                 .desired_width(f32::INFINITY),
-        );
+        ));
         changed |= key_field.changed();
-        ui.add_space(8.0);
-        ui.label("Lokaler Pfad");
+        ui.label(crate::tr!("Lokaler Pfad"));
         ui.add_enabled_ui(!path_locked && self.folder_picker.is_none(), |ui| {
             ui.horizontal(|ui| {
                 // TextEdit's desired width excludes its padding; reserve the button
@@ -1467,12 +1945,12 @@ impl FormDialog {
                     - ui.spacing().item_spacing.x - design::INPUT_MARGIN.sum().x).max(1.0);
                 let path_field = ui.add(
                     design::singleline(&mut path)
-                        .hint_text(design::input_hint("/pfad/zum/projekt"))
+                        .hint_text(design::input_hint(crate::tr!("/pfad/zum/projekt")))
                         .desired_width(width),
                 );
                 changed |= path_field.changed();
                 let folder = design::icon_button(
-                    ui, egui_phosphor::regular::FOLDER_OPEN, "Projektordner auswählen", true,
+                    ui, egui_phosphor::regular::FOLDER_OPEN, crate::tr!("Projektordner auswählen"), true,
                 );
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| d.insert_temp(
@@ -1484,7 +1962,7 @@ impl FormDialog {
                     let ctx = ui.ctx().clone();
                     let current = std::path::PathBuf::from(path.trim());
                     std::thread::spawn(move || {
-                        let mut picker = rfd::FileDialog::new().set_title("Projektordner auswählen");
+                        let mut picker = rfd::FileDialog::new().set_title(crate::tr!("Projektordner auswählen"));
                         if current.is_dir() {
                             picker = picker.set_directory(current);
                         }
@@ -1496,32 +1974,57 @@ impl FormDialog {
             });
         });
         if path_locked {
-            ui.colored_label(MUTED, "Der Pfad ist nach dem Anlegen von Arbeitsbereichen festgeschrieben.");
+            ui.colored_label(MUTED, crate::tr!("Der Pfad ist nach dem Anlegen von Arbeitsbereichen festgeschrieben."));
         } else if editing && path.is_empty() {
-            ui.colored_label(MUTED, "Ohne neuen Pfad bleibt das bisherige Repository unverändert.");
+            ui.colored_label(MUTED, crate::tr!("Ohne neuen Pfad bleibt das bisherige Repository unverändert."));
         }
-        ui.add_space(8.0);
-        ui.label("Runner-Zuordnung");
+        if !editing {
+            ui.add_space(8.0);
+            design::settings_field(ui, crate::tr!("Runner-Zuordnung"), |ui| {
+                self.runner_mapping_field(ui, app);
+            });
+        }
+        if let Some(error) = self.logo_picker.show(ui, &mut self.body, editing) {
+            app.notice(error);
+        }
+        if changed {
+            self.error = None;
+            self.body["name"] = json!(name);
+            self.body["key"] = json!(key);
+            self.body["repository"] = json!(path);
+        }
+        !name.trim().is_empty()
+            && (editing || !path.trim().is_empty())
+            && self.folder_picker.is_none()
+            && !self.logo_picker.busy()
+    }
+
+    fn runner_mapping_field(&mut self, ui: &mut egui::Ui, app: &App) {
         let mut mapping = serde_json::from_value::<Option<ProjectRunnerMapping>>(
             self.body["runner_mapping"].clone(),
         ).ok().flatten().unwrap_or(ProjectRunnerMapping::Automatic);
         let current_mapping = mapping;
         let runners = app.snapshot.as_ref().map_or(&[][..], |s| s.runners.as_slice());
         let selected = match mapping {
-            ProjectRunnerMapping::Automatic => "Automatisch".into(),
+            ProjectRunnerMapping::Automatic => crate::tr!("Automatisch").into(),
             ProjectRunnerMapping::Runner(id) => runners.iter().find(|runner| runner.id == id)
-                .map_or_else(|| "Runner nicht verfügbar".into(), |runner| runner.name.clone()),
+                .map_or_else(|| crate::tr!("Runner nicht verfügbar").into(), |runner| runner.name.clone()),
         };
         let _runner_select = egui::ComboBox::from_id_salt("project-runner-mapping")
             .selected_text(selected)
             .wrap_mode(egui::TextWrapMode::Truncate)
             .width(ui.available_width())
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut mapping, ProjectRunnerMapping::Automatic, "Automatisch");
-                for runner in runners {
-                    ui.selectable_value(
-                        &mut mapping, ProjectRunnerMapping::Runner(runner.id), &runner.name,
-                    );
+                if design::navigation_row(ui, crate::tr!("Automatisch"), mapping == ProjectRunnerMapping::Automatic, None).clicked() {
+                    mapping = ProjectRunnerMapping::Automatic;
+                    ui.close();
+                }
+                for runner in runners.iter().filter(|runner| !app.runner_removed(runner.id)) {
+                    let option = ProjectRunnerMapping::Runner(runner.id);
+                    if design::navigation_row(ui, &runner.name, mapping == option, None).clicked() {
+                        mapping = option;
+                        ui.close();
+                    }
                 }
             })
             .response
@@ -1535,26 +2038,20 @@ impl FormDialog {
             self.body["runner_mapping"] = json!(mapping);
             self.error = None;
         }
-        if changed {
-            self.error = None;
-            self.body["name"] = json!(name);
-            self.body["key"] = json!(key);
-            self.body["repository"] = json!(path);
-        }
-        !name.trim().is_empty()
-            && (editing || !path.trim().is_empty())
-            && self.folder_picker.is_none()
     }
 
     fn project_request(&self, app: &App) -> Result<Value, String> {
         let mut body = self.body.clone();
+        if self.is_runner_mapping() {
+            return Ok(body);
+        }
         let name = body["name"].as_str().unwrap_or("").trim().to_owned();
         let key = body["key"].as_str().unwrap_or("").trim().to_ascii_uppercase();
         let path = body["repository"].as_str().unwrap_or("").trim().to_owned();
         let existing = self.path.strip_prefix("/v1/projects/")
             .and_then(|id| id.parse::<ProjectId>().ok())
             .and_then(|id| app.snapshot.as_ref()?.projects.iter().find(|project| project.id == id));
-        if existing.is_some_and(|project| body["runner_mapping"] == json!(project.runner_mapping)) {
+        if self.is_project_update() {
             body.as_object_mut().unwrap().remove("runner_mapping");
         }
         body["name"] = json!(name);
@@ -1562,10 +2059,10 @@ impl FormDialog {
             && (key.len() > 10 || !key.starts_with(|c: char| c.is_ascii_uppercase())
                 || !key.bytes().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
         {
-            return Err("Das Projektkürzel muss mit einem Buchstaben beginnen und darf höchstens 10 Buchstaben oder Ziffern enthalten.".into());
+            return Err(crate::tr!("Das Projektkürzel muss mit einem Buchstaben beginnen und darf höchstens 10 Buchstaben oder Ziffern enthalten.").into());
         }
         if key.is_empty() && existing.is_some_and(|p| !p.key.is_empty()) {
-            return Err("Das Projektkürzel darf nicht leer sein.".into());
+            return Err(crate::tr!("Das Projektkürzel darf nicht leer sein.").into());
         }
         body["key"] = json!((!key.is_empty()).then_some(key));
         if self.method == "PATCH"
@@ -1585,7 +2082,7 @@ impl FormDialog {
             d.server != app.server
                 || d.path != self.path
                 || d.method != self.method
-                || d.body.get("project_id") != self.body.get("project_id")
+                || !self.matches_body(&d.body)
         });
         if self
             .request
@@ -1606,28 +2103,32 @@ impl FormDialog {
         app.settings_dirty = true;
     }
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32) -> bool {
-        self.show_form(ui, app, height, None)
+        self.show_form(ui, app, height, None, false)
     }
 
     pub(crate) fn show_in_settings(&mut self, ui: &mut egui::Ui, app: &mut App, bottom: f32, height: f32) -> bool {
-        let saves_settings = self.path == "/v1/projects/setup"
+        if self.settings_baseline.is_some() {
+            self.show_form(ui, app, height, Some(bottom), true);
+            return false;
+        }
+        let saves_settings = self.is_project_update() || self.path == "/v1/projects/setup"
             || self.path.starts_with("/v1/projects/") && ["/profile", "/scheduler", "/session-limit", "/supervisor", "/token-budget"]
                 .iter().any(|suffix| self.path.ends_with(suffix));
-        self.show_form(ui, app, height, saves_settings.then_some(bottom))
+        self.show_form(ui, app, height, saves_settings.then_some(bottom), false)
     }
 
-    fn show_form(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32, settings_bottom: Option<f32>) -> bool {
-        if self.request.is_none() {
+    fn show_form(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32, settings_bottom: Option<f32>, staged: bool) -> bool {
+        if self.request.is_none() && !staged {
             if let Some(pending) = app.settings.pending.iter().find(|r| {
                 r.server == app.server
                     && r.path == self.path
                     && r.method == self.method
-                    && r.body.get("project_id") == self.body.get("project_id")
+                    && self.matches_body(&r.body)
             }) {
                 self.request = Some(pending.id);
                 if self.is_project_editor() {
-                    for key in ["request_id", "expected_revision", "name", "key", "repository", "runner_mapping"] {
-                        if let Some(value) = pending.body.get(key).filter(|value| !value.is_null()) {
+                    for key in ["request_id", "expected_revision", "name", "key", "repository", "runner_mapping", "logo"] {
+                        if let Some(value) = pending.body.get(key).filter(|value| key == "logo" || !value.is_null()) {
                             self.body[key] = value.clone();
                         }
                     }
@@ -1636,32 +2137,117 @@ impl FormDialog {
                 }
             }
         }
+        if self.method == "POST" && self.path.starts_with("/v1/devices/") && self.path.ends_with("/revoke") {
+            return self.show_device_revoke(ui, app);
+        }
         if self.path == "/v1/projects/setup" && self.request.is_none() {
             self.body["setup"]["repository_source"] = self.body["repository"].clone();
         }
         let project_editor = self.is_project_editor();
-        if !self.help.is_empty() {
-            ui.label(&self.help);
+        if !project_editor && !self.help.is_empty() {
+            ui.label(crate::i18n::label(&self.help));
         }
         let mut valid = true;
         let deleting_project = self.method == "DELETE" && self.body.get("confirm_name").is_some();
-        if project_editor {
-            ui.add_enabled_ui(self.request.is_none(), |ui| {
-                valid = self.project_fields(ui, app);
+        if self.path.starts_with("/v1/projects/") && self.path.ends_with("/supervisor") {
+            let seconds = self.body["interval_seconds"].as_u64().unwrap_or(300);
+            let mut minutes = seconds as f64 / 60.0;
+            design::settings_field(ui, crate::tr!("Prüfintervall in Minuten"), |ui| {
+                let input = ui.add(egui::DragValue::new(&mut minutes)
+                    .range(0.5..=1440.0)
+                    .speed(0.1)
+                    .max_decimals(2))
+                    .on_hover_text(crate::tr!("Mindestabstand zwischen zwei Supervisor-Prüfungen."));
+                if input.changed() {
+                    self.body["interval_seconds"] = json!((minutes * 60.0).round() as u64);
+                }
             });
-            ui.add_space(12.0);
+        } else if self.path.starts_with("/v1/projects/") && self.path.ends_with("/session-limit") {
+            let mut limit = self.body["max_sessions"].as_u64()
+                .unwrap_or_else(|| u64::from(default_session_limit()));
+            design::settings_field(ui, crate::tr!("Gleichzeitig arbeitende Sessions"), |ui| {
+                let viewport = ui.ctx().content_rect();
+                let anchor = ui.cursor().top();
+                let room = (anchor - viewport.top())
+                    .max(viewport.bottom() - anchor - ui.spacing().interact_size.y);
+                let rows = 16.0 * (design::LIST_ROW_HEIGHT + ui.spacing().item_spacing.y);
+                let limit_picker = egui::ComboBox::from_id_salt(("project-session-limit", self.id))
+                    .selected_text(limit.to_string())
+                    .width(ui.available_width())
+                    .height(rows.min((room - 24.0).max(design::LIST_ROW_HEIGHT)))
+                    .show_ui(ui, |ui| {
+                        for value in 1..=16 {
+                            let option = design::navigation_row(ui, &value.to_string(), limit == value, None);
+                            #[cfg(test)]
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-project-limit-option", value)), option.rect));
+                            if option.clicked() {
+                                limit = value;
+                                ui.close();
+                            }
+                        }
+                    })
+                    .response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-project-limit-picker"), limit_picker.rect));
+                #[cfg(not(test))]
+                let _ = limit_picker;
+            });
+            self.body["max_sessions"] = json!(limit);
+        } else if project_editor {
+            let form_id = self.id;
+            let fields = |ui: &mut egui::Ui| {
+                ui.add_enabled_ui(self.request.is_none(), |ui| {
+                    if self.is_runner_mapping() {
+                        if !self.help.is_empty() {
+                            ui.label(crate::i18n::label(&self.help));
+                            ui.add_space(design::SETTINGS_FIELD_GAP);
+                        }
+                        self.runner_mapping_field(ui, app);
+                        valid = self.path.rsplit('/').next().and_then(|id| id.parse::<ProjectId>().ok())
+                            .and_then(|id| app.snapshot.as_ref()?.projects.iter().find(|p| p.id == id))
+                            .is_some_and(|p| self.body["runner_mapping"] != json!(p.runner_mapping.unwrap_or(ProjectRunnerMapping::Automatic)));
+                    } else {
+                        valid = self.project_fields(ui, app);
+                    }
+                });
+                if let Some(error) = &self.error {
+                    ui.colored_label(RED, error);
+                }
+            };
+            if let Some(bottom) = settings_bottom {
+                egui::ScrollArea::vertical()
+                    .id_salt(("project-fields", form_id))
+                    .max_height(if staged { (bottom - ui.cursor().top()).max(0.0) } else { design::settings_body_height(ui, bottom) })
+                    .show(ui, fields);
+            } else {
+                let footer_height = ui.spacing().interact_size.y.max(
+                    ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y
+                ) + 12.0;
+                egui::ScrollArea::vertical()
+                    .id_salt(("project-fields", form_id))
+                    .max_height((height - footer_height).max(24.0))
+                    .show(ui, fields);
+                ui.add_space(12.0);
+            }
         } else {
+            let height = if staged {
+                settings_bottom.map_or(height, |bottom| (bottom - ui.cursor().top()).max(0.0))
+            } else {
+                height
+            };
             egui::ScrollArea::vertical()
                 .id_salt("management-dialog-scroll")
                 .max_height(height)
                 .show(ui, |ui| {
                     ui.add_enabled_ui(self.request.is_none(), |ui| {
-                        valid = management_editor(ui, &mut self.body, "body", app);
+                        valid = management_editor(ui, &mut self.body, "body", app, staged);
                     });
-                    ui.collapsing(
-                        "Vollständige Anfragedaten (einschließlich Request-ID)",
-                        |ui| json_read(ui, &self.body),
-                    );
+                    if !staged {
+                        ui.collapsing(
+                            crate::tr!("Vollständige Anfragedaten (einschließlich Request-ID)"),
+                            |ui| json_read(ui, &self.body),
+                        );
+                    }
                 });
         }
         if deleting_project {
@@ -1676,11 +2262,20 @@ impl FormDialog {
                 .map(|p| p.name.as_str());
             valid &= expected.is_some_and(|name| self.body["confirm_name"].as_str() == Some(name));
         }
-        if let Some(e) = &self.error {
+        if staged {
+            return false;
+        }
+        if let Some(e) = self.error.as_ref().filter(|_| !project_editor) {
             ui.colored_label(RED, e);
         }
         if let Some(id) = self.request {
-            request_status(ui, app, id);
+            if !self.is_project_update() || app.in_flight.contains(&id) {
+                request_status(ui, app, id);
+            } else if app.settings.pending.iter().any(|r| r.id == id)
+                && ui.add_enabled(app.online, egui::Button::new(crate::tr!("Identische Anfrage abgleichen"))).clicked()
+            {
+                app.retry(id);
+            }
             if let Some(Ok(result)) = app.responses.get(&id) {
                 if project_editor {
                     if self.method == "POST" {
@@ -1691,15 +2286,15 @@ impl FormDialog {
                     return true;
                 }
                 if result.get("success") == Some(&Value::Bool(false)) {
-                    ui.colored_label(RED, "Runner-Helfer ist fehlgeschlagen. Ausgabe und Exitcode im Ergebnis prüfen.");
+                    ui.colored_label(RED, crate::tr!("Runner-Helfer ist fehlgeschlagen. Ausgabe und Exitcode im Ergebnis prüfen."));
                 }
-                ui.collapsing("Bestätigtes Ergebnis", |ui| json_read(ui, result));
+                ui.collapsing(crate::tr!("Bestätigtes Ergebnis"), |ui| json_read(ui, result));
             }
             if app
                 .responses
                 .get(&id)
                 .is_some_and(|v| v.as_ref().is_err_and(|e| !e.uncertain))
-                && ui.button("Eingaben korrigieren").clicked()
+                && ui.button(crate::tr!("Eingaben korrigieren")).clicked()
             {
                 self.request = None;
                 if self.body.get("request_id").is_some() {
@@ -1712,9 +2307,19 @@ impl FormDialog {
                 .is_some_and(|r| r.as_ref().is_err_and(|e| !e.uncertain))
             {
                 if let Some((revision, current)) = current_revision(app, &self.path, &self.body) {
-                    ui.collapsing("Aktuellen Serverstand mit meinem Entwurf vergleichen", |ui| {
-                        if project_editor {
-                            for (label, key) in [("Name", "name"), ("Projektkürzel", "key"), ("Lokaler Pfad", "repository")] {
+                    ui.collapsing(crate::tr!("Aktuellen Serverstand mit meinem Entwurf vergleichen"), |ui| {
+                        if self.is_runner_mapping() {
+                            let mapping = serde_json::from_value::<ProjectRunnerMapping>(current["runner_mapping"].clone())
+                                .unwrap_or(ProjectRunnerMapping::Automatic);
+                            let label = match mapping {
+                                ProjectRunnerMapping::Automatic => crate::tr!("Automatisch"),
+                                ProjectRunnerMapping::Runner(id) => app.snapshot.as_ref()
+                                    .and_then(|s| s.runners.iter().find(|runner| runner.id == id))
+                                    .map_or(crate::tr!("Runner nicht verfügbar"), |runner| runner.name.as_str()),
+                            };
+                            ui.label(label);
+                        } else if project_editor {
+                            for (label, key) in [("Name", "name"), (crate::tr!("Projektkürzel"), "key"), (crate::tr!("Lokaler Pfad"), "repository")] {
                                 let value = current[key].as_str().unwrap_or("");
                                 if key != "repository" || value.starts_with('/') {
                                     ui.label(format!("{label}: {value}"));
@@ -1724,11 +2329,9 @@ impl FormDialog {
                             json_read(ui, &current);
                         }
                     });
-                    ui.small("Revision erst nach Vergleich übernehmen. Eigene Eingaben bleiben erhalten und werden nicht stillschweigend mit fremden Änderungen zusammengeführt.");
+                    ui.small(crate::tr!("Revision erst nach Vergleich übernehmen. Eigene Eingaben bleiben erhalten und werden nicht stillschweigend mit fremden Änderungen zusammengeführt."));
                     if ui
-                        .button(format!(
-                            "Serverrevision {revision} übernehmen und Entwurf erneut prüfen"
-                        ))
+                        .button(crate::tr!("Serverrevision {revision} übernehmen und Entwurf erneut prüfen", revision = revision))
                         .clicked()
                     {
                         let key = if self.body.get("expected_stream_revision").is_some() {
@@ -1749,13 +2352,13 @@ impl FormDialog {
         } else if self.request.is_none() {
             design::accent_button(
                 ui, egui::Button::new(if deleting_project {
-                    "Projekt löschen"
+                    crate::tr!("Projekt löschen")
                 } else if project_editor && self.method == "POST" {
-                    "Projekt anlegen"
+                    crate::tr!("Projekt anlegen")
                 } else if project_editor {
-                    "Speichern"
+                    crate::tr!("Speichern")
                 } else {
-                    "Bestätigen und ausführen"
+                    crate::tr!("Bestätigen und ausführen")
                 }),
                 app.online && valid,
                 if deleting_project {
@@ -1783,7 +2386,7 @@ impl FormDialog {
             let mut path = self.path.clone();
             if let Some(device) = body.get("device_id").and_then(Value::as_str) {
                 if device.parse::<DeviceId>().is_err() {
-                    self.error = Some("Bitte eine gültige Geräte-ID auswählen.".into());
+                    self.error = Some(crate::tr!("Bitte eine gültige Geräte-ID auswählen.").into());
                     return false;
                 }
                 path = path.replace("{device_id}", device);
@@ -1791,23 +2394,58 @@ impl FormDialog {
             }
             self.request = Some(app.write(&self.title, &self.method, path, body));
         }
-        settings_bottom.is_none() && !project_editor && ui.button("Schließen").clicked()
+        settings_bottom.is_none() && !project_editor && ui.button(crate::tr!("Schließen")).clicked()
     }
+
+    fn show_device_revoke(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
+        if self.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)) { return true; }
+        if self.request.is_some_and(|id| app.responses.get(&id).is_some_and(|r|
+            r.as_ref().is_err_and(|error| !error.uncertain))) { self.request = None; }
+        ui.label(crate::i18n::label(&self.help));
+        ui.add_space(12.0);
+        let mut close = false;
+        ui.horizontal(|ui| {
+            let confirm = design::accent_button(ui, egui::Button::new(crate::tr!("Zugang widerrufen")),
+                app.online && self.request.is_none(), RED.gamma_multiply(0.7));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-device-revoke-confirm"), confirm.rect));
+            if confirm.clicked() {
+                self.request = Some(app.write(crate::tr!("Gerätezugang widerrufen"), "POST", self.path.clone(), Value::Null));
+            }
+            if ui.button(if self.request.is_some() { crate::tr!("Zurück") } else { crate::tr!("Abbrechen") }).clicked() { close = true; }
+            if let Some(id) = self.request {
+                if !app.in_flight.contains(&id) {
+                    if ui.add_enabled(app.online, egui::Button::new(crate::tr!("Zustellung prüfen"))).clicked() { app.retry(id); }
+                } else { ui.spinner(); }
+            }
+        });
+        close
+    }
+}
+
+pub(crate) fn is_project_update(method: &str, path: &str) -> bool {
+    method == "PATCH" && path.strip_prefix("/v1/projects/")
+        .is_some_and(|id| id.parse::<ProjectId>().is_ok())
+}
+
+pub(crate) fn same_form_body(method: &str, path: &str, first: &Value, second: &Value) -> bool {
+    first.get("project_id") == second.get("project_id")
+        && (!is_project_update(method, path) || first.get("name").is_some() == second.get("name").is_some())
 }
 
 /// Read only: preparing or creating a missing repository remains a runner job.
 fn local_project_branch(path: &str) -> Result<String, String> {
     if path.len() > 2048 || path.chars().any(char::is_control) {
-        return Err("Der lokale Pfad ist zu lang oder enthält ungültige Zeichen.".into());
+        return Err(crate::tr!("Der lokale Pfad ist zu lang oder enthält ungültige Zeichen.").into());
     }
     let path = std::path::Path::new(path);
     if !path.is_absolute() {
-        return Err("Bitte einen absoluten lokalen Pfad angeben.".into());
+        return Err(crate::tr!("Bitte einen absoluten lokalen Pfad angeben.").into());
     }
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("main".into()),
         Ok(_) if path.is_dir() => {}
-        _ => return Err("Der lokale Pfad muss ein Ordner sein.".into()),
+        _ => return Err(crate::tr!("Der lokale Pfad muss ein Ordner sein.").into()),
     }
     let run_git = |args: &[&str]| {
         let mut command = std::process::Command::new("git");
@@ -1830,59 +2468,8 @@ fn local_project_branch(path: &str) -> Result<String, String> {
     {
         Ok(branch.into())
     } else {
-        Err("Bitte ein Git-Repository mit ausgechecktem Branch und mindestens einem Commit oder einen noch nicht vorhandenen Ordner angeben.".into())
+        Err(crate::tr!("Bitte ein Git-Repository mit ausgechecktem Branch und mindestens einem Commit oder einen noch nicht vorhandenen Ordner angeben.").into())
     }
-}
-
-pub(crate) fn desktop_settings(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    height: f32,
-    show_close: bool,
-) -> bool {
-    if ui
-        .checkbox(
-            &mut app.settings.desktop_notifications,
-            "Desktop-Meldungen bei Fragen, Fehlern und Abschlüssen",
-        )
-        .changed()
-    {
-        app.settings_dirty = true;
-    }
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new("Desktop-Meldungen werden nur bei laufender GUI ausgeliefert. Meldungen enthalten Projekt und Ereignis, keine Prompts oder Antworten.").color(MUTED));
-    ui.add_space(8.0);
-    ui.label("Darstellung: Dark Theme · Sprache: Deutsch");
-    if !app.settings.form_drafts.is_empty() {
-        ui.separator();
-        ui.strong("Gespeicherte Dialogentwürfe");
-        egui::ScrollArea::vertical()
-            .id_salt("settings-drafts")
-            .max_height((height - 140.0).max(40.0))
-            .show(ui, |ui| {
-                for draft in app
-                    .settings
-                    .form_drafts
-                    .clone()
-                    .into_iter()
-                    .filter(|d| d.server == app.server)
-                {
-                    if design::navigation_row(ui, &draft.title, false, None)
-                        .on_hover_text("Dialogentwurf öffnen")
-                        .clicked()
-                    {
-                        app.dialog = Some(Dialog::form(
-                            &draft.title,
-                            &draft.help,
-                            &draft.method,
-                            draft.path,
-                            draft.body,
-                        ));
-                    }
-                }
-            });
-    }
-    show_close && ui.button("Schließen").clicked()
 }
 
 pub(crate) fn pending_requests(
@@ -1891,18 +2478,18 @@ pub(crate) fn pending_requests(
     height: f32,
     show_close: bool,
 ) -> bool {
-    ui.label("Diese Anfragen wurden noch nicht eindeutig bestätigt. Ein Abgleich wiederholt nur die identische gespeicherte Anfrage — keine neue Aufgabe.");
+    ui.label(crate::tr!("Diese Anfragen wurden noch nicht eindeutig bestätigt. Ein Abgleich wiederholt nur die identische gespeicherte Anfrage — keine neue Aufgabe."));
     egui::ScrollArea::vertical().id_salt("settings-pending").max_height((height-100.0).max(40.0)).show(ui,|ui| {
         for request in app.settings.pending.clone() {
             ui.push_id(request.id,|ui| {app::card().show(ui,|ui| {
                 ui.strong(&request.label);ui.label(&request.server);ui.monospace(&request.path);
-                ui.collapsing("Unveränderte gespeicherte Anfrage",|ui|json_read(ui,&request.body));
-                if request.server!=app.server {ui.label("Zum zugehörigen Server verbinden, um abzugleichen.");} else {request_status(ui,app,request.id);}
-                if request.path=="/v1/devices/enrollment" && !app.in_flight.contains(&request.id) && ui.button("Hinweis verwerfen · unbekannte Einladung bleibt bis Ablauf gültig").clicked() {app.settings.pending.retain(|p|p.id!=request.id);app.settings_dirty=true;}
+                ui.collapsing(crate::tr!("Unveränderte gespeicherte Anfrage"),|ui|json_read(ui,&request.body));
+                if request.server!=app.server {ui.label(crate::tr!("Zum zugehörigen Server verbinden, um abzugleichen."));} else {request_status(ui,app,request.id);}
+                if request.path=="/v1/devices/enrollment" && !app.in_flight.contains(&request.id) && ui.button(crate::tr!("Hinweis verwerfen · unbekannte Einladung bleibt bis Ablauf gültig")).clicked() {app.settings.pending.retain(|p|p.id!=request.id);app.settings_dirty=true;}
             });});
         }
     });
-    show_close && ui.button("Schließen").clicked()
+    show_close && ui.button(crate::tr!("Schließen")).clicked()
 }
 
 pub fn request_status(ui: &mut egui::Ui, app: &mut App, id: u64) {
@@ -1913,31 +2500,31 @@ pub fn request_status(ui: &mut egui::Ui, app: &mut App, id: u64) {
         .find(|r| r.id == id)
         .is_none_or(|r| r.path != "/v1/devices/enrollment");
     if !replayable {
-        ui.colored_label(AMBER, "Einladungserstellung wird bei unklarem Ausgang nicht wiederholt. Unbekannter Code läuft gemäß Gültigkeit ab; gegebenenfalls Geräteverwaltung prüfen.");
+        ui.colored_label(AMBER, crate::tr!("Einladungserstellung wird bei unklarem Ausgang nicht wiederholt. Unbekannter Code läuft gemäß Gültigkeit ab; gegebenenfalls Geräteverwaltung prüfen."));
     }
     if app.in_flight.contains(&id) {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label("Wird übertragen …");
+            ui.label(crate::tr!("Wird übertragen …"));
         });
     } else {
         match app.responses.get(&id) {
             Some(Ok(_)) => {
                 ui.colored_label(
                     app::GREEN,
-                    "Anfrage bestätigt — Ergebnis und Zustellstatus prüfen.",
+                    crate::tr!("Anfrage bestätigt — Ergebnis und Zustellstatus prüfen."),
                 );
             }
             Some(Err(e)) => {
                 ui.colored_label(if e.uncertain { AMBER } else { RED }, &e.message);
                 if e.uncertain {
-                    ui.label("Ausgang unklar. Eingaben bleiben gesperrt; Abgleich verwendet dieselbe Request-ID und Nutzlast.");
+                    ui.label(crate::tr!("Ausgang unklar. Eingaben bleiben gesperrt; Abgleich verwendet dieselbe Request-ID und Nutzlast."));
                 }
             }
             None => {
                 ui.colored_label(
                     AMBER,
-                    "Bestätigung fehlt. Gespeicherte Anfrage kann abgeglichen werden.",
+                    crate::tr!("Bestätigung fehlt. Gespeicherte Anfrage kann abgeglichen werden."),
                 );
             }
         }
@@ -1947,7 +2534,7 @@ pub fn request_status(ui: &mut egui::Ui, app: &mut App, id: u64) {
         && ui
             .add_enabled(
                 app.online && !app.in_flight.contains(&id),
-                egui::Button::new("Identische Anfrage abgleichen"),
+                egui::Button::new(crate::tr!("Identische Anfrage abgleichen")),
             )
             .clicked()
     {
@@ -1969,26 +2556,23 @@ pub fn read_text(ui: &mut egui::Ui, text: &str, monospace: bool) {
     if pages > 1 {
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(page > 0, egui::Button::new("‹ Vorheriger Textabschnitt"))
+                .add_enabled(page > 0, egui::Button::new(crate::tr!("‹ Vorheriger Textabschnitt")))
                 .clicked()
             {
                 page -= 1;
             }
-            ui.label(format!(
-                "Abschnitt {} / {pages} · {} Bytes vollständig zugänglich",
-                page + 1,
-                text.len()
-            ));
+            ui.label(crate::tr!("Abschnitt {} / {pages} · {} Bytes vollständig zugänglich", page + 1,
+                text.len(), pages = pages));
             if ui
                 .add_enabled(
                     page + 1 < pages,
-                    egui::Button::new("Nächster Textabschnitt ›"),
+                    egui::Button::new(crate::tr!("Nächster Textabschnitt ›")),
                 )
                 .clicked()
             {
                 page += 1;
             }
-            if ui.button("Gesamten Text kopieren").clicked() {
+            if ui.button(crate::tr!("Gesamten Text kopieren")).clicked() {
                 ui.ctx().copy_text(text.to_string());
             }
         });
@@ -2030,7 +2614,7 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, value: &mut Value) {
     let title = schema["title"]
         .as_str()
         .or(schema["key"].as_str())
-        .unwrap_or("Feld");
+        .unwrap_or(crate::tr!("Feld"));
     ui.strong(format!(
         "{title}{}",
         if schema["required"] == true { " *" } else { "" }
@@ -2044,9 +2628,9 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, value: &mut Value) {
                 || u.starts_with("http://localhost")
                 || u.starts_with("http://127.0.0.1")
         }) {
-            ui.hyperlink_to("Externes Formular öffnen", url);
+            ui.hyperlink_to(crate::tr!("Externes Formular öffnen"), url);
         } else {
-            ui.label("Kein gültiger Link zum externen Formular vorhanden.");
+            ui.label(crate::tr!("Kein gültiger Link zum externen Formular vorhanden."));
         }
         return;
     }
@@ -2078,15 +2662,15 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, value: &mut Value) {
         if schema["custom"] != true {
             return;
         }
-        ui.label("Eigene Antwort (optional)");
+        ui.label(crate::tr!("Eigene Antwort (optional)"));
     }
     match schema["type"].as_str() {
         Some("boolean") => {
             ui.horizontal(|ui| {
-                if ui.radio(*value == true, "Ja").clicked() {
+                if ui.radio(*value == true, crate::tr!("Ja")).clicked() {
                     *value = json!(true);
                 }
-                if ui.radio(*value == false, "Nein").clicked() {
+                if ui.radio(*value == false, crate::tr!("Nein")).clicked() {
                     *value = json!(false);
                 }
             });
@@ -2130,7 +2714,7 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, value: &mut Value) {
         _ => {
             ui.colored_label(
                 RED,
-                "Dieser Antworttyp wird hier nicht unterstützt.",
+                crate::tr!("Dieser Antworttyp wird hier nicht unterstützt."),
             );
         }
     }
@@ -2147,7 +2731,7 @@ pub fn validate_field(schema: &Value, value: &Value) -> Result<(), String> {
         _ => false,
     };
     if !valid {
-        return Err("Bitte einen gültigen Wert eingeben".into());
+        return Err(crate::tr!("Bitte einen gültigen Wert eingeben").into());
     }
     if let Some(text) = value.as_str() {
         let len = text.chars().count() as u64;
@@ -2155,14 +2739,14 @@ pub fn validate_field(schema: &Value, value: &Value) -> Result<(), String> {
             || schema["minLength"].as_u64().is_some_and(|n| len < n)
             || schema["maxLength"].as_u64().is_some_and(|n| len > n)
         {
-            return Err("Textlänge außerhalb der erlaubten Grenzen".into());
+            return Err(crate::tr!("Textlänge außerhalb der erlaubten Grenzen").into());
         }
     }
     if let Some(n) = value.as_f64() {
         if schema["minimum"].as_f64().is_some_and(|v| n < v)
             || schema["maximum"].as_f64().is_some_and(|v| n > v)
         {
-            return Err("Zahl außerhalb des erlaubten Bereichs".into());
+            return Err(crate::tr!("Zahl außerhalb des erlaubten Bereichs").into());
         }
     }
     if let Some(a) = value.as_array() {
@@ -2173,7 +2757,7 @@ pub fn validate_field(schema: &Value, value: &Value) -> Result<(), String> {
                 .as_u64()
                 .is_some_and(|n| (a.len() as u64) > n)
         {
-            return Err("Anzahl der Auswahlwerte außerhalb der Grenzen".into());
+            return Err(crate::tr!("Anzahl der Auswahlwerte außerhalb der Grenzen").into());
         }
     }
     if let Some(options) = schema["options"].as_array().filter(|o| !o.is_empty()) {
@@ -2186,7 +2770,7 @@ pub fn validate_field(schema: &Value, value: &Value) -> Result<(), String> {
                 .iter()
                 .any(|v| !options.iter().any(|o| o["value"] == *v))
         {
-            return Err("Bitte eine angebotene Option auswählen".into());
+            return Err(crate::tr!("Bitte eine angebotene Option auswählen").into());
         }
     }
     Ok(())
@@ -2206,7 +2790,7 @@ fn structured_editor(ui: &mut egui::Ui, value: &mut Value, key: &str) -> bool {
             valid
         }
         Value::Bool(v) => {
-            ui.checkbox(v, "Aktiviert");
+            ui.checkbox(v, crate::tr!("Aktiviert"));
             true
         }
         Value::String(v) => {
@@ -2241,7 +2825,7 @@ fn structured_editor(ui: &mut egui::Ui, value: &mut Value, key: &str) -> bool {
                 Err(_) => {
                     ui.colored_label(
                         RED,
-                        "Ungültiger JSON-Wert. Bitte korrigieren; Senden ist gesperrt.",
+                        crate::tr!("Ungültiger JSON-Wert. Bitte korrigieren; Senden ist gesperrt."),
                     );
                     false
                 }
@@ -2251,7 +2835,7 @@ fn structured_editor(ui: &mut egui::Ui, value: &mut Value, key: &str) -> bool {
     .inner
 }
 
-fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App) -> bool {
+fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App, staged: bool) -> bool {
     if matches!(
         key,
         "expected"
@@ -2272,14 +2856,16 @@ fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App)
         let mut names = map.keys().cloned().collect::<Vec<_>>();
         names.sort_by_key(|name| (field_rank(name), name.clone()));
         for name in names {
-            if name == "request_id" || (app.models.managed() && key == "profile"
+            if name == "request_id"
+                || (staged && matches!(name.as_str(), "expected_revision" | "expected_stream_revision"))
+                || (app.models.managed() && key == "profile"
                 && matches!(name.as_str(), "provider_id" | "model_id")) {
                 continue;
             }
             let v = map.get_mut(&name).expect("existing key");
             ui.push_id(&name, |ui| {
                 ui.label(field_label(&name));
-                valid &= management_editor(ui, v, &name, app);
+                valid &= management_editor(ui, v, &name, app, staged);
             });
         }
         return valid;
@@ -2330,18 +2916,18 @@ fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App)
                 .collect(),
             ),
             "transport" => Some(vec![
-                (json!("local"), "Auf diesem Rechner".into()),
-                (json!("ssh"), "Über das SSH-Profil des Runners".into()),
+                (json!("local"), crate::tr!("Auf diesem Rechner").into()),
+                (json!("ssh"), crate::tr!("Über das SSH-Profil des Runners").into()),
             ]),
             "status" => Some(
                 [
                     ("backlog", "Backlog"),
-                    ("ready", "Bereit"),
-                    ("in_progress", "In Bearbeitung"),
-                    ("blocked", "Blockiert"),
+                    ("ready", crate::tr!("Bereit")),
+                    ("in_progress", crate::tr!("In Bearbeitung")),
+                    ("blocked", crate::tr!("Blockiert")),
                     ("review", "Review"),
-                    ("done", "Abgeschlossen"),
-                    ("cancelled", "Abgebrochen"),
+                    ("done", crate::tr!("Abgeschlossen")),
+                    ("cancelled", crate::tr!("Abgebrochen")),
                 ]
                 .into_iter()
                 .map(|(v, t)| (json!(v), t.into()))
@@ -2353,7 +2939,7 @@ fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App)
             let label = options.iter().find(|(v, _)| v == value).map_or_else(
                 || {
                     if value.is_null() {
-                        "Keine Auswahl".into()
+                        crate::tr!("Keine Auswahl").into()
                     } else {
                         value.to_string()
                     }
@@ -2368,7 +2954,7 @@ fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App)
                         ui.selectable_value(
                             value,
                             Value::Null,
-                            "Keine Bindung (nur bei gerätebezogener Runner-Rolle erforderlich)",
+                            crate::tr!("Keine Bindung (nur bei gerätebezogener Runner-Rolle erforderlich)"),
                         );
                     }
                     for (v, label) in options {
@@ -2407,7 +2993,7 @@ fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App)
     }
     if matches!(key, "work" | "orchestration" | "memory") {
         let mut unlimited = value.is_null();
-        if ui.checkbox(&mut unlimited, "Unbegrenzt").changed() {
+        if ui.checkbox(&mut unlimited, crate::tr!("Unbegrenzt")).changed() {
             *value = if unlimited { Value::Null } else { json!(0) };
         }
         if unlimited {
@@ -2425,22 +3011,59 @@ fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App)
     structured_editor(ui, value, key)
 }
 
+pub(crate) fn devices(ui: &mut egui::Ui, app: &mut App, devices: &[Device]) {
+    let active: Vec<_> = devices.iter().filter(|device| !device.revoked).collect();
+    if active.is_empty() { ui.label(crate::tr!("Keine aktiven Gerätezugänge.")); }
+    for device in active {
+        design::task_row_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    let revoke = ui.add_enabled(app.online && app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin),
+                        egui::Button::new(crate::tr!("Widerrufen …")));
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-device-revoke", device.id)), revoke.rect));
+                    if revoke.clicked() {
+                        let own = app.access.as_ref().is_some_and(|a| a.device_id == Some(device.id));
+                        app.dialog = Some(Dialog::form(crate::tr!("Gerätezugang widerrufen"),
+                            &crate::tr!("Zugang für „{}“ dauerhaft sperren? Das Gerät kann sich danach nicht mehr verbinden.{}", device.name, if own { crate::tr!(" Das betrifft auch diese Desktop-Verbindung.") } else { "" }),
+                            "POST", format!("/v1/devices/{}/revoke", device.id), Value::Null));
+                    }
+                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 0.0),
+                        egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(&device.name).strong()).truncate())
+                                .on_hover_text(&device.name);
+                            ui.colored_label(MUTED, match device.role {
+                                DeviceRole::Admin => "Administration",
+                                DeviceRole::Operator => crate::tr!("Bedienung"),
+                                DeviceRole::Runner => crate::tr!("Runner-Zugang"),
+                            });
+                            if app.access.as_ref().is_some_and(|a| a.device_id == Some(device.id)) {
+                                ui.label(crate::tr!("Dieser Desktop"));
+                            }
+                        });
+                });
+            });
+        });
+    }
+}
+
 pub(crate) fn read_content(ui: &mut egui::Ui, app: &mut App, value: &Value, path: &str) {
     if path.starts_with("ssh-profile/") {
         let mut body = value.clone();
         if body["profile"].is_null() {
             body["profile"] = json!({"host":"","server":"http://127.0.0.1:7432","journal":"","opencode_registration":null});
         }
-        ui.label("Lokales SSH-Profil für nichtinteraktive Runner-Helfer. Hostschlüssel und Zugangsdaten bleiben in der normalen SSH-Konfiguration.");
-        if ui.button("SSH-Profil bearbeiten …").clicked() {
-            app.dialog = Some(Dialog::form("SSH-Profil speichern", "Absolute Pfade auf dem Runnerhost angeben. Eine zwischenzeitliche Änderung desselben Profils wird nicht überschrieben.", "LOCAL_SSH_SAVE", path.into(), body));
+        ui.label(crate::tr!("Lokales SSH-Profil für nichtinteraktive Runner-Helfer. Hostschlüssel und Zugangsdaten bleiben in der normalen SSH-Konfiguration."));
+        if ui.button(crate::tr!("SSH-Profil bearbeiten …")).clicked() {
+            app.dialog = Some(Dialog::form(crate::tr!("SSH-Profil speichern"), crate::tr!("Absolute Pfade auf dem Runnerhost angeben. Eine zwischenzeitliche Änderung desselben Profils wird nicht überschrieben."), "LOCAL_SSH_SAVE", path.into(), body));
         }
-        if !value["profile"].is_null() && ui.button("SSH-Profil entfernen …").clicked() {
+        if !value["profile"].is_null() && ui.button(crate::tr!("SSH-Profil entfernen …")).clicked() {
             let mut body = value.clone();
             body["profile"] = Value::Null;
             app.dialog = Some(Dialog::form(
-                "SSH-Profil entfernen",
-                "Die lokale SSH-Zuordnung entfernen; keine Runner oder Sessions werden beendet.",
+                crate::tr!("SSH-Profil entfernen"),
+                crate::tr!("Die lokale SSH-Zuordnung entfernen; keine Runner oder Sessions werden beendet."),
                 "LOCAL_SSH_SAVE",
                 path.into(),
                 body,
@@ -2459,34 +3082,31 @@ pub(crate) fn read_content(ui: &mut egui::Ui, app: &mut App, value: &Value, path
             app::card().show(ui, |ui| {
                 ui.strong(&w.goal);
                 ui.label(format!("{:?} · Runner {}", w.status, w.runner_id));
-                for (label, kind) in [("Vorbereiten …", CommandKind::PrepareWorkspace), ("OpenCode prüfen …", CommandKind::CheckOpenCode)] {
-                    if ui.button(label).clicked() { app.dialog = Some(Dialog::form(label, "Technischen Auftrag an diesen Arbeitsbereich senden. Die Serverrevision schützt vor parallelen Änderungen.", "POST", format!("/v1/streams/{}/commands", w.id), json!(EnqueueCommand { request_id: RequestId::new(), expected_revision: w.revision, kind, prompt: None }))); }
+                for (label, kind) in [(crate::tr!("Vorbereiten …"), CommandKind::PrepareWorkspace), (crate::tr!("OpenCode prüfen …"), CommandKind::CheckOpenCode)] {
+                    if ui.button(label).clicked() { app.dialog = Some(Dialog::form(label, crate::tr!("Technischen Auftrag an diesen Arbeitsbereich senden. Die Serverrevision schützt vor parallelen Änderungen."), "POST", format!("/v1/streams/{}/commands", w.id), json!(EnqueueCommand { request_id: RequestId::new(), expected_revision: w.revision, kind, prompt: None }))); }
                 }
                 for c in snapshot.commands.iter().filter(|c| c.stream_id == w.id) {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(format!("{:?} · {}", c.kind, command_status(c)));
-                        ui.menu_button("Verwalten …", |ui| app.command_menu(ui, c));
+                        ui.menu_button(crate::tr!("Verwalten …"), |ui| app.command_menu(ui, c));
                     });
-                    ui.collapsing(format!("Auftrag {}", c.id), |ui| json_read(ui, &json!(c)));
+                    ui.collapsing(crate::tr!("Auftrag {}", c.id), |ui| json_read(ui, &json!(c)));
                 }
             });
         }
     } else if path.ends_with("/runtime-binding") {
         if let Ok(binding) = serde_json::from_value::<RuntimeBinding>(value.clone()) {
-            ui.label(format!(
-                "Container {} · gestartet {}",
-                binding.runtime.container_id, binding.runtime.started_at
-            ));
-            if ui.button("Diese Runtime gezielt beenden …").clicked() {
+            ui.label(crate::tr!("Container {} · gestartet {}", binding.runtime.container_id, binding.runtime.started_at));
+            if ui.button(crate::tr!("Diese Runtime gezielt beenden …")).clicked() {
                 let revision = app
                     .snapshot
                     .as_ref()
                     .and_then(|s| s.streams.iter().find(|w| w.id == binding.stream_id))
                     .map_or(Revision(0), |w| w.revision);
-                app.dialog = Some(Dialog::form("Runtime unwiderruflich beenden", "Nur die bestätigte dedizierte Runtime wird entfernt. Hintergrundprozesse werden erst nach bestätigtem Stopp als beendet behandelt. Worktree und Volumes bleiben erhalten; Archiv kann unvollständig sein.", "POST", format!("/v1/commands/{}/termination", binding.command_id), json!(RequestTermination { request_id: RequestId::new(), expected_stream_revision: revision, runtime: binding.runtime, previous_request: None, reason: String::new() })));
+                app.dialog = Some(Dialog::form(crate::tr!("Runtime unwiderruflich beenden"), crate::tr!("Nur die bestätigte dedizierte Runtime wird entfernt. Hintergrundprozesse werden erst nach bestätigtem Stopp als beendet behandelt. Worktree und Volumes bleiben erhalten; Archiv kann unvollständig sein."), "POST", format!("/v1/commands/{}/termination", binding.command_id), json!(RequestTermination { request_id: RequestId::new(), expected_stream_revision: revision, runtime: binding.runtime, previous_request: None, reason: String::new() })));
             }
         } else {
-            ui.label("Keine bestätigte dedizierte Container-Runtime verfügbar. Native Sessionsteuerung ist getrennt über den Arbeitsbereich möglich.");
+            ui.label(crate::tr!("Keine bestätigte dedizierte Container-Runtime verfügbar. Native Sessionsteuerung ist getrennt über den Arbeitsbereich möglich."));
         }
     } else if path.ends_with("/files") {
         if let Ok(index) = serde_json::from_value::<ArchiveBlobIndex>(value.clone()) {
@@ -2495,23 +3115,20 @@ pub(crate) fn read_content(ui: &mut egui::Ui, app: &mut App, value: &Value, path
                 .nth(3)
                 .and_then(|s| s.parse::<CommandId>().ok());
             if index.files.is_empty() {
-                ui.label("Keine separat gesicherten Dateien. Inline-Anhänge und Unverfügbarkeitsgründe stehen zusätzlich bei der Originalnachricht.");
+                ui.label(crate::tr!("Keine separat gesicherten Dateien. Inline-Anhänge und Unverfügbarkeitsgründe stehen zusätzlich bei der Originalnachricht."));
             }
             for file in index.files {
                 app::card().show(ui, |ui| {
                     ui.strong(&file.name);
-                    ui.label(format!(
-                        "{} · {} Bytes · erfasst {}",
-                        file.mime,
+                    ui.label(crate::tr!("{} · {} Bytes · erfasst {}", file.mime,
                         file.bytes,
-                        timestamp(file.captured_unix_ms)
-                    ));
+                        timestamp(file.captured_unix_ms)));
                     ui.colored_label(MUTED, &file.sha256);
                     if let Some(command) = command {
                         if ui
                             .add_enabled(
                                 app.online,
-                                egui::Button::new("SHA256-geprüft exportieren …"),
+                                egui::Button::new(crate::tr!("SHA256-geprüft exportieren …")),
                             )
                             .clicked()
                         {
@@ -2525,80 +3142,71 @@ pub(crate) fn read_content(ui: &mut egui::Ui, app: &mut App, value: &Value, path
                 });
             }
         }
-    } else if let Ok(devices) = serde_json::from_value::<Vec<Device>>(value.clone()) {
-        for device in devices {
-            app::card().show(ui, |ui| {
-            ui.strong(&device.name); ui.label(format!("{:?} · {} · {}", device.role, device.id, if device.revoked { "widerrufen" } else { "aktiv" }));
-            if !device.revoked && ui.button("Zugang widerrufen …").clicked() { app.dialog = Some(Dialog::form("Gerätezugang widerrufen", &format!("Zugang für „{}“ ({}) unwiderruflich sperren. Laufende Geräteverbindungen verlieren ihre Berechtigung.", device.name, device.id), "POST", format!("/v1/devices/{}/revoke", device.id), Value::Null)); }
-        });
+    } else if path == "/v1/devices" {
+        if let Ok(devices) = serde_json::from_value::<Vec<Device>>(value.clone()) {
+            self::devices(ui, app, &devices);
         }
+        return;
     } else if let Ok(notes) = serde_json::from_value::<Vec<KnowledgeNote>>(value.clone()) {
         for note in notes {
             app::card().show(ui, |ui| {
-            ui.strong(&note.title); ui.label(&note.content); ui.colored_label(MUTED, format!("Quelle: {} · Branch: {:?} · abgelöst: {}", note.source, note.branch, note.retired));
-            if !note.retired && ui.button("Wissen ablösen …").clicked() { app.dialog = Some(Dialog::form("Wissen ablösen", "Der Eintrag bleibt historisch erhalten, wird aber nicht mehr automatisch als aktuelles Wissen verwendet.", "POST", format!("/v1/knowledge/{}/retire", note.id), json!(RetireKnowledge { request_id: RequestId::new(), expected_revision: note.revision }))); }
-            ui.collapsing("Metadaten", |ui| json_read(ui, &json!(note)));
+            ui.strong(&note.title); ui.label(&note.content); ui.colored_label(MUTED, crate::tr!("Quelle: {} · Branch: {:?} · abgelöst: {}", note.source, note.branch, note.retired));
+            if !note.retired && ui.button(crate::tr!("Wissen ablösen …")).clicked() { app.dialog = Some(Dialog::form(crate::tr!("Wissen ablösen"), crate::tr!("Der Eintrag bleibt historisch erhalten, wird aber nicht mehr automatisch als aktuelles Wissen verwendet."), "POST", format!("/v1/knowledge/{}/retire", note.id), json!(RetireKnowledge { request_id: RequestId::new(), expected_revision: note.revision }))); }
+            ui.collapsing(crate::tr!("Metadaten"), |ui| json_read(ui, &json!(note)));
         });
         }
     } else if let Ok(policy) = serde_json::from_value::<SupervisorPolicy>(value.clone()) {
-        ui.label(format!(
-            "{} · {} Auswertungen verbleibend · Intervall {} s",
-            if policy.enabled {
-                "Aktiv"
+        ui.label(crate::tr!("{} · {} Auswertungen verbleibend · Intervall {} s", if policy.enabled {
+                crate::tr!("Aktiv")
             } else {
-                "Deaktiviert"
+                crate::tr!("Deaktiviert")
             },
             policy.remaining_evaluations,
-            policy.interval_seconds
-        ));
-        if ui.button("Supervisor ändern …").clicked() {
-            app.dialog = Some(Dialog::form("Supervisor konfigurieren", "Budget und Intervall gelten für zukünftige Auswertungen. Aktuelle Revision wird übernommen.", "PUT", format!("/v1/projects/{}/supervisor", policy.project_id), json!(SetSupervisor { request_id: RequestId::new(), expected_revision: policy.revision, stream_id: policy.stream_id, enabled: policy.enabled, evaluation_budget: policy.remaining_evaluations, interval_seconds: policy.interval_seconds })));
-        }
+            policy.interval_seconds));
     } else if let Ok(budget) = serde_json::from_value::<TokenBudget>(value.clone()) {
-        if ui.button("Tokenlimits ändern …").clicked() {
-            app.dialog = Some(Dialog::form("Tokenbudget ändern", "Limits gelten für beobachtete Tokenverbräuche. Fehlende historische Angaben sind keine Nullverbräuche. null bedeutet unbegrenzt.", "PUT", format!("/v1/projects/{}/token-budget", budget.project_id), json!(SetTokenBudget { request_id: RequestId::new(), expected_revision: budget.revision, limits: budget.limits })));
+        if ui.button(crate::tr!("Tokenlimits ändern …")).clicked() {
+            app.dialog = Some(Dialog::form(crate::tr!("Tokenbudget ändern"), crate::tr!("Limits gelten für beobachtete Tokenverbräuche. Fehlende historische Angaben sind keine Nullverbräuche. null bedeutet unbegrenzt."), "PUT", format!("/v1/projects/{}/token-budget", budget.project_id), json!(SetTokenBudget { request_id: RequestId::new(), expected_revision: budget.revision, limits: budget.limits })));
         }
     }
-    ui.collapsing("Vollständige Daten", |ui| json_read(ui, value));
+    ui.collapsing(crate::tr!("Vollständige Daten"), |ui| json_read(ui, value));
 }
 fn field_label(key: &str) -> &str {
     match key {
-        "key" => "Projektkürzel (z. B. TEST oder WOAI; neu: leer = automatisch)",
-        "confirm_name" => "Projektname zur Bestätigung",
+        "key" => crate::tr!("Projektkürzel (z. B. TEST oder WOAI; neu: leer = automatisch)"),
+        "confirm_name" => crate::tr!("Projektname zur Bestätigung"),
         "expected_revision" | "expected_stream_revision" => {
-            "Erwartete Serverrevision (bei Konflikt aktuellen Stand prüfen)"
+            crate::tr!("Erwartete Serverrevision (bei Konflikt aktuellen Stand prüfen)")
         }
         "name" => "Name",
-        "repository" => "Repository / Quelle",
-        "base_branch" => "Basisbranch",
-        "provider_id" => "Anbieter-ID",
-        "model_id" => "Modell-ID",
+        "repository" => crate::tr!("Repository / Quelle"),
+        "base_branch" => crate::tr!("Basisbranch"),
+        "provider_id" => crate::tr!("Anbieter-ID"),
+        "model_id" => crate::tr!("Modell-ID"),
         "toolchain" => "Toolchain",
-        "start_command" => "Startbefehl",
-        "test_command" => "Testbefehl",
-        "enabled" => "Automatik aktiv",
-        "paused" => "Pausiert",
+        "start_command" => crate::tr!("Startbefehl"),
+        "test_command" => crate::tr!("Testbefehl"),
+        "enabled" => crate::tr!("Automatik aktiv"),
+        "paused" => crate::tr!("Pausiert"),
         "runner_ids" => "Runner-IDs",
         "runner_id" => "Runner-ID",
-        "max_parallel" => "Maximal parallele Aufträge",
-        "max_sessions" => "Maximal arbeitende Sessions",
-        "start_budget" => "Startbudget (4294967295 = unbegrenzt)",
-        "evaluation_budget" => "Auswertungsbudget",
-        "interval_seconds" => "Intervall in Sekunden",
-        "stream_id" => "Arbeitsbereich-ID",
-        "reason" => "Begründung",
-        "goal" => "Ziel",
-        "title" => "Titel",
-        "description" => "Beschreibung",
-        "content" => "Inhalt",
-        "acceptance_criteria" => "Erfolgskriterien",
-        "priority" => "Priorität (0–3)",
-        "ticket_ids" => "Aufgaben-IDs",
-        "depends_on" => "Abhängigkeiten (Aufgaben-IDs)",
-        "role" => "Rolle",
-        "ttl_seconds" => "Gültigkeit in Sekunden",
-        "repository_path" => "Repositorypfad auf dem Runner",
-        "service_registration" => "OpenCode-Service-Registrierung auf dem Runner",
+        "max_parallel" => crate::tr!("Maximal parallele Aufträge"),
+        "max_sessions" => crate::tr!("Maximal arbeitende Sessions"),
+        "evaluation_budget" => crate::tr!("Auswertungsbudget"),
+        "interval_seconds" => crate::tr!("Intervall in Sekunden"),
+        "stream_id" => crate::tr!("Arbeitsbereich-ID"),
+        "reason" => crate::tr!("Begründung"),
+        "goal" => crate::tr!("Ziel"),
+        "title" => crate::tr!("Titel"),
+        "description" => crate::tr!("Beschreibung"),
+        "content" => crate::tr!("Inhalt"),
+        "acceptance_criteria" => crate::tr!("Erfolgskriterien"),
+        "priority" => crate::tr!("Priorität (0–3)"),
+        "ticket_ids" => crate::tr!("Aufgaben-IDs"),
+        "depends_on" => crate::tr!("Abhängigkeiten (Aufgaben-IDs)"),
+        "role" => crate::tr!("Rolle"),
+        "ttl_seconds" => crate::tr!("Gültigkeit in Sekunden"),
+        "repository_path" => crate::tr!("Repositorypfad auf dem Runner"),
+        "service_registration" => crate::tr!("OpenCode-Service-Registrierung auf dem Runner"),
         _ => key,
     }
 }
@@ -2673,6 +3281,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_usage_counts_input_and_output_across_all_days_since_first_sample() {
+        let start = chrono::DateTime::from_timestamp_millis(1_750_000_000_000).unwrap()
+            .with_timezone(&chrono::Local).date_naive();
+        let report = ProjectUsage {
+            project_id: ProjectId::new(),
+            groups: vec![UsageGroup {
+                assistant_messages: 1,
+                tokens: TokenUsage {
+                    input: 2400, output: 600, reasoning: 700,
+                    cache: CacheUsage { read: 1100, write: 500 },
+                },
+                ..Default::default()
+            }],
+            first_observed_unix_ms: Some(1_750_000_000_000),
+            token_budget: None,
+            source: String::new(),
+        };
+        let ctx = egui::Context::default();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                project_usage_summary(ui, &report, None, start + chrono::Days::new(2));
+            });
+        });
+        let mut text = Vec::new();
+        for shape in &output.shapes {
+            crate::tests::shape_text(&shape.shape, &mut text);
+        }
+        assert!(text.contains(&"3.000".into()), "{text:?}");
+        assert!(text.contains(&start.format("%d.%m.%Y").to_string()), "{text:?}");
+        assert!(text.contains(&"1.000 Tokens".into()), "{text:?}");
+        let without_observation = ProjectUsage { first_observed_unix_ms: None, ..report };
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                project_usage_summary(ui, &without_observation, Some(1_750_000_000_000), start + chrono::Days::new(2));
+            });
+        });
+        text.clear();
+        for shape in &output.shapes {
+            crate::tests::shape_text(&shape.shape, &mut text);
+        }
+        assert!(text.contains(&"Berechnet seit Projektanlage".into()), "{text:?}");
+        assert!(text.contains(&start.format("%d.%m.%Y").to_string()), "{text:?}");
+        assert!(text.contains(&"1.000 Tokens".into()), "{text:?}");
+    }
+
+    #[test]
     fn project_editor_detects_the_local_branch_and_leaves_runner_mapping_automatic() {
         let mut app = crate::tests::fixture();
         app.project_editor(None);
@@ -2723,15 +3377,39 @@ mod tests {
         assert!(form.body["repository"].is_null());
         form.body["name"] = json!("Umbenannt");
         form.body["key"] = json!("new");
+        let runner = app.snapshot.as_ref().unwrap().runners[0].id;
+        form.body["runner_mapping"] = json!(ProjectRunnerMapping::Runner(runner));
         let request = form.project_request(&app).unwrap();
         assert_eq!(request["name"], "Umbenannt");
         assert_eq!(request["key"], "NEW");
         assert!(request["repository"].is_null());
         assert!(request["base_branch"].is_null());
         assert!(request.get("profile").is_none());
+        assert!(request.get("runner_mapping").is_none());
         form.persist(&mut app);
         app.project_editor(Some(&project));
         assert!(matches!(&app.dialog, Some(Dialog::Form(form)) if form.body["name"] == "Umbenannt"));
+    }
+
+    #[test]
+    fn runner_mapping_request_does_not_update_general_fields() {
+        let app = crate::tests::fixture();
+        let project = app.project().unwrap();
+        let runner = app.snapshot.as_ref().unwrap().runners[0].id;
+        let Dialog::Form(form) = Dialog::form(
+            "Runner-Zuordnung",
+            "",
+            "PATCH",
+            format!("/v1/projects/{}", project.id),
+            json!({
+                "request_id": RequestId::new(),
+                "expected_revision": project.revision,
+                "runner_mapping": ProjectRunnerMapping::Runner(runner),
+            }),
+        ) else { unreachable!() };
+        let request = form.project_request(&app).unwrap();
+        assert_eq!(request["runner_mapping"], json!({"runner": runner}));
+        assert_eq!(request.as_object().unwrap().len(), 3);
     }
 
     #[test]

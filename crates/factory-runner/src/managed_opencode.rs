@@ -1,17 +1,16 @@
 //! The runner owns this OpenCode instance. Never start or discover a user service.
 use anyhow::{bail, ensure, Context, Result};
 use factory_core::{OpenCodeStatus, RequestId};
+use factory_opencode::distribution::{self, VERSION};
 use serde_json::Value;
 use std::{
     fs,
     io::Write,
-    os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 
-const VERSION: &str = "2.4.1";
 const CONFIGS: &[&str] = &[
     "opencode.json",
     "opencode.jsonc",
@@ -23,7 +22,7 @@ const CONFIGS: &[&str] = &[
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Settings {
-    binary: PathBuf,
+    binary: Option<PathBuf>,
     port: u16,
     config: Option<PathBuf>,
     model_key_file: Option<PathBuf>,
@@ -38,14 +37,10 @@ pub(crate) fn registration(journal: &Path, runner: factory_core::RunnerId) -> Pa
 }
 
 fn owned_dir(path: &Path) -> Result<PathBuf> {
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e.into()),
-    }
+    factory_platform::private_dir(path)?;
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
-        metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0,
+        metadata.is_dir(),
         "Factory OpenCode-Verzeichnis muss privat sein: {}",
         path.display()
     );
@@ -54,6 +49,7 @@ fn owned_dir(path: &Path) -> Result<PathBuf> {
 
 fn replace_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(path.parent().context("Missing directory")?)?;
+    factory_platform::private_file(file.path())?;
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
     file.persist(path)?;
@@ -69,13 +65,35 @@ fn exists(path: &Path) -> Result<bool> {
 }
 
 fn no_ambient_config(path: &Path) -> Result<()> {
-    for relative in CONFIGS.iter().copied().chain([".opencode"]) {
+    for relative in CONFIGS.iter().copied() {
         let file = path.join(relative);
         ensure!(
             !exists(&file)?,
             "Externe OpenCode-Konfiguration nicht erlaubt: {}",
             file.display()
         );
+    }
+    let directory = path.join(".opencode");
+    if exists(&directory)? {
+        // The installer also uses ~/.opencode for binaries and npm dependencies.
+        // That alone is not configuration. Keep rejecting every discovery source
+        // (agents, plugins, skills, commands, etc.) and unknown entries, without
+        // touching or importing the user's installation.
+        ensure!(
+            fs::symlink_metadata(&directory)?.file_type().is_dir(),
+            "Externes OpenCode-Verzeichnis muss ein reguläres Verzeichnis sein: {}",
+            directory.display()
+        );
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            ensure!(
+                matches!(name.to_str(), Some("bin" | "node_modules" | "package.json"
+                    | "package-lock.json" | "bun.lock" | "bun.lockb" | ".gitignore")),
+                "Externe OpenCode-Konfiguration nicht erlaubt: {}",
+                entry.path().display()
+            );
+        }
     }
     Ok(())
 }
@@ -87,11 +105,7 @@ pub(crate) async fn start(
 ) -> Result<tokio::process::Child> {
     let settings: Settings = serde_json::from_slice(&fs::read(settings)?)
         .context("Invalid managed OpenCode settings")?;
-    let (binary, port) = (&settings.binary, settings.port);
-    ensure!(
-        binary.is_absolute(),
-        "OpenCode-Binary muss ein absoluter Pfad sein"
-    );
+    let port = settings.port;
     ensure!(
         port != 0,
         "Verwaltetes OpenCode braucht einen festen Loopback-Port"
@@ -107,6 +121,7 @@ pub(crate) async fn start(
     let home = owned_dir(&root.join("home"))?;
     let config_dir = owned_dir(&root.join("config"))?;
     let config_home = owned_dir(&config_dir.join("opencode"))?;
+    owned_dir(&config_home.join("skills"))?;
     let data = owned_dir(&root.join("data"))?;
     let state = owned_dir(&root.join("state"))?;
     let cache = owned_dir(&root.join("cache"))?;
@@ -115,13 +130,16 @@ pub(crate) async fn start(
     let base = owned_dir(&root.join("workspace"))?;
     no_ambient_config(&base)?;
     no_ambient_config(&root)?;
+    write_config(&settings, &config_home.join("opencode.jsonc"), factory_url).await?;
+    let override_path = std::env::var_os("FACTORY_OPENCODE_BIN").map(PathBuf::from);
+    let binary = distribution::binary(&root, settings.binary.as_deref().or(override_path.as_deref())).await?;
     let password = format!("{}{}", RequestId::new(), RequestId::new());
     let url = format!("http://127.0.0.1:{port}");
     let command = || {
         let mut command = tokio::process::Command::new(&binary);
         command
             .env_clear()
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", &config_dir)
             .env("XDG_DATA_HOME", &data)
@@ -129,12 +147,23 @@ pub(crate) async fn start(
             .env("XDG_CACHE_HOME", &cache)
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("TMPDIR", &tmp)
+            .env("TEMP", &tmp)
+            .env("TMP", &tmp)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", &config_dir)
+            .env("LOCALAPPDATA", &data)
             .env("OPENCODE_PASSWORD", &password)
             .current_dir(&base)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        #[cfg(windows)]
+        for key in ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
         command
     };
     let reported =
@@ -144,7 +173,6 @@ pub(crate) async fn start(
             && std::str::from_utf8(&reported.stdout)?.trim() == format!("opencode v{VERSION}"),
         "Managed OpenCode requires version {VERSION}"
     );
-    write_config(&settings, &config_home.join("opencode.jsonc"), factory_url).await?;
     let mut child = command()
         .args([
             "serve",
@@ -231,9 +259,10 @@ async fn add_gateway_config(factory_url: &str, key_file: &Path, config: &mut Val
     );
     let metadata = fs::symlink_metadata(key_file)?;
     ensure!(
-        metadata.is_file() && metadata.len() <= 130 && metadata.permissions().mode() & 0o077 == 0,
+        metadata.is_file() && metadata.len() <= 130,
         "Model gateway key file must be a private regular file (0600)"
     );
+    factory_platform::ensure_private(key_file)?;
     let key = fs::read_to_string(key_file)?;
     let key = key.trim_end_matches(['\n', '\r']);
     ensure!(
@@ -278,14 +307,22 @@ async fn add_gateway_config(factory_url: &str, key_file: &Path, config: &mut Val
         let models = access
             .models
             .into_iter()
-            .map(|model| (model, serde_json::json!({"capabilities":{"tools":true}})))
+            .map(|model| {
+                let mut config = serde_json::json!({"capabilities":{"tools":true}});
+                if let Some(transport) = access.transports.get(&model) {
+                    config["package"] = serde_json::json!(transport.runtime_package());
+                }
+                (model, config)
+            })
             .collect::<serde_json::Map<_, _>>();
         let alias = access.id;
         rules_list
             .push(serde_json::json!({"action":"provider.use","resource":alias,"effect":"allow"}));
+        let package = factory_protocol::models::KeyModelProvider::from_access_id(&alias)
+            .map_or("@opencode/ai/providers/openai-compatible/responses", |p| p.runtime_package());
         let value = serde_json::json!({
             "name": access.name,
-            "package":"@opencode/ai/providers/openai-compatible/responses",
+            "package":package,
             "settings":{"baseURL":format!("{base}/{alias}"),"apiKey":key},
             "models":models,
         });
@@ -293,6 +330,10 @@ async fn add_gateway_config(factory_url: &str, key_file: &Path, config: &mut Val
     }
     config.insert("providers".into(), Value::Object(providers));
     config.insert("policies".into(), rules);
+    let permissions = config.entry("permissions").or_insert_with(|| serde_json::json!([]));
+    if let Some(rules) = permissions.as_array_mut() {
+        rules.push(serde_json::json!({"action":"skill","resource":format!("{}*",factory_core::FACTORY_SKILL_PREFIX),"effect":"deny"}));
+    }
     Ok(())
 }
 
@@ -486,6 +527,10 @@ fn scan_markdown(dir: &Path, depth: usize) -> Result<()> {
 }
 
 pub(crate) fn validate_workspace(workspace: &Path) -> Result<()> {
+    validate_workspace_with_profile(workspace, false)
+}
+
+pub(crate) fn validate_workspace_with_profile(workspace: &Path, managed_integrations: bool) -> Result<()> {
     let workspace = workspace.canonicalize()?;
     for ancestor in workspace.ancestors().skip(1) {
         no_ambient_config(ancestor)?;
@@ -514,6 +559,10 @@ pub(crate) fn validate_workspace(workspace: &Path) -> Result<()> {
             let value = parse_jsonc(&fs::read(&path)?)
                 .with_context(|| format!("{relative}: ungültige OpenCode-Konfiguration"))?;
             validate_config(Path::new(relative), &value)?;
+            ensure!(
+                !managed_integrations || (value.get("skills").is_none() && value.get("mcp").is_none()),
+                "{relative}: externe Skill-Quellen und Repo-MCPs sind mit verwalteten Integrationen nicht erlaubt"
+            );
         }
     }
     for name in ["agent", "agents", "command", "commands"] {
@@ -568,6 +617,50 @@ mod tests {
     }
 
     #[test]
+    fn configured_repo_skill_profiles_reject_extra_sources_but_legacy_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("opencode.jsonc");
+        for json in [
+            r#"{"skills":["https://example.test/skills"]}"#,
+            r#"{"mcp":{"servers":{"local":{"type":"local","command":["ignored"]}}}}"#,
+        ] {
+            fs::write(&file, json).unwrap();
+            validate_workspace(dir.path()).unwrap();
+            assert!(validate_workspace_with_profile(dir.path(), true)
+                .unwrap_err().to_string().contains("externe Skill-Quellen"));
+        }
+    }
+
+    #[test]
+    fn personal_binary_installation_does_not_block_a_private_runtime_or_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join(".opencode");
+        fs::create_dir_all(install.join("bin")).unwrap();
+        fs::create_dir_all(install.join("node_modules")).unwrap();
+        fs::write(install.join("package.json"), r#"{"dependencies":{"opencode-ai":"latest"}}"#).unwrap();
+        fs::write(install.join("package-lock.json"), "{}").unwrap();
+        fs::write(install.join(".gitignore"), "*").unwrap();
+        let workspace = dir.path().join("factory/runtime/workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        no_ambient_config(dir.path()).unwrap();
+        validate_workspace(&workspace).unwrap();
+        assert_eq!(fs::read_to_string(install.join("package-lock.json")).unwrap(), "{}");
+        for name in ["agents", "commands", "skills", "plugins", "plugin", "unknown"] {
+            let external = install.join(name);
+            fs::create_dir(&external).unwrap();
+            assert!(no_ambient_config(dir.path()).is_err(), "{name} must remain blocked");
+            assert!(validate_workspace(&workspace).is_err());
+            fs::remove_dir(external).unwrap();
+        }
+        for name in ["opencode.json", "opencode.jsonc"] {
+            let external = install.join(name);
+            fs::write(&external, "{}").unwrap();
+            assert!(no_ambient_config(dir.path()).is_err(), "{name} must remain blocked");
+            fs::remove_file(external).unwrap();
+        }
+    }
+
+    #[test]
     fn rejects_config_in_a_worktree_ancestor_and_symlinks() {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("repo");
@@ -579,7 +672,7 @@ mod tests {
             .to_string()
             .contains("Externe OpenCode-Konfiguration"));
         fs::remove_file(&foreign).unwrap();
-        std::os::unix::fs::symlink(&foreign, workspace.join(".opencode")).unwrap();
+        crate::test_symlink_file(&foreign, workspace.join(".opencode")).unwrap();
         assert!(validate_workspace(&workspace).is_err());
     }
 
@@ -596,10 +689,23 @@ mod tests {
         let key = "runner-only-model-key-for-isolated-test";
         let key_file = root.path().join("model.key");
         replace_private(&key_file, key.as_bytes()).unwrap();
+        use factory_protocol::models::KeyModelProvider;
+        let providers = KeyModelProvider::ALL.map(|p| (p, p.new_access_id()));
+        let mut catalog = vec![serde_json::json!({"id":"factory-test","name":"Factory Test","models":["sample"]})];
+        catalog.extend(providers.iter().map(|(provider, id)| {
+            serde_json::json!({"id":id,"name":provider.label(),"models":["sample"]})
+        }));
+        let copilot = format!("{}{}", factory_protocol::models::COPILOT_ACCESS_PREFIX, factory_core::RequestId::new());
+        catalog.push(serde_json::json!({"id":copilot,"name":"GitHub Copilot",
+            "models":["sample-chat","sample-responses","sample-messages"],
+            "transports":{"sample-chat":"chat","sample-responses":"responses","sample-messages":"messages"}}));
         let route = axum::Router::new().route("/v1/model-gateway/catalog", axum::routing::get(
-            move |headers: axum::http::HeaderMap| async move {
-                assert_eq!(headers["authorization"], format!("Bearer {key}"));
-                axum::Json(serde_json::json!([{"id":"factory-test","name":"Factory Test","models":["sample"]}]))
+            move |headers: axum::http::HeaderMap| {
+                let catalog = catalog.clone();
+                async move {
+                    assert_eq!(headers["authorization"], format!("Bearer {key}"));
+                    axum::Json(catalog)
+                }
             }));
         let mock = tokio::spawn(async move {
             axum::serve(factory, route).await.unwrap();
@@ -631,6 +737,7 @@ mod tests {
                 .await
                 .unwrap();
             if resource == "config" {
+                let entries = result.as_array().unwrap();
                 assert!(result
                     .as_array()
                     .unwrap()
@@ -639,6 +746,22 @@ mod tests {
                         |entry| entry["info"]["providers"]["factory-test"]["models"]["sample"]
                             .is_object()
                     ));
+                for (provider, id) in &providers {
+                    assert!(entries.iter().any(|entry| {
+                        let access = &entry["info"]["providers"][id];
+                        access["package"] == provider.runtime_package()
+                            && access["models"]["sample"]["capabilities"]["tools"] == true
+                    }), "{provider:?} missing from runner config");
+                }
+                for (model, transport) in [
+                    ("sample-chat", factory_protocol::models::ModelTransport::Chat),
+                    ("sample-responses", factory_protocol::models::ModelTransport::Responses),
+                    ("sample-messages", factory_protocol::models::ModelTransport::Messages),
+                ] {
+                    assert!(entries.iter().any(|entry| {
+                        entry["info"]["providers"][&copilot]["models"][model]["package"] == transport.runtime_package()
+                    }));
+                }
             } else {
                 assert_eq!(result["data"], serde_json::json!([]));
             }

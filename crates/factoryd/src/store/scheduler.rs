@@ -65,9 +65,8 @@ pub(super) fn map_project_runner(
 }
 pub(super) fn activate_prompts(tx: &Transaction<'_>, id: ProjectId) -> Result<()> {
     if let Some(mut p) = policy(tx, id)? {
-        if !p.enabled || p.remaining_starts != UNLIMITED_STARTS {
+        if !p.enabled {
             p.enabled = true;
-            p.remaining_starts = UNLIMITED_STARTS;
             p.revision.0 += 1;
             save_policy(tx, &p)?;
         }
@@ -94,7 +93,124 @@ pub(super) fn set_limit(tx: &Transaction<'_>, id: ProjectId, limit: u8) -> Resul
     }
     Ok(())
 }
+
+fn refresh_automatic_runner(tx: &Transaction<'_>, policy: &mut SchedulerPolicy, ticket: &Ticket) -> Result<()> {
+    let data: String = tx.query_row(
+        "SELECT data FROM active_projects WHERE id=?1",
+        [policy.project_id.to_string()], |row| row.get(0),
+    )?;
+    let mut project: Project = serde_json::from_str(&data)?;
+    match project.runner_mapping {
+        Some(ProjectRunnerMapping::Runner(_)) => return Ok(()),
+        // Legacy projects displayed as Automatic retained their initial host in setup.
+        None if !project.setup.as_ref().is_some_and(|setup| policy.runner_ids == [setup.runner_id]) => return Ok(()),
+        _ => {}
+    }
+    let now = super::super::unix_ms().saturating_sub(30_000);
+    let mut query = tx.prepare(
+        "SELECT runner_id,local_source FROM live_automatic_runners WHERE seen_ms >= ?1 ORDER BY runner_id",
+    )?;
+    let candidates = query.query_map([now], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let local_repository = std::path::Path::new(&project.repository).is_absolute()
+        || project.repository.as_bytes().get(1..3).is_some_and(|prefix| prefix == b":\\" || prefix == b":/")
+        || project.repository.starts_with("\\\\");
+    let mcps = super::mcp::for_ticket(tx, ticket.id, project.id)?;
+    if !super::mcp::allowed(tx, project.id, &mcps)? {
+        return Ok(());
+    }
+    let mut replacement = None;
+    for (id, local_source) in candidates {
+        let id = id.parse().map_err(|_| StoreError::Internal)?;
+        if (local_repository && !local_source && !project.runner_bindings.contains_key(&id))
+            || !super::mcp::runner_ready(tx, id, &mcps)?
+        {
+            continue;
+        }
+        if policy.runner_ids.contains(&id) {
+            return Ok(());
+        }
+        if replacement.is_none() {
+            replacement = Some(id);
+        }
+    }
+    let Some(id) = replacement else { return Ok(()); };
+    bind_project_runner(&mut project, id);
+    project.runner_mapping = Some(ProjectRunnerMapping::Automatic);
+    project.revision.0 += 1;
+    tx.execute("UPDATE projects SET data=?1 WHERE id=?2",
+        params![serde_json::to_string(&project)?, project.id.to_string()])?;
+    event(tx, "project.automatic_setup", project.id.to_string(), &project)?;
+    policy.runner_ids = vec![id];
+    policy.revision.0 += 1;
+    save_policy(tx, policy)
+}
+
+#[cfg(test)]
+mod automatic_runner_tests {
+    use super::*;
+
+    #[test]
+    fn auto_replaces_a_stale_local_runner_without_changing_manual_assignments() {
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let project = store.create_project(CreateProject {
+            request_id: RequestId::new(), key: None, logo: None,
+            name: "Automatic runner".into(), repository: "/project".into(),
+            base_branch: "main".into(), runner_mapping: None,
+        }).unwrap();
+        let old = RunnerId::new();
+        let remote = RunnerId::new();
+        let local = RunnerId::new();
+        store.save_task(SaveTask {
+            request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+            project_id: project.id, requested_session: None,
+            prompt: "Run on an available host".into(), images: vec![],
+        }).unwrap();
+        store.autostart_runner(old).unwrap();
+        let assert_runner = |runner| {
+            assert_eq!(store.scheduler_policy(project.id).unwrap().unwrap().runner_ids, [runner]);
+        };
+        store.observe_automatic_runner(remote, true, false).unwrap();
+        store.scheduler_tick().unwrap();
+        assert_runner(old);
+        store.observe_automatic_runner(local, true, true).unwrap();
+        store.scheduler_tick().unwrap();
+        assert_runner(local);
+        assert!(store.pending(local).unwrap().iter().any(|c| c.kind == CommandKind::PrepareWorkspace));
+        let p = store.snapshot().unwrap().projects.into_iter().find(|p| p.id == project.id).unwrap();
+        assert_eq!(p.runner_mapping, Some(ProjectRunnerMapping::Automatic));
+        store.update_project(p.id, UpdateProject {
+            request_id: RequestId::new(), expected_revision: p.revision,
+            name: None, key: None, logo: None, repository: None, base_branch: None,
+            runner_mapping: Some(ProjectRunnerMapping::Runner(old)),
+        }).unwrap();
+        store.scheduler_tick().unwrap();
+        assert_runner(old);
+    }
+}
+
 impl Store {
+    pub(crate) fn observe_automatic_runner(&self, id: RunnerId, ready: bool, local_source: bool) -> Result<()> {
+        let db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let now = super::super::unix_ms();
+        let previously_ready: Option<bool> = db.query_row(
+            "SELECT local_source FROM live_automatic_runners WHERE runner_id=?1 AND seen_ms >= ?2",
+            params![id.to_string(), now.saturating_sub(30_000)], |row| row.get(0),
+        ).optional()?;
+        db.execute("DELETE FROM live_automatic_runners WHERE seen_ms < ?1", [now.saturating_sub(60_000)])?;
+        if ready {
+            db.execute("INSERT INTO live_automatic_runners VALUES(?1,?2,?3)
+                ON CONFLICT(runner_id) DO UPDATE SET seen_ms=excluded.seen_ms,local_source=excluded.local_source",
+                params![id.to_string(), now, local_source])?;
+        } else {
+            db.execute("DELETE FROM live_automatic_runners WHERE runner_id=?1", [id.to_string()])?;
+        }
+        if previously_ready != ready.then_some(local_source) {
+            self.wake_scheduler();
+        }
+        Ok(())
+    }
+
     pub fn recover_local_projects(&self, runner: RunnerId) -> Result<()> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -217,7 +333,6 @@ impl Store {
                     enabled: true,
                     runner_ids: vec![runner],
                     max_parallel: p.max_sessions,
-                    remaining_starts: UNLIMITED_STARTS,
                 })?;
             }
         }
@@ -264,10 +379,9 @@ impl Store {
                     || b.runner_ids.len() > 16
                     || b.runner_ids.iter().collect::<BTreeSet<_>>().len() != b.runner_ids.len()
                     || !(1..=16).contains(&b.max_parallel)
-                    || (b.start_budget > 1000 && b.start_budget != UNLIMITED_STARTS)
                 {
                     return Err(StoreError::Invalid(
-                        "Scheduler needs 1..16 unique runners, parallelism 1..16, budget <=1000",
+                        "Scheduler needs 1..16 unique runners and parallelism 1..16",
                     ));
                 }
                 let previous = policy(tx, id)?.map_or(Revision(0), |p| p.revision);
@@ -280,7 +394,6 @@ impl Store {
                     enabled: b.enabled,
                     runner_ids: b.runner_ids.clone(),
                     max_parallel: b.max_parallel,
-                    remaining_starts: b.start_budget,
                 };
                 save_policy(tx, &p)?;
                 let raw: String = tx.query_row(
@@ -375,6 +488,13 @@ impl Store {
                 continue;
             }
             let mut all = tickets(&tx, p.project_id)?;
+            if let Some(ticket) = all.values().filter(|t| !t.draft && t.requested_session.is_none()
+                && matches!(t.status, TicketState::Backlog | TicketState::Ready)
+                && t.depends_on.iter().all(|id| all.get(id).is_some_and(|t| t.status == TicketState::Done)))
+                .min_by_key(|t| (std::cmp::Reverse(t.priority), t.created_unix_ms, t.id))
+            {
+                refresh_automatic_runner(&tx, &mut p, ticket)?;
+            }
             tx.execute_batch("SAVEPOINT question_orchestration")?;
             match super::question_orchestrator::tick(&tx, &p) {
                 Ok(()) => {}
@@ -436,7 +556,9 @@ impl Store {
                 // A rejected transition must not prevent other projects from advancing.
                 tx.execute_batch("SAVEPOINT scheduled_start")?;
                 let pins = super::models::ticket(&tx, tid)?;
-                match Self::enqueue_with_model(
+                let repo_skills = super::skills::for_ticket(&tx, tid, t.project_id)?;
+                let local_mcps = super::mcp::for_ticket(&tx, tid, t.project_id)?;
+                match Self::enqueue_with_pins(
                     &tx,
                     sid,
                     &EnqueueCommand {
@@ -448,6 +570,7 @@ impl Store {
                     None,
                     "",
                     pins.as_ref().and_then(|m| m.implementer.as_ref()),
+                    Some((&repo_skills, &local_mcps)),
                 ) {
                     Ok(c) => {
                         let mut ticket = t.clone();
@@ -522,7 +645,7 @@ impl Store {
                 .collect::<Vec<_>>();
             ready.sort_by_key(|t| (std::cmp::Reverse(t.priority), t.created_unix_ms, t.id));
             for mut t in ready {
-                if active >= p.max_parallel as usize || p.remaining_starts == 0 {
+                if active >= p.max_parallel as usize {
                     break;
                 }
                 let assigned: bool = tx.query_row(
@@ -533,11 +656,23 @@ impl Store {
                 if assigned {
                     continue;
                 }
-                let runner = *p
-                    .runner_ids
-                    .iter()
+                let local_mcps = super::mcp::for_ticket(&tx, t.id, t.project_id)?;
+                if !super::mcp::allowed(&tx, t.project_id, &local_mcps)? {
+                    super::routing::note(&tx, &mut t, "MCP-Freigabe oder Konfiguration geändert; Aufgabe mit aktueller Auswahl neu einreihen")?;
+                    continue;
+                }
+                let mut eligible = Vec::new();
+                for candidate in &p.runner_ids {
+                    if super::mcp::runner_ready(&tx, *candidate, &local_mcps)? {
+                        eligible.push(candidate);
+                    }
+                }
+                let Some(&runner) = eligible.into_iter()
                     .min_by_key(|r| (counts.get(r).copied().unwrap_or(0), **r))
-                    .unwrap();
+                else {
+                    super::routing::note(&tx, &mut t, "Wartet auf verfügbaren Runner mit den freigegebenen MCPs")?;
+                    continue;
+                };
                 let mut prompt = t.prompt.clone().unwrap_or_else(|| {
                     format!(
                         "Work on ticket {}: {}\nDescription:\n{}\nAcceptance criteria:\n{}",
@@ -593,11 +728,6 @@ impl Store {
                             all.insert(t.id, t.clone());
                             active += 1;
                             *counts.entry(runner).or_default() += 1;
-                            if p.remaining_starts != UNLIMITED_STARTS {
-                                p.remaining_starts -= 1;
-                            }
-                            p.revision.0 += 1;
-                            save_policy(&tx, &p)?;
                         }
                         continue;
                     }
@@ -630,10 +760,6 @@ impl Store {
                 t.execution_command = Some(c.id);
                 save_ticket(&tx, &mut t)?;
                 all.insert(t.id, t.clone());
-                if p.remaining_starts != UNLIMITED_STARTS {
-                    p.remaining_starts -= 1;
-                }
-                p.revision.0 += 1;
                 active += 1;
                 *counts.entry(runner).or_default() += 1;
                 event(
@@ -642,7 +768,6 @@ impl Store {
                     t.id.to_string(),
                     &serde_json::json!({"ticket":t.id,"stream":stream.id,"runner":runner,"policy_revision":p.revision}),
                 )?;
-                save_policy(&tx, &p)?;
             }
             tx.execute_batch("SAVEPOINT memory_extraction")?;
             match super::memory::tick(&tx, &p) {

@@ -5,6 +5,7 @@ use factoryd::store::{Store, StoreError};
 fn project(store: &Store) -> Project {
     store
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),
@@ -179,6 +180,7 @@ fn migration_from_v1_preserves_projects_and_adds_work_tables() {
     db.execute_batch(include_str!("../migrations/001_initial.sql"))
         .unwrap();
     let p = Project {
+        logo: None,
         runner_mapping: None,
         key: String::new(),
         deleted: false,
@@ -420,6 +422,22 @@ fn agent_profile_is_snapshotted_unknown_keeps_stream_reserved_and_success_requir
         ),
         Err(StoreError::WorkConflict)
     ));
+    let finalizing = AgentProgress {
+        phase: AgentPhase::Finalizing,
+        summary: "Saving the session archive".into(),
+        ..progress.clone()
+    };
+    let observed = store
+        .observe_agent(runner, cmd.id, ObserveAgent {
+            ownership_epoch: 1,
+            progress: finalizing.clone(),
+        })
+        .unwrap();
+    assert_eq!(observed.state, CommandState::Accepted);
+    assert_eq!(observed.agent_progress, Some(finalizing));
+    assert_eq!(store.snapshot().unwrap().streams[0].status, StreamState::Running);
+    assert_eq!(store.pending(runner).unwrap()[0].id, cmd.id);
+
     let final_progress = AgentProgress {
         phase: AgentPhase::Succeeded,
         summary: "Done".into(),

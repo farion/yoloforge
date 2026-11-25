@@ -1,0 +1,108 @@
+name: Native packages
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ''
+      release_tag:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            os: macos
+            arch: aarch64
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      PACKAGE_OS: ${{ matrix.os }}
+      PACKAGE_ARCH: ${{ matrix.arch }}
+      BUILD_TARGET: ${{ matrix.target }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal
+      - name: Linux SDL3 and OpenGL dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libxkbcommon-dev libwayland-dev wayland-protocols libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libgl1-mesa-dev libegl1-mesa-dev
+      - name: Windows Git fixtures
+        if: runner.os == 'Windows'
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.symlinks true
+      - name: Packaging regression tests
+        run: python scripts/test-package-release.py
+      - name: Native runner, protocol and headless GUI tests
+        run: cargo +stable test --locked --target "$BUILD_TARGET" -p factory-platform -p factory-core -p factory-protocol -p factory-opencode -p factory-runner -p factory-gui --all-targets
+      - name: Verify pinned native OpenCode distribution
+        run: cargo +stable test --locked --target "$BUILD_TARGET" -p factory-opencode distribution::tests::downloads_verified_binary_and_reuses_it -- --ignored
+      - name: Server tests
+        if: runner.os == 'Linux'
+        run: cargo +stable test --locked --target "$BUILD_TARGET" -p factoryd --all-targets
+      - name: Build GUI and runner
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: cargo +stable build --locked --release --target "$BUILD_TARGET" -p factory-gui -p factory-runner
+      - name: Build server
+        if: runner.os == 'Linux'
+        run: cargo +stable build --locked --release --target "$BUILD_TARGET" -p factoryd
+      - name: Package native binaries
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import tomllib; print("v"+tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          if [[ -n "$RELEASE_TAG" ]]; then test "$version" = "$RELEASE_TAG"; fi
+          for kind in gui runner; do
+            python scripts/package-release.py --kind "$kind" --os "$PACKAGE_OS" --arch "$PACKAGE_ARCH" --version "$version" --binaries "target/$BUILD_TARGET/release"
+          done
+          if [[ "$PACKAGE_OS" == linux ]]; then
+            python scripts/package-release.py --kind server --os linux --arch "$PACKAGE_ARCH" --version "$version" --binaries "target/$BUILD_TARGET/release"
+          fi
+      - name: Test extracted packages without services or GUI windows
+        run: python scripts/test-native-packages.py --directory dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

@@ -1,198 +1,90 @@
-name: Versioned release
+name: Release
+
 on:
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
         description: Existing version tag to publish
         required: true
         type: string
-  push:
-    tags: ['v*']
-env:
-  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
-permissions:
-  contents: read
+
 jobs:
-  binaries:
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: aarch64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.0
-      - name: Verify tag and manifest version agree
-        run: python3 -c 'import os,tomllib; assert os.environ["RELEASE_TAG"] == "v" + tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"]'
-      - name: Native Linux GUI dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libxkbcommon-dev libwayland-dev wayland-protocols libx11-dev libxext-dev libxcursor-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libgl1-mesa-dev libegl1-mesa-dev
-      - run: cargo test --workspace --locked
-      - run: cargo build --release --locked -p factoryd -p factory-runner -p factory-tui -p factory-gui
-      - name: Package binaries and deployment contract
-        run: |
-          python3 scripts/package-release.py --kind server --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
-          python3 scripts/package-release.py --kind tui --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
-          python3 scripts/package-release.py --kind runner --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
-          python3 scripts/package-release.py --kind gui --os linux --arch ${{ matrix.arch }} --version "$RELEASE_TAG"
-      - name: Test the standalone server package
-        if: matrix.arch == 'x86_64'
-        run: python3 scripts/smoke-server-package.py "dist/yoloforge-server-${RELEASE_TAG}-linux-x86_64.tar.gz"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{ matrix.arch }}
-          path: |
-            dist/*.tar.gz
-            dist/*.sha256
-  windows-tui:
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.98.0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - run: cargo test --locked -p factory-tui --bin yoloforge
-      - run: cargo build --release --locked -p factory-tui --bin yoloforge
-      - run: python scripts/smoke-client.py target/release/yoloforge.exe
-      - run: python scripts/package-release.py --kind tui --os windows --arch x86_64 --version "$env:RELEASE_TAG"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-tui
-          path: |
-            dist/*.zip
-            dist/*.sha256
-  image:
+  validate:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
-      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-      - run: python3 -c 'import os,tomllib; assert os.environ["RELEASE_TAG"] == "v" + tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"]'
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        id: image
-        with:
-          context: .
-          file: deploy/Dockerfile
-          push: true
-          tags: ${{ env.IMAGE }}:${{ env.RELEASE_TAG }}
-          provenance: true
-          sbom: true
-      - name: Record immutable server image
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - name: Validate version tag
         env:
-          DIGEST: ${{ steps.image.outputs.digest }}
-        run: python3 -c 'import json,os; json.dump({"version":os.environ["RELEASE_TAG"],"image":os.environ["IMAGE"]+"@"+os.environ["DIGEST"],"platform":"linux/amd64"},open("server-image.json","w"))'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-image
-          path: server-image.json
-  android:
-    if: vars.ANDROID_RELEASE_SIGNING == 'enabled'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
-      - name: Verify release version
-        run: python3 -c 'import os,tomllib; assert os.environ["RELEASE_TAG"] == "v" + tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"]'
-      - name: Materialize private signing inputs
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           python3 - <<'PY'
-          import base64,json,os
-          from pathlib import Path
-          os.umask(0o077)
-          directory=Path(os.environ['RUNNER_TEMP'])/'yoloforge-signing'
-          directory.mkdir()
-          for key in ['KEYSTORE_BASE64','STORE_PASSWORD','KEY_ALIAS']:
-              assert os.environ.get(key), 'Android signing secret missing: '+key
-          (directory/'release.p12').write_bytes(base64.b64decode(os.environ['KEYSTORE_BASE64'],validate=True))
-          (directory/'password').write_text(os.environ['STORE_PASSWORD'])
-          (directory/'signing.json').write_text(json.dumps({'alias':os.environ['KEY_ALIAS'],'keystore':'release.p12','password_file':'password'}))
+          import os, re, tomllib
+          tag = os.environ["RELEASE_TAG"]
+          assert re.fullmatch(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", tag), "Expected a version tag"
+          with open("Cargo.toml", "rb") as file:
+              assert tag == "v" + tomllib.load(file)["workspace"]["package"]["version"], "Tag and Cargo version differ"
           PY
-      - name: Build and verify pinned Android release signature
-        run: python3 scripts/android-release.py --signing-dir "$RUNNER_TEMP/yoloforge-signing"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: android-release
-          path: |
-            dist/*.apk
-            dist/*.apk.sha256
-      - name: Remove ephemeral signing material
-        if: always()
-        run: rm -rf -- "$RUNNER_TEMP/yoloforge-signing"
+
+  build:
+    needs: validate
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+      release_tag: ${{ inputs.tag || github.ref_name }}
+
   publish:
-    needs: [binaries, windows-tui, image, android]
-    if: always() && needs.binaries.result == 'success' && needs.windows-tui.result == 'success' && needs.image.result == 'success' && (needs.android.result == 'success' || needs.android.result == 'skipped')
+    needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ env.RELEASE_TAG }}
-      - uses: actions/download-artifact@v4
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: linux-*
-          path: release
+          pattern: packages-*
           merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: server-image
-          path: release
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-tui
-          path: release
-      - uses: actions/download-artifact@v4
-        if: needs.android.result == 'success'
-        with:
-          name: android-release
-          path: release
+          path: dist
+      - name: Verify complete release and checksums
+        run: python3 scripts/verify-release.py --version "$RELEASE_TAG" --directory dist
       - name: Publish only the complete release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          cd release
-          sha256sum --check ./*.sha256
-          test -s server-image.json
-          notes=(--generate-notes)
-          if test -f "../docs/release-notes/${RELEASE_TAG}.md"; then
-            notes=(--notes-file "../docs/release-notes/${RELEASE_TAG}.md")
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            notes=(--generate-notes)
+            if test -f "docs/release-notes/${RELEASE_TAG}.md"; then
+              notes=(--notes-file "docs/release-notes/${RELEASE_TAG}.md")
+            fi
+            prerelease=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=(--prerelease); fi
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --title "$RELEASE_TAG" "${notes[@]}" "${prerelease[@]}"
           fi
-          gh release create "$RELEASE_TAG" --verify-tag "${notes[@]}" --draft ./*
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi

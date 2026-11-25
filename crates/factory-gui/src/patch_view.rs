@@ -245,18 +245,15 @@ pub fn show(ui: &mut egui::Ui, patch: &Patch<'_>, show_path: bool) {
     if pages > 1 {
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(page > 0, egui::Button::new("Vorherige Patchzeilen"))
+                .add_enabled(page > 0, egui::Button::new(crate::tr!("Vorherige Patchzeilen")))
                 .clicked()
             {
                 page -= 1;
             }
-            ui.label(format!(
-                "Zeilenabschnitt {} / {pages} · {} Patchzeilen",
-                page + 1,
-                rows.len()
-            ));
+            ui.label(crate::tr!("Zeilenabschnitt {} / {pages} · {} Patchzeilen", page + 1,
+                rows.len(), pages = pages));
             if ui
-                .add_enabled(page + 1 < pages, egui::Button::new("Weitere Patchzeilen"))
+                .add_enabled(page + 1 < pages, egui::Button::new(crate::tr!("Weitere Patchzeilen")))
                 .clicked()
             {
                 page += 1;
@@ -295,7 +292,7 @@ pub fn show(ui: &mut egui::Ui, patch: &Patch<'_>, show_path: bool) {
                 if row.text.len() > 16 * 1024 {
                     ui.colored_label(
                         AMBER,
-                        "Sehr lange Patchzeile · vollständiger Text in Abschnitten",
+                        crate::tr!("Sehr lange Patchzeile · vollständiger Text in Abschnitten"),
                     );
                     crate::dialogs::read_text(ui, row.text, true);
                 } else {

@@ -8,9 +8,7 @@ use factory_protocol::{client::FactoryClient, ReportArchiveBlob};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -40,19 +38,11 @@ fn spool(
         roots.iter().any(|r| path.starts_with(r)),
         "Source outside allowed roots"
     );
-    let mut source = OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
-        .open(path)?;
+    let mut source = factory_platform::open_rooted(&path, roots)?;
     let before = source.metadata()?;
     ensure!(
         before.is_file() && before.len() > 0 && before.len() <= ARCHIVE_BLOB_LIMIT.min(budget),
         "Source exceeds blob budget or is not a regular file"
-    );
-    let opened = std::fs::canonicalize(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
-    ensure!(
-        roots.iter().any(|r| opened.starts_with(r)),
-        "Opened source outside allowed roots"
     );
     std::fs::create_dir_all(directory)?;
     let mut temp = tempfile::NamedTempFile::new_in(directory)?;
@@ -81,7 +71,7 @@ fn spool(
     temp.as_file().sync_all()?;
     if !path.try_exists()? {
         temp.persist_noclobber(&path).map_err(|e| e.error)?;
-        std::fs::File::open(directory)?.sync_all()?;
+        factory_platform::sync_dir(directory)?;
     } else {
         let mut existing = std::fs::File::open(&path)?;
         let mut digest = Sha256::new();
@@ -246,7 +236,7 @@ mod tests {
         let bytes = vec![0x7f; 5 * 1024 * 1024 + 3];
         std::fs::write(&path, &bytes).unwrap();
         let link = root.path().join("escape");
-        std::os::unix::fs::symlink(&path, &link).unwrap();
+        crate::test_symlink_file(&path, &link).unwrap();
         let uri = reqwest::Url::from_file_path(&link).unwrap().to_string();
         assert!(spool(
             &uri,
@@ -257,7 +247,7 @@ mod tests {
         .is_err());
         let (hash, size, stored) = spool(
             &uri,
-            &[outside.path().into()],
+            &[outside.path().canonicalize().unwrap()],
             destination.path(),
             ARCHIVE_BLOB_LIMIT,
         )
@@ -267,7 +257,7 @@ mod tests {
         assert_eq!(std::fs::read(&stored).unwrap(), bytes);
         assert!(spool(
             &uri,
-            &[outside.path().into()],
+            &[outside.path().canonicalize().unwrap()],
             destination.path(),
             4 * 1024 * 1024
         )

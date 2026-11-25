@@ -94,7 +94,7 @@ impl FlowState {
             let previous = self.previous.insert(ticket.id, success);
             if success && previous != Some(true) {
                 // Don't resurrect an old archive on startup. Newly observed
-                // transitions get the full ten seconds, regardless of ticket age.
+                // transitions get the full two minutes, regardless of ticket age.
                 let remaining = if previous.is_some() {
                     design::FLOW_SUCCESS_MS
                 } else {
@@ -153,6 +153,9 @@ struct Card<'a> {
 fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     let command = task_command(s, ticket);
     let waiting = command.is_some_and(|c| {
+        if c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::Finalizing) {
+            return false;
+        }
         c.agent_progress
             .as_ref()
             .is_some_and(|p| p.phase == AgentPhase::WaitingInput)
@@ -217,7 +220,7 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
             c.state == CommandState::Accepted
                 && c.agent_progress
                     .as_ref()
-                    .is_none_or(|p| matches!(p.phase, AgentPhase::Starting | AgentPhase::Running))
+                    .is_none_or(|p| matches!(p.phase, AgentPhase::Starting | AgentPhase::Running | AgentPhase::Finalizing))
         });
     Card {
         ticket,
@@ -231,6 +234,18 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
 }
 
 impl Card<'_> {
+    fn motion(&self) -> CardMotion {
+        if self.ticket.draft {
+            CardMotion::Sleep
+        } else if self.stage == Stage::Result {
+            CardMotion::Sway
+        } else if self.stage == Stage::Execution && !self.waiting && !self.failed {
+            CardMotion::Buzz
+        } else {
+            CardMotion::Hop
+        }
+    }
+
     fn starting_execution(&self) -> bool {
         self.active
             && self.stage == Stage::Execution
@@ -268,7 +283,7 @@ impl Card<'_> {
         } else {
             let status = self.status(s);
             let color = crate::views::status_color(status);
-            if status.contains("pausiert") {
+            if s.projects.iter().any(|p| p.id == self.ticket.project_id && p.paused) {
                 AMBER
             } else if color == MUTED || color == BLUE {
                 design::FLOW_TASK_ACCENT
@@ -292,11 +307,45 @@ impl Card<'_> {
     }
     fn status(&self, s: &Snapshot) -> &'static str {
         if self.waiting {
-            "Braucht Antwort"
+            crate::tr!("Braucht Antwort")
         } else if self.failed {
-            "Blockiert / fehlgeschlagen"
+            crate::tr!("Blockiert / fehlgeschlagen")
         } else {
             task_status(s, self.ticket)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardMotion {
+    Hop,
+    Sleep,
+    Buzz,
+    Sway,
+}
+
+impl CardMotion {
+    fn rect(self, base: Rect, clock: u64, seed: u64) -> Rect {
+        let phase = |period| ((clock % period + seed % period) % period) as f32 / period as f32;
+        let pulse = |period, duration: f32| {
+            let p = phase(period) / duration;
+            if p < 1.0 { (p * std::f32::consts::PI).sin().powi(2) } else { 0.0 }
+        };
+        match self {
+            Self::Hop => {
+                let lift = pulse(2000, 0.32);
+                base.translate(egui::vec2(2.0 * lift * (phase(2000) * 18.0).sin(), -5.0 * lift))
+            }
+            Self::Sleep => base.shrink2(egui::vec2(0.0, 3.0 * pulse(6200, 0.69))),
+            Self::Buzz => {
+                let p = phase(2900);
+                let strength = pulse(2900, 0.21);
+                base.translate(egui::vec2(
+                    2.0 * strength * (p * 155.0).sin(),
+                    0.8 * strength * (p * 121.0).sin(),
+                ))
+            }
+            Self::Sway => base.translate(egui::vec2(4.0 * (phase(2400) * std::f32::consts::TAU).sin(), 0.0)),
         }
     }
 }
@@ -342,24 +391,24 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
     let mut result = vec![
         Lane {
             key: "input".into(),
-            title: "Eingang".into(),
-            subtitle: "Entwürfe & neue Aufgaben".into(),
+            title: crate::tr!("Eingang").into(),
+            subtitle: crate::tr!("Entwürfe & neue Aufgaben").into(),
             column: 0,
             cards: vec![],
             session: None,
         },
         Lane {
             key: "routing".into(),
-            title: "Verteilung".into(),
-            subtitle: "Orchestrierung & Start".into(),
+            title: crate::tr!("Verteilung").into(),
+            subtitle: crate::tr!("Orchestrierung & Start").into(),
             column: 1,
             cards: vec![],
             session: None,
         },
         Lane {
             key: "result".into(),
-            title: "Ergebnis".into(),
-            subtitle: "Erfolg bleibt 10 Sekunden".into(),
+            title: crate::tr!("Ergebnis").into(),
+            subtitle: crate::tr!("Erfolg bleibt 2 Minuten").into(),
             column: 3,
             cards: vec![],
             session: None,
@@ -392,8 +441,8 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
                     let (title, subtitle, session) = c.command.map_or_else(
                         || {
                             (
-                                "Zuordnung unbekannt".into(),
-                                "Keine bestätigte Session".into(),
+                                crate::tr!("Zuordnung unbekannt").into(),
+                                crate::tr!("Keine bestätigte Session").into(),
                                 None,
                             )
                         },
@@ -403,7 +452,7 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
                                     .iter()
                                     .find(|r| r.id == command.runner_id)
                                     .map_or_else(
-                                        || "Unbekannter Runner".into(),
+                                        || crate::tr!("Unbekannter Runner").into(),
                                         |r| r.name.clone(),
                                     ),
                                 session_title(s, command),
@@ -429,8 +478,8 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
             "idle".into(),
             Lane {
                 key: "idle".into(),
-                title: "Ausführung".into(),
-                subtitle: "Noch keine Aufgaben zugewiesen".into(),
+                title: crate::tr!("Ausführung").into(),
+                subtitle: crate::tr!("Noch keine Aufgaben zugewiesen").into(),
                 column: 2,
                 cards: vec![],
                 session: None,
@@ -467,10 +516,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         |ui| {
             let _animation = ui
                 .checkbox(&mut app.factory_flow.motion, "Animation")
-                .on_hover_text("Lichtimpulse, Heartbeat und Kartenbewegungen ein-/ausschalten");
+                .on_hover_text(crate::tr!("Lichtimpulse, Heartbeat und Kartenbewegungen ein-/ausschalten"));
             let _filter = ui.add_enabled(
                 app.settings.project.is_some(),
-                egui::Checkbox::new(&mut app.factory_flow.project_only, "Nur aktuelles Projekt"),
+                egui::Checkbox::new(&mut app.factory_flow.project_only, crate::tr!("Nur aktuelles Projekt")),
             );
             #[cfg(test)]
             ui.ctx().data_mut(|d| {
@@ -483,7 +532,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     );
     let Some(s) = app.snapshot.clone() else {
         ui.add_space(32.0);
-        ui.label("Noch kein Factory-Stand empfangen. Nach dem Verbinden erscheint hier der Aufgabenfluss.");
+        ui.label(crate::tr!("Noch kein Factory-Stand empfangen. Nach dem Verbinden erscheint hier der Aufgabenfluss."));
         return;
     };
     let project = if app.factory_flow.project_only {
@@ -492,7 +541,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         None
     };
     if let Some(project) = project.and_then(|id| s.projects.iter().find(|p| p.id == id)) {
-        ui.label(format!("Projekt: {}", project.name));
+        ui.label(crate::tr!("Projekt: {}", project.name));
     }
     let lanes = lanes(&s, &app.factory_flow, project);
     let orchestrating = orchestration_active(&s, project);
@@ -556,7 +605,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
             let clock = app.factory_flow.clock;
             let animate = app.online && app.factory_flow.motion;
-            for (column, title) in ["Eingang", "Verteilung", "Ausführung", "Ergebnis"]
+            for (column, title) in [crate::tr!("Eingang"), crate::tr!("Verteilung"), crate::tr!("Ausführung"), crate::tr!("Ergebnis")]
                 .iter()
                 .enumerate()
             {
@@ -661,12 +710,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     header.width() - 24.0,
                 );
                 if let Some(target) = lane.session {
-                    let response = header_response.unwrap().on_hover_text(format!(
-                        "{}\n{}\nSession öffnen",
-                        lane.title, lane.subtitle
-                    ));
+                    let response = header_response.unwrap().on_hover_text(crate::tr!("{}\n{}\nSession öffnen", lane.title, lane.subtitle));
                     response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Session öffnen")
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, crate::tr!("Session öffnen"))
                     });
                     if response.clicked() {
                         session = Some(target);
@@ -686,7 +732,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     text(
                         ui,
                         origin + egui::vec2(12.0, 92.0),
-                        "Keine Aufgaben",
+                        crate::tr!("Keine Aufgaben"),
                         13.0,
                         MUTED,
                         card_width - 24.0,
@@ -735,9 +781,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         ui,
                         rect.min + egui::vec2(12.0, 10.0),
                         &if expanded {
-                            "Weniger anzeigen".into()
+                            crate::tr!("Weniger anzeigen").into()
                         } else {
-                            format!("{} weitere Aufgaben", lane.cards.len() - shown)
+                            crate::tr!("{} weitere Aufgaben", lane.cards.len() - shown)
                         },
                         13.0,
                         ui.visuals().text_color(),
@@ -748,9 +794,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             egui::WidgetType::Button,
                             true,
                             if expanded {
-                                "Aufgabenstapel zuklappen"
+                                crate::tr!("Aufgabenstapel zuklappen")
                             } else {
-                                "Aufgabenstapel aufklappen"
+                                crate::tr!("Aufgabenstapel aufklappen")
                             },
                         )
                     });
@@ -779,10 +825,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(
                 if app.factory_flow.motion
-                    && (lanes
-                        .iter()
-                        .flat_map(|lane| &lane.cards)
-                        .any(|c| c.active || c.waiting)
+                    && (lanes.iter().any(|lane| !lane.cards.is_empty())
                         || orchestrating
                         || app
                             .factory_flow
@@ -840,17 +883,24 @@ fn draw_card(
     ui: &mut egui::Ui,
     s: &Snapshot,
     c: &Card<'_>,
-    rect: Rect,
+    layout_rect: Rect,
     animate: bool,
     clock: u64,
 ) -> egui::Response {
     let response = ui
         .interact(
-            rect,
+            layout_rect,
             ui.id().with(("flow-task", c.ticket.id)),
             Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
+    // Keep click/hover targets steady while the artwork moves within the lane.
+    let rect = if animate {
+        c.motion().rect(layout_rect, clock, c.ticket.id.0.as_u128() as u64)
+    } else {
+        layout_rect
+    };
+    let at = |x, y| rect.min + egui::vec2(x, y * rect.height() / layout_rect.height());
     let color = c.color(s);
     ui.painter().rect_filled(
         rect,
@@ -889,7 +939,7 @@ fn draw_card(
     );
     text(
         ui,
-        rect.min + egui::vec2(12.0, 12.0),
+        at(12.0, 12.0),
         c.icon(),
         22.0,
         color,
@@ -902,7 +952,7 @@ fn draw_card(
     };
     pill(
         ui,
-        rect.min + egui::vec2(44.0, 12.0),
+        at(44.0, 12.0),
         &reference,
         design::FLOW_ID_TEXT,
         design::FLOW_ID_FILL,
@@ -911,7 +961,7 @@ fn draw_card(
     );
     text(
         ui,
-        rect.min + egui::vec2(12.0, 44.0),
+        at(12.0, 44.0),
         &task_text(c.ticket),
         14.0,
         ui.visuals().text_color(),
@@ -919,7 +969,7 @@ fn draw_card(
     );
     pill(
         ui,
-        rect.min + egui::vec2(12.0, 70.0),
+        at(12.0, 70.0),
         c.status(s),
         design::FLOW_STATUS_TEXT,
         color.gamma_multiply(0.45),
@@ -930,15 +980,7 @@ fn draw_card(
         .projects
         .iter()
         .find(|p| p.id == c.ticket.project_id)
-        .map_or("Projekt unbekannt", |p| p.name.as_str());
-    text(
-        ui,
-        rect.min + egui::vec2(12.0, 99.0),
-        project,
-        11.0,
-        MUTED,
-        rect.width() - 24.0,
-    );
+        .map_or(crate::tr!("Projekt unbekannt"), |p| p.name.as_str());
     let response = response.on_hover_ui(|ui| {
         ui.set_max_width(440.0);
         ui.strong(&reference);
@@ -946,15 +988,20 @@ fn draw_card(
         ui.colored_label(color, c.status(s));
         ui.label(project);
         if !c.ticket.routing_note.is_empty() {
-            ui.label(&c.ticket.routing_note);
+            let note = crate::model::task_runner_blocker(s, c.ticket).unwrap_or(&c.ticket.routing_note);
+            ui.colored_label(crate::design::history_color(
+                factory_protocol::task_routing_level(&c.ticket.routing_note), MUTED), note);
         }
         if let Some(command) = c.command {
             ui.label(session_title(s, command));
             if let Some(progress) = &command.agent_progress {
-                ui.label(&progress.summary);
+                if progress.phase == AgentPhase::Finalizing {
+                    ui.label(crate::tr!("Ergebnis liegt vor. Der Session-Verlauf wird noch gespeichert."));
+                } else {
+                    ui.label(&progress.summary);
+                }
             }
         }
-        ui.label("Aufgabe öffnen · Session über den Stationskopf");
     });
     response.widget_info(|| {
         egui::WidgetInfo::labeled(
@@ -1013,6 +1060,30 @@ mod tests {
     use crate::{dialogs::Dialog, model::Page};
     use std::sync::Arc;
 
+    #[test]
+    fn task_tile_uses_the_ticket_reference_without_repeating_the_project_name() {
+        let app = crate::tests::fixture();
+        let ctx = app.backend.context().clone();
+        let mut snapshot = (**app.snapshot.as_ref().unwrap()).clone();
+        snapshot.projects[0].name = "Project name only in tooltip".into();
+        snapshot.tickets[0].key = "WOAI-7".into();
+        let ticket = &snapshot.tickets[0];
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = Rect::from_min_size(ui.cursor().min, design::FLOW_CARD_SIZE);
+                draw_card(ui, &snapshot, &card(&snapshot, ticket), rect, false, 0);
+            });
+        });
+        let mut text = vec![];
+        for shape in output.shapes {
+            crate::tests::shape_text(&shape.shape, &mut text);
+        }
+        assert!(text.iter().any(|value| value == "WOAI-7"));
+        assert!(text.iter().any(|value| value == card(&snapshot, ticket).status(&snapshot)));
+        assert!(!text.iter().any(|value| value.contains("Project name only in tooltip")));
+        assert_eq!(design::FLOW_CARD_SIZE.y - (70.0 + 24.0), 12.0);
+    }
+
     fn complete(s: &mut Snapshot) {
         s.questions.clear();
         s.commands[0].state = CommandState::Succeeded;
@@ -1043,6 +1114,30 @@ mod tests {
         s.tickets[0].draft = true;
         assert_eq!(card(&s, &s.tickets[0]).stage, Stage::Input);
         assert!(!card(&s, &s.tickets[0]).active);
+    }
+
+    #[test]
+    fn finalizing_stays_blue_in_execution_until_factory_confirms_success() {
+        let app = crate::tests::fixture();
+        let mut s = (*app.snapshot.unwrap()).clone();
+        s.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Finalizing;
+        let tile = card(&s, &s.tickets[0]);
+        assert_eq!(tile.stage, Stage::Execution);
+        assert_eq!(tile.status(&s), crate::tr!("Wird abgeschlossen"));
+        assert_eq!(crate::views::status_color(tile.status(&s)), BLUE);
+        assert_eq!(tile.color(&s), design::FLOW_TASK_ACCENT);
+        assert!(!tile.success);
+
+        s.questions.clear();
+        s.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Unknown;
+        let tile = card(&s, &s.tickets[0]);
+        assert_eq!(tile.status(&s), crate::tr!("Zustand ungeklärt"));
+        assert_eq!(tile.color(&s), AMBER);
+
+        complete(&mut s);
+        let tile = card(&s, &s.tickets[0]);
+        assert_eq!(tile.stage, Stage::Result);
+        assert!(tile.success);
     }
 
     #[test]
@@ -1092,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn success_expires_after_ten_seconds_but_errors_and_unanswered_work_do_not() {
+    fn success_expires_after_two_minutes_but_errors_and_unanswered_work_do_not() {
         let app = crate::tests::fixture();
         let mut s = (*app.snapshot.unwrap()).clone();
         let mut state = FlowState::default();
@@ -1100,12 +1195,12 @@ mod tests {
         complete(&mut s);
         state.observe("test", &s, true, 101_000);
         assert!(state.visible(&s.tickets[0]));
-        state.observe("test", &s, true, 110_999);
+        state.observe("test", &s, true, 220_999);
         assert!(state.visible(&s.tickets[0]));
-        state.observe("test", &s, true, 111_000);
+        state.observe("test", &s, true, 221_000);
         assert!(!state.visible(&s.tickets[0]));
         s.commands[0].state = CommandState::Failed;
-        state.observe("test", &s, true, 112_000);
+        state.observe("test", &s, true, 222_000);
         state.observe("test", &s, true, 999_000);
         assert!(state.visible(&s.tickets[0]));
         assert!(card(&s, &s.tickets[0]).failed);
@@ -1124,27 +1219,27 @@ mod tests {
         let mut s = (*app.snapshot.unwrap()).clone();
         let mut state = FlowState::default();
         complete(&mut s);
-        state.observe("test", &s, true, 100_000);
+        state.observe("test", &s, true, 300_000);
         assert!(!state.visible(&s.tickets[0]));
         s.commands[0].state = CommandState::Accepted;
         s.tickets[0].status = TicketState::InProgress;
-        state.observe("test", &s, true, 101_000);
+        state.observe("test", &s, true, 301_000);
         complete(&mut s);
-        state.observe("test", &s, true, 102_000);
+        state.observe("test", &s, true, 302_000);
         let id = s.tickets[0].id;
         assert_eq!(state.position(id, Vec2::ZERO), Vec2::ZERO);
         state.position(id, egui::vec2(100.0, 0.0));
-        state.observe("test", &s, true, 102_200);
+        state.observe("test", &s, true, 302_200);
         let position = state.position(id, egui::vec2(100.0, 0.0));
         assert!(position.x > 0.0 && position.x < 100.0);
-        state.observe("test", &s, false, 200_000);
+        state.observe("test", &s, false, 400_000);
         state.observe("test", &s, false, 900_000);
         assert_eq!(state.position(id, egui::vec2(100.0, 0.0)), position);
         assert!(state.visible(&s.tickets[0]));
         state.observe("test", &s, true, 1_000_000);
-        state.observe("test", &s, true, 1_009_799);
+        state.observe("test", &s, true, 1_119_799);
         assert!(state.visible(&s.tickets[0]));
-        state.observe("test", &s, true, 1_009_800);
+        state.observe("test", &s, true, 1_119_800);
         assert!(!state.visible(&s.tickets[0]));
         state.motion = false;
         assert_eq!(
@@ -1418,5 +1513,22 @@ mod tests {
         click(&mut app, size, animation);
         assert!(app.factory_flow.motion);
         assert!(app.settings.pending.is_empty());
+    }
+    #[test]
+    fn tile_motion_distinguishes_waiting_draft_running_and_finished() {
+        let base = Rect::from_min_size(Pos2::ZERO, design::FLOW_CARD_SIZE);
+        let hop = CardMotion::Hop.rect(base, 320, 0);
+        assert!(hop.top() < base.top() && hop.size() == base.size());
+        let sleep = CardMotion::Sleep.rect(base, 2100, 0);
+        assert!(sleep.height() < base.height() && sleep.center() == base.center());
+        assert_eq!(CardMotion::Sleep.rect(base, 5000, 0), base);
+        let buzz = CardMotion::Buzz.rect(base, 300, 0);
+        assert_ne!(buzz.center(), base.center());
+        assert!((buzz.center() - base.center()).length() < 3.0);
+        assert_eq!(CardMotion::Buzz.rect(base, 1200, 0), base);
+        let right = CardMotion::Sway.rect(base, 600, 0);
+        let left = CardMotion::Sway.rect(base, 1800, 0);
+        assert!(left.left() < base.left() && right.left() > base.left());
+        assert_eq!(left.top(), right.top());
     }
 }

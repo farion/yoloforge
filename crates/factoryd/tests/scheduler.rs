@@ -25,12 +25,13 @@ fn status(s: &Store, id: TicketId, status: TicketState) {
     .unwrap();
 }
 #[test]
-fn concurrent_ticks_respect_dependencies_budget_and_restart_without_duplicate_starts() {
+fn concurrent_ticks_respect_parallelism_and_resume_after_migrating_a_spent_legacy_budget() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let s = Store::open(&path).unwrap();
     let p = s
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),
@@ -96,7 +97,6 @@ fn concurrent_ticks_respect_dependencies_budget_and_restart_without_duplicate_st
             enabled: true,
             runner_ids: runners,
             max_parallel: 2,
-            start_budget: 2,
         },
     )
     .unwrap();
@@ -124,10 +124,7 @@ fn concurrent_ticks_respect_dependencies_budget_and_restart_without_duplicate_st
         .streams
         .iter()
         .any(|s| s.ticket_ids.contains(&tickets[2].id)));
-    assert_eq!(
-        s.scheduler_policy(p.id).unwrap().unwrap().remaining_starts,
-        0
-    );
+    assert_eq!(s.scheduler_policy(p.id).unwrap().unwrap().revision, Revision(1));
     for c in snap.commands {
         s.acknowledge(
             c.runner_id,
@@ -156,6 +153,13 @@ fn concurrent_ticks_respect_dependencies_budget_and_restart_without_duplicate_st
         .unwrap();
     }
     drop(s);
+    {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(
+            "UPDATE scheduler_policies SET data = json_set(data, '$.remaining_starts', 0);
+             PRAGMA user_version = 39;",
+        ).unwrap();
+    }
     let s = Store::open(&path).unwrap();
     s.scheduler_tick().unwrap();
     s.scheduler_tick().unwrap();
@@ -168,9 +172,28 @@ fn concurrent_ticks_respect_dependencies_budget_and_restart_without_duplicate_st
             .count(),
         2
     );
+    let snap = s.snapshot().unwrap();
+    let finished = snap.streams.iter().find(|w| w.ticket_ids.contains(&tickets[0].id)).unwrap();
+    let agent = snap.commands.iter().find(|c| c.stream_id == finished.id && c.kind == CommandKind::RunAgent).unwrap();
+    s.acknowledge(agent.runner_id, agent.id, AckCommand {
+        request_id: RequestId::new(),
+        ownership_epoch: agent.ownership_epoch,
+    }).unwrap();
+    s.complete(agent.runner_id, agent.id, CommandResult {
+        request_id: RequestId::new(),
+        ownership_epoch: agent.ownership_epoch,
+        result: CommandOutput::Agent {
+            agent: AgentProgress {
+                session_id: agent.session_id(),
+                message_id: agent_message_id(agent.id),
+                phase: AgentPhase::Succeeded,
+                summary: "Task complete".into(),
+            },
+        },
+    }).unwrap();
     status(&s, tickets[0].id, TicketState::Done);
     s.scheduler_tick().unwrap();
-    assert_eq!(s.snapshot().unwrap().streams.len(), 2);
+    assert_eq!(s.snapshot().unwrap().streams.len(), 3);
     assert_eq!(
         s.snapshot()
             .unwrap()
@@ -179,6 +202,13 @@ fn concurrent_ticks_respect_dependencies_budget_and_restart_without_duplicate_st
             .find(|t| t.id == tickets[2].id)
             .unwrap()
             .status,
-        TicketState::Ready
+        TicketState::InProgress
     );
+    assert_eq!(s.scheduler_policy(p.id).unwrap().unwrap().revision, Revision(1));
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let absent: bool = db.query_row(
+        "SELECT json_type(data, '$.remaining_starts') IS NULL FROM scheduler_policies", [],
+        |row| row.get(0),
+    ).unwrap();
+    assert!(absent);
 }

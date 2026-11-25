@@ -6,6 +6,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 COPY --chmod=0755 factoryd /usr/local/bin/factoryd
 COPY install-opencode.sh /tmp/install-opencode.sh
 RUN sh /tmp/install-opencode.sh && rm /tmp/install-opencode.sh
+ENV FACTORY_OPENCODE_BIN=/usr/local/bin/opencode
 COPY --chmod=0755 factory-backup.py /usr/local/bin/factory-backup
 USER 10001:10001
 WORKDIR /data

@@ -9,7 +9,6 @@ use anyhow::{ensure, Context, Result};
 use factory_core::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::os::unix::fs::MetadataExt;
 use std::{
     fs,
     path::PathBuf,
@@ -55,6 +54,20 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn worktree_owner(path: &std::path::Path) -> Result<(u32, u32)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)?;
+        Ok((metadata.uid(), metadata.gid()))
+    }
+    #[cfg(windows)]
+    {
+        let _ = path;
+        anyhow::bail!("Container reviews require a Unix host with exact worktree binds; use a Linux review runner")
+    }
 }
 fn save(j: &Journal, r: &mut Record, p: &Plan) -> Result<()> {
     r.review = Some(p.clone());
@@ -338,8 +351,8 @@ fn validate(v: &Value, p: &Plan, r: &Record) -> Result<()> {
             && v["Config"]["User"]
                 == format!(
                     "{}:{}",
-                    fs::metadata(&p.work)?.uid(),
-                    fs::metadata(&p.work)?.gid()
+                    worktree_owner(&p.work)?.0,
+                    worktree_owner(&p.work)?.1
                 ),
         "Review privilege policy changed"
     );
@@ -371,6 +384,9 @@ pub async fn step(
     args: &Args,
     job: &ReviewJob,
 ) -> Result<Option<CommandOutput>> {
+    if cfg!(windows) && !matches!(job, ReviewJob::Integrate { .. }) {
+        return Ok(error("Container reviews require a Unix host with exact worktree binds; use a Linux review runner"));
+    }
     let mut p = if let Some(p) = &r.review {
         ensure!(
             p.job == *job && p.repository == repository(r, args)?,
@@ -448,8 +464,7 @@ pub async fn step(
             let ReviewJob::Review { test_command, .. } = job else {
                 unreachable!()
             };
-            let uid = fs::metadata(&p.work)?.uid();
-            let gid = fs::metadata(&p.work)?.gid();
+            let (uid, gid) = worktree_owner(&p.work)?;
             ensure!(uid != 0, "Review worktree must be owned by a non-root user");
             let common = git(
                 &p.repository,
@@ -575,8 +590,13 @@ pub async fn step(
             .unwrap_or_default();
         let mut opts = fs::OpenOptions::new();
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = opts.write(true).create_new(true).mode(0o600).open(&log)?;
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&log)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
     }

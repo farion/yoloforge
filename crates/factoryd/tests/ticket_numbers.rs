@@ -4,6 +4,7 @@ use factoryd::store::{Store,StoreError};
 
 fn project(store:&Store,key:Option<&str>)->Project {
     store.create_project(CreateProject {
+        logo: None,
         runner_mapping: None,
         key:key.map(str::to_string),request_id:RequestId::new(),name:"WorldOfAI".into(),
         repository:"factory:managed".into(),base_branch:"main".into(),
@@ -63,6 +64,7 @@ fn automatic_keys_are_unique_and_explicit_keys_are_validated() {
     assert_eq!(second.key,"WOAI2");
     for key in ["WOAI","woai","bad-key","1BAD","ä","TOOLONGPROJECTKEY"] {
         assert!(matches!(store.create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key:Some(key.into()),request_id:RequestId::new(),name:"Other".into(),
             repository:"factory:managed".into(),base_branch:"main".into(),
@@ -95,7 +97,7 @@ fn prefix_changes_keep_sequence_and_reserve_old_keys_without_touching_prompts() 
     let p=project(&store,Some("OLD"));
     let first=store.save_task(task(p.id)).unwrap();
     assert_eq!(technical(&store,p.id).key,"OLD-2");
-    let body=UpdateProject {runner_mapping:None,key:Some("WOAI".into()),request_id:RequestId::new(),
+    let body=UpdateProject {logo:None,runner_mapping:None,key:Some("WOAI".into()),request_id:RequestId::new(),
         expected_revision:p.revision,name:None,repository:None,base_branch:None};
     let renamed=store.update_project(p.id,body.clone()).unwrap();
     assert_eq!(renamed.key,"WOAI");
@@ -105,7 +107,7 @@ fn prefix_changes_keep_sequence_and_reserve_old_keys_without_touching_prompts() 
     assert_eq!(changed.key,"WOAI-1");
     assert_eq!(changed.prompt,first.prompt);
     assert_eq!(store.save_task(task(p.id)).unwrap().key,"WOAI-3");
-    assert!(store.create_project(CreateProject {runner_mapping:None,key:Some("OLD".into()),request_id:RequestId::new(),
+    assert!(store.create_project(CreateProject {logo:None,runner_mapping:None,key:Some("OLD".into()),request_id:RequestId::new(),
         name:"Other".into(),repository:"factory:managed".into(),base_branch:"main".into()}).is_err());
 }
 

@@ -1882,9 +1882,10 @@ fn usage_deduplicates_continuation_snapshots_and_preserves_unknown_coverage() {
         )
         .unwrap();
     store.report_archive(next.runner_id,next.id,batch(1,vec![message(12,0.2),serde_json::json!({
-        "id":"msg_unknown_usage","type":"assistant","model":{"providerID":"openai","id":"test"},"tokens":-1,"cost":"unknown"
+        "id":"msg_unknown_usage","type":"assistant","model":{"providerID":"openai","id":"test"},"time":{"created":1},"tokens":-1,"cost":"unknown"
     })],false)).unwrap();
     let report = store.project_usage(project).unwrap();
+    assert_eq!(report.first_observed_unix_ms, Some(20));
     let budget = store.token_budget(project).unwrap();
     store
         .set_token_budget(
@@ -2080,6 +2081,7 @@ fn interrupted_native_session_requires_confirmation_archive_and_explicit_release
 fn command(store: &Store) -> RunnerCommand {
     let p = store
         .create_project(CreateProject {
+            logo: None,
             runner_mapping: None,
             key: None,
             request_id: RequestId::new(),

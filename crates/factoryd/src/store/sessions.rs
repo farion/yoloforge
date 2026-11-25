@@ -6,6 +6,22 @@ pub(super) fn closed(tx: &Transaction<'_>, root: CommandId) -> Result<bool> {
         |r| r.get(0),
     )?)
 }
+
+/// Called only inside the successful prompt admission transaction. Invalid
+/// prompts and replayed requests therefore never reopen a session.
+pub(super) fn reopen_for_prompt(tx: &Transaction<'_>, root: CommandId, ticket: TicketId) -> Result<()> {
+    if tx.execute("DELETE FROM session_closures WHERE root_command_id=?1", [root.to_string()])? == 0 {
+        return Ok(());
+    }
+    let stream: String = tx.query_row("SELECT stream_id FROM commands WHERE id=?1", [root.to_string()], |r| r.get(0))?;
+    let mut owner = super::work::stream(tx, stream.parse().map_err(|_| StoreError::Internal)?)?;
+    let status = owner.status;
+    super::work::save_stream(tx, &mut owner, status)?;
+    event(tx, "session.reopened", root.to_string(), &serde_json::json!({
+        "root_command_id": root, "ticket_id": ticket, "session_id": agent_session_id(root),
+    }))?;
+    Ok(())
+}
 impl Store {
     /// Retire future scheduling of a successfully completed session, never an interrupt.
     pub fn close_session(&self, id: CommandId, body: CloseSession) -> Result<SessionClosure> {

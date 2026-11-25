@@ -237,6 +237,7 @@ impl View {
                 _ => match c.agent_progress.as_ref().map(|a| a.phase) {
                     Some(AgentPhase::WaitingInput) => "Rueckfrage offen",
                     Some(AgentPhase::Running) => "Arbeitet",
+                    Some(AgentPhase::Finalizing) => "Wird abgeschlossen",
                     _ => "Startet",
                 },
             })

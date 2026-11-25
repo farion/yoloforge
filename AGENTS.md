@@ -5,6 +5,9 @@ Diese Designregeln des Nutzers gelten bei UI-Arbeiten in diesem Repository:
 - Textfelder haben einen ausgewogenen, sichtbar angenehmen Innenabstand auf
   allen Seiten. Links und rechts ähnlich viel Platz wie oben und unten; etwas
   weniger als Buttons, aber nicht der knappe Framework-Standard.
+- Platzhalter und Beispieltexte in leeren Textfeldern sind grau und kursiv
+  (egui: `design::input_hint`). Eingegebene oder vorausgefüllte Werte behalten
+  die normale Textdarstellung.
 - Listen als Listen darstellen, nicht als unterschiedlich lange Buttons.
   Gleichrangige Items sind gleich breit; zusätzliche Zähler dürfen die Breite
   nicht verändern. Gilt insbesondere für die Sidebar-Navigation.
@@ -22,6 +25,11 @@ Diese Designregeln des Nutzers gelten bei UI-Arbeiten in diesem Repository:
   verfügbare Cache-Daten ohne wiederholte Offline-Hinweise.
 - Einstellungen mit explizitem Speichern haben einen einheitlichen Button
   „Speichern“, unten rechts außerhalb des scrollbaren Inhalts.
+- Einstellungsformulare richten sich nach „Default-Modelle“: Label direkt am
+  Eingabefeld, danach ein sichtbarer, einheitlicher Abstand zum nächsten Feld
+  (egui: 8 pt zusätzlich über `design::settings_field`). Dialoge wachsen und
+  schrumpfen mit den sichtbaren Feldern. Erst bei ausgeschöpfter Fensterhöhe
+  scrollt der Inhalt; Kopf und Speichern bleiben erreichbar.
 
 Konkrete egui-Komponenten und Abstände: `crates/factory-gui/AGENTS.md` und
 `crates/factory-gui/src/design.rs`. Das vom Nutzer gewünschte Dark Theme behalten.

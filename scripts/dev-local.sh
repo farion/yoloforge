@@ -38,21 +38,16 @@ case "$mode" in
   tui) exec cargo run --locked --bin factory -- --server "$url" "$@" ;;
   snapshot) exec cargo run --locked --bin factory -- --server "$url" --snapshot "$@" ;;
   runner)
-    binary="${FACTORY_OPENCODE_BIN:-$(command -v opencode || true)}"
-    if [[ -z "$binary" ]]; then
-      echo "OpenCode fehlt; FACTORY_OPENCODE_BIN auf OpenCode 2.4.1 setzen." >&2
-      exit 1
-    fi
     key="$data/factory.sqlite3.opencode/model.key"
     if [[ ! -f "$key" ]]; then
       echo "Erst den lokalen Factory-Server starten." >&2
       exit 1
     fi
-    python3 - "$data/runner-opencode.json" "$binary" "$key" <<'PY'
+    python3 - "$data/runner-opencode.json" "$key" <<'PY'
 import json, os, pathlib, sys, tempfile
-settings, binary, key = sys.argv[1:]
+settings, key = sys.argv[1:]
 with tempfile.NamedTemporaryFile(mode="w", dir=pathlib.Path(settings).parent, delete=False) as f:
-    json.dump({"binary": str(pathlib.Path(binary).resolve(strict=True)), "port": 17434, "model_key_file": key}, f)
+    json.dump({"port": 17434, "model_key_file": key}, f)
 os.replace(f.name, settings)
 PY
     exec cargo run --locked --bin factory-runner -- --server "$url" \

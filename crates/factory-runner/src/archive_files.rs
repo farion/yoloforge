@@ -2,9 +2,7 @@ use anyhow::{ensure, Context, Result};
 use factory_core::*;
 use serde_json::Value;
 use std::{
-    fs::OpenOptions,
     io::Read,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::Path,
 };
 
@@ -22,21 +20,7 @@ fn read(root: &Path, uri: &str, budget: usize) -> Result<Vec<u8>> {
         path.starts_with(root),
         "Attachment is outside execution workspace"
     );
-    // Opening a FIFO must not stall archive collection before the type check.
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
-        .open(&path)?;
-    ensure!(
-        file.metadata()?.is_file(),
-        "Attachment is not a regular file"
-    );
-    // Check the opened descriptor, not only the earlier path resolution: tools can rename/swap files.
-    let opened = std::fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd()))?;
-    ensure!(
-        opened.starts_with(root),
-        "Opened attachment is outside workspace"
-    );
+    let file = factory_platform::open_rooted(&path, &[root])?;
     let maximum = budget.min(ARCHIVE_FILE_LIMIT);
     ensure!(
         file.metadata()?.len() <= maximum as u64,
@@ -111,7 +95,7 @@ mod tests {
         let secret = outside.path().join("private");
         std::fs::write(&secret, b"private data").unwrap();
         let link = root.path().join("escape");
-        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        crate::test_symlink_file(&secret, &link).unwrap();
         let uri = reqwest::Url::from_file_path(&path).unwrap().to_string();
         let escape = reqwest::Url::from_file_path(&link).unwrap().to_string();
         let raw = serde_json::json!({"id":"msg_binary","content":[{"type":"file","uri":uri,"mime":"application/octet-stream"},{"type":"file","uri":escape,"mime":"text/plain"},{"type":"file","uri":"http://127.0.0.1/private","mime":"text/plain"}]});

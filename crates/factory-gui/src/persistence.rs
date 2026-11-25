@@ -13,6 +13,12 @@ use std::{
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub language: crate::i18n::Language,
+    pub task_keep_open: bool,
+    pub task_as_draft: bool,
+    pub cached_projects: Vec<CachedProjects>,
+    pub offline_tasks: Vec<OfflineTask>,
+    pub session_prompts: Vec<SessionPromptDraft>,
     pub server: String,
     pub credential_file: Option<PathBuf>,
     pub project: Option<ProjectId>,
@@ -22,6 +28,28 @@ pub struct Settings {
     pub pending: Vec<PendingWrite>,
     pub question_drafts: Vec<QuestionDraft>,
     pub form_drafts: Vec<FormDraft>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CachedProjects {
+    pub server: String,
+    pub projects: Vec<Project>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OfflineTask {
+    pub id: RequestId,
+    pub draft: TaskDraft,
+    pub project_name: String,
+    #[serde(default)]
+    pub edit: Option<TaskDraft>,
+    #[serde(default)]
+    pub sync_request: Option<u64>,
+    #[serde(default)]
+    pub sync_error: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SessionPromptDraft {
+    pub id: RequestId,
+    pub draft: TaskDraft,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FormDraft {
@@ -63,20 +91,18 @@ pub struct TaskDraft {
     pub requested_session: Option<CommandId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementer: Option<factory_protocol::models::ModelSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_mcps: Option<Vec<String>>,
     #[serde(default)]
     pub model_loaded: bool,
 }
 
 pub fn data_dir() -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("de", "yoloforge", "YoloForge")
-        .context("Kein Benutzerverzeichnis verfügbar")?;
+        .context(crate::tr!("Kein Benutzerverzeichnis verfügbar"))?;
     let path = dirs.data_local_dir().to_path_buf();
-    fs::create_dir_all(&path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-    }
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    factory_platform::private_dir(&path)?;
     Ok(path)
 }
 pub fn load_settings() -> Result<Settings> {
@@ -99,12 +125,12 @@ fn desktop_client_id_in(directory: &Path) -> Result<RequestId> {
         fs::read_to_string(&path)?
             .trim()
             .parse()
-            .context("Gespeicherte Desktop-ID ist ungültig; Datei wurde nicht verändert")
+            .context(crate::tr!("Gespeicherte Desktop-ID ist ungültig; Datei wurde nicht verändert"))
     };
     match fs::read_to_string(&path) {
-        Ok(id) => return id.trim().parse().context("Gespeicherte Desktop-ID ist ungültig; Datei wurde nicht verändert"),
+        Ok(id) => return id.trim().parse().context(crate::tr!("Gespeicherte Desktop-ID ist ungültig; Datei wurde nicht verändert")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("Desktop-ID konnte nicht gelesen werden"),
+        Err(error) => return Err(error).context(crate::tr!("Desktop-ID konnte nicht gelesen werden")),
     }
     let id = RequestId::new();
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
@@ -112,11 +138,11 @@ fn desktop_client_id_in(directory: &Path) -> Result<RequestId> {
     temporary.as_file().sync_all()?;
     match temporary.persist_noclobber(&path) {
         Ok(_) => {
-            fs::File::open(directory)?.sync_all()?;
+            factory_platform::sync_dir(directory)?;
             Ok(id)
         }
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => read(),
-        Err(error) => Err(error).context("Desktop-ID konnte nicht dauerhaft gespeichert werden"),
+        Err(error) => Err(error).context(crate::tr!("Desktop-ID konnte nicht dauerhaft gespeichert werden")),
     }
 }
 pub fn save_settings(settings: &Settings) -> Result<()> {
@@ -126,6 +152,32 @@ pub fn save_settings(settings: &Settings) -> Result<()> {
     fs::rename(temporary, path)?;
     Ok(())
 }
+
+/// Credentials are separate from desktop drafts and readable only by their owner.
+pub fn save_connection_token(server: &str, token: &str) -> Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("de", "yoloforge", "YoloForge")
+        .context(crate::tr!("Kein Benutzerverzeichnis verfügbar"))?;
+    save_connection_token_in(dirs.config_dir(), server, token)
+}
+
+fn save_connection_token_in(directory: &Path, server: &str, token: &str) -> Result<PathBuf> {
+    if let Some(parent) = directory.parent() { fs::create_dir_all(parent)?; }
+    factory_platform::private_dir(directory)?;
+    let path = directory.join(format!("connection-{:x}.token", Sha256::digest(server.as_bytes())));
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    factory_platform::private_file(temporary.path())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(token.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&path).context(crate::tr!("Zugangstoken konnte nicht gespeichert werden"))?;
+    factory_platform::sync_dir(directory)?;
+    Ok(path)
+}
+
 pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -136,7 +188,7 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     let mut file = options
         .open(path)
-        .context("Datei existiert bereits oder kann nicht angelegt werden")?;
+        .context(crate::tr!("Datei existiert bereits oder kann nicht angelegt werden"))?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
@@ -153,10 +205,10 @@ pub async fn download_file(
         .files
         .iter()
         .find(|f| f.sha256 == hash)
-        .context("Datei nicht mehr verfügbar")?;
+        .context(crate::tr!("Datei nicht mehr verfügbar"))?;
     ensure!(
         meta.bytes <= ARCHIVE_BLOB_LIMIT,
-        "Datei überschreitet Exportgrenze"
+        crate::tr!("Datei überschreitet Exportgrenze")
     );
     let mut bytes = Vec::new();
     while (bytes.len() as u64) < meta.bytes {
@@ -165,30 +217,30 @@ pub async fn download_file(
             .await?;
         ensure!(
             chunk.file == *meta && chunk.offset == bytes.len() as u64,
-            "Dateiidentität verändert"
+            crate::tr!("Dateiidentität verändert")
         );
         let data = chunk.bytes().map_err(anyhow::Error::msg)?;
         ensure!(
             bytes.len() as u64 + data.len() as u64 <= meta.bytes,
-            "Ungültige Dateigröße"
+            crate::tr!("Ungültige Dateigröße")
         );
         bytes.extend(data);
     }
     ensure!(
         format!("{:x}", Sha256::digest(&bytes)) == hash,
-        "SHA256-Prüfung fehlgeschlagen"
+        crate::tr!("SHA256-Prüfung fehlgeschlagen")
     );
     let name = Path::new(name)
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or("Anhang")
+        .unwrap_or(crate::tr!("Anhang"))
         .to_string();
     tokio::task::spawn_blocking(move || {
         if let Some(path) = rfd::FileDialog::new().set_file_name(name).save_file() {
             write_new(&path, &bytes)?;
             Ok(path.display().to_string())
         } else {
-            Ok("Export abgebrochen".into())
+            Ok(crate::tr!("Export abgebrochen").into())
         }
     })
     .await?
@@ -220,13 +272,13 @@ pub async fn start_local() -> Result<LocalConnection> {
     let client = FactoryClient::new_desktop(&server, &token, desktop_client_id()?)?;
     let bin_dir = std::env::current_exe()?
         .parent()
-        .context("Programmverzeichnis fehlt")?
+        .context(crate::tr!("Programmverzeichnis fehlt"))?
         .to_path_buf();
     let start = |binary: &str, arguments: &[String]| -> Result<()> {
         let executable = bin_dir.join(binary);
         ensure!(
             executable.is_file(),
-            "{binary} fehlt neben der GUI. Server und Runner zusammen mit der GUI installieren."
+            crate::tr!("{binary} fehlt neben der GUI. Server und Runner zusammen mit der GUI installieren.", binary = binary)
         );
         let log = OpenOptions::new()
             .append(true)
@@ -259,38 +311,12 @@ pub async fn start_local() -> Result<LocalConnection> {
             start("factoryd", &["--listen".into(), "127.0.0.1:17433".into(), "--database".into(), root.join("factory.sqlite3").display().to_string()])?;
             let mut ready = false;
             for _ in 0..30 { if client.snapshot().await.is_ok() { ready = true; break; } tokio::time::sleep(std::time::Duration::from_millis(300)).await; }
-            ensure!(ready, "Lokaler Server startet nicht. Diagnose: {}", root.join("factoryd.log").display());
+            ensure!(ready, crate::tr!("Lokaler Server startet nicht. Diagnose: {}", root.join("factoryd.log").display()));
         }
-        Err(_) => anyhow::bail!("Port 17433 gehört nicht zur gespeicherten lokalen Factory oder der Zugang wurde widerrufen. Keine fremden Prozesse verändert."),
+        Err(_) => anyhow::bail!("{}", crate::tr!("Port 17433 gehört nicht zur gespeicherten lokalen Factory oder der Zugang wurde widerrufen. Keine fremden Prozesse verändert.", )),
     }
-    client.desktop_snapshot().await.map_err(|error| anyhow::anyhow!(
-        "Lokaler Server auf Port 17433 läuft, ist aber nicht mit dieser GUI kompatibel oder nicht erreichbar ({error}). Eine ältere laufende factoryd-Version zuerst gezielt neu starten; es werden keine fremden oder laufenden Prozesse automatisch beendet."
-    ))?;
-    let runner_path = root.join("runner-id");
-    if !runner_path.exists() {
-        write_new(&runner_path, RunnerId::new().to_string().as_bytes())?;
-    }
-    let runner: RunnerId = fs::read_to_string(runner_path)?.parse()?;
-    let snapshot = client.snapshot().await?;
-    if !snapshot
-        .runners
-        .iter()
-        .any(|r| r.id == runner && r.connection != ConnectionState::Unreachable)
-    {
-        start(
-            "factory-runner",
-            &[
-                "--server".into(),
-                server.clone(),
-                "--id".into(),
-                runner.to_string(),
-                "--name".into(),
-                "Lokaler Desktop-Runner".into(),
-                "--journal".into(),
-                root.join("runner.sqlite3").display().to_string(),
-            ],
-        )?;
-    }
+    client.desktop_snapshot().await.map_err(|error| anyhow::anyhow!("{}", crate::tr!("Lokaler Server auf Port 17433 läuft, ist aber nicht mit dieser GUI kompatibel oder nicht erreichbar ({error}). Eine ältere laufende factoryd-Version zuerst gezielt neu starten; es werden keine fremden oder laufenden Prozesse automatisch beendet.", error = error)))?;
+    crate::local_runners::ensure_builtin(&client, &server, &root).await?;
     Ok(LocalConnection {
         server,
         token,
@@ -334,6 +360,38 @@ mod tests {
         fs::write(&path, "invalid identity").unwrap();
         assert!(desktop_client_id_in(root.path()).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), "invalid identity");
+    }
+
+    #[test]
+    fn saved_connection_tokens_are_private_replaceable_and_server_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("yoloforge");
+        let server = "https://factory.example";
+        let path = save_connection_token_in(&directory, server, "first-secret").unwrap();
+        let settings = Settings {
+            server: server.into(),
+            credential_file: Some(path.clone()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(!json.contains("first-secret"));
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.server, server);
+        assert_eq!(fs::read_to_string(restored.credential_file.unwrap()).unwrap(), "first-secret");
+        assert_eq!(save_connection_token_in(&directory, server, "new-secret").unwrap(), path);
+        let other = save_connection_token_in(&directory, "https://other.example", "other-secret").unwrap();
+        assert_ne!(path, other);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new-secret");
+        assert_eq!(fs::read_to_string(&other).unwrap(), "other-secret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+            for file in [&path, &other] {
+                assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+            }
+        }
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 2);
     }
 
     #[test]

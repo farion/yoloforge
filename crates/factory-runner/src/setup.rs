@@ -42,7 +42,7 @@ fn harness(path: &Path, value: &serde_json::Value) -> Result<()> {
     temp.as_file().sync_all()?;
     temp.persist_noclobber(&target)
         .map_err(|_| anyhow::anyhow!("Harness path occupied during setup"))?;
-    fs::File::open(path)?.sync_all()?;
+    factory_platform::sync_dir(path)?;
     Ok(())
 }
 pub async fn prepare(
@@ -139,7 +139,7 @@ mod tests {
         fs::write(second.path().join("opencode.jsonc"), "{}").unwrap();
         assert!(harness(second.path(), &config).is_err());
         let third = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(
+        crate::test_symlink_file(
             dir.path().join("opencode.json"),
             third.path().join("opencode.json"),
         )

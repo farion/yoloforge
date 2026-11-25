@@ -42,7 +42,7 @@ impl<T: DeserializeOwned> Load<T> {
         match result {
             Ok(value) => match serde_json::from_value(value) {
                 Ok(value) => self.value = Some(value),
-                Err(_) => self.error = Some("Unerwartete Antwort der Factory.".into()),
+                Err(_) => self.error = Some(crate::tr!("Unerwartete Antwort der Factory.").into()),
             },
             Err(error) => self.error = Some(error.message),
         }
@@ -99,6 +99,40 @@ impl Models {
                 self.next_refresh = Some(Instant::now() + Duration::from_secs(15));
             }
             let mut pane = std::mem::take(&mut self.pane);
+            pane.settle_defaults(app, &mut self.factory, &mut self.next_refresh);
+            if let Some((id, result)) = pane.remove_request.as_ref().and_then(|(id, request)| {
+                app.responses.remove(request).map(|result| (id.clone(), result))
+            }) {
+                pane.remove_request = None;
+                match result {
+                    Ok(value) => match serde_json::from_value::<FactoryModelSettings>(value["settings"].clone()) {
+                        Ok(saved) => {
+                            if let Some(draft) = pane.draft.as_mut() {
+                                draft.revision = saved.revision;
+                                draft.accesses.clone_from(&saved.accesses);
+                                for model in [&mut draft.default_model, &mut draft.roles.orchestrator,
+                                    &mut draft.roles.implementer, &mut draft.roles.supervisor,
+                                    &mut draft.roles.memorizer] {
+                                    if model.as_ref().is_some_and(|model| model.access_id == id) {
+                                        *model = None;
+                                    }
+                                }
+                            }
+                            pane.status.remove(&id);
+                            self.factory.value = Some(saved);
+                            self.factory.request = None;
+                            self.projects.clear();
+                            app.notice(if value["credential_removed"] == true {
+                                crate::tr!("Modellzugang gelöscht.")
+                            } else {
+                                crate::tr!("Modellzugang entfernt. Die Zugangsdaten konnten nicht gelöscht werden.")
+                            });
+                        }
+                        Err(_) => app.notice(crate::tr!("Das Löschen wurde nicht bestätigt.")),
+                    },
+                    Err(error) => app.notice(error.message),
+                }
+            }
             if let Some(settings) = &self.factory.value {
                 let refresh = app.online && self.next_status.is_none_or(|at| at <= Instant::now());
                 if refresh {
@@ -151,8 +185,9 @@ pub(crate) fn seed(app: &mut App, default: bool) {
     use factory_core::Revision;
     let access = ModelAccess {
         id: "factory-test".into(),
-        name: "OpenAI Arbeit".into(),
+        name: crate::tr!("OpenAI Arbeit").into(),
         models: vec!["demo".into()],
+        transports: Default::default(),
     };
     app.models.setup.value = Some(Setup { managed: true });
     app.models.factory.value = Some(FactoryModelSettings {
@@ -196,15 +231,15 @@ pub fn ephemeral(app: &mut App, method: &str, path: String, body: Value) -> u64 
 pub fn submitted(
     path: &str,
     value: &Value,
-) -> Option<(factory_protocol::SubmitTask, Option<ModelSelection>)> {
+) -> Option<(factory_protocol::SubmitTask, Option<ModelSelection>, Option<Vec<String>>)> {
     match path {
         "/v1/tasks/submit" => serde_json::from_value(value.clone())
             .ok()
-            .map(|task| (task, None)),
+            .map(|task| (task, None, None)),
         "/v1/tasks/submit-with-model" => {
             serde_json::from_value::<SubmitTaskWithModel>(value.clone())
                 .ok()
-                .map(|body| (body.submission, body.implementer))
+            .map(|body| (body.submission, body.implementer, body.local_mcps))
         }
         _ => None,
     }
@@ -234,7 +269,7 @@ pub fn label(catalog: &[ModelAccess], model: &ModelSelection) -> String {
         .iter()
         .find(|a| a.id == model.access_id)
         .map_or(model.access_id.as_str(), |a| &a.name);
-    format!("{name} · {}", model.model_id)
+    format!("{} / {name}", model.model_id)
 }
 
 pub fn choice(
@@ -289,9 +324,9 @@ fn roles(ui: &mut egui::Ui, scope: &str, catalog: &[ModelAccess], models: &mut R
         ("Supervisor", &mut models.supervisor),
         ("Memorizer", &mut models.memorizer),
     ] {
-        ui.label(name);
-        choice(ui, (scope, name), catalog, selection, "Default");
-        ui.add_space(8.0);
+        design::settings_field(ui, name, |ui| {
+            choice(ui, (scope, name), catalog, selection, "Default");
+        });
     }
 }
 
@@ -322,22 +357,34 @@ struct Login {
 enum Provider {
     #[default]
     ChatGpt,
+    Copilot,
+    Key(KeyModelProvider),
 }
 
 impl Provider {
-    const AVAILABLE: [Self; 1] = [Self::ChatGpt];
+    fn available() -> impl Iterator<Item = Self> {
+        [Self::ChatGpt, Self::Copilot].into_iter().chain(KeyModelProvider::ALL.into_iter().map(Self::Key))
+    }
 
     fn label(self) -> &'static str {
         match self {
             Self::ChatGpt => "OpenAI (ChatGPT)",
+            Self::Copilot => "GitHub Copilot",
+            Self::Key(provider) => provider.label(),
         }
     }
 
     fn new_access(self) -> (String, String) {
         match self {
-            Self::ChatGpt => {
-                let id = format!("factory-openai-{}", RequestId::new());
+            Self::ChatGpt | Self::Copilot => {
+                let prefix = if self == Self::Copilot { COPILOT_ACCESS_PREFIX } else { "factory-openai-" };
+                let id = format!("{prefix}{}", RequestId::new());
                 let path = format!("{}/start", oauth_path(&id));
+                (id, path)
+            }
+            Self::Key(provider) => {
+                let id = provider.new_access_id();
+                let path = format!("/v1/model-settings/accesses/{id}/key");
                 (id, path)
             }
         }
@@ -349,6 +396,11 @@ struct FactoryPane {
     draft: Option<FactoryModelSettings>,
     save: Option<u64>,
     name: String,
+    api_key: String,
+    endpoint: String,
+    key_request: Option<u64>,
+    remove_access: Option<(String, String)>,
+    remove_request: Option<(String, u64)>,
     naming: bool,
     focus_name: bool,
     provider: Provider,
@@ -362,9 +414,63 @@ pub fn show_factory(ui: &mut egui::Ui, app: &mut App, defaults_bottom: Option<f3
     app.models.pane = pane;
 }
 
+pub(crate) fn factory_defaults_can_save(app: &App) -> bool {
+    app.online && app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin)
+        && match app.models.pane.save {
+            None => app.models.pane.draft.is_some(),
+            Some(id) => !app.in_flight.contains(&id) && app.settings.pending.iter()
+                .any(|request| request.server == app.server && request.id == id),
+        }
+}
+
+pub(crate) fn factory_defaults_saving(app: &App) -> bool {
+    app.models.pane.save.is_some_and(|id| app.in_flight.contains(&id))
+}
+
+pub(crate) fn save_factory_defaults(app: &mut App) {
+    if factory_defaults_can_save(app) {
+        let mut pane = std::mem::take(&mut app.models.pane);
+        if let Some(id) = pane.save {
+            app.responses.remove(&id);
+            app.retry(id);
+        } else if let Some(draft) = pane.draft.clone() {
+            pane.send(app, draft);
+        }
+        app.models.pane = pane;
+    }
+}
+
 pub fn show_add_dialog(ctx: &egui::Context, app: &mut App) {
     let mut pane = std::mem::take(&mut app.models.pane);
-    if pane.naming {
+    if let Some(result) = pane.key_request.and_then(|id| app.responses.remove(&id)) {
+        pane.key_request = None;
+        match result {
+            Ok(value) if value["connected"] == true => {
+                pane.api_key.clear();
+                let name = std::mem::take(&mut pane.name);
+                pane.naming = false;
+                let mut factory = std::mem::take(&mut app.models.factory);
+                factory.fetch(app, "/v1/model-settings");
+                app.models.factory = factory;
+                if let Ok(model) =
+                    serde_json::from_value::<ModelSelection>(value["automatic_default"].clone())
+                {
+                    app.dialog = Some(crate::dialogs::Dialog::ModelDefaultsConfigured {
+                        model: format!("{} · {}", name.trim(), model.model_id),
+                    });
+                } else {
+                    app.notice(crate::tr!("Modellzugang verbunden."));
+                }
+            }
+            Ok(_) => app.notice(crate::tr!("Der Modellzugang wurde nicht bestätigt.")),
+            Err(error) => app.notice(error.message),
+        }
+    }
+    if pane.remove_access.is_some() {
+        pane.show_remove_dialog(ctx, app);
+    } else if pane.naming && matches!(pane.provider, Provider::Key(_)) {
+        pane.show_key_dialog(ctx, app);
+    } else if pane.naming {
         let mut close = false;
         let response = egui::Modal::new(egui::Id::new("name-model-access"))
             .frame(egui::Frame::window(&ctx.style()).inner_margin(design::DIALOG_PADDING))
@@ -374,12 +480,16 @@ pub fn show_add_dialog(ctx: &egui::Context, app: &mut App) {
                         .x
                         .min(380.0),
                 );
-                close = design::dialog_header(ui, "OpenAI-Zugang benennen").clicked();
+                let title = if pane.provider == Provider::Copilot { crate::tr!("GitHub-Copilot-Zugang benennen") }
+                    else { crate::tr!("OpenAI-Zugang benennen") };
+                close = design::dialog_header(ui, title).clicked();
                 ui.separator();
                 ui.label("Name");
                 let input = ui.add(
                     design::singleline(&mut pane.name)
-                        .hint_text(design::input_hint("z. B. OpenAI Arbeit"))
+                        .hint_text(design::input_hint(if pane.provider == Provider::Copilot {
+                            crate::tr!("z. B. Arbeit")
+                        } else { crate::tr!("z. B. OpenAI Arbeit") }))
                         .desired_width(f32::INFINITY),
                 );
                 if std::mem::take(&mut pane.focus_name) {
@@ -393,21 +503,25 @@ pub fn show_add_dialog(ctx: &egui::Context, app: &mut App) {
                         .any(|a| a.name.trim().to_lowercase() == name.to_lowercase())
                 });
                 if duplicate {
-                    ui.colored_label(RED, "Dieser Name ist bereits vergeben.");
+                    ui.colored_label(RED, crate::tr!("Dieser Name ist bereits vergeben."));
                 }
                 let valid = app.online
                     && !name.is_empty()
                     && name.len() <= 120
                     && !name.chars().any(char::is_control)
                     && !duplicate;
-                let submit = design::accent_button(
-                    ui,
-                    egui::Button::new("Weiter zur Anmeldung"),
-                    valid,
-                    crate::app::BLUE.gamma_multiply(0.7),
-                )
-                .clicked();
-                if valid
+                ui.separator();
+                let bottom = ui.cursor().top();
+                let (submit, cancel) = design::settings_footer(ui, bottom, |ui| {
+                    let submit = design::accent_button(
+                        ui, egui::Button::new(crate::tr!("Weiter zur Anmeldung")), valid,
+                        crate::app::BLUE.gamma_multiply(0.7),
+                    ).clicked();
+                    let cancel = ui.button(crate::tr!("Abbrechen")).clicked();
+                    (submit, cancel)
+                });
+                close |= cancel;
+                if !close && valid
                     && (submit
                         || (input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
                 {
@@ -432,17 +546,189 @@ pub fn show_add_dialog(ctx: &egui::Context, app: &mut App) {
 }
 
 impl FactoryPane {
+    fn show_remove_dialog(&mut self, ctx: &egui::Context, app: &mut App) {
+        let Some((id, name)) = self.remove_access.as_ref() else { return };
+        let response = egui::Modal::new(egui::Id::new("remove-model-access"))
+            .frame(egui::Frame::window(&ctx.style()).inner_margin(design::DIALOG_PADDING))
+            .show(ctx, |ui| {
+                ui.set_width(design::dialog_content_size(ctx.content_rect().size()).x.min(440.0));
+                let close = design::dialog_header(ui, crate::tr!("Modellzugang löschen")).clicked();
+                ui.separator();
+                ui.label(crate::tr!("„{}“ und seine Zugangsdaten aus der Factory löschen?", name));
+                ui.separator();
+                let bottom = ui.cursor().top();
+                design::settings_footer(ui, bottom, |ui| {
+                    let remove = design::accent_button(ui, egui::Button::new(crate::tr!("Löschen")),
+                        app.online && self.remove_request.is_none(), RED.gamma_multiply(0.7));
+                    #[cfg(test)]
+                    ctx.data_mut(|data| data.insert_temp(egui::Id::new("test-model-remove-confirm"), remove.rect));
+                    (remove.clicked(), close || ui.button(crate::tr!("Abbrechen")).clicked())
+                })
+            });
+        let (confirm, cancel) = response.inner;
+        if confirm {
+            let request = ephemeral(app, "DELETE", format!("/v1/model-settings/accesses/{id}"), Value::Null);
+            self.remove_request = Some((id.clone(), request));
+        }
+        if confirm || cancel || response.should_close() {
+            self.remove_access = None;
+        }
+    }
+
+    fn provider_picker(&mut self, ui: &mut egui::Ui) -> egui::Response {
+        let count = Provider::available().count() as f32;
+        let rows_height = count * (design::LIST_ROW_HEIGHT + ui.spacing().item_spacing.y);
+        let viewport = ui.ctx().content_rect();
+        let anchor = ui.cursor().top();
+        let room = (anchor - viewport.top())
+            .max(viewport.bottom() - anchor - ui.spacing().interact_size.y);
+        egui::ComboBox::from_id_salt("add-model-provider")
+            .selected_text(self.provider.label())
+            .width(ui.available_width().min(260.0))
+            .height(rows_height.min((room - 24.0).max(design::LIST_ROW_HEIGHT)))
+            .show_ui(ui, |ui| {
+                for provider in Provider::available() {
+                    if design::navigation_row(ui, provider.label(), provider == self.provider, None)
+                        .clicked()
+                    {
+                        if provider != self.provider {
+                            self.api_key.clear();
+                            self.endpoint.clear();
+                        }
+                        self.provider = provider;
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
+
+    fn show_key_dialog(&mut self, ctx: &egui::Context, app: &mut App) {
+        let Provider::Key(provider) = self.provider else { return };
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::new("key-model-access"))
+            .frame(egui::Frame::window(&ctx.style()).inner_margin(design::DIALOG_PADDING))
+            .show(ctx, |ui| {
+                let size = design::dialog_content_size(ctx.content_rect().size());
+                ui.set_width(size.x.min(440.0));
+                let max_bottom = ui.cursor().top() + size.y;
+                close = design::dialog_header(ui, &crate::tr!("{} hinzufügen", provider.label())).clicked();
+                ui.separator();
+                let pending = self.key_request.is_some();
+                let max_height = design::settings_body_height(ui, max_bottom).max(24.0);
+                let body = egui::ScrollArea::vertical().id_salt("provider-fields")
+                    .max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
+                    ui.add_enabled_ui(!pending, |ui| {
+                    design::settings_field(ui, "Name", |ui| {
+                        let input = ui.add(design::singleline(&mut self.name)
+                            .hint_text(design::input_hint(crate::tr!("z. B. Arbeit")))
+                            .desired_width(f32::INFINITY));
+                        if std::mem::take(&mut self.focus_name) {
+                            input.request_focus();
+                        }
+                    });
+                    if provider.endpoint_env().is_some() {
+                        let example = if provider == KeyModelProvider::Ollama {
+                            "http://localhost:11434"
+                        } else {
+                            "http://litellm:4000"
+                        };
+                        design::settings_field(ui, crate::tr!("Server-URL"), |ui| {
+                            ui.add(design::singleline(&mut self.endpoint)
+                                .hint_text(design::input_hint(example))
+                                .desired_width(f32::INFINITY));
+                            ui.label(egui::RichText::new(crate::tr!("Die URL muss vom Factory-Server erreichbar sein.")).color(MUTED));
+                        });
+                    }
+                    let key_label = if provider.key_optional() {
+                        crate::tr!("API-Schlüssel (optional)")
+                    } else {
+                        crate::tr!("API-Schlüssel")
+                    };
+                    design::settings_field(ui, key_label, |ui| {
+                        ui.add(design::singleline(&mut self.api_key)
+                            .password(true)
+                            .hint_text(design::input_hint(crate::tr!("API-Schlüssel einfügen")))
+                            .desired_width(f32::INFINITY));
+                        if provider == KeyModelProvider::Gemini {
+                            ui.hyperlink_to(crate::tr!("Schlüssel in Google AI Studio erstellen"), "https://aistudio.google.com/apikey");
+                        }
+                    });
+                    });
+                    let name = self.name.trim();
+                    let duplicate = app.models.factory.value.as_ref().is_some_and(|settings| {
+                        settings.accesses.iter().any(|a| a.name.trim().to_lowercase() == name.to_lowercase())
+                    });
+                    if duplicate {
+                        ui.colored_label(RED, crate::tr!("Dieser Name ist bereits vergeben."));
+                    }
+                    duplicate
+                });
+                #[cfg(test)]
+                ctx.data_mut(|d| {
+                    let mut visible = body.inner_rect;
+                    visible.set_height(visible.height().min(body.content_size.y));
+                    d.insert_temp(egui::Id::new("test-provider-form-body"), visible);
+                });
+                let name = self.name.trim();
+                let key = self.api_key.trim();
+                let endpoint = self.endpoint.trim();
+                let valid = app.online && !pending && !body.inner && !name.is_empty()
+                    && name.len() <= 120 && !name.chars().any(char::is_control)
+                    && (provider.key_optional() || !key.is_empty())
+                    && (endpoint.is_empty() || endpoint.starts_with("https://") || endpoint.starts_with("http://"))
+                    && key.len() <= 4096 && key.bytes().all(|b| b.is_ascii_graphic());
+                ui.separator();
+                let bottom = ui.cursor().top();
+                let (save, cancel) = design::settings_footer(ui, bottom, |ui| {
+                    let save = design::settings_save_button(ui, valid);
+                    let cancel = ui.add_enabled(!pending, egui::Button::new(crate::tr!("Abbrechen")));
+                    #[cfg(test)]
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("test-provider-form-cancel"), cancel.rect));
+                    if pending {
+                        ui.spinner().on_hover_text(crate::tr!("API-Schlüssel wird geprüft …"));
+                    }
+                    (save.clicked(), cancel.clicked())
+                });
+                close |= cancel;
+                if save && !close {
+                    let (_, path) = self.provider.new_access();
+                    let url = (provider.endpoint_env().is_some() && !endpoint.is_empty()).then_some(endpoint);
+                    self.key_request = Some(ephemeral(app, "POST", path, json!({"name":name,"key":key,"url":url})));
+                }
+            });
+        self.naming = !(close || response.should_close());
+    }
+
     fn show(&mut self, ui: &mut egui::Ui, app: &mut App, defaults_bottom: Option<f32>) {
         if !app.models.managed() {
             if let Some(error) = &app.models.setup.error {
                 ui.colored_label(RED, error);
             } else if app.models.setup.value.is_some() {
-                ui.label("Diese Factory wurde ohne zentralen Modell-Gateway gestartet.");
+                ui.label(crate::tr!("Diese Factory wurde ohne zentralen Modell-Gateway gestartet."));
             } else {
-                ui.label("Verbindung und OpenCode-Einrichtung werden geprüft …");
+                ui.label(crate::tr!("Verbindung und OpenCode-Einrichtung werden geprüft …"));
             }
             return;
         }
+        let Some(saved) = app.models.factory.value.clone() else {
+            ui.label(crate::tr!("Modell-Anbieter werden geladen …"));
+            if let Some(error) = &app.models.factory.error {
+                ui.colored_label(RED, error);
+            }
+            return;
+        };
+        let admin = app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin);
+        let editable = admin && app.online && self.save.is_none();
+        if let Some(bottom) = defaults_bottom {
+            self.show_defaults(ui, saved, editable, bottom);
+            return;
+        }
+        self.show_providers(ui, app, &saved, admin, editable);
+    }
+
+    fn settle_defaults(&mut self, app: &mut App, factory: &mut Load<FactoryModelSettings>, next_refresh: &mut Option<Instant>) {
         if self.save.is_none() {
             self.save = app
                 .settings
@@ -457,71 +743,39 @@ impl FactoryPane {
                 Ok(value) => match serde_json::from_value::<FactoryModelSettings>(value) {
                     Ok(saved) => {
                         self.draft = None;
-                        app.models.factory.value = Some(saved);
-                        app.models.factory.request = None;
-                        app.models.next_refresh = None;
+                        factory.value = Some(saved);
+                        factory.request = None;
+                        *next_refresh = None;
                     }
-                    Err(_) => app.notice("Speichern nicht eindeutig bestätigt."),
+                    Err(_) => app.notice(crate::tr!("Speichern nicht eindeutig bestätigt.")),
                 },
-                Err(_) => app.notice("Die Default-Modelle konnten nicht gespeichert werden."),
+                Err(_) => app.notice(crate::tr!("Die Default-Modelle konnten nicht gespeichert werden.")),
             }
         }
-        let Some(saved) = app.models.factory.value.clone() else {
-            ui.label("Modell-Anbieter werden geladen …");
-            if let Some(error) = &app.models.factory.error {
-                ui.colored_label(RED, error);
-            }
-            return;
-        };
-        let admin = app
-            .access
-            .as_ref()
-            .is_some_and(|a| a.role == DeviceRole::Admin);
-        let editable = admin && app.online && self.save.is_none();
-        if let Some(bottom) = defaults_bottom {
-            self.show_defaults(ui, app, saved, editable, bottom);
-            return;
-        }
+    }
+
+    fn show_providers(&mut self, ui: &mut egui::Ui, app: &mut App, saved: &FactoryModelSettings, admin: bool, editable: bool) {
         if !admin {
             ui.colored_label(
                 MUTED,
-                "Nur Factory-Admins können Zugänge und Standardmodelle ändern.",
+                crate::tr!("Nur Factory-Admins können Zugänge und Standardmodelle ändern."),
             );
         }
         ui.add_space(8.0);
-        design::section_heading(ui, "Anbieter hinzufügen");
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(editable && self.login.is_none(), |ui| {
-                egui::ComboBox::from_id_salt("add-model-provider")
-                    .selected_text(self.provider.label())
-                    .width(180.0)
-                    .show_ui(ui, |ui| {
-                        for provider in Provider::AVAILABLE {
-                            if design::navigation_row(
-                                ui,
-                                provider.label(),
-                                provider == self.provider,
-                                None,
-                            )
-                            .clicked()
-                            {
-                                self.provider = provider;
-                                ui.close();
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                if ui.button("Hinzufügen").clicked() {
+        design::section_heading(ui, crate::tr!("Anbieter hinzufügen"));
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(editable && self.login.is_none() && self.key_request.is_none(), |ui| {
+                self.provider_picker(ui);
+                if ui.button(crate::tr!("Hinzufügen")).clicked() {
                     self.naming = true;
                     self.focus_name = true;
                 }
             });
         });
         ui.add_space(12.0);
-        design::section_heading(ui, "Vorhandene Zugänge");
+        design::section_heading(ui, crate::tr!("Vorhandene Zugänge"));
         if saved.accesses.is_empty() {
-            ui.colored_label(MUTED, "Noch keine Zugänge verbunden.");
+            ui.colored_label(MUTED, crate::tr!("Noch keine Zugänge verbunden."));
         }
         for access in &saved.accesses {
             let status = self.status.entry(access.id.clone()).or_default();
@@ -529,46 +783,58 @@ impl FactoryPane {
                 app,
                 &format!("/v1/model-settings/accesses/{}/status", access.id),
             );
-            ui.horizontal_wrapped(|ui| {
-                ui.strong(&access.name);
-                match status.value.as_ref().map(|status| status.state.as_str()) {
-                    Some("ready") => {
-                        ui.colored_label(crate::app::GREEN, "Verbunden");
+            ui.push_id(&access.id, |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), design::LIST_ROW_HEIGHT),
+                    egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let remove = design::icon_button(ui, egui_phosphor::regular::TRASH,
+                        crate::tr!("Modellzugang löschen"), editable && self.login.is_none()
+                            && self.key_request.is_none() && self.remove_request.is_none());
+                    if remove.clicked() {
+                        self.remove_access = Some((access.id.clone(), access.name.clone()));
                     }
-                    Some(state) => {
-                        if state != "not_connected" {
-                            ui.colored_label(RED, "Zugang nicht verfügbar");
+                    match status.value.as_ref().map(|status| status.state.as_str()) {
+                        Some("ready") => {
+                            ui.colored_label(crate::app::GREEN, crate::tr!("Verbunden"));
                         }
-                        let action = if state == "not_connected" {
-                            "Mit ChatGPT verbinden"
-                        } else {
-                            "Erneut anmelden"
-                        };
-                        if ui
-                            .add_enabled(
-                                editable && self.login.is_none(),
-                                egui::Button::new(action),
-                            )
-                            .clicked()
-                        {
-                            let begin = ephemeral(app, "POST", oauth_path(&access.id), Value::Null);
-                            self.login = Some(Login {
-                                access: access.id.clone(),
-                                begin,
-                                prompt: None,
-                                code: String::new(),
-                                finish: None,
-                                cancelling: false,
-                            });
+                        Some(_) if KeyModelProvider::from_access_id(&access.id).is_some() => {
+                            ui.colored_label(RED, crate::tr!("Zugang nicht verfügbar"));
+                        }
+                        Some(state) => {
+                            let action = if state == "not_connected" && is_copilot_access(&access.id) {
+                                crate::tr!("Mit GitHub verbinden")
+                            } else if state == "not_connected" {
+                                crate::tr!("Mit ChatGPT verbinden")
+                            } else {
+                                crate::tr!("Erneut anmelden")
+                            };
+                            if ui.add_enabled(editable && self.login.is_none() && self.remove_request.is_none(),
+                                egui::Button::new(action)).clicked()
+                            {
+                                let begin = ephemeral(app, "POST", oauth_path(&access.id), Value::Null);
+                                self.login = Some(Login {
+                                    access: access.id.clone(), begin, prompt: None, code: String::new(),
+                                    finish: None, cancelling: false,
+                                });
+                            }
+                            if state != "not_connected" {
+                                ui.colored_label(RED, crate::tr!("Zugang nicht verfügbar"));
+                            }
+                        }
+                        None => {
+                            ui.colored_label(
+                                MUTED,
+                                status.error.as_deref().unwrap_or(crate::tr!("Wird geprüft …")),
+                            );
                         }
                     }
-                    None => {
-                        ui.colored_label(
-                            MUTED,
-                            status.error.as_deref().unwrap_or("Wird geprüft …"),
-                        );
-                    }
-                }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(&access.name).strong()).truncate())
+                            .on_hover_text(&access.name);
+                    });
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-provider-row", &access.id)), ui.min_rect()));
+                });
             });
         }
     }
@@ -576,7 +842,6 @@ impl FactoryPane {
     fn show_defaults(
         &mut self,
         ui: &mut egui::Ui,
-        app: &mut App,
         saved: FactoryModelSettings,
         editable: bool,
         bottom: f32,
@@ -596,15 +861,15 @@ impl FactoryPane {
             .collect();
         egui::ScrollArea::vertical()
             .id_salt("factory-default-models-fields")
-            .max_height(design::settings_body_height(ui, bottom))
+            .max_height((bottom - ui.cursor().top()).max(0.0))
             .show(ui, |ui| {
-                design::section_heading(ui, "Standardmodell");
+                design::section_heading(ui, crate::tr!("Standardmodell"));
                 if saved
                     .accesses
                     .iter()
                     .all(|a| matches!(state(a), Some("not_connected" | "unavailable")))
                 {
-                    ui.label(egui::RichText::new("Verbinde zuerst einen Anbieter.").color(MUTED));
+                    ui.label(egui::RichText::new(crate::tr!("Verbinde zuerst einen Anbieter.")).color(MUTED));
                     ui.add_space(6.0);
                 }
                 ui.add_enabled_ui(editable, |ui| {
@@ -613,26 +878,23 @@ impl FactoryPane {
                         "factory-default",
                         &ready,
                         &mut draft.default_model,
-                        "Nicht eingerichtet",
+                        crate::tr!("Nicht eingerichtet"),
                     );
                 });
                 ui.add_space(16.0);
-                design::section_heading(ui, "Agenten Overrides");
-                ui.label(egui::RichText::new("Überschreibe die Modelle pro Agent").color(MUTED));
+                design::section_heading(ui, crate::tr!("Agenten Overrides"));
+                ui.label(egui::RichText::new(crate::tr!("Überschreibe die Modelle pro Agent")).color(MUTED));
                 ui.add_space(6.0);
                 ui.add_enabled_ui(editable, |ui| {
                     roles(ui, "factory-models", &ready, &mut draft.roles);
                 });
             });
-        self.draft = (draft != saved).then(|| draft.clone());
-        if model_save_footer(ui, app, bottom, editable && self.draft.is_some(), self.save) {
-            self.send(app, draft);
-        }
+        self.draft = (draft != saved).then_some(draft);
     }
 
     fn send(&mut self, app: &mut App, settings: FactoryModelSettings) {
         self.save = Some(app.write(
-            "Factory-Modelle speichern",
+            crate::tr!("Factory-Modelle speichern"),
             "PUT",
             "/v1/model-settings".into(),
             json!(SetFactoryModels {
@@ -646,6 +908,7 @@ impl FactoryPane {
         let Some(mut login) = self.login.take() else {
             return;
         };
+        let copilot = is_copilot_access(&login.access);
         if let Some(result) = app.responses.remove(&login.begin) {
             match result {
                 Ok(value) => match serde_json::from_value(value) {
@@ -666,7 +929,8 @@ impl FactoryPane {
                     }
                     Err(_) => {
                         app.notice(
-                            "Die Factory hat keine gültige ChatGPT-Anmeldung zurückgegeben.",
+                            if copilot { crate::tr!("Die Factory hat keine gültige GitHub-Anmeldung zurückgegeben.") }
+                            else { crate::tr!("Die Factory hat keine gültige ChatGPT-Anmeldung zurückgegeben.") },
                         );
                         return;
                     }
@@ -706,10 +970,12 @@ impl FactoryPane {
                             },
                         });
                     } else {
-                        app.notice("ChatGPT-Zugang verbunden.");
+                        app.notice(if copilot { crate::tr!("GitHub Copilot verbunden.") }
+                            else { crate::tr!("ChatGPT-Zugang verbunden.") });
                     }
                 }
-                Ok(_) => app.notice("Die ChatGPT-Anmeldung wurde nicht bestätigt."),
+                Ok(_) => app.notice(if copilot { crate::tr!("Die GitHub-Anmeldung wurde nicht bestätigt.") }
+                    else { crate::tr!("Die ChatGPT-Anmeldung wurde nicht bestätigt.") }),
                 Err(error) => {
                     self.status.remove(&login.access);
                     app.notice(error.message);
@@ -728,7 +994,7 @@ impl FactoryPane {
                         .x
                         .min(380.0),
                 );
-                ui.heading("Mit ChatGPT verbinden");
+                ui.heading(if copilot { crate::tr!("Mit GitHub verbinden") } else { crate::tr!("Mit ChatGPT verbinden") });
                 ui.separator();
                 if let Some(prompt) = &login.prompt {
                     if let Some(code) = prompt
@@ -746,7 +1012,7 @@ impl FactoryPane {
                             if design::icon_button(
                                 ui,
                                 egui_phosphor::regular::COPY_SIMPLE,
-                                "Code kopieren",
+                                crate::tr!("Code kopieren"),
                                 true,
                             )
                             .clicked()
@@ -766,7 +1032,7 @@ impl FactoryPane {
                             design::singleline(&mut login.code)
                                 .password(true)
                                 .hint_text(design::input_hint(
-                                    "Bestätigungscode · mit Enter senden",
+                                    crate::tr!("Bestätigungscode · mit Enter senden"),
                                 )),
                         );
                         if app.online
@@ -787,17 +1053,19 @@ impl FactoryPane {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(if login.cancelling {
-                        "Anmeldung wird abgebrochen …"
+                        crate::tr!("Anmeldung wird abgebrochen …")
+                    } else if login.prompt.is_some() && copilot {
+                        crate::tr!("Warte auf GitHub …")
                     } else if login.prompt.is_some() {
-                        "Warte auf ChatGPT …"
+                        crate::tr!("Warte auf ChatGPT …")
                     } else {
-                        "Anmeldung wird vorbereitet …"
+                        crate::tr!("Anmeldung wird vorbereitet …")
                     });
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_enabled(!login.cancelling, egui::Button::new("Abbrechen"))
+                        ui.add_enabled(!login.cancelling, egui::Button::new(crate::tr!("Abbrechen")))
                             .clicked()
                     })
                 })
@@ -827,39 +1095,8 @@ impl Login {
 }
 
 fn oauth_path(id: &str) -> String {
-    format!("/v1/model-settings/accesses/{id}/openai/oauth")
-}
-
-fn model_save_footer(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    bottom: f32,
-    enabled: bool,
-    request: Option<u64>,
-) -> bool {
-    design::settings_footer(ui, bottom, |ui| {
-        let clicked = design::settings_save_button(ui, enabled).clicked();
-        if let Some(id) = request {
-            if app.in_flight.contains(&id) {
-                ui.spinner();
-            } else {
-                if app
-                    .responses
-                    .remove(&id)
-                    .is_some_and(|result| result.is_err())
-                {
-                    app.notice("Speichern nicht bestätigt. Bitte dieselbe Anfrage abgleichen.");
-                }
-                if ui
-                    .add_enabled(app.online, egui::Button::new("Abgleichen"))
-                    .clicked()
-                {
-                    app.retry(id);
-                }
-            }
-        }
-        clicked
-    })
+    let provider = if is_copilot_access(id) { COPILOT_INTEGRATION } else { "openai" };
+    format!("/v1/model-settings/accesses/{id}/{provider}/oauth")
 }
 
 fn settled_save(
@@ -872,6 +1109,8 @@ fn settled_save(
         .get(&id)
         .is_some_and(|r| r.as_ref().is_err_and(|e| e.uncertain))
     {
+        app.responses.remove(&id);
+        app.notice(crate::tr!("Speichern nicht bestätigt. Bitte dieselbe Anfrage abgleichen."));
         return None;
     }
     app.responses.remove(&id)
@@ -880,8 +1119,6 @@ fn settled_save(
 #[derive(Default)]
 pub struct ProjectPane {
     draft: Option<ProjectModelSettings>,
-    save: Option<u64>,
-    error: Option<String>,
 }
 
 pub fn load_project(app: &mut App, id: ProjectId) {
@@ -899,33 +1136,18 @@ pub fn show_project(ui: &mut egui::Ui, app: &mut App, id: ProjectId, bottom: f32
 impl ProjectPane {
     pub fn show(&mut self, ui: &mut egui::Ui, app: &mut App, project: ProjectId, bottom: f32) {
         if !app.models.managed() {
-            ui.label("Zentrale Modellzugänge sind für diese Factory nicht aktiv.");
+            ui.label(crate::tr!("Zentrale Modellzugänge sind für diese Factory nicht aktiv."));
             return;
         }
+        let had_load_error = app.models.projects.get(&project).is_some_and(|load| load.error.is_some());
         load_project(app, project);
-        if self.save.is_none() {
-            let path = format!("/v1/projects/{project}/models");
-            self.save = app
-                .settings
-                .pending
-                .iter()
-                .find(|p| p.server == app.server && p.path == path)
-                .map(|p| p.id);
-        }
-        if let Some(result) = settled_save(app, self.save) {
-            self.save = None;
-            match result {
-                Ok(value) => {
-                    let cache = app.models.projects.get_mut(&project).unwrap();
-                    cache.value = serde_json::from_value(value).ok();
-                    self.draft = None;
-                }
-                Err(error) => self.error = Some(error.message),
-            }
+        let load_error = app.models.projects.get(&project).is_some_and(|load| load.error.is_some());
+        if load_error && !had_load_error {
+            app.notice(crate::tr!("Projektmodelle konnten nicht geladen werden."));
         }
         let ready = app.models.ready_catalog();
-        let Some(_) = app.models.factory.value.as_ref() else {
-            ui.label("Modellkatalog lädt …");
+        let Some(factory) = app.models.factory.value.as_ref() else {
+            ui.label(crate::tr!("Modellkatalog lädt …"));
             return;
         };
         let Some(saved) = app
@@ -934,42 +1156,53 @@ impl ProjectPane {
             .get(&project)
             .and_then(|load| load.value.as_ref())
         else {
-            let error = app
-                .models
-                .projects
-                .get(&project)
-                .and_then(|load| load.error.as_deref());
-            ui.label(error.unwrap_or("Projektmodelle laden …"));
+            if load_error {
+                if ui.add_enabled(app.online, egui::Button::new(crate::tr!("Erneut laden"))).clicked() {
+                    app.models.projects.get_mut(&project).unwrap().error = None;
+                }
+            } else if app.online {
+                ui.label(crate::tr!("Projektmodelle laden …"));
+            }
             return;
         };
         let mut draft = self.draft.clone().unwrap_or_else(|| saved.clone());
-        let editable = app.online && self.save.is_none();
+        let editable = app.online;
         egui::ScrollArea::vertical()
             .id_salt(("project-models-fields", project))
-            .max_height(design::settings_body_height(ui, bottom))
+            .max_height((bottom - ui.cursor().top()).max(0.0))
             .show(ui, |ui| {
-                ui.label("Default übernimmt das jeweilige Rollenmodell der Factory.");
+                design::section_heading(ui, crate::tr!("Standardmodell"));
+                let default = factory.default_model.as_ref()
+                    .map_or_else(|| crate::tr!("Nicht eingerichtet").into(), |model| label(&factory.accesses, model));
+                ui.label(crate::tr!("Aus der Factory: {default}", default = default));
+                ui.add_space(16.0);
+                design::section_heading(ui, crate::tr!("Agenten-Overrides"));
+                ui.label(crate::tr!("Ohne eigene Auswahl gilt das jeweilige Rollenmodell der Factory."));
+                ui.add_space(6.0);
                 ui.add_enabled_ui(editable, |ui| {
                     roles(ui, "project-models", &ready, &mut draft.roles)
                 });
             });
         self.draft = (draft != *saved).then(|| draft.clone());
-        if model_save_footer(ui, app, bottom, editable && self.draft.is_some(), self.save) {
-            self.error = None;
-            self.save = Some(app.write(
-                "Projektmodelle speichern",
-                "PUT",
-                format!("/v1/projects/{project}/models"),
-                json!(SetProjectModels {
-                    request_id: RequestId::new(),
-                    settings: draft
-                }),
-            ));
-        }
-        if let Some(error) = &self.error {
-            ui.colored_label(RED, error);
-        }
     }
+}
+
+pub(crate) fn project_draft(app: &App, project: ProjectId) -> Option<Value> {
+    let settings = app.models.project_panes.get(&project)?.draft.as_ref()?;
+    Some(json!(SetProjectModels { request_id: RequestId::new(), settings: settings.clone() }))
+}
+
+pub(crate) fn discard_project_draft(app: &mut App, project: ProjectId) {
+    if let Some(pane) = app.models.project_panes.get_mut(&project) {
+        pane.draft = None;
+    }
+}
+
+pub(crate) fn confirm_project_save(app: &mut App, project: ProjectId, value: Value) -> bool {
+    let Ok(settings) = serde_json::from_value(value) else { return false; };
+    app.models.projects.entry(project).or_default().value = Some(settings);
+    discard_project_draft(app, project);
+    true
 }
 
 #[cfg(test)]
@@ -1026,7 +1259,9 @@ mod tests {
             .any(|command| matches!(command, egui::OutputCommand::OpenUrl(_))));
         assert_eq!(pane.login.as_ref().unwrap().finish, Some(finish));
         let button: egui::Rect = ctx
-            .data_mut(|data| data.get_temp(egui::Id::new(("test-icon-button", "Code kopieren"))))
+            .data_mut(|data| {
+                data.get_temp(egui::Id::new(("test-icon-button", crate::tr!("Code kopieren"))))
+            })
             .unwrap();
         let pos = button.center();
         let frame = ctx.run(
@@ -1095,12 +1330,12 @@ mod tests {
             ..Default::default()
         };
         let id = app.project().unwrap().id;
-        for mut settings in [ProjectSettings::factory(), ProjectSettings::new(id)] {
-            settings.selected = if settings.project.is_some() {
-                ProjectSection::Profile
-            } else {
-                ProjectSection::DefaultModels
-            };
+        for (mut settings, section) in [
+            (ProjectSettings::factory(), ProjectSection::Models),
+            (ProjectSettings::factory(), ProjectSection::DefaultModels),
+            (ProjectSettings::new(id), ProjectSection::General),
+        ] {
+            settings.selected = section;
             for _ in 0..2 {
                 let _ = ctx.run(input(), |ctx| {
                     egui::CentralPanel::default()
@@ -1118,10 +1353,15 @@ mod tests {
                 (pane.right() - save.right()).abs() < 2.0,
                 "{pane:?} {save:?}"
             );
-            assert!(
-                pane.bottom() - save.bottom() >= 0.0 && pane.bottom() - save.bottom() <= 12.0,
-                "{pane:?} {save:?}"
-            );
+            let bottom = if settings.project.is_some() {
+                ctx.data_mut(|d| d.get_temp::<f32>(egui::Id::new("test-project-footer-bottom")).unwrap())
+            } else {
+                let cancel = ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-factory-settings-cancel")).unwrap());
+                assert!(cancel.right() < save.left() && cancel.center().y == save.center().y);
+                assert!(pane.bottom() < save.top(), "{pane:?} {save:?}");
+                ctx.data_mut(|d| d.get_temp::<f32>(egui::Id::new("test-factory-settings-footer-bottom")).unwrap())
+            };
+            assert!((-1.0..=12.0).contains(&(bottom - save.bottom())), "{bottom} {save:?}");
         }
     }
 
@@ -1226,6 +1466,149 @@ mod tests {
     }
 
     #[test]
+    fn api_key_provider_draft_is_masked_and_never_persisted() {
+        let mut app = crate::tests::fixture();
+        crate::i18n::set_language(crate::i18n::Language::German);
+        seed(&mut app, false);
+        let pane = &mut app.models.pane;
+        pane.provider = Provider::Key(KeyModelProvider::Gemini);
+        pane.naming = true;
+        pane.name = "Gemini Test".into();
+        pane.api_key = "dummy-secret-for-render-test".into();
+        let ctx = app.backend.context().clone();
+        let render = |app: &mut App| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| show_add_dialog(ctx, app),
+            )
+        };
+        let _ = render(&mut app);
+        fn text_of(shape: &egui::epaint::Shape, text: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(value) => text.push(value.galley.job.text.clone()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|shape| text_of(shape, text));
+                }
+                _ => {}
+            }
+        }
+        let mut text = Vec::new();
+        for shape in render(&mut app).shapes {
+            text_of(&shape.shape, &mut text);
+        }
+        assert!(text.iter().any(|text| text == crate::tr!("API-Schlüssel")), "{text:?}");
+        assert!(text.iter().any(|text| text == crate::tr!("Speichern")), "{text:?}");
+        assert!(!text.iter().any(|text| text.contains("dummy-secret")));
+        assert!(!serde_json::to_string(&app.settings).unwrap().contains("dummy-secret"));
+        assert!(!text.iter().any(|text| text == crate::tr!("Server-URL")));
+        let rect = |id| ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(id))).unwrap();
+        let body = rect("test-provider-form-body");
+        let save = rect("test-settings-save");
+        let cancel = rect("test-provider-form-cancel");
+        assert!(body.bottom() < cancel.top() && cancel.right() <= save.left(),
+            "body {body:?}, cancel {cancel:?}, save {save:?}");
+        for provider in [KeyModelProvider::LiteLlm, KeyModelProvider::Ollama] {
+            app.models.pane.provider = Provider::Key(provider);
+            let mut text = Vec::new();
+            for shape in render(&mut app).shapes {
+                text_of(&shape.shape, &mut text);
+            }
+            assert!(text.iter().any(|text| text == crate::tr!("Server-URL")), "{provider:?}");
+            assert_eq!(
+                text.iter().any(|text| text == crate::tr!("API-Schlüssel (optional)")),
+                provider == KeyModelProvider::Ollama,
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_is_available_as_a_direct_oauth_provider() {
+        assert!(Provider::available().any(|provider| provider == Provider::Copilot));
+        let (access, path) = Provider::Copilot.new_access();
+        assert!(is_copilot_access(&access));
+        assert_eq!(path, format!("/v1/model-settings/accesses/{access}/github-copilot/oauth/start"));
+    }
+
+    #[test]
+    fn provider_menu_shows_all_choices_at_full_width_without_scrolling() {
+        let ctx = egui::Context::default();
+        let mut pane = FactoryPane::default();
+        let mut button = egui::Rect::NOTHING;
+        let mut frame = |events| ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
+            events, ..Default::default()
+        }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                button = pane.provider_picker(ui).rect;
+            });
+        });
+        let _ = frame(vec![]);
+        drop(frame);
+        assert!(button.width() >= 250.0);
+        let pos = button.center();
+        let mut frame = |events| ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
+            events, ..Default::default()
+        }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| { pane.provider_picker(ui); });
+        });
+        let click = |pressed| egui::Event::PointerButton {
+            pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+        };
+        let _ = frame(vec![egui::Event::PointerMoved(pos), click(true), click(false)]);
+        let output = frame(vec![]);
+        for provider in Provider::available() {
+            assert!(output.shapes.iter().any(|s| match &s.shape {
+                egui::epaint::Shape::Text(text) => text.galley.job.text == provider.label()
+                    && text.galley.elided == false
+                    && s.clip_rect.contains_rect(text.galley.rect.translate(text.pos.to_vec2())),
+                _ => false,
+            }), "{} wasn't fully visible", provider.label());
+        }
+    }
+
+    #[test]
+    fn provider_trash_requires_confirmation() {
+        let mut app = crate::tests::fixture();
+        seed(&mut app, true);
+        app.access = Some(factory_protocol::AccessView {
+            role: DeviceRole::Admin, device_id: None, runner_id: None,
+        });
+        let ctx = app.backend.context().clone();
+        let frame = |app: &mut App, events| ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
+            events, ..Default::default()
+        }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| show_factory(ui, app, None));
+            show_add_dialog(ctx, app);
+        });
+        let click = |pos| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+            };
+            vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+        };
+        let rect = |id| ctx.data_mut(|d| d.get_temp::<egui::Rect>(id)).unwrap();
+        let _ = frame(&mut app, vec![]);
+        let trash = rect(egui::Id::new(("test-icon-button", crate::tr!("Modellzugang löschen"))));
+        assert!(trash.top() < 220.0, "Access rows must sit at the top of the list: {trash:?}");
+        let _ = frame(&mut app, click(trash.center()));
+        assert!(app.models.pane.remove_access.is_some());
+        assert!(app.models.pane.remove_request.is_none());
+        let _ = frame(&mut app, vec![]);
+        let confirm = rect(egui::Id::new("test-model-remove-confirm"));
+        let _ = frame(&mut app, click(confirm.center()));
+        assert_eq!(app.models.pane.remove_request.as_ref().unwrap().0, "factory-test");
+        assert!(app.models.pane.remove_access.is_none());
+    }
+
+    #[test]
     fn same_model_on_two_accounts_has_different_display_labels() {
         let mut app = crate::tests::fixture();
         seed(&mut app, true);
@@ -1234,6 +1617,7 @@ mod tests {
             id: "factory-private".into(),
             name: "OpenAI Privat".into(),
             models: vec!["demo".into()],
+            transports: Default::default(),
         });
         let model = |id: &str| ModelSelection {
             access_id: id.into(),
@@ -1241,11 +1625,11 @@ mod tests {
         };
         assert_eq!(
             label(catalog, &model("factory-test")),
-            "OpenAI Arbeit · demo"
+            format!("demo / {}", crate::tr!("OpenAI Arbeit"))
         );
         assert_eq!(
             label(catalog, &model("factory-private")),
-            "OpenAI Privat · demo"
+            "demo / OpenAI Privat"
         );
     }
 
@@ -1284,7 +1668,9 @@ mod tests {
             collect(&shape.shape, &mut text);
         }
         assert!(text.iter().any(|s| s == "Name"));
-        assert!(text.iter().any(|s| s.contains("Weiter zur Anmeldung")));
+        assert!(text
+            .iter()
+            .any(|s| s.contains(crate::tr!("Weiter zur Anmeldung"))));
         assert!(!text.iter().any(|s| s.contains("Modell-ID")));
         let _ = render(
             &mut app,

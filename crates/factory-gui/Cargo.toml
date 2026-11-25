@@ -12,11 +12,14 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 factory-core.workspace = true
+factory-platform.workspace = true
 factory-client-core = { path = "../factory-client-core" }
 factory-protocol = { workspace = true, features = ["client"] }
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+serde_yaml = "0.9"
+tokio = { workspace = true, features = ["io-util"] }
+url = "2"
 egui = { version = "0.33", features = ["default_fonts"] }
 egui_glow = "0.33"
 sdl3 = { version = "=0.18.4", features = ["build-from-source-static"] }
@@ -34,6 +37,11 @@ notify-rust = "4"
 base64 = "0.22"
 sha2 = "0.10"
 tempfile = "3"
+libc = "0.2"
+sys-locale = "0.3"
+
+[build-dependencies]
+serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wl-clipboard-rs = { version = "0.9.5", default-features = false }

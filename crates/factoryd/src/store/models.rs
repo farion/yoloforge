@@ -2,7 +2,7 @@ use super::*;
 use factory_protocol::models::*;
 use std::collections::HashSet;
 
-fn factory(db: &Connection) -> Result<Option<FactoryModelSettings>> {
+pub(super) fn factory(db: &Connection) -> Result<Option<FactoryModelSettings>> {
     let data: Option<String> = db
         .query_row(
             "SELECT data FROM factory_model_settings WHERE id=1",
@@ -89,6 +89,17 @@ fn check_roles(catalog: &FactoryModelSettings, roles: &RoleModels) -> Result<()>
         check_selection(catalog, model)?;
     }
     Ok(())
+}
+
+fn clear_role_accesses(roles: &mut RoleModels, alias: &str) -> bool {
+    let mut changed = false;
+    for model in [&mut roles.orchestrator, &mut roles.implementer, &mut roles.supervisor, &mut roles.memorizer] {
+        if model.as_ref().is_some_and(|m| m.access_id == alias) {
+            *model = None;
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn role(roles: &RoleModels, role: &str) -> Option<ModelSelection> {
@@ -237,6 +248,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_removal_clears_project_roles_but_protects_open_intents() {
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        store.enable_model_settings().unwrap();
+        let access = ModelAccess {
+            id: "factory-removal-test".into(), name: "Test".into(),
+            models: vec!["model".into()], transports: Default::default(),
+        };
+        let model = store.add_connected_model_access(access.clone(), "test-credential").unwrap().unwrap();
+        let project = store.create_project(CreateProject {
+            logo: None,
+            request_id: RequestId::new(), runner_mapping: None, key: None,
+            name: "Models".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+        }).unwrap();
+        store.set_project_models(project.id, SetProjectModels {
+            request_id: RequestId::new(),
+            settings: ProjectModelSettings {
+                revision: Revision(0),
+                roles: RoleModels { implementer: Some(model), ..Default::default() },
+            },
+        }).unwrap();
+        let task = store.save_task(SaveTask {
+            request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+            project_id: project.id, prompt: "Test access pin".into(),
+            requested_session: None, images: vec![],
+        }).unwrap();
+        assert!(matches!(store.remove_model_access(&access.id), Err(StoreError::Invalid(_))));
+        {
+            let db = store.0.lock().unwrap();
+            db.execute("UPDATE tickets SET data=json_set(data,'$.status','done') WHERE id=?1",
+                [task.id.to_string()]).unwrap();
+        }
+        let (settings, credential) = store.remove_model_access(&access.id).unwrap();
+        assert!(settings.accesses.is_empty() && settings.default_model.is_none());
+        assert!(store.project_models(project.id).unwrap().roles.implementer.is_none());
+        assert_eq!(credential.as_deref(), Some("test-credential"));
+        assert!(store.task_models(task.id).unwrap().unwrap().implementer.is_some());
+    }
+
+    #[test]
     fn only_first_connected_access_sets_a_default_and_roles_inherit_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("factory.sqlite");
@@ -246,6 +296,7 @@ mod tests {
             id: format!("factory-{id}"),
             name: id.into(),
             models: vec![model.into()],
+            transports: Default::default(),
         };
         let first = store
             .add_connected_model_access(access("work", "first-model"), "credential-1")
@@ -270,6 +321,64 @@ mod tests {
 }
 
 impl Store {
+    pub(crate) fn remove_model_access(&self, alias: &str) -> Result<(FactoryModelSettings, Option<String>)> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut settings = factory(&tx)?.ok_or(StoreError::NotFound)?;
+        if !settings.accesses.iter().any(|access| access.id == alias) {
+            return Ok((settings, None));
+        }
+        let in_use: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM task_models m
+                JOIN tickets t ON t.id=m.ticket_id
+                JOIN active_projects p ON p.id=t.project_id
+                WHERE json_extract(t.data,'$.status') NOT IN ('done','cancelled')
+                AND EXISTS (SELECT 1 FROM json_each(m.data) role
+                            WHERE json_extract(role.value,'$.access_id')=?1)
+             )",
+            [alias],
+            |row| row.get(0),
+        )?;
+        if in_use {
+            return Err(StoreError::Invalid("Dieser Modellzugang wird noch von offenen Intents verwendet."));
+        }
+        settings.accesses.retain(|access| access.id != alias);
+        if settings.default_model.as_ref().is_some_and(|model| model.access_id == alias) {
+            settings.default_model = None;
+        }
+        clear_role_accesses(&mut settings.roles, alias);
+        settings.revision.0 = settings.revision.0.checked_add(1).ok_or(StoreError::Internal)?;
+        tx.execute(
+            "UPDATE factory_model_settings SET data=?1 WHERE id=1",
+            [serde_json::to_string(&settings)?],
+        )?;
+        let projects = {
+            let mut query = tx.prepare("SELECT project_id,data FROM project_model_settings")?;
+            let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, raw) in projects {
+            let mut project: ProjectModelSettings = serde_json::from_str(&raw)?;
+            if clear_role_accesses(&mut project.roles, alias) {
+                project.revision.0 = project.revision.0.checked_add(1).ok_or(StoreError::Internal)?;
+                tx.execute(
+                    "UPDATE project_model_settings SET data=?2 WHERE project_id=?1",
+                    params![id, serde_json::to_string(&project)?],
+                )?;
+                event(&tx, "models.project_changed", id, &project)?;
+            }
+        }
+        let credential = tx.query_row(
+            "DELETE FROM model_access_bindings WHERE access_id=?1 RETURNING credential_id",
+            [alias],
+            |row| row.get(0),
+        ).optional()?;
+        event(&tx, "models.factory_changed", "factory".into(), &settings)?;
+        tx.commit()?;
+        Ok((settings, credential))
+    }
+
     pub(crate) fn add_connected_model_access(
         &self,
         access: ModelAccess,

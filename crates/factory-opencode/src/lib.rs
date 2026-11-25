@@ -6,6 +6,8 @@ use reqwest::{Client, Method, StatusCode, Url};
 use serde::Deserialize;
 use std::{fs, path::Path, time::Duration};
 
+pub mod distribution;
+
 fn supported_version(version: &str) -> bool {
     let mut parts = version.trim().split(['-', '+']).next().unwrap_or("").split('.');
     matches!(
@@ -486,7 +488,7 @@ impl OpenCodeClient {
         command: &str,
         provider: &str,
         model: &str,
-        read_only: bool,
+        permissions: Option<serde_json::Value>,
     ) -> Result<()> {
         safe_id(id)?;
         let result = self
@@ -497,7 +499,7 @@ impl OpenCodeClient {
                     "id":id,"agent":"build",
                     "location":{"directory":directory},"model":{"providerID":provider,"id":model},
                     "metadata":{"factory_command":command},
-                    "permissions": if read_only {Some(serde_json::json!([{"action":"*","resource":"*","effect":"deny"}]))} else {None}
+                    "permissions": permissions
                 })),
             )
             .await?;
@@ -509,6 +511,61 @@ impl OpenCodeClient {
                 == Some(id),
             "Session creation not confirmed"
         );
+        Ok(())
+    }
+
+    pub async fn repo_skill_paths(&self, directory: &str) -> Result<serde_json::Value> {
+        self.location_get("/api/skill", directory).await
+    }
+
+    pub async fn set_session_permissions(&self, id: &str, permissions: &serde_json::Value) -> Result<()> {
+        safe_id(id)?;
+        let updated = self.request(Method::PATCH, &format!("/api/session/{id}"),
+            Some(serde_json::json!({"permissions":permissions}))).await?;
+        ensure!(updated.as_ref().and_then(|r| r.pointer("/data/permissions")) == Some(permissions),
+            "OpenCode did not confirm the session permissions");
+        Ok(())
+    }
+
+    pub async fn local_mcp_statuses(&self, directory: &str) -> Result<std::collections::BTreeMap<String, String>> {
+        let data = self.location_get("/api/mcp", directory).await?;
+        data.as_array().context("MCP status list missing")?.iter().map(|entry| {
+            Ok((
+                entry["name"].as_str().context("MCP name missing")?.to_owned(),
+                entry["status"]["status"].as_str().context("MCP status missing")?.to_owned(),
+            ))
+        }).collect()
+    }
+
+    pub async fn connect_local_mcp(&self, directory: &str, name: &str, command: &[String]) -> Result<()> {
+        self.connect_mcp(directory, name, serde_json::json!({"type":"local","command":command,
+            "codemode":false,"pool":false,"timeout":{"startup":5000,"catalog":5000}})).await
+    }
+
+    pub async fn connect_remote_mcp(&self, directory: &str, name: &str, url: &str, token: &str) -> Result<()> {
+        self.connect_mcp(directory, name, serde_json::json!({"type":"remote","url":url,
+            "headers":{"Authorization":format!("Bearer {token}")},"oauth":false,
+            "codemode":false,"pool":false,"timeout":{"startup":8000,"catalog":8000}})).await
+    }
+
+    pub async fn remove_local_mcp_probe(&self, directory: &str) {
+        // Fixed name; this endpoint is used only in a fresh, private probe location.
+        let _ = self.client.delete(format!(
+            "{}/api/experimental/mcp/yf-local-probe", self.registration.url.trim_end_matches('/')
+        )).basic_auth("opencode", Some(&self.registration.password))
+            .query(&[("location[directory]", directory)])
+            .timeout(std::time::Duration::from_secs(4)).send().await;
+    }
+
+    async fn connect_mcp(&self, directory: &str, name: &str, config: serde_json::Value) -> Result<()> {
+        ensure!(!name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'), "Invalid MCP name");
+        let response = self.client.put(format!(
+            "{}/api/experimental/mcp/{name}", self.registration.url.trim_end_matches('/')
+        )).basic_auth("opencode", Some(&self.registration.password))
+            .query(&[("location[directory]", directory)])
+            .json(&serde_json::json!({"config":config}))
+            .send().await.map_err(|_| anyhow::anyhow!("OpenCode MCP connection unavailable"))?;
+        ensure!(response.status() == reqwest::StatusCode::NO_CONTENT, "OpenCode did not accept MCP");
         Ok(())
     }
     /// Archive without deleting history. Repeating this update is a native no-op.
@@ -695,6 +752,27 @@ impl OpenCodeClient {
             }
         }
     }
+}
+
+pub fn session_permissions(read_only: bool, repo_skills: Option<&[String]>, factory_skills: &[String], local_mcps: &[String], managed: bool) -> Option<serde_json::Value> {
+    if read_only {
+        return Some(serde_json::json!([{"action":"*","resource":"*","effect":"deny"}]));
+    }
+    let mut rules = Vec::new();
+    if let Some(skills) = repo_skills {
+        rules.push(serde_json::json!({"action":"skill","resource":"*","effect":"deny"}));
+        rules.extend(skills.iter().map(|id| serde_json::json!({"action":"skill","resource":id,"effect":"allow"})));
+    }
+    if managed {
+        rules.push(serde_json::json!({"action":"skill","resource":format!("{}*",factory_core::FACTORY_SKILL_PREFIX),"effect":"deny"}));
+        rules.extend(factory_skills.iter().map(|id| serde_json::json!({"action":"skill","resource":id,"effect":"allow"})));
+    }
+    for name in local_mcps {
+        rules.push(serde_json::json!({"action":format!("{name}_*"),"resource":"*","effect":"allow"}));
+        rules.push(serde_json::json!({"action":"opencode_list_mcp_resources","resource":name,"effect":"allow"}));
+        rules.push(serde_json::json!({"action":"opencode_read_mcp_resource","resource":format!("{name}:*"),"effect":"allow"}));
+    }
+    (!rules.is_empty()).then_some(serde_json::Value::Array(rules))
 }
 
 fn safe_id(id: &str) -> Result<()> {

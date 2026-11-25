@@ -38,8 +38,10 @@ getrennt; Rückfragenauswertungen gehören zum Orchestrator, Wissensextraktion z
 Terminale Auswertungen erscheinen im Archiv, unabhängig davon, ob die native
 OpenCode-Archivierung bereits erreichbar war. Auch fehlgeschlagene Auswertungen
 bleiben dort lesbar; Suchfeld und Zähler gelten für den jeweiligen Tab.
-Verteilung, Sessionlimit, Supervisor-Konfiguration und Supervisorhistorie liegen
-unter **Erweiterte Projekteinstellungen**, nicht oberhalb der Sessionlisten.
+Die Anzahl gleichzeitig arbeitender Sessions steht unter **Projekteinstellungen
+→ Limits**. Unter **Projekteinstellungen → Supervisor** steht das Prüfintervall
+in Minuten. Supervisor-Läufe sind auf der Supervisor-Seite sichtbar; Orchestrator
+und Memorizer starten bei Bedarf und haben kein eigenes Prüfintervall.
 
 Ohne feste Auswahl erzeugt der Scheduler einen dauerhaften, schreibgeschützten
 OpenCode-Auftrag im projektbezogenen Orchestrator-Arbeitsbereich. Das Modell erhält
