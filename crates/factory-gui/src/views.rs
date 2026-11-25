@@ -760,13 +760,15 @@ impl App {
                                 let attachments = t.images.len() + t.files.len();
                                 let session = task_session_command(&s, t);
                                 let editable = t.draft || s.editable_tasks.contains_key(&t.id);
-                                let labels = if session.is_some() {
+                                 let mut labels = if session.is_some() {
                                     vec![crate::tr!("Anzeigen"), crate::tr!("OpenCode anzeigen")]
                                 } else if editable {
                                     vec![crate::tr!("Anzeigen"), crate::tr!("Bearbeiten")]
                                 } else {
                                     vec![crate::tr!("Anzeigen")]
-                                };
+                                 };
+                                 let retryable = retryable_task(&s, t);
+                                 if retryable { labels.push(crate::tr!("Erneut einreihen")); }
                                 let reserved = labels
                                     .iter()
                                     .map(|label| {
@@ -834,8 +836,15 @@ impl App {
                                 ui.allocate_ui_with_layout(
                                     egui::vec2(ui.available_width(), _date.rect.height()),
                                     egui::Layout::right_to_left(egui::Align::Max),
-                                    |ui| {
-                                        if let Some(command) = session {
+                                     |ui| {
+                                         if retryable {
+                                             let path = format!("/v1/tasks/{}/retry", t.id);
+                                             let pending = self.settings.pending.iter().any(|r| r.server == self.server && r.path == path);
+                                             if ui.add_enabled(self.online && !pending, egui::Button::new(crate::tr!("Erneut einreihen"))).clicked() {
+                                                 self.requeue_task(t);
+                                             }
+                                         }
+                                         if let Some(command) = session {
                                             let action = ui.button(crate::tr!("OpenCode anzeigen"));
                                             #[cfg(test)]
                                             ui.ctx().data_mut(|d| {
@@ -1728,6 +1737,7 @@ impl App {
         let project = tab.project;
         let can_prompt = self.snapshot.as_ref().is_some_and(|s|
             can_prompt_session(s, project, root));
+        let rows = conversation::transcript_rows(entries, self.snapshot.as_deref(), root, tab.selected_execution);
         if can_prompt {
             let panel = egui::TopBottomPanel::bottom(egui::Id::new(("session-prompt", root)))
                 .show_separator_line(false)
@@ -1743,16 +1753,16 @@ impl App {
             #[cfg(not(test))]
             let _ = panel;
         }
-        if self.online && entries.is_empty() && !working {
+        if self.online && rows.is_empty() && !working {
             ui.label(crate::tr!("Noch keine archivierten Nachrichten verfügbar."));
         }
         let list_key = format!("archive/{root}");
         let mut list = self.take_list(
             &list_key,
             hash_of(
-                entries
+                rows
                     .iter()
-                    .map(|(_, entry)| (entry.message["id"].as_str().unwrap_or(""), entry.sequence))
+                    .map(conversation::TranscriptRow::key)
                     .collect::<Vec<_>>(),
             ),
         );
@@ -1764,16 +1774,24 @@ impl App {
         }
         let scroll = scroll.show(ui, |ui| {
             conversation::transcript_style(ui);
-            list.list.ui_custom_layout(ui, entries.len(), |ui, index| {
-                let (command, entry) = &entries[index];
-                let row_id = if show_versions {
-                    format!("revision/{}", entry.sequence)
-                } else {
-                    format!("message/{}", entry.message["id"].as_str().unwrap_or(""))
-                };
-                ui.push_id(row_id, |ui| {
-                    conversation::message(ui, self, *command, entry, show_versions);
-                });
+            list.list.ui_custom_layout(ui, rows.len(), |ui, index| {
+                match &rows[index] {
+                    conversation::TranscriptRow::Message(command, entry) => {
+                        let row_id = if show_versions {
+                            format!("revision/{}", entry.sequence)
+                        } else {
+                            format!("message/{}", entry.message["id"].as_str().unwrap_or(""))
+                        };
+                        ui.push_id(row_id, |ui| {
+                            conversation::message(ui, self, *command, entry, show_versions);
+                        });
+                    }
+                    conversation::TranscriptRow::Question(question) => {
+                        ui.push_id(("question", question.id), |ui| {
+                            conversation::question(ui, question);
+                        });
+                    }
+                }
                 let height = conversation::line_height(ui);
                 ui.add_space(height);
                 1

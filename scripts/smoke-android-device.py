@@ -5,6 +5,7 @@ Resets only dev.yoloforge.mobile on the explicitly selected emulator. No model c
 """
 import argparse,base64,hashlib,json,os,re,secrets,select,struct,subprocess,tempfile,time,urllib.request,uuid,xml.etree.ElementTree as ET,zlib
 from pathlib import Path
+from cargo_paths import profile_dir
 root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--serial',required=True)
@@ -40,7 +41,7 @@ def api(method,path,body=None,registration=None):
     with urllib.request.urlopen(request,timeout=10) as response:return json.load(response)
 def rid():return str(uuid.uuid4())
 env={**os.environ,'FACTORY_TOKEN':secrets.token_hex(32)};env.pop('FACTORY_TOKEN_FILE',None)
-server=subprocess.Popen([str(root/'target/debug/factoryd'),'--listen','127.0.0.1:0','--database',str(base/'db')],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+server=subprocess.Popen([str(profile_dir(root=root)/'factoryd'),'--listen','127.0.0.1:0','--database',str(base/'db')],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
 port=None
 try:
     assert select.select([server.stdout],[],[],10)[0]

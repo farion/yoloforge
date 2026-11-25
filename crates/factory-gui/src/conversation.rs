@@ -18,6 +18,106 @@ const TOOL_OUTPUT: Color32 = Color32::from_rgb(145, 151, 161);
 const USER_BACKGROUND: Color32 = Color32::from_rgb(30, 35, 43);
 const USER_MARKER_WIDTH: f32 = 6.0;
 
+#[derive(Clone)]
+pub enum TranscriptRow {
+    Message(CommandId, std::sync::Arc<ArchivedMessage>),
+    Question(Question),
+}
+
+impl TranscriptRow {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Message(_, entry) => format!("message/{}/{}", entry.message["id"].as_str().unwrap_or(""), entry.sequence),
+            Self::Question(q) => format!("question/{}/{}", q.id, q.revision.0),
+        }
+    }
+}
+
+/// Questions come from the durable snapshot, not optional native tool output.
+/// Keep them with their execution, even offline or before any archive arrives.
+pub fn transcript_rows(
+    entries: Vec<(CommandId, std::sync::Arc<ArchivedMessage>)>,
+    snapshot: Option<&factory_protocol::Snapshot>,
+    root: CommandId,
+    selected: Option<CommandId>,
+) -> Vec<TranscriptRow> {
+    let mut questions = snapshot.map(|s| s.questions.iter().filter(|q|
+        q.session_id == agent_session_id(root)
+            && selected.is_none_or(|id| q.command_id == id)
+            && s.commands.iter().any(|c| c.id == q.command_id && c.session_root() == root)
+    ).cloned().collect::<Vec<_>>()).unwrap_or_default();
+    let last_entries: std::collections::BTreeMap<_, _> = entries.iter().enumerate()
+        .map(|(index, (command, _))| (*command, index)).collect();
+    let mut rows = Vec::new();
+    for (index, (command, entry)) in entries.iter().enumerate() {
+        rows.push(TranscriptRow::Message(*command, entry.clone()));
+        // Prefer the matching native question/permission tool as an anchor.
+        // Otherwise retain server question order at the end of the execution.
+        let last = last_entries.get(command) == Some(&index);
+        let mut remaining = Vec::new();
+        for q in questions {
+            let anchored = parts(&entry.message).iter().any(|part| match part {
+                Part::Tool(tool) => {
+                    tool["id"].as_str() == Some(q.external.external_id.as_str())
+                        || tool["callID"].as_str() == Some(q.external.external_id.as_str())
+                        || tool_input(tool)["id"].as_str() == Some(q.external.external_id.as_str())
+                }
+                _ => false,
+            });
+            if q.command_id == *command && (anchored || last) {
+                rows.push(TranscriptRow::Question(q));
+            } else {
+                remaining.push(q);
+            }
+        }
+        questions = remaining;
+    }
+    rows.extend(questions.into_iter().map(TranscriptRow::Question));
+    rows
+}
+
+pub fn question(ui: &mut egui::Ui, question: &Question) {
+    let width = ui.available_width();
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0)).show(ui, |ui| {
+        ui.set_min_width((width - 44.0).max(1.0));
+        transcript_style(ui);
+        let payload = &question.external.payload;
+        let title = payload["title"].as_str().unwrap_or(
+            if question.external.kind == QuestionKind::Permission { crate::tr!("Berechtigung") } else { crate::tr!("Rückfrage") });
+        read_text(ui, crate::tr!("Frage"), true);
+        if !crate::model::generic_question_title(title) { read_text(ui, title, true); }
+        if let Some(description) = payload["description"].as_str() { read_text(ui, description, true); }
+        if question.external.kind == QuestionKind::Permission {
+            for (key, label) in [
+                ("action", crate::tr!("Aktion")), ("permission", crate::tr!("Berechtigung")),
+                ("resource", crate::tr!("Ziel")), ("patterns", crate::tr!("Geltungsbereich")),
+                ("command", crate::tr!("Befehl")),
+            ] {
+                if let Some(value) = payload.get(key).filter(|v| !v.is_null()) {
+                    read_text(ui, &format!("{label}: {}", crate::dialogs::answer_text(value, None)), true);
+                }
+            }
+            if let Some(command) = payload["metadata"]["command"].as_str() {
+                read_text(ui, &crate::tr!("Befehl: {command}", command = command), true);
+            }
+        }
+        let fields: Vec<_> = payload["fields"].as_array().into_iter().flatten()
+            .filter(|field| field["hidden"] != true).collect();
+        if fields.is_empty() && payload["fields"].as_array().is_none_or(Vec::is_empty) {
+            read_text(ui, crate::tr!("Antwort"), true);
+            read_text(ui, &crate::dialogs::question_answer_text(question, None), true);
+        } else {
+            for field in fields {
+                if let Some(label) = field["title"].as_str().filter(|label| *label != title) { read_text(ui, label, true); }
+                if let Some(description) = field["description"].as_str() { read_text(ui, description, true); }
+                read_text(ui, crate::tr!("Antwort"), true);
+                read_text(ui, &crate::dialogs::question_answer_text(question, Some(field)), true);
+            }
+        }
+        ui.colored_label(MUTED, crate::model::question_status(question.state));
+    });
+}
+
 pub fn line_height(ui: &mut egui::Ui) -> f32 {
     ui.fonts_mut(|fonts| fonts.row_height(&FontId::monospace(CLI_FONT_SIZE)))
 }

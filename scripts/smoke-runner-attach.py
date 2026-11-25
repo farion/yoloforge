@@ -12,6 +12,7 @@ import struct
 import termios
 import time
 from pathlib import Path
+from cargo_paths import profile_dir
 import pyte
 
 parser=argparse.ArgumentParser(description=__doc__)
@@ -29,7 +30,7 @@ config.setdefault("keybinds",{})["app.exit"]="f12"
 env["OPENCODE_CLI_CONFIG_CONTENT"]=json.dumps(config)
 pid,fd=pty.fork()
 if pid==0:
-    executable=str(root/"target/debug/factory-runner")
+    executable=str(profile_dir(root=root)/"factory-runner")
     os.execve(executable,[executable,"--id",args.runner,"--name","attachment-test","--server",args.server,"--journal",args.journal,"--open-session",args.command],env)
 fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack("HHHH",42,160,0,0))
 screen=pyte.Screen(160,42)

@@ -8,6 +8,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import secrets
 import select
 import struct
@@ -250,7 +251,7 @@ def main():
     if args.memory:
         args.followup=True
     if args.local_registration:
-        inside(ROOT / "target/debug", args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory, args.native_pause, args.memory_correction, args.supervisor)
+        inside(profile_dir(), args.provider, args.model, json.loads(args.local_registration.read_text()), args.followup, args.memory, args.native_pause, args.memory_correction, args.supervisor)
         return
     if args.inside:
         inside(args.inside, args.provider, args.model, followup=args.followup, memory=args.memory, native_pause=args.native_pause, memory_correction=args.memory_correction, supervisor=args.supervisor)
@@ -261,8 +262,9 @@ def main():
     subprocess.run(["docker", "exec", container, "mkdir", target], check=True, capture_output=True)
     try:
         for name in ["factoryd", "factory-runner"]:
-            subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + target + "/" + name], check=True, capture_output=True)
+            subprocess.run(["docker", "cp", str(profile_dir() / name), container + ":" + target + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + target + "/test.py"], check=True, capture_output=True)
+        subprocess.run(["docker", "cp", str(ROOT / "scripts/cargo_paths.py"), container + ":" + target + "/cargo_paths.py"], check=True, capture_output=True)
         result = subprocess.run(["docker", "exec", "-i", container, "python3", target + "/test.py", "--inside", target,"--provider",args.provider,"--model",args.model] + (["--followup"] if args.followup else []) + (["--memory"] if args.memory else []) + (["--native-pause"] if args.native_pause else []) + (["--memory-correction"] if args.memory_correction else []) + (["--supervisor"] if args.supervisor else []),
             input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=900 if args.memory else 600 if args.followup else 300)
         assert result.returncode == 0, "Real image-prompt acceptance failed"

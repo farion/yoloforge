@@ -225,6 +225,13 @@ Container benötigen das Paket ebenfalls. Der Test ist kein Remote-SSH-Nachweis.
 
 ## Manuell ausprobieren
 
+Die folgenden Beispiele verwenden `CARGO_BIN_DIR`. In jedem Terminal aus dem
+Repository setzen (berücksichtigt auch einen globalen Cargo-Buildordner):
+
+```sh
+export CARGO_BIN_DIR="$(python3 scripts/cargo_paths.py)"
+```
+
 Für diese Entwicklungsstufe verwenden Server, Runner und TUI denselben zufälligen
 Token. Folgendes erzeugt einmalig eine nur für den Benutzer lesbare lokale Datei;
 eine vorhandene Datei wird nicht überschrieben:
@@ -242,7 +249,7 @@ Terminal 1, aus dem Repository:
 
 ```sh
 source .factory-dev.env
-target/debug/factoryd
+"$CARGO_BIN_DIR/factoryd"
 ```
 
 Standard-Datenbank: `.factory-data/factory.sqlite3` (von Git ausgeschlossen).
@@ -254,7 +261,7 @@ Terminal 2:
 
 ```sh
 source .factory-dev.env
-target/debug/factory-runner \
+"$CARGO_BIN_DIR/factory-runner" \
   --id 78d15fe6-56c2-47bd-b367-14833c384a71 \
   --name Laptop --location local \
   --opencode-registration "$HOME/.local/state/opencode/service.json"
@@ -270,14 +277,14 @@ Terminal 3 und beliebig weitere:
 
 ```sh
 source .factory-dev.env
-target/debug/factory
+"$CARGO_BIN_DIR/factory"
 ```
 
 `q`, Esc oder Ctrl+C beendet die Oberfläche; die Runner bleiben eigenständige
 Prozesse. Ohne interaktive Oberfläche:
 
 ```sh
-target/debug/factory --snapshot
+"$CARGO_BIN_DIR/factory" --snapshot
 ```
 
 In der TUI wechselt `1` zu Runnern, `2` zu Projekten, `3` zu Tickets. Links/rechts
@@ -289,22 +296,22 @@ TUIs sehen Änderungen beim nächsten Snapshot-Abruf (ungefähr eine Sekunde).
 In einem Terminal mit geladenem `FACTORY_TOKEN`:
 
 ```sh
-target/debug/factory project create \
+"$CARGO_BIN_DIR/factory" project create \
   --name yoloforge --repository git@github.com:farion/yoloforge.git
-target/debug/factory project list
+"$CARGO_BIN_DIR/factory" project list
 ```
 
 `project create` speichert Metadaten; es klont noch kein Repository und prüft
 keinen Hosting-Zugang. Die zurückgegebene Projekt-ID für Tickets verwenden:
 
 ```sh
-target/debug/factory ticket create \
+"$CARGO_BIN_DIR/factory" ticket create \
   --project <PROJEKT-ID> --title 'SSH-Verbindungsprofil einrichten' \
   --description 'Host, Benutzer und Schlüssel im Client auswählen' \
   --acceptance-criteria 'Die Verbindung über einen vorhandenen SSH-Tunnel funktioniert' \
   --priority 2
-target/debug/factory ticket list --project <PROJEKT-ID>
-target/debug/factory ticket update <TICKET-ID> --expected-revision 1 --status ready
+"$CARGO_BIN_DIR/factory" ticket list --project <PROJEKT-ID>
+"$CARGO_BIN_DIR/factory" ticket update <TICKET-ID> --expected-revision 1 --status ready
 ```
 
 Priorität: 0 niedrig, 1 normal, 2 hoch, 3 dringend. Neue Tickets beginnen in
@@ -325,7 +332,7 @@ Ein Update mit veralteter `--expected-revision` führt zu HTTP 409
 bewusst zusammenführen; die CLI überschreibt den Konflikt nicht automatisch.
 
 ```sh
-target/debug/factory events --after 0
+"$CARGO_BIN_DIR/factory" events --after 0
 ```
 
 Dies liefert eine JSON-Seite mit höchstens 100 Ereignissen und `next_cursor`.
@@ -335,11 +342,11 @@ zusätzlich `limit` von 1 bis 500. Das ist noch kein SSE-Abonnement.
 ## Streams und Runner-Aufträge
 
 ```sh
-target/debug/factory stream create --project <PROJEKT-ID> \
+"$CARGO_BIN_DIR/factory" stream create --project <PROJEKT-ID> \
   --goal 'Aufgabe umsetzen' --runner <RUNNER-ID> --ticket <TICKET-ID>
-target/debug/factory stream list
-target/debug/factory stream check <STREAM-ID> --expected-revision 1
-target/debug/factory commands --stream <STREAM-ID>
+"$CARGO_BIN_DIR/factory" stream list
+"$CARGO_BIN_DIR/factory" stream check <STREAM-ID> --expected-revision 1
+"$CARGO_BIN_DIR/factory" commands --stream <STREAM-ID>
 ```
 
 `--ticket` kann mehrfach angegeben werden. Tickets müssen zum Projekt gehören
@@ -387,7 +394,7 @@ Factory-Projekten zugeordnet. Eine JSON-Datei, etwa `repositories.json`:
 Den Runner mit der bestehenden ID und seinem bestehenden Journal starten:
 
 ```sh
-target/debug/factory-runner --id <RUNNER-ID> --name laptop \
+"$CARGO_BIN_DIR/factory-runner" --id <RUNNER-ID> --name laptop \
   --repositories /pfad/repositories.json \
   --workspace-root /home/USER/factory-workspaces
 ```
@@ -399,9 +406,9 @@ geplanter Stream behält Repository, Root, Branch und Ausgangs-Commit; geändert
 Zuordnungen führen zum Fehler statt zur stillen Verschiebung.
 
 ```sh
-target/debug/factory stream list
-target/debug/factory stream prepare <STREAM-ID> --expected-revision <AKTUELLE-REVISION>
-target/debug/factory commands --stream <STREAM-ID>
+"$CARGO_BIN_DIR/factory" stream list
+"$CARGO_BIN_DIR/factory" stream prepare <STREAM-ID> --expected-revision <AKTUELLE-REVISION>
+"$CARGO_BIN_DIR/factory" commands --stream <STREAM-ID>
 ```
 
 Der erfolgreiche Auftrag enthält `result.workspace` mit absolutem Runner-Pfad,
@@ -435,7 +442,7 @@ Ausführungsort verfügbare Modell. `configure` ersetzt das gesamte Profil mit
 Revisionsschutz; ausgelassene Textoptionen werden leer:
 
 ```sh
-target/debug/factory project configure <PROJEKT-ID> --expected-revision 1 \
+"$CARGO_BIN_DIR/factory" project configure <PROJEKT-ID> --expected-revision 1 \
   --toolchain 'Rust stable' --test-command 'cargo test --workspace --locked' \
   --start-command 'cargo run -p factoryd' --provider openai --model gpt-6-astra
 ```
@@ -449,10 +456,10 @@ Die Provider-Anmeldung bleibt beim jeweiligen OpenCode-Service.
 Nach erfolgreichem `stream prepare`:
 
 ```sh
-target/debug/factory stream list
-target/debug/factory stream run <STREAM-ID> --expected-revision <AKTUELLE-REVISION> \
+"$CARGO_BIN_DIR/factory" stream list
+"$CARGO_BIN_DIR/factory" stream run <STREAM-ID> --expected-revision <AKTUELLE-REVISION> \
   --prompt 'Implementiere die Aufgabe im Worktree, führe die Tests aus und berichte die Ergebnisse.'
-target/debug/factory commands --stream <STREAM-ID>
+"$CARGO_BIN_DIR/factory" commands --stream <STREAM-ID>
 ```
 
 Ein Lauf erhält eine eigene OpenCode-Session und einen unveränderlichen Snapshot
@@ -532,11 +539,11 @@ auch für eine Wiederholung derselben Antwort per CLI verwendet werden.
 Alternativ liefert und bearbeitet die CLI dieselben Fragen:
 
 ```sh
-target/debug/factory question list
-target/debug/factory question list --command <COMMAND-ID>
-target/debug/factory question answer <FRAGE-ID> --expected-revision 1 \
+"$CARGO_BIN_DIR/factory" question list
+"$CARGO_BIN_DIR/factory" question list --command <COMMAND-ID>
+"$CARGO_BIN_DIR/factory" question answer <FRAGE-ID> --expected-revision 1 \
   --answer-json '{"choice":"meine Antwort"}'
-target/debug/factory question answer <PERMISSION-FRAGE-ID> --expected-revision 1 \
+"$CARGO_BIN_DIR/factory" question answer <PERMISSION-FRAGE-ID> --expected-revision 1 \
   --decision once
 ```
 

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import subprocess
 import tempfile
 import time
@@ -58,7 +59,7 @@ def main():
             def cli(token_file, *arguments):
                 env = {**os.environ, "FACTORY_TOKEN_FILE": str(token_file)}
                 env.pop("FACTORY_TOKEN", None)
-                result = subprocess.run([str(ROOT / "target/debug/factory"), "--server", url, *arguments], env=env,
+                result = subprocess.run([str(profile_dir() / "factory"), "--server", url, *arguments], env=env,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 if result.returncode:
                     raise RuntimeError("Factory CLI failed: " + result.stderr)

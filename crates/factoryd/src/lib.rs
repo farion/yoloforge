@@ -208,6 +208,9 @@ pub fn router_with_shutdown(
             get(mcp_routes::project).put(mcp_routes::save_project),
         )
         .route("/v1/tasks/{id}/edit", post(desktop::begin_task_edit))
+        .route("/v1/tasks/{id}/retry", post(desktop::retry_task))
+        .route("/v1/runners/{id}/restart",
+            get(desktop::runner_restart_status).put(desktop::hold_runner_restart).delete(desktop::release_runner_restart))
         .route("/v1/commands/{id}", get(desktop::command_payload))
         .route("/v1/events/history", get(desktop::event_history))
         .route(
@@ -766,6 +769,7 @@ async fn runner_snapshot(State(app): State<App>, Path(id): Path<RunnerId>) -> Re
             || p.runner_bindings.contains_key(&id) || p.setup.as_ref().is_some_and(|setup| setup.runner_id == id));
         Ok(serde_json::json!({
             "protocol_version": PROTOCOL_VERSION, "server_version": env!("CARGO_PKG_VERSION"),
+            "server_capabilities": [TARGET_GIT_CAPABILITY, RUNNER_RESTART_CAPABILITY],
             "boot_id": boot, "revision": 0, "runners": [],
             "projects": snapshot.projects, "streams": snapshot.streams, "commands": snapshot.commands,
         }))
@@ -811,6 +815,7 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
     };
     let registry = app.registry.read().await;
     Json(Snapshot {
+        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
         editable_tasks: durable.editable_tasks,

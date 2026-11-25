@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import socket
 import subprocess
 import tempfile
@@ -54,7 +55,7 @@ def main():
             env = {**os.environ, "FACTORY_TOKEN_FILE": str(token)}
             env.pop("FACTORY_TOKEN", None)
             command = ["python3", str(ROOT / "scripts/factory-connect.py"), "--host", "factory-test", "--ssh-config", str(config),
-                       "--local-port", str(local_port), "--", str(ROOT / "target/debug/factory"), "--snapshot"]
+                       "--local-port", str(local_port), "--", str(profile_dir() / "factory"), "--snapshot"]
             result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=40)
             assert result.returncode == 0, result.stderr
             assert json.loads(result.stdout)["protocol_version"] == 1

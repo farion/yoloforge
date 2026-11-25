@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import select
 import subprocess
 import tempfile
@@ -19,7 +20,7 @@ args=parser.parse_args()
 Path("/tmp/opencode").mkdir(mode=0o700,parents=True,exist_ok=True)
 directory=Path(tempfile.mkdtemp(prefix="yf-android-api-",dir="/tmp/opencode"))
 env={**os.environ,"FACTORY_TOKEN":uuid.uuid4().hex*2};env.pop("FACTORY_TOKEN_FILE",None)
-server=subprocess.Popen([str(root/"target/debug/factoryd"),"--listen","127.0.0.1:0","--database",str(directory/"db")],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+server=subprocess.Popen([str(profile_dir(root=root)/"factoryd"),"--listen","127.0.0.1:0","--database",str(directory/"db")],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
 adb=["adb","-s",args.serial]
 port=None
 try:

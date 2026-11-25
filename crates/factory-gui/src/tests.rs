@@ -4727,6 +4727,217 @@ fn footer_settings_open_a_trimmed_dialog_and_keep_navigation_when_reopened() {
 }
 
 #[test]
+fn retried_git_intent_is_only_archived_after_confirmed_git_success() {
+    let mut app = fixture();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    s.questions.clear();
+    s.commands[0].kind = CommandKind::TargetGit;
+    s.commands[0].state = CommandState::Failed;
+    s.commands[0].agent_spec = None;
+    s.commands[0].agent_progress = None;
+    assert!(retryable_task(s, &s.tickets[0]));
+    assert_eq!(task_bucket(s, &s.tickets[0]), TaskBucket::Current);
+    s.commands[0].state = CommandState::Pending;
+    assert!(!retryable_task(s, &s.tickets[0]));
+    assert_eq!(task_bucket(s, &s.tickets[0]), TaskBucket::Current);
+    s.commands[0].state = CommandState::Succeeded;
+    assert_eq!(task_bucket(s, &s.tickets[0]), TaskBucket::Current);
+    s.commands[0].result = Some(CommandOutput::TargetGit { git_succeeded: true, git_summary: "Published".into() });
+    assert_eq!(task_bucket(s, &s.tickets[0]), TaskBucket::Archive);
+}
+
+#[test]
+fn failed_intent_can_be_requeued_from_its_dialog_without_duplicate_writes() {
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.questions.clear();
+    snapshot.commands[0].kind = CommandKind::TargetGit;
+    snapshot.commands[0].state = CommandState::Failed;
+    snapshot.commands[0].agent_spec = None;
+    snapshot.commands[0].agent_progress = None;
+    snapshot.commands[0].result = Some(CommandOutput::TargetGit {
+        git_succeeded: false, git_summary: "No staged changes".into(),
+    });
+    let ticket = snapshot.tickets[0].clone();
+    let mut dialog = Dialog::task_read_only(app.server.clone(), ticket.project_id, &ticket, true);
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, dialog: &mut Dialog, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| { assert!(!dialog.show(ctx, app)); });
+    for _ in 0..3 { let _ = render(&mut app, &mut dialog, vec![]); }
+    let button: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-retry", ticket.id)))).unwrap();
+    let _ = render(&mut app, &mut dialog, click_events(button.center()));
+    let request = app.settings.pending.last().unwrap().clone();
+    assert_eq!(request.path, format!("/v1/tasks/{}/retry", ticket.id));
+    assert_eq!(request.body["expected_revision"], json!(ticket.revision));
+    assert_eq!(request.body["previous_command"], json!(ticket.execution_command));
+    let count = app.settings.pending.len();
+    app.requeue_task(&ticket);
+    assert_eq!(app.settings.pending.len(), count);
+    let mut requeued = ticket.clone();
+    requeued.revision.0 += 1;
+    requeued.execution_command = Some(CommandId::new());
+    app.backend.emit_for_test(crate::backend::Event::Request(request.id, Ok(json!(requeued))));
+    app.receive();
+    assert_eq!(app.notices.last().unwrap().0, crate::tr!("Intent erneut eingereiht."));
+    assert_eq!(app.snapshot.as_ref().unwrap().tickets[0].execution_command, requeued.execution_command);
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
+fn retry_failures_are_toasts_and_active_or_offline_intents_are_not_requeued() {
+    let mut app = fixture();
+    let ticket = app.snapshot.as_ref().unwrap().tickets[0].clone();
+    assert!(!retryable_task(app.snapshot.as_ref().unwrap(), &ticket));
+    app.requeue_task(&ticket);
+    assert!(app.settings.pending.is_empty());
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).commands[0].state = CommandState::Failed;
+    app.online = false;
+    app.requeue_task(&ticket);
+    assert!(app.settings.pending.is_empty());
+    app.online = true;
+    app.requeue_task(&ticket);
+    let request = app.settings.pending.last().unwrap().clone();
+    app.backend.emit_for_test(crate::backend::Event::Request(request.id, Err(crate::backend::Failure {
+        message: "HTTP diagnostic".into(), uncertain: false,
+    })));
+    app.receive();
+    assert_eq!(app.notices.last().unwrap().0, crate::tr!("Intent konnte nicht erneut eingereiht werden. Details stehen in der Diagnose."));
+    assert!(app.action_errors.iter().any(|(_, text)| text.contains("HTTP diagnostic")));
+}
+
+#[test]
+fn opencode_session_view_shows_automatic_answers_without_native_messages() {
+    let mut app = fixture();
+    app.online = true;
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let root = snapshot.commands[0].session_root();
+    snapshot.questions.truncate(1);
+    snapshot.questions[0].state = QuestionState::Answered;
+    snapshot.questions[0].answer = Some(json!({"color":"blue"}));
+    snapshot.questions[0].orchestration_note = "answer queued: automatic response".into();
+    app.open_session(app.settings.project.unwrap(), root);
+    assert!(app.tabs[0].archives.is_empty());
+    let ctx = app.backend.context().clone();
+    let mut text = vec![];
+    for _ in 0..3 {
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 800.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        text.clear();
+        for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    }
+    assert!(text.iter().any(|line| line == crate::tr!("Antwort")), "{text:?}");
+    assert!(text.iter().any(|line| line == "Blau"), "{text:?}");
+    assert!(!text.iter().any(|line| line.contains("Noch keine archivierten Nachrichten")));
+}
+
+#[test]
+fn opencode_transcript_always_contains_human_and_automatic_question_answers_without_archives() {
+    let mut app = fixture();
+    app.online = false;
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let root = snapshot.commands[0].session_root();
+    snapshot.questions.truncate(2);
+    for (index, q) in snapshot.questions.iter_mut().enumerate() {
+        q.state = QuestionState::Answered;
+        q.answer = Some(json!({"color": if index == 0 { "blue" } else { "green" }}));
+        q.orchestration_note = if index == 0 { String::new() } else { "answer queued: model selected green".into() };
+    }
+    let rows = crate::conversation::transcript_rows(vec![], Some(snapshot), root, None);
+    assert_eq!(rows.len(), 2, "Snapshot questions must not depend on native archive output");
+    let ctx = app.backend.context().clone();
+    let output = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            for row in &rows {
+                let crate::conversation::TranscriptRow::Question(q) = row else { panic!("Expected a question"); };
+                crate::conversation::question(ui, q);
+            }
+        });
+    });
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert_eq!(text.iter().filter(|line| line.as_str() == crate::tr!("Frage")).count(), 2);
+    assert_eq!(text.iter().filter(|line| line.as_str() == crate::tr!("Antwort")).count(), 2);
+    assert!(text.iter().any(|line| line == "Blau"), "{text:?}");
+    assert!(text.iter().any(|line| line == "green"), "{text:?}");
+    assert!(!text.iter().any(|line| line.contains("answer queued:") || line.contains("external_id")));
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
+fn opencode_question_rows_are_execution_scoped_stable_and_invalidate_on_answer_updates() {
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let root = snapshot.commands[0].session_root();
+    let command = snapshot.commands[0].id;
+    snapshot.questions.truncate(1);
+    let question = snapshot.questions[0].clone();
+    let mut foreign = question.clone();
+    foreign.id = QuestionId::new();
+    foreign.session_id = agent_session_id(CommandId::new());
+    snapshot.questions.push(foreign);
+    let entry = |sequence, body| Arc::new(ArchivedMessage {
+        sequence, sample_revision: 1, captured_unix_ms: sequence, message: body,
+    });
+    let entries = vec![
+        (command, entry(1, json!({"id":"tool","type":"assistant","content":[
+            {"type":"tool","id":question.external.external_id,"name":"question","state":{"input":{}}}
+        ]}))),
+        (command, entry(2, json!({"id":"after","type":"assistant","text":"After the answer"}))),
+    ];
+    let rows = crate::conversation::transcript_rows(entries.clone(), Some(snapshot), root, None);
+    assert_eq!(rows.len(), 3);
+    assert!(matches!(&rows[1], crate::conversation::TranscriptRow::Question(q) if q.id == question.id));
+    let old_key = rows[1].key();
+    snapshot.questions[0].revision.0 += 1;
+    snapshot.questions[0].state = QuestionState::AnswerQueued;
+    snapshot.questions[0].answer = Some(json!({"color":"blue"}));
+    let updated = crate::conversation::transcript_rows(entries.clone(), Some(snapshot), root, Some(command));
+    assert_ne!(updated[1].key(), old_key, "Answer changes must invalidate virtual row heights");
+    let selected_other = crate::conversation::transcript_rows(vec![], Some(snapshot), root, Some(CommandId::new()));
+    assert!(selected_other.is_empty());
+    assert_eq!(crate::conversation::transcript_rows(entries, None, root, None).len(), 2);
+}
+
+#[test]
+fn opencode_question_answers_show_pending_delivery_and_permissions_without_hidden_values() {
+    let app = fixture();
+    let mut question = app.snapshot.as_ref().unwrap().questions[0].clone();
+    question.external.payload = json!({"title":"Questions","fields":[
+        {"key":"color","title":"Pick a color","options":[{"value":"blue","label":"Blue option"}]},
+        {"key":"secret","title":"Hidden field","hidden":true}
+    ]});
+    question.answer = Some(json!({"color":"blue","secret":"HIDDEN_SECRET"}));
+    let ctx = app.backend.context().clone();
+    for state in [QuestionState::Pending, QuestionState::AnswerQueued, QuestionState::Answered,
+        QuestionState::Rejected, QuestionState::Unknown] {
+        question.state = state;
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| crate::conversation::question(ui, &question));
+        });
+        let mut text = vec![];
+        for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+        assert!(text.iter().any(|line| line == "Pick a color"));
+        assert!(text.iter().any(|line| line == "Blue option"));
+        assert!(text.iter().any(|line| line == question_status(state)), "{text:?}");
+        assert!(!text.iter().any(|line| line.contains("HIDDEN_SECRET") || line.contains("Hidden field")));
+    }
+    question.external.kind = QuestionKind::Permission;
+    question.external.payload = json!({"title":"Run tests?","permission":"shell","metadata":{"command":"cargo test"}});
+    question.answer = Some(json!({"decision":"once"}));
+    let output = ctx.run(egui::RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| crate::conversation::question(ui, &question));
+    });
+    let mut text = vec![];
+    for shape in output.shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|line| line == crate::tr!("Einmal erlaubt")));
+    assert!(text.iter().any(|line| line.contains("cargo test")));
+}
+
+#[test]
 fn opencode_points_only_show_while_working_and_archived_errors_are_readable() {
     let mut app = fixture();
     app.online = true;

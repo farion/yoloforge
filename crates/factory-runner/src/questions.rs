@@ -301,6 +301,7 @@ mod tests {
         )
         .unwrap();
         let args = Args {
+            instance_id: None,
             control_file: None,
             open_session: None,
             fetch_repository: None,

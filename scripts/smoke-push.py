@@ -4,6 +4,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import select
 import socket
 import sqlite3
@@ -35,7 +36,7 @@ provider=http.server.ThreadingHTTPServer(("127.0.0.1",0),Provider)
 thread=threading.Thread(target=provider.serve_forever,daemon=True);thread.start()
 config=directory/"push.json";config.write_text(json.dumps({"endpoint":f"http://127.0.0.1:{provider.server_port}/private-test-topic"}))
 def start():
-    p=subprocess.Popen([str(root/"target/debug/factoryd"),"--listen","127.0.0.1:0","--database",str(directory/"db"),"--push-config",str(config)],env=env,stdout=subprocess.PIPE,stderr=(directory/"server.log").open("a"),text=True)
+    p=subprocess.Popen([str(profile_dir(root=root)/"factoryd"),"--listen","127.0.0.1:0","--database",str(directory/"db"),"--push-config",str(config)],env=env,stdout=subprocess.PIPE,stderr=(directory/"server.log").open("a"),text=True)
     assert select.select([p.stdout],[],[],10)[0];return p,"http://"+p.stdout.readline().strip().split()[-1]
 def rid():return str(uuid.uuid4())
 server,endpoint=start()

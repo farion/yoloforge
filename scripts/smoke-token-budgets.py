@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import secrets
 import select
 import subprocess
@@ -17,7 +18,7 @@ base=Path(tempfile.mkdtemp(prefix='yf-token-budgets-',dir='/tmp/opencode'))
 env={**os.environ,'FACTORY_TOKEN':secrets.token_hex(32)};env.pop('FACTORY_TOKEN_FILE',None)
 def rid():return str(uuid.uuid4())
 def start(address):
-    process=subprocess.Popen([str(ROOT/'target/debug/factoryd'),'--listen',address,'--database',str(base/'db')],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    process=subprocess.Popen([str(profile_dir()/'factoryd'),'--listen',address,'--database',str(base/'db')],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
     assert select.select([process.stdout],[],[],10)[0]
     return process,'http://'+process.stdout.readline().strip().split()[-1]
 process,url=start('127.0.0.1:0')
@@ -34,7 +35,7 @@ try:
         except urllib.error.HTTPError as error:
             assert error.code==status,(error.code,error.read().decode())
     def cli(*args):
-        return json.loads(subprocess.check_output([str(ROOT/'target/debug/yoloforge'),'--server',url,*map(str,args)],env=env,text=True))
+        return json.loads(subprocess.check_output([str(profile_dir()/'yoloforge'),'--server',url,*map(str,args)],env=env,text=True))
     p=api('POST','/v1/projects',{'request_id':rid(),'name':'Token budget acceptance','repository':'/unused','base_branch':'main'})
     project=p['id']
     api('PATCH','/v1/projects/'+project+'/profile',{'request_id':rid(),'expected_revision':1,'profile':{'provider_id':'test','model_id':'test','toolchain':'','start_command':'','test_command':''}})

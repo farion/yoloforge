@@ -452,8 +452,11 @@ mod tests {
         (record, PathBuf::from(workspace.path))
     }
     #[tokio::test(flavor = "multi_thread")]
-    async fn split_git_tags_the_published_commit_and_does_not_replay_after_interruption() {
+    async fn split_git_tags_the_published_commit_and_reconciles_without_a_second_tag() {
         let mut f = fixture().await;
+        // This fixture simulates a locally owned execution, not recovery after
+        // losing the accepted command's write-ahead journal.
+        f.record.recovery_required = false;
         f.record.command.workspace_spec.as_mut().unwrap().target_git = Some(TargetGitPlan {
             commit: true,
             commit_message: Some("User-selected subject".into()),
@@ -474,7 +477,7 @@ mod tests {
         assert!(crate::target_git::execute(&f.journal, &mut f.record, Some(&commit)).0);
         assert_eq!(git(&f.target, &["rev-parse", "v0.1.0"]).unwrap(), commit);
         let mut replay = f.journal.receive(f.record.command.clone()).unwrap();
-        assert!(!crate::target_git::execute(&f.journal, &mut replay, Some(&commit)).0);
+        assert!(crate::target_git::execute(&f.journal, &mut replay, Some(&commit)).0);
         assert_eq!(git(&f.target, &["tag", "--list"]).unwrap(), "v0.1.0");
     }
     #[tokio::test(flavor = "multi_thread")]

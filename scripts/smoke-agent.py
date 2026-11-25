@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import secrets
 import shutil
 import subprocess
@@ -310,8 +311,9 @@ def main():
     subprocess.run(["docker", "exec", container, "mkdir", directory], check=True, capture_output=True)
     try:
         for name in ["factoryd", "factory-runner", "factory"]:
-            subprocess.run(["docker", "cp", str(ROOT / "target/debug" / name), container + ":" + directory + "/" + name], check=True, capture_output=True)
+            subprocess.run(["docker", "cp", str(profile_dir() / name), container + ":" + directory + "/" + name], check=True, capture_output=True)
         subprocess.run(["docker", "cp", str(Path(__file__).resolve()), container + ":" + directory + "/smoke-agent.py"], check=True, capture_output=True)
+        subprocess.run(["docker", "cp", str(ROOT / "scripts/cargo_paths.py"), container + ":" + directory + "/cargo_paths.py"], check=True, capture_output=True)
         result = subprocess.run(["docker", "exec", "-i", container, "python3", directory + "/smoke-agent.py", "--inside", directory,"--provider",args.provider,"--model",args.model],
                                 input=json.dumps({"url": "http://127.0.0.1:4096", "password": state["password"]}), text=True, timeout=600)
         check(result.returncode == 0, "real agent integration failed")

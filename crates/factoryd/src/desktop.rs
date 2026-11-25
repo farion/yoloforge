@@ -1,5 +1,56 @@
 use super::*;
 
+pub(super) async fn runner_restart_status(
+    State(app): State<App>, Path(id): Path<RunnerId>,
+    axum::Extension(principal): axum::Extension<Principal>,
+) -> Response {
+    if principal.role != DeviceRole::Admin {
+        return error(StatusCode::FORBIDDEN, ErrorCode::Unauthorized, "Admin access required for runner restart");
+    }
+    Json(restart_status(&app, id).await).into_response()
+}
+
+async fn restart_status(app: &App, id: RunnerId) -> RunnerRestartStatus {
+    let registry = app.registry.read().await;
+    let entry = registry.entries.get(&id);
+    RunnerRestartStatus {
+        instance_id: entry.map(|e| e.input.instance_id),
+        ready: entry.is_some_and(|e| e.seen.elapsed() < SUSPECT_AFTER && matches!(e.input.opencode, OpenCodeStatus::Ready { .. })),
+    }
+}
+
+pub(super) async fn hold_runner_restart(
+    State(app): State<App>, Path(id): Path<RunnerId>,
+    axum::Extension(principal): axum::Extension<Principal>, Json(body): Json<RunnerRestartHold>,
+) -> Response {
+    if principal.role != DeviceRole::Admin {
+        return error(StatusCode::FORBIDDEN, ErrorCode::Unauthorized, "Admin access required for runner restart");
+    }
+    let previous = restart_status(&app, id).await;
+    match tokio::task::spawn_blocking(move || app.store.hold_runner_restart(id, body.request_id)).await {
+        Ok(Ok(())) => Json(previous).into_response(),
+        Ok(Err(error)) => db_error(error, body.request_id),
+        Err(_) => db_error(StoreError::Internal, body.request_id),
+    }
+}
+
+pub(super) async fn release_runner_restart(
+    State(app): State<App>, Path(id): Path<RunnerId>,
+    axum::Extension(principal): axum::Extension<Principal>, Json(body): Json<RunnerRestartHold>,
+) -> Response {
+    if principal.role != DeviceRole::Admin {
+        return error(StatusCode::FORBIDDEN, ErrorCode::Unauthorized, "Admin access required for runner restart");
+    }
+    db_call(body.request_id, move || app.store.release_runner_restart(id, body.request_id)).await
+}
+
+pub(super) async fn retry_task(
+    State(app): State<App>, Path(id): Path<TicketId>,
+    Json(body): Json<RetryTask>,
+) -> Response {
+    db_call(body.request_id, move || app.store.retry_task(id, body)).await
+}
+
 pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &HeaderMap, ip: Option<std::net::IpAddr>) {
     if principal.role == DeviceRole::Runner {
         return;
@@ -48,6 +99,10 @@ pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &H
     registry.clients.insert(
         key.clone(),
         ClientPresence {
+            version: headers.get("x-factory-client-version").and_then(|v| v.to_str().ok())
+                .filter(|v| !v.is_empty() && v.len() <= 80
+                    && v.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))).map(str::to_string),
+            protocol_version: headers.get(VERSION_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()),
             ip,
             id: key,
             name: name.into(),

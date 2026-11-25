@@ -152,6 +152,9 @@ pub(crate) async fn start(
             .env("USERPROFILE", &home)
             .env("APPDATA", &config_dir)
             .env("LOCALAPPDATA", &data)
+            // Agent workspaces otherwise accumulate full debug information and
+            // incremental state independently for every job.
+            .envs(cargo_build_env(std::env::var_os("CARGO_TARGET_DIR")))
             .env("OPENCODE_PASSWORD", &password)
             .current_dir(&base)
             .stdin(Stdio::null())
@@ -571,9 +574,53 @@ pub(crate) fn validate_workspace_with_profile(workspace: &Path, managed_integrat
     Ok(())
 }
 
+const CARGO_BUILD_ENV: [(&str, &str); 4] = [
+    ("CARGO_PROFILE_DEV_DEBUG", "0"),
+    ("CARGO_PROFILE_DEV_INCREMENTAL", "false"),
+    ("CARGO_PROFILE_TEST_DEBUG", "0"),
+    ("CARGO_PROFILE_TEST_INCREMENTAL", "false"),
+];
+
+fn cargo_build_env(target: Option<std::ffi::OsString>) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut env: Vec<_> = CARGO_BUILD_ENV
+        .iter()
+        .map(|(key, value)| ((*key).into(), (*value).into()))
+        .collect();
+    if let Some(target) = target {
+        env.push(("CARGO_TARGET_DIR".into(), target));
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runner_builds_disable_debug_symbols_and_incremental_state() {
+        let mut command = std::process::Command::new("unused");
+        command.env_clear().envs(cargo_build_env(None));
+        let env: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
+            .collect();
+        for profile in ["DEV", "TEST"] {
+            assert_eq!(env[format!("CARGO_PROFILE_{profile}_DEBUG").as_str()], "0");
+            assert_eq!(
+                env[format!("CARGO_PROFILE_{profile}_INCREMENTAL").as_str()],
+                "false"
+            );
+        }
+        assert!(!env.contains_key("CARGO_TARGET_DIR"));
+    }
+
+    #[test]
+    fn runner_forwards_the_shared_cargo_target_without_other_ambient_settings() {
+        let target = std::ffi::OsString::from("/shared/build files");
+        let env = cargo_build_env(Some(target.clone()));
+        assert_eq!(env.len(), 5);
+        assert_eq!(env.last().unwrap(), &("CARGO_TARGET_DIR".into(), target));
+    }
+
     #[test]
     fn repo_options_are_preserved_but_model_sources_are_rejected() {
         let dir = tempfile::tempdir().unwrap();

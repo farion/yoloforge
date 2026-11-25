@@ -6,9 +6,38 @@ use crate::{
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use factory_core::*;
 use factory_protocol::Snapshot;
+mod compatibility;
+use compatibility::{Compatibility, State as CompatibilityState};
+
+impl Compatibility {
+    fn color(&self) -> Color32 {
+        match self.state { CompatibilityState::Compatible => GREEN, CompatibilityState::Limited => AMBER,
+            CompatibilityState::Blocked => RED, CompatibilityState::Unknown => MUTED }
+    }
+    fn icon(&self) -> &'static str {
+        use egui_phosphor::regular as icons;
+        match self.state { CompatibilityState::Compatible => icons::CHECK_CIRCLE, CompatibilityState::Limited => icons::WARNING,
+            CompatibilityState::Blocked => icons::WARNING_CIRCLE, CompatibilityState::Unknown => icons::QUESTION }
+    }
+}
+
+fn version_text(version: Option<&str>, protocol: Option<u16>) -> String {
+    let version = version.filter(|v| !v.trim().is_empty()).map_or_else(
+        || crate::tr!("Version unbekannt").into(),
+        |v| if v.starts_with('v') { v.into() } else { format!("v{v}") });
+    protocol.map_or_else(|| version.clone(), |protocol|
+        crate::tr!("{version} · Protokoll {protocol}", version = version, protocol = protocol))
+}
+
+fn opencode_version(status: &OpenCodeStatus) -> Option<&str> {
+    match status { OpenCodeStatus::Ready { version } | OpenCodeStatus::Unsupported { version } => Some(version),
+        _ => None }
+}
 
 #[derive(Clone, Debug)]
 struct Node {
+    version: String,
+    compatibility: Option<Compatibility>,
     service: Option<String>,
     id: String,
     icon: &'static str,
@@ -107,14 +136,18 @@ fn infrastructure(app: &App, now: u64) -> Graph {
     use egui_phosphor::regular as icons;
     let clients=app.clients.iter().map(|client| {
         let fresh=app.online && now.saturating_sub(client.observed_unix_ms)<30_000;
-        Node {service:None,address:Some(client.ip.map_or_else(||crate::tr!("IP unbekannt").into(),|ip|ip.to_string())),id:format!("client:{}",client.id),icon:if client.name=="Desktop" {icons::DESKTOP} else {icons::TERMINAL_WINDOW},
+        Node {version:version_text(client.version.as_deref(),client.protocol_version),
+            compatibility:Some(compatibility::client(app.snapshot.as_deref(),client.protocol_version,fresh)),
+            service:None,address:Some(client.ip.map_or_else(||crate::tr!("IP unbekannt").into(),|ip|ip.to_string())),id:format!("client:{}",client.id),icon:if client.name=="Desktop" {icons::DESKTOP} else {icons::TERMINAL_WINDOW},
             title:client.name.clone(),status:if fresh {crate::tr!("Kürzlich aktiv")} else {crate::tr!("Kontakt veraltet")}.into(),
             activity:crate::tr!("Kontakt vor {} s", now.saturating_sub(client.observed_unix_ms)/1000),
             detail:crate::tr!("Client: {}\nGerät: {}\nLetzter authentifizierter Kontakt: {}\nKeine dauerhafte Verbindungsgarantie. Clients ohne Präsenzheader sind nicht einzeln erkennbar.", client.id,client.device_id.map_or_else(||crate::tr!("Gemeinsamer Serverzugang").into(),|id|id.to_string()),timestamp(client.observed_unix_ms)),
             color:if fresh {GREEN} else {MUTED}}
     }).collect::<Vec<_>>();
     let clients = if clients.is_empty() {
-        vec![Node {service:None,address:Some(crate::tr!("IP unbekannt").into()),id:"this-desktop".into(),icon:icons::DESKTOP,title:crate::tr!("Dieser Desktop").into(),status:crate::tr!("Lokal geöffnet").into(),activity:crate::tr!("Weitere Clients unbekannt").into(),detail:crate::tr!("Dieser Desktop ist lokal geöffnet. Es liegen noch keine bestätigten Client-Beobachtungen vor. Ältere Server/Clients benötigen ein Update für die Client-Präsenz.").into(),color:BLUE}]
+        vec![Node {version:version_text(Some(env!("CARGO_PKG_VERSION")),Some(factory_protocol::PROTOCOL_VERSION)),
+            compatibility:Some(compatibility::server(app.snapshot.as_deref(),app.online)),
+            service:None,address:Some(crate::tr!("IP unbekannt").into()),id:"this-desktop".into(),icon:icons::DESKTOP,title:crate::tr!("Dieser Desktop").into(),status:crate::tr!("Lokal geöffnet").into(),activity:crate::tr!("Weitere Clients unbekannt").into(),detail:crate::tr!("Dieser Desktop ist lokal geöffnet. Es liegen noch keine bestätigten Client-Beobachtungen vor. Ältere Server/Clients benötigen ein Update für die Client-Präsenz.").into(),color:BLUE}]
     } else {
         clients
     };
@@ -123,17 +156,19 @@ fn infrastructure(app: &App, now: u64) -> Graph {
         .as_ref()
         .map(|s| Activity::from_commands(s, s.commands.iter()))
         .unwrap_or_default();
-    let server=Node {service:None,address:Some(app.server.clone()),id:"server".into(),icon:icons::HARD_DRIVES,title:crate::tr!("Factory-Server").into(),
+    let server=Node {version:version_text(app.snapshot.as_ref().map(|s|s.server_version.as_str()),app.snapshot.as_ref().map(|s|s.protocol_version)),
+        compatibility:Some(compatibility::server(app.snapshot.as_deref(),app.online)),
+        service:None,address:Some(app.server.clone()),id:"server".into(),icon:icons::HARD_DRIVES,title:crate::tr!("Factory-Server").into(),
         status:if app.online {crate::tr!("Verbunden")} else {"Offline"}.into(),activity:activity.text(),
         detail:crate::tr!("{}\nVersion: {}\nBoot: {}\nNur der aktuell verbundene Factory-Server ist bekannt.", app.server,app.snapshot.as_ref().map_or(crate::tr!("unbekannt"),|s|s.server_version.as_str()),app.snapshot.as_ref().map_or_else(||crate::tr!("unbekannt").into(),|s|s.boot_id.to_string())),
-        color:if app.online {activity.color()} else {AMBER}};
+        color:if app.online {GREEN} else {AMBER}};
     let edges = clients
         .iter()
         .map(|c| {
             (
                 c.id.clone(),
                 "server".into(),
-                if app.online { c.color } else { MUTED },
+                if app.online { c.compatibility.as_ref().map_or(c.color,Compatibility::color) } else { MUTED },
             )
         })
         .collect();
@@ -219,7 +254,7 @@ fn workers(app: &App, project: Option<ProjectId>, unassigned: bool, now: u64) ->
         let (status, color) = if !app.online {
             (crate::tr!("Stand veraltet"), MUTED)
         } else if healthy {
-            ("Online", a.color())
+            ("Online", GREEN)
         } else if r.connection == ConnectionState::Unreachable || age >= 60_000 {
             (crate::tr!("Nicht erreichbar"), RED)
         } else {
@@ -238,7 +273,11 @@ fn workers(app: &App, project: Option<ProjectId>, unassigned: bool, now: u64) ->
                     OpenCodeStatus::Ready { .. } => unreachable!(),
                 }.into()
             };
-        runners.push(Node {service:Some(service),address:Some(r.ip.map_or_else(||crate::tr!("IP unbekannt").into(),|ip|ip.to_string())),id:runner_key(r.id),icon:crate::design::RUNNER_ICON,title:r.name.clone(),status:status.into(),activity:a.text(),
+        let version = version_text(Some(&r.version),None);
+        let version = opencode_version(&r.opencode).map_or(version.clone(), |runtime|
+            crate::tr!("{version} · OpenCode {runtime}", version = version, runtime = runtime));
+        runners.push(Node {version,compatibility:Some(compatibility::runner(s,r,healthy)),
+            service:Some(service),address:Some(r.ip.map_or_else(||crate::tr!("IP unbekannt").into(),|ip|ip.to_string())),id:runner_key(r.id),icon:crate::design::RUNNER_ICON,title:r.name.clone(),status:status.into(),activity:a.text(),
             detail:crate::tr!("Runner: {}\nOrt: {:?}\nVersion: {}\nLetzter Kontakt: {}\nOpenCode-Fähigkeit: {:?}\n{}{}\nEine konfigurierte OpenCode-Version ist kein Nachweis einer laufenden Instanz.", r.id,r.location,r.version,timestamp(r.last_seen_unix_ms),r.opencode,a.text(),activity_details(s,&commands)),color});
         for instance in instances.iter().filter(|i| i.runner_id == r.id) {
             let commands = instance
@@ -251,13 +290,15 @@ fn workers(app: &App, project: Option<ProjectId>, unassigned: bool, now: u64) ->
             let fresh = healthy && now.saturating_sub(instance.observed_unix_ms) < 30_000;
             let color = if fresh { a.color() } else { MUTED };
             let key = instance_key(r.id, &instance.id);
-            nodes.push(Node {service:None,address:None,id:key.clone(),icon:icons::TERMINAL_WINDOW,title:format!("OpenCode · {}",crate::design::elide(&instance.id,6)),status:if fresh {crate::tr!("Präsenz bestätigt")} else {crate::tr!("Präsenz veraltet")}.into(),activity:a.text(),
+            nodes.push(Node {version:version_text(opencode_version(&r.opencode),None),compatibility:None,
+                service:None,address:None,id:key.clone(),icon:icons::TERMINAL_WINDOW,title:format!("OpenCode · {}",crate::design::elide(&instance.id,6)),status:if fresh {crate::tr!("Präsenz bestätigt")} else {crate::tr!("Präsenz veraltet")}.into(),activity:a.text(),
                 detail:crate::tr!("Instanz: {}\nRunner: {}\nBeobachtet: {}\n{}{}\nPräsenz meldet den Dienst, nicht den Fortschritt einzelner Aufträge.", instance.id,r.name,timestamp(instance.observed_unix_ms),a.text(),activity_details(s,&commands)),color});
             edges.push((runner_key(r.id), key, color));
         }
         if !has_instances {
             let key = format!("unknown:{}", r.id);
-            nodes.push(Node {service:None,address:None,id:key.clone(),icon:icons::TERMINAL_WINDOW,title:"OpenCode".into(),status:crate::tr!("Präsenz unbekannt").into(),activity:crate::tr!("Keine Instanz bestätigt").into(),detail:crate::tr!("Für {} liegt keine Instanzmeldung vor. Das bedeutet nicht zwingend, dass OpenCode nicht läuft.", r.name),color:MUTED});
+            nodes.push(Node {version:version_text(opencode_version(&r.opencode),None),compatibility:None,
+                service:None,address:None,id:key.clone(),icon:icons::TERMINAL_WINDOW,title:"OpenCode".into(),status:crate::tr!("Präsenz unbekannt").into(),activity:crate::tr!("Keine Instanz bestätigt").into(),detail:crate::tr!("Für {} liegt keine Instanzmeldung vor. Das bedeutet nicht zwingend, dass OpenCode nicht läuft.", r.name),color:MUTED});
             edges.push((runner_key(r.id), key, MUTED));
         }
     }
@@ -268,6 +309,7 @@ fn workers(app: &App, project: Option<ProjectId>, unassigned: bool, now: u64) ->
     {
         let key = instance_key(instance.runner_id, &instance.id);
         nodes.push(Node {
+            version:version_text(None,None), compatibility:None,
             service: None,
             address: None,
             id: key,
@@ -326,7 +368,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             if let Some((_, nodes)) = worker.columns.first_mut() {
                 for runner in &managed {
                     if !nodes.iter().any(|node| node.id == runner_key(runner.id)) {
-                        nodes.push(Node {
+                         nodes.push(Node {
+                             version:version_text(None,None),
+                             compatibility:Some(Compatibility::unknown(crate::tr!("Noch kein Runner-Kontakt bestätigt."))),
                             service: Some(crate::tr!("OpenCode: nicht bestätigt").into()),
                             id: runner_key(runner.id), icon: crate::design::RUNNER_ICON,
                             title: runner.name.clone(), address: Some(crate::tr!("IP unbekannt").into()),
@@ -340,7 +384,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
             if let Some((_, runners)) = worker.columns.first() {
                 for r in runners {
-                    infra.edges.push(("server".into(), r.id.clone(), r.color));
+                    infra.edges.push(("server".into(), r.id.clone(),
+                        r.compatibility.as_ref().map_or(r.color,Compatibility::color)));
                 }
             }
             infra.columns.extend(worker.columns);
@@ -348,9 +393,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let removable = if !app.local_runners_busy {
                 managed.iter().map(|r| (runner_key(r.id), r.id)).collect()
             } else { vec![] };
-            if let Some(id) = graph(ui, "all", &infra, &removable) {
+            if let Some(action) = graph(ui, "all", &infra, &removable) {
+                let id = match action { RunnerNodeAction::Remove(id) | RunnerNodeAction::Restart(id) => id };
                 if let Some(runner) = managed.iter().find(|r| r.id == id) {
-                    app.dialog = Some(crate::dialogs::Dialog::RemoveLocalRunner { id, name: runner.name.clone() });
+                    app.dialog = Some(match action {
+                        RunnerNodeAction::Remove(_) => crate::dialogs::Dialog::RemoveLocalRunner { id, name: runner.name.clone() },
+                        RunnerNodeAction::Restart(_) => crate::dialogs::Dialog::RestartLocalRunner { id, name: runner.name.clone() },
+                    });
                 }
             }
         });
@@ -358,7 +407,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .request_repaint_after(std::time::Duration::from_secs(1));
 }
 
-fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)]) -> Option<RunnerId> {
+#[derive(Clone, Copy)]
+enum RunnerNodeAction { Remove(RunnerId), Restart(RunnerId) }
+
+fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)]) -> Option<RunnerNodeAction> {
     let mut remove = None;
     if graph.columns.iter().all(|(_, nodes)| nodes.is_empty()) {
         ui.colored_label(
@@ -376,7 +428,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
         .max()
         .unwrap_or(1)
         .max(1);
-    let height = 40.0 + rows as f32 * 152.0;
+    let height = 40.0 + rows as f32 * 212.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let col = width / n as f32;
     let node_width = (col - 40.0).min(280.0);
@@ -391,17 +443,17 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             MUTED,
         );
         for (row, node) in nodes.iter().enumerate() {
-            let center = Pos2::new(x, rect.top() + 42.0 + row as f32 * 152.0 + 64.0);
+            let center = Pos2::new(x, rect.top() + 42.0 + row as f32 * 212.0 + 94.0);
             placements.push((
                 node,
-                Rect::from_center_size(center, Vec2::new(node_width, 128.0)),
+                Rect::from_center_size(center, Vec2::new(node_width, 188.0)),
             ));
         }
     }
     for (from, to, color) in &graph.edges {
         let a = placements.iter().find(|(node, _)| node.id == *from);
         let b = placements.iter().find(|(node, _)| node.id == *to);
-        if let (Some((_, a)), Some((_, b))) = (a, b) {
+        if let (Some((source, a)), Some((destination, b))) = (a, b) {
             let start = a.right_center();
             let end = b.left_center();
             let middle = (start.x + end.x) * 0.5;
@@ -416,6 +468,20 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             ));
             let target = if from == "server" { start } else { end };
             ui.painter().circle_filled(target, 5.0, *color);
+            let compatibility = if from == "server" { destination.compatibility.as_ref() } else { source.compatibility.as_ref() };
+            if let Some(compatibility) = compatibility {
+                let center = Pos2::new(middle, (start.y + end.y) * 0.5);
+                ui.painter().circle_filled(center, 13.0, Color32::from_rgb(21, 25, 32));
+                ui.painter().text(center, egui::Align2::CENTER_CENTER, compatibility.icon(),
+                    FontId::proportional(19.0), compatibility.color());
+                let badge = ui.interact(Rect::from_center_size(center, Vec2::splat(26.0)),
+                    ui.id().with(("compatibility-edge", from, to)), Sense::hover())
+                    .on_hover_text(format!("{} / {}: {}\n{}", source.title, destination.title, compatibility.label, compatibility.detail));
+                badge.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true,
+                    format!("{} / {}: {}",source.title,destination.title,compatibility.label)));
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-infrastructure-compatibility-edge",from,to)),badge.rect));
+            }
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-infrastructure-edge-target", from, to)), target));
         }
@@ -452,7 +518,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             node.title.clone(),
             FontId::proportional(16.0),
             ui.visuals().text_color(),
-            rect.width() - 60.0,
+            rect.width() - 60.0 - if removable.iter().any(|(key, _)| key == &node.id) { 34.0 } else { 0.0 },
             1,
         );
         let title = ui.painter().layout_job(title_job);
@@ -471,10 +537,11 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             .as_ref()
             .map(|address| (address, 12.0, MUTED, 49.0))
             .into_iter()
-            .chain(node.service.as_ref().map(|service| (service, 12.0, MUTED, 94.0)))
+            .chain(node.service.as_ref().map(|service| (service, 12.0, MUTED, 146.0)))
             .chain([
                 (&node.status, 14.0, node.color, 73.0),
-                (&node.activity, 12.0, MUTED, 115.0),
+                (&node.version, 12.0, MUTED, 99.0),
+                (&node.activity, 12.0, MUTED, 171.0),
             ])
         {
             let galley = ui.painter().layout_job(crate::design::elided_text_job(
@@ -490,12 +557,37 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-infrastructure-ip", &node.id)),
                     Rect::from_min_size(position, galley.size())));
             }
+            #[cfg(test)]
+            if text == &node.version {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-infrastructure-version",&node.id)),
+                    Rect::from_min_size(position,galley.size())));
+            }
             ui.painter().galley(position, galley, color);
+        }
+        if let Some(compatibility) = &node.compatibility {
+            let center = rect.left_top() + Vec2::new(22.0, 123.0);
+            ui.painter().text(center, egui::Align2::CENTER_CENTER, compatibility.icon(),
+                FontId::proportional(17.0), compatibility.color());
+            let label = ui.painter().layout_job(crate::design::elided_text_job(
+                compatibility.label.into(), FontId::proportional(13.0), compatibility.color(), rect.width()-52.0, 1));
+            ui.painter().galley(rect.left_top() + Vec2::new(36.0,123.0-label.size().y*0.5),label,compatibility.color());
+            let badge = ui.interact(Rect::from_min_size(rect.left_top()+Vec2::new(12.0,111.0),
+                Vec2::new(rect.width()-24.0,24.0)),ui.id().with(("compatibility",&node.id)),Sense::hover())
+                .on_hover_text(&compatibility.detail);
+            badge.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label,true,
+                format!("{}: {}",compatibility.label,compatibility.detail)));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-infrastructure-compatibility",&node.id)),badge.rect));
         }
         response.clone().on_hover_ui(|ui| {
             ui.set_max_width(480.0);
             ui.strong(&node.title);
+            ui.monospace(&node.version);
             ui.colored_label(node.color, &node.status);
+            if let Some(compatibility) = &node.compatibility {
+                ui.colored_label(compatibility.color(),compatibility.label);
+                ui.add(egui::Label::new(&compatibility.detail).wrap());
+            }
             ui.add(egui::Label::new(&node.detail).wrap());
         });
         response.widget_info(|| {
@@ -503,13 +595,14 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                 egui::WidgetType::Label,
                 true,
                 format!(
-                    "{} · {}{} · {}",
+                    "{} · {}{} · {} · {}",
                     node.title,
                     node.address
                         .as_ref()
                         .map_or_else(String::new, |address| format!("{address} · ")),
                     node.status,
-                    node.activity
+                    node.activity,
+                    node.version
                 ),
             )
         });
@@ -527,7 +620,19 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, crate::tr!("Lokalen Runner entfernen")));
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-local-runner-remove", *runner)), button.rect));
-            if button.clicked() { remove = Some(*runner); }
+            if button.clicked() { remove = Some(RunnerNodeAction::Remove(*runner)); }
+            let restart_rect = Rect::from_center_size(rect.right_top() - Vec2::new(34.0, 0.0), Vec2::splat(26.0));
+            let restart = ui.interact(restart_rect, ui.id().with(("restart-local-runner", runner)), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(crate::tr!("Lokalen Runner neu starten"));
+            ui.painter().circle_filled(restart_rect.center(), 13.0,
+                if restart.hovered() { crate::design::HOVER_FILL } else { Color32::from_rgb(29, 34, 43) });
+            ui.painter().text(restart_rect.center(), egui::Align2::CENTER_CENTER,
+                egui_phosphor::regular::ARROWS_CLOCKWISE, FontId::proportional(14.0), ui.visuals().text_color());
+            restart.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, crate::tr!("Lokalen Runner neu starten")));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-local-runner-restart", *runner)), restart.rect));
+            if restart.clicked() { remove = Some(RunnerNodeAction::Restart(*runner)); }
         }
         #[cfg(test)]
         ui.ctx()
@@ -555,6 +660,8 @@ mod tests {
             observed_unix_ms: now,
         }];
         app.clients = vec![ClientPresence {
+            version:Some(env!("CARGO_PKG_VERSION").into()),
+            protocol_version:Some(factory_protocol::PROTOCOL_VERSION),
             ip: Some("192.0.2.10".parse().unwrap()),
             id: "client-test".into(),
             name: "Desktop".into(),
@@ -610,6 +717,66 @@ mod tests {
     }
 
     #[test]
+    fn versions_and_compatibility_are_visible_without_confusing_them_with_connectivity() {
+        let mut app = live_fixture();
+        app.settings.page = crate::model::Page::Infrastructure;
+        let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        snapshot.server_version = "0.1.5".into();
+        snapshot.server_capabilities = vec![TARGET_GIT_CAPABILITY.into(),RUNNER_RESTART_CAPABILITY.into()];
+        snapshot.runners[0].version = "0.1.5".into();
+        snapshot.runners[0].capabilities = vec!["target-git-v1".into()];
+        snapshot.runners[0].opencode = OpenCodeStatus::Ready { version:"2.4.1".into() };
+        snapshot.commands[0].kind = CommandKind::TargetGit;
+        snapshot.commands[0].state = CommandState::Pending;
+        snapshot.commands[0].agent_spec = None;
+        snapshot.commands[0].agent_progress = None;
+        snapshot.tickets[0].key = "YOLO-8".into();
+        let runner = runner_key(snapshot.runners[0].id);
+        let worker = workers(&app,None,false,now_ms());
+        let node = &worker.columns[0].1[0];
+        assert_eq!(node.status,"Online");
+        assert_eq!(node.color,GREEN);
+        assert!(node.version.contains("0.1.5") && node.version.contains("2.4.1"));
+        let compatibility = node.compatibility.as_ref().unwrap();
+        assert_eq!(compatibility.state,CompatibilityState::Blocked);
+        assert!(compatibility.detail.contains("YOLO-8") && compatibility.detail.contains(TARGET_GIT_CAPABILITY));
+        let ctx = app.backend.context().clone();
+        for size in [Vec2::new(820.0,560.0),Vec2::new(1360.0,900.0)] {
+            for _ in 0..3 {
+                let _ = ctx.run(egui::RawInput {
+                    screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),..Default::default()
+                },|ctx|app.draw_shell(ctx));
+            }
+            for id in ["client:client-test","server",runner.as_str()] {
+                let card:Rect = ctx.data_mut(|d|d.get_temp(egui::Id::new(("test-overview-node","all",id)))).unwrap();
+                let version:Rect = ctx.data_mut(|d|d.get_temp(egui::Id::new(("test-infrastructure-version",id)))).unwrap();
+                let status:Rect = ctx.data_mut(|d|d.get_temp(egui::Id::new(("test-infrastructure-compatibility",id)))).unwrap();
+                assert!(card.contains_rect(version) && card.contains_rect(status));
+                assert!(version.bottom()<status.top(),"Version and compatibility rows must not overlap");
+            }
+            assert!(ctx.data_mut(|d|d.get_temp::<Rect>(egui::Id::new((
+                "test-infrastructure-compatibility-edge","server",&runner)))).is_some());
+        }
+        assert!(app.settings.pending.is_empty());
+        assert!(!app.local_runners_busy);
+    }
+
+    #[test]
+    fn cached_versions_remain_visible_but_compatibility_turns_unknown_offline() {
+        let mut app = live_fixture();
+        let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        snapshot.server_version = "0.1.5".into();
+        snapshot.runners[0].version = "0.1.4".into();
+        app.online = false;
+        let infra = infrastructure(&app,now_ms());
+        assert!(infra.columns[1].1[0].version.contains("0.1.5"));
+        assert_eq!(infra.columns[1].1[0].compatibility.as_ref().unwrap().state,CompatibilityState::Unknown);
+        let worker = workers(&app,None,false,now_ms());
+        assert!(worker.columns[0].1[0].version.contains("0.1.4"));
+        assert_eq!(worker.columns[0].1[0].compatibility.as_ref().unwrap().state,CompatibilityState::Unknown);
+    }
+
+    #[test]
     fn opencode_status_distinguishes_missing_configuration_from_unavailable_service() {
         let mut app = live_fixture();
         app.instances.clear();
@@ -661,6 +828,98 @@ mod tests {
     }
 
     #[test]
+    fn owned_runner_restart_icon_opens_a_distinct_confirmation_without_process_actions() {
+        let mut app = live_fixture();
+        app.settings.page = crate::model::Page::Infrastructure;
+        let id = app.snapshot.as_ref().unwrap().runners[0].id;
+        let ctx = app.backend.context().clone();
+        let render = |app: &mut App, events| ctx.run(egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1360.0, 900.0))),
+            events, ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let _ = render(&mut app, vec![]);
+        let key = egui::Id::new(("test-local-runner-restart", id));
+        assert!(ctx.data_mut(|d| d.get_temp::<Rect>(key)).is_none());
+        app.local_runners.push(crate::local_runners::fixture(id, &app.server));
+        let _ = render(&mut app, vec![]);
+        let restart: Rect = ctx.data_mut(|d| d.get_temp(key)).unwrap();
+        let remove: Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-local-runner-remove", id)))).unwrap();
+        assert!(!restart.intersects(remove), "Restart and removal must have separate hit targets");
+        let _ = render(&mut app, crate::tests::click_events(restart.center()));
+        assert!(matches!(app.dialog, Some(crate::dialogs::Dialog::RestartLocalRunner { id: selected, .. }) if selected == id));
+        assert!(!app.local_runners_busy);
+        assert!(app.settings.pending.is_empty());
+    }
+
+    #[test]
+    fn restart_confirmation_allows_queued_work_but_disables_running_offline_and_non_admin_actions() {
+        let mut app = live_fixture();
+        let id = app.snapshot.as_ref().unwrap().runners[0].id;
+        app.access = Some(factory_protocol::AccessView { role: DeviceRole::Admin, device_id: None, runner_id: None });
+        let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        snapshot.commands[0].state = CommandState::Pending;
+        snapshot.commands[0].agent_progress = None;
+        snapshot.streams[0].status = StreamState::Queued;
+        let mut dialog = crate::dialogs::Dialog::RestartLocalRunner { id, name: "Local".into() };
+        let ctx = app.backend.context().clone();
+        for (online, admin, running, enabled) in [
+            (true, true, false, true), (true, true, true, false),
+            (false, true, false, false), (true, false, false, false),
+        ] {
+            app.online = online;
+            app.access.as_mut().unwrap().role = if admin { DeviceRole::Admin } else { DeviceRole::Operator };
+            Arc::make_mut(app.snapshot.as_mut().unwrap()).commands[0].state =
+                if running { CommandState::Accepted } else { CommandState::Pending };
+            for _ in 0..3 {
+                let _ = ctx.run(egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(820.0, 560.0))),
+                    ..Default::default()
+                }, |ctx| { assert!(!dialog.show(ctx, &mut app)); });
+            }
+            assert_eq!(ctx.data_mut(|d| d.get_temp::<bool>(egui::Id::new("test-runner-restart-confirm-enabled"))), Some(enabled));
+        }
+        assert!(app.settings.pending.is_empty());
+        assert!(!app.local_runners_busy);
+    }
+
+    #[test]
+    fn restart_confirmation_stays_compact_and_keeps_footer_visible_with_long_content() {
+        let mut app = live_fixture();
+        let id = app.snapshot.as_ref().unwrap().runners[0].id;
+        app.access = Some(factory_protocol::AccessView { role: DeviceRole::Admin, device_id: None, runner_id: None });
+        let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        snapshot.commands[0].state = CommandState::Pending;
+        snapshot.streams[0].status = StreamState::Queued;
+        let ctx = app.backend.context().clone();
+        let modal = egui::Id::new(("factory-runner-restart", id));
+        let render = |dialog: &mut crate::dialogs::Dialog, app: &mut App, size| {
+            for _ in 0..4 {
+                let _ = ctx.run(egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                    ..Default::default()
+                }, |ctx| { assert!(!dialog.show(ctx, app)); });
+            }
+            let rect = ctx.memory(|m| m.area_rect(modal)).unwrap();
+            let button: Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-runner-restart-confirm"))).unwrap();
+            assert!(rect.contains_rect(button));
+            assert!(rect.bottom() - button.bottom() < 40.0, "Footer should sit above the dialog padding: {rect:?} {button:?}");
+            rect
+        };
+        let mut dialog = crate::dialogs::Dialog::RestartLocalRunner { id, name: "Lokaler Runner 5".into() };
+        let compact = render(&mut dialog, &mut app, Vec2::new(1100.0, 1200.0));
+        assert!(compact.width() <= 540.0 && compact.height() < 320.0, "{compact:?}");
+        let mut long = crate::dialogs::Dialog::RestartLocalRunner { id, name: "Langer Runner-Name ".repeat(100) };
+        let screen = Vec2::new(520.0, 400.0);
+        let constrained = render(&mut long, &mut app, screen);
+        assert!(constrained.height() > compact.height());
+        assert!(constrained.top() >= 16.0 && constrained.bottom() <= screen.y - 16.0, "{constrained:?}");
+        let (viewport, content): (Rect, Vec2) = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-runner-restart-body"))).unwrap();
+        assert!(content.y > viewport.height(), "Only the long body should scroll");
+        let compact_again = render(&mut dialog, &mut app, Vec2::new(1100.0, 1200.0));
+        assert!((compact_again.height() - compact.height()).abs() < 1.0);
+    }
+
+    #[test]
     fn topology_links_exact_runner_and_instance_and_marks_waiting_work() {
         let app = live_fixture();
         let s = app.snapshot.as_ref().unwrap();
@@ -673,7 +932,7 @@ mod tests {
             instance_key(s.runners[0].id, "instance-one")
         );
         assert!(graph.columns[0].1[0].activity.contains("1 warten"));
-        assert_eq!(graph.columns[0].1[0].color, AMBER);
+        assert_eq!(graph.columns[0].1[0].color, GREEN, "Connectivity stays green; work and compatibility have separate indicators");
         assert!(graph.columns[1].1[0].detail.contains("Projekt 界"));
         assert!(graph.columns[1].1[0].detail.contains("Test-Runner"));
     }

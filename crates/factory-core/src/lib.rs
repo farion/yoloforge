@@ -358,12 +358,16 @@ pub enum CommandKind {
     IntegrateReview,
     TargetGit,
 }
-pub const TARGET_GIT_CAPABILITY: &str = "target-git-v1";
+pub const TARGET_GIT_CAPABILITY: &str = "target-git-v2";
+pub const RUNNER_RESTART_CAPABILITY: &str = "desktop-runner-restart-v1";
 
 /// A bounded plan, never a shell command or a model-selected checkout path.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TargetGitPlan {
+    /// Set only by the Factory retry endpoint, never by model routing.
+    #[serde(default)]
+    pub resume: bool,
     pub commit: bool,
     pub commit_message: Option<String>,
     pub tag: Option<TargetTag>,

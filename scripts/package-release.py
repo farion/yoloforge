@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import plistlib
 from pathlib import Path
+from cargo_paths import profile_dir
 import shutil
 import tarfile
 import tempfile
@@ -19,9 +20,11 @@ def main():
     parser.add_argument("--os", choices=["linux", "macos", "windows"], required=True)
     parser.add_argument("--arch", choices=["x86_64", "aarch64"], required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--binaries", type=Path, default=ROOT / "target/release")
+    parser.add_argument("--binaries", type=Path)
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     args = parser.parse_args()
+    if args.binaries is None:
+        args.binaries = profile_dir("release")
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     if args.version != "v" + version:
         parser.error("Tag and Cargo version differ")

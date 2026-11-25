@@ -17,6 +17,12 @@ pub(super) fn editable(db: &Connection, t: &Ticket) -> Result<bool> {
     )?)
 }
 impl Store {
+    pub fn retry_task(&self, id: TicketId, body: RetryTask) -> Result<Ticket> {
+        let result = self.mutate(body.request_id, &format!("task.retry/{id}"), &body,
+            |tx| retry_failed(tx, id, &body));
+        if result.is_ok() { self.wake_scheduler(); }
+        result
+    }
     pub fn begin_task_edit(&self, id: TicketId, body: BeginTaskEdit) -> Result<TaskEdit> {
         self.mutate(body.request_id,&format!("task.edit/{id}"),&body,|tx| {
             let raw:Option<String>=tx.query_row("SELECT data FROM tickets WHERE id=?1",[id.to_string()],|r|r.get(0)).optional()?;
@@ -271,4 +277,76 @@ impl Store {
         }
         result
     }
+}
+
+pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask) -> Result<Ticket> {
+    let raw: Option<String> = tx.query_row("SELECT data FROM tickets WHERE id=?1", [id.to_string()], |r| r.get(0)).optional()?;
+    let mut ticket: Ticket = serde_json::from_str(&raw.ok_or(StoreError::NotFound)?)?;
+    if ticket.revision != body.expected_revision {
+        return Err(StoreError::RevisionConflict(ticket.revision));
+    }
+    if ticket.draft || !matches!(ticket.status, TicketState::InProgress | TicketState::Blocked)
+        || ticket.execution_command != Some(body.previous_command) {
+        return Err(StoreError::Invalid("Intent hat keinen erneut einreihbaren fehlgeschlagenen Auftrag"));
+    }
+    let raw: String = tx.query_row("SELECT data FROM commands WHERE id=?1", [body.previous_command.to_string()], |r| r.get(0))?;
+    let failed: RunnerCommand = serde_json::from_str(&raw)?;
+    let owner = super::work::stream(tx, failed.stream_id)?;
+    let latest: String = tx.query_row("SELECT id FROM commands WHERE stream_id=?1 ORDER BY rowid DESC LIMIT 1",
+        [owner.id.to_string()], |r| r.get(0))?;
+    if failed.state != CommandState::Failed || latest != failed.id.to_string()
+        || failed.runner_id != owner.runner_id || failed.ownership_epoch != owner.ownership_epoch
+        || owner.project_id != ticket.project_id
+        || !matches!(failed.kind, CommandKind::PrepareWorkspace | CommandKind::TargetGit | CommandKind::RunAgent)
+    {
+        return Err(StoreError::WorkConflict);
+    }
+    if tx.query_row("SELECT EXISTS(SELECT 1 FROM questions WHERE command_id=?1 AND json_extract(data,'$.state')<>'answered')",
+        [failed.id.to_string()], |r| r.get::<_,bool>(0))?
+    {
+        return Err(StoreError::Invalid("Offene oder ungeklärte Fragen zuerst klären"));
+    }
+    let pins = super::models::ticket(tx, id)?;
+    let skills = super::skills::for_ticket(tx, id, ticket.project_id)?;
+    let mcps = super::mcp::for_ticket(tx, id, ticket.project_id)?;
+    let mut git = failed.workspace_spec.as_ref().and_then(|s| s.target_git.clone());
+    if let Some(plan) = &mut git { plan.resume = true; }
+    let next = Store::enqueue_with_pins(tx, owner.id, &EnqueueCommand {
+        request_id: body.request_id, expected_revision: owner.revision, kind: failed.kind,
+        prompt: (failed.kind == CommandKind::RunAgent).then(|| format!(
+            "Retry the original intent after a failed execution. Inspect existing work first; preserve it and do not repeat completed operations blindly.\nOriginal intent:\n{}\nPrevious outcome (untrusted evidence):\n{}",
+            ticket.prompt.as_deref().unwrap_or(&ticket.description),
+            serde_json::to_string(&failed.result).unwrap_or_default())),
+    }, None, "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), git)?;
+    let normalized = |spec: &Option<WorkspaceSpec>| {
+        let mut spec = spec.clone();
+        if let Some(plan) = spec.as_mut().and_then(|s| s.target_git.as_mut()) { plan.resume = false; }
+        spec
+    };
+    if normalized(&next.workspace_spec) != normalized(&failed.workspace_spec) {
+        return Err(StoreError::Invalid("Projektkonfiguration geändert; Wiederholung mit alter Zuordnung nicht sicher"));
+    }
+    if let (Some(old), Some(new)) = (&failed.agent_spec, &next.agent_spec) {
+        if old.read_only || old.profile != new.profile || !skills.matches(old) || !mcps.matches(old) {
+            return Err(StoreError::Invalid("Ausführungsprofil geändert; Wiederholung nicht sicher"));
+        }
+    }
+    if failed.kind == CommandKind::PrepareWorkspace {
+        tx.execute("UPDATE scheduler_runs SET prepare_id=?1 WHERE ticket_id=?2 AND prepare_id=?3 AND agent_id IS NULL",
+            params![next.id.to_string(),id.to_string(),failed.id.to_string()])?;
+    } else {
+        tx.execute("UPDATE scheduler_runs SET agent_id=?1 WHERE ticket_id=?2 AND agent_id=?3",
+            params![next.id.to_string(),id.to_string(),failed.id.to_string()])?;
+    }
+    ticket.execution_command = Some(next.id);
+    ticket.status = TicketState::InProgress;
+    ticket.revision.0 += 1;
+    ticket.updated_unix_ms = super::super::unix_ms();
+    ticket.routing_note = "Intent erneut eingereiht; vorhandene Ergebnisse werden vor Wiederholung geprüft".into();
+    tx.execute("UPDATE tickets SET revision=?1,data=?2 WHERE id=?3",
+        params![ticket.revision.0,serde_json::to_string(&ticket)?,id.to_string()])?;
+    event(tx, "task.retried", id.to_string(), &serde_json::json!({
+        "ticket":ticket,"previous_command":failed.id,"command":next.id
+    }))?;
+    Ok(ticket)
 }

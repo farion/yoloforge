@@ -4,6 +4,7 @@ import argparse
 import getpass
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import shlex
 import socket
 import subprocess
@@ -25,7 +26,7 @@ for name in ["host","client"]:
 (directory/"authorized_keys").write_text((directory/"client.pub").read_text());(directory/"authorized_keys").chmod(0o600)
 with socket.socket() as listener:
     listener.bind(("127.0.0.1",0));port=listener.getsockname()[1]
-helper=[str(root/"target/debug/factory-runner"),"--id",args.runner,"--name","ssh-readiness-test","--server",args.server,"--journal",str(args.journal.resolve()),"--open-session",args.command,"--session-readiness"]
+helper=[str(profile_dir(root=root)/"factory-runner"),"--id",args.runner,"--name","ssh-readiness-test","--server",args.server,"--journal",str(args.journal.resolve()),"--open-session",args.command,"--session-readiness"]
 if args.fetch:
     if args.model:parser.error("--model is not used for repository fetch")
     helper=helper[:-3]+["--fetch-repository",args.command]

@@ -8,6 +8,7 @@ import argparse
 import fcntl
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import pty
 import select
 import signal
@@ -45,7 +46,7 @@ if args.native:
         env["PATH"] = "/nonexistent-yoloforge-native-test"
 pid, fd = pty.fork()
 if pid == 0:
-    os.execve(str(ROOT / "target/debug/yoloforge"), ["yoloforge", "--server", args.server], env)
+    os.execve(str(profile_dir() / "yoloforge"), ["yoloforge", "--server", args.server], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 42, 160, 0, 0))
 screen = pyte.Screen(160, 42)
 terminal = pyte.Stream(screen)

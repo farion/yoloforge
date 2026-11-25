@@ -227,7 +227,7 @@ pub(super) fn route(tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket) -
                 note(tx, t, &format!("Orchestrator wartet: {reason}"))?;
             }
             Some(Decision::TargetGit { worktree_prompt, git, .. })
-                if git.valid() && worktree_prompt.as_ref().is_none_or(|prompt|
+                if git.valid() && !git.resume && worktree_prompt.as_ref().is_none_or(|prompt|
                     !prompt.trim().is_empty()
                         && !prompt.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))) =>
             {

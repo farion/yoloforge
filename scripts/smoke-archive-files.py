@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import select
 import subprocess
 import tempfile
@@ -16,7 +17,7 @@ directory=Path(tempfile.mkdtemp(prefix="yf-archive-files-",dir="/tmp/opencode"))
 env={**os.environ,"FACTORY_TOKEN":uuid.uuid4().hex*2};env.pop("FACTORY_TOKEN_FILE",None)
 def rid():return str(uuid.uuid4())
 def start():
-    process=subprocess.Popen([str(root/"target/debug/factoryd"),"--listen","127.0.0.1:0","--database",str(directory/"db")],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    process=subprocess.Popen([str(profile_dir(root=root)/"factoryd"),"--listen","127.0.0.1:0","--database",str(directory/"db")],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
     assert select.select([process.stdout],[],[],10)[0]
     return process,"http://"+process.stdout.readline().strip().split()[-1]
 server,endpoint=start()
@@ -44,7 +45,7 @@ try:
     first=api("PUT",prefix+command["id"]+"/archive",body,registration);assert api("PUT",prefix+command["id"]+"/archive",body,registration)==first
     source.unlink();server.terminate();server.wait(timeout=10);server,endpoint=start()
     output=directory/"archive.jsonl";files=directory/"files"
-    result=subprocess.run([str(root/"target/debug/yoloforge"),"--server",endpoint,"archive",command["id"],"--output",str(output),"--attachments",str(files)],env=env,capture_output=True,text=True,timeout=20)
+    result=subprocess.run([str(profile_dir(root=root)/"yoloforge"),"--server",endpoint,"archive",command["id"],"--output",str(output),"--attachments",str(files)],env=env,capture_output=True,text=True,timeout=20)
     assert result.returncode==0,result.stderr
     assert (files/digest).read_bytes()==payload
     assert not (directory.parent/"untrusted-name.bin").exists()

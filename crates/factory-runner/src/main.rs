@@ -62,6 +62,9 @@ struct Args {
     server: String,
     #[arg(long)]
     id: RunnerId,
+    /// GUI-selected startup identity used to confirm this exact replacement.
+    #[arg(long)]
+    instance_id: Option<InstanceId>,
     #[arg(long)]
     name: String,
     #[arg(long, value_enum, default_value = "local")]
@@ -590,6 +593,32 @@ async fn opencode_status(path: &Option<PathBuf>) -> OpenCodeStatus {
     }
 }
 
+fn registration_capabilities(managed: bool) -> Vec<String> {
+    [
+        SESSION_LIFECYCLE_CAPABILITY,
+        CONTAINER_FREEZE_CAPABILITY,
+        RUNTIME_TERMINATION_CAPABILITY,
+        CHECKPOINT_CAPABILITY,
+        REVIEW_CAPABILITY,
+        TARGET_GIT_CAPABILITY,
+        PROJECT_SETUP_CAPABILITY,
+        TASK_IMAGES_CAPABILITY,
+        TASK_FILES_CAPABILITY,
+        CONTEXT_PLANNING_CAPABILITY,
+        LOCAL_PROJECT_CAPABILITY,
+    ]
+    .into_iter()
+    .chain(managed.then_some([
+        factory_protocol::REPO_SKILLS_CAPABILITY,
+        factory_protocol::mcp::LOCAL_MCP_CAPABILITY,
+        factory_protocol::mcp::REMOTE_MCP_CAPABILITY,
+        factory_protocol::mcp::LOCAL_MCP_PROBE_CAPABILITY,
+        factory_protocol::skills::FACTORY_SKILLS_CAPABILITY,
+    ]).into_iter().flatten())
+    .map(str::to_owned)
+    .collect()
+}
+
 async fn run(mut args: Args) -> Result<()> {
     for root in &mut args.archive_source_root {
         anyhow::ensure!(
@@ -700,7 +729,7 @@ async fn run(mut args: Args) -> Result<()> {
     } else {
         None
     };
-    let instance_id = InstanceId::new();
+    let instance_id = args.instance_id.unwrap_or_else(InstanceId::new);
     let mut registration: Option<Registration> = None;
     let mut was_connected = false;
     let mut waiting_for_registration = false;
@@ -740,25 +769,7 @@ async fn run(mut args: Args) -> Result<()> {
             let opencode = opencode_status(&args.opencode_registration).await;
             let result = client
                 .register(&RegisterRunner {
-                    capabilities: vec![
-                        SESSION_LIFECYCLE_CAPABILITY.into(),
-                        CONTAINER_FREEZE_CAPABILITY.into(),
-                        RUNTIME_TERMINATION_CAPABILITY.into(),
-                        CHECKPOINT_CAPABILITY.into(),
-                        REVIEW_CAPABILITY.into(),
-                        TARGET_GIT_CAPABILITY.into(),
-                        PROJECT_SETUP_CAPABILITY.into(),
-                        TASK_IMAGES_CAPABILITY.into(),
-                        TASK_FILES_CAPABILITY.into(),
-                        CONTEXT_PLANNING_CAPABILITY.into(),
-                        LOCAL_PROJECT_CAPABILITY.into(),
-                    ].into_iter().chain(args.managed_opencode.is_some().then(|| [
-                        factory_protocol::REPO_SKILLS_CAPABILITY.into(),
-                        factory_protocol::mcp::LOCAL_MCP_CAPABILITY.into(),
-                        factory_protocol::mcp::REMOTE_MCP_CAPABILITY.into(),
-                        factory_protocol::mcp::LOCAL_MCP_PROBE_CAPABILITY.into(),
-                        factory_protocol::skills::FACTORY_SKILLS_CAPABILITY.into(),
-                    ]).into_iter().flatten()).collect(),
+                    capabilities: registration_capabilities(args.managed_opencode.is_some()),
                     id: args.id,
                     instance_id,
                     name: args.name.clone(),
@@ -870,7 +881,11 @@ async fn run(mut args: Args) -> Result<()> {
                 delay = Duration::from_secs(3);
             }
             Err(error @ ClientError::Http { .. }) | Err(error @ ClientError::InvalidResponse) => {
-                return Err(error.into())
+                return Err(anyhow::Error::new(error).context(if registration.is_some() {
+                    "Factory rejected the runner heartbeat"
+                } else {
+                    "Factory rejected the runner registration"
+                }));
             }
             Err(ClientError::Transport) => {
                 if was_connected || registration.is_none() {
@@ -900,5 +915,36 @@ async fn main() -> Result<()> {
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = terminate => Ok(()),
         result = control::serve(control) => result,
+    }
+}
+
+#[cfg(test)]
+mod startup_identity_tests {
+    use super::*;
+
+    #[test]
+    fn managed_runner_registration_fits_server_limit_without_losing_git_recovery() {
+        for managed in [false, true] {
+            let capabilities = registration_capabilities(managed);
+            assert!(capabilities.len() <= 16);
+            assert!(capabilities.iter().any(|cap| cap == TARGET_GIT_CAPABILITY));
+            assert!(!capabilities.iter().any(|cap| cap == RUNNER_RESTART_CAPABILITY));
+        }
+    }
+
+    #[test]
+    fn desktop_can_select_the_exact_startup_instance_without_changing_runner_identity() {
+        let runner = RunnerId::new();
+        let instance = InstanceId::new();
+        let args = Args::try_parse_from([
+            "factory-runner", "--id", &runner.to_string(), "--name", "Local",
+            "--instance-id", &instance.to_string(),
+        ]).unwrap();
+        assert_eq!(args.id, runner);
+        assert_eq!(args.instance_id, Some(instance));
+        let args = Args::try_parse_from([
+            "factory-runner", "--id", &runner.to_string(), "--name", "Local",
+        ]).unwrap();
+        assert!(args.instance_id.is_none(), "Existing runner launch commands stay compatible");
     }
 }

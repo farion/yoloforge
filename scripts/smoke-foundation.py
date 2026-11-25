@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import pty
 import select
 import signal
@@ -53,7 +54,7 @@ def stop(process):
 def tui_check(url, env):
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(str(ROOT / "target/debug/factory"), ["factory", "--server", url], env)
+        os.execve(str(profile_dir() / "factory"), ["factory", "--server", url], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
     output = b""
     exited = False
@@ -120,7 +121,7 @@ def main():
     temporary = tempfile.TemporaryDirectory(prefix="factory-smoke-", dir="/tmp/opencode")
     database = str(Path(temporary.name) / "factory.db")
     def spawn(binary, *arguments):
-        process = subprocess.Popen([str(ROOT / "target/debug" / binary), *arguments], env=env,
+        process = subprocess.Popen([str(profile_dir() / binary), *arguments], env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=ROOT)
         processes.append(process)
         return process
@@ -149,7 +150,7 @@ def main():
         wait_for(lambda: len(snapshot()["runners"]) == 2)
         before = snapshot()
         def cli(*args):
-            result = subprocess.run([str(ROOT / "target/debug/factory"), "--server", url, *args],
+            result = subprocess.run([str(profile_dir() / "factory"), "--server", url, *args],
                                     env=env, capture_output=True, text=True, timeout=10)
             check(result.returncode == 0, "CLI mutation failed")
             return json.loads(result.stdout)
@@ -202,7 +203,7 @@ def main():
         if args.opencode_registration:
             check(next(r for r in before["runners"] if r["name"] == "smoke-local")["opencode"]["status"] == "ready", "OpenCode adapter did not report ready")
             print("PASS actual OpenCode registration read and version checked")
-        clients = [subprocess.Popen([str(ROOT / "target/debug/factory"), "--server", url, "--snapshot"],
+        clients = [subprocess.Popen([str(profile_dir() / "factory"), "--server", url, "--snapshot"],
                                    env=env, stdout=subprocess.PIPE, text=True) for _ in range(2)]
         for client in clients:
             output, _ = client.communicate(timeout=10)

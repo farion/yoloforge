@@ -640,6 +640,10 @@ impl Store {
             |tx| {
                 let mut value = command(tx, id, runner, body.ownership_epoch)?;
                 if value.state == CommandState::Pending {
+                    let restarting: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runner_restart_holds WHERE runner_id=?1 AND expires_ms>?2)",
+                        params![runner.to_string(),super::super::unix_ms()], |r| r.get(0))?;
+                    if restarting { return Err(StoreError::WorkConflict); }
                      if value.kind == CommandKind::RunAgent {
                          let owner=stream(tx,value.stream_id)?;
                          if let Some(agent) = &value.agent_spec {

@@ -2,6 +2,7 @@
 """Real Factory/runner/CLI, synthetic OpenCode: large files, restart, external-source recovery."""
 import base64,hashlib,http.server,json,os,select,secrets,subprocess,tempfile,threading,time,urllib.parse,urllib.request,uuid
 from pathlib import Path
+from cargo_paths import profile_dir
 ROOT=Path(__file__).resolve().parents[1]
 Path('/tmp/opencode').mkdir(exist_ok=True)
 base=Path(tempfile.mkdtemp(prefix='yf-archive-blobs-',dir='/tmp/opencode'))
@@ -44,7 +45,7 @@ native=http.server.ThreadingHTTPServer(('127.0.0.1',0),Native);threading.Thread(
 (base/'registration').write_text(json.dumps({'url':f'http://127.0.0.1:{native.server_port}','password':'fixture'}))
 def rid():return str(uuid.uuid4())
 def start_server(address):
-    p=subprocess.Popen([str(ROOT/'target/debug/factoryd'),'--listen',address,'--database',str(base/'db')],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    p=subprocess.Popen([str(profile_dir()/'factoryd'),'--listen',address,'--database',str(base/'db')],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
     assert select.select([p.stdout],[],[],10)[0];return p,'http://'+p.stdout.readline().strip().split()[-1]
 server,url=start_server('127.0.0.1:0');runner=None
 def api(method,path,body=None,registration=None):
@@ -65,7 +66,7 @@ try:
     project=api('POST','/v1/projects',{'request_id':rid(),'name':'Large archive','repository':str(repo),'base_branch':'main'})
     api('PATCH','/v1/projects/'+project['id']+'/profile',{'request_id':rid(),'expected_revision':1,'profile':{'provider_id':'fixture','model_id':'fixture','toolchain':'','start_command':'','test_command':''}})
     (base/'repositories').write_text(json.dumps({project['id']:str(repo)}));runner_id=rid()
-    args=[str(ROOT/'target/debug/factory-runner'),'--id',runner_id,'--name','archive-fixture','--server',url,'--journal',str(base/'journal'),'--workspace-root',str(base/'work'),'--repositories',str(base/'repositories'),'--opencode-registration',str(base/'registration')]
+    args=[str(profile_dir()/'factory-runner'),'--id',runner_id,'--name','archive-fixture','--server',url,'--journal',str(base/'journal'),'--workspace-root',str(base/'work'),'--repositories',str(base/'repositories'),'--opencode-registration',str(base/'registration')]
     log=(base/'runner.log').open('w');runner=subprocess.Popen(args,env=env,stdout=log,stderr=subprocess.STDOUT)
     wait(lambda:any(r['id']==runner_id for r in api('GET','/v1/snapshot')['runners']))
     stream=api('POST','/v1/streams',{'request_id':rid(),'project_id':project['id'],'runner_id':runner_id,'goal':'Archive fixture','ticket_ids':[]})
@@ -83,7 +84,7 @@ try:
     runner=subprocess.Popen([*args,'--archive-source-root',str(outside)],env=env,stdout=log,stderr=subprocess.STDOUT)
     wait(lambda:len(api('GET','/v1/commands/'+command['id']+'/files')['files'])==2)
     external_path.unlink()
-    result=json.loads(subprocess.check_output([str(ROOT/'target/debug/yoloforge'),'--server',url,'archive',command['id'],'--output',str(base/'archive.jsonl'),'--attachments',str(base/'files')],env=env,text=True))
+    result=json.loads(subprocess.check_output([str(profile_dir()/'yoloforge'),'--server',url,'archive',command['id'],'--output',str(base/'archive.jsonl'),'--attachments',str(base/'files')],env=env,text=True))
     assert result['files_extracted']==2,result
     for data in [large,external]:assert (base/'files'/hashlib.sha256(data).hexdigest()).read_bytes()==data
     assert len(writes)==2,writes

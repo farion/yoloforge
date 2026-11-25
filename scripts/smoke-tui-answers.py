@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import pty
 import re
 import select
@@ -57,7 +58,7 @@ def main():
     env = {**os.environ, "FACTORY_TOKEN": uuid.uuid4().hex * 2, "TERM": "xterm-256color"}
     Path("/tmp/opencode").mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="factory-tui-answer-", dir="/tmp/opencode") as directory:
-        server = subprocess.Popen([str(ROOT / "target/debug/factoryd"), "--listen", "127.0.0.1:0", "--database", directory + "/db"],
+        server = subprocess.Popen([str(profile_dir() / "factoryd"), "--listen", "127.0.0.1:0", "--database", directory + "/db"],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         pid = None
         fd = None
@@ -113,7 +114,7 @@ def main():
                              {"id": "msg_raw_second", "text": "Second raw archive message"}]}}, registration)
             pid, fd = pty.fork()
             if pid == 0:
-                os.execve(str(ROOT / "target/debug/factory"), ["factory", "--server", url], env)
+                os.execve(str(profile_dir() / "factory"), ["factory", "--server", url], env)
             width = 125
 
             def resize():

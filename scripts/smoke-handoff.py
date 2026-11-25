@@ -4,6 +4,7 @@ import json
 import argparse
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import secrets
 import socket
 import subprocess
@@ -31,7 +32,7 @@ def main():
         def spawn(binary, *args):
             log = open(base / f"process-{len(logs)}.log", "w+")
             logs.append(log)
-            p = subprocess.Popen([str(ROOT / "target/debug" / binary), *map(str, args)],
+            p = subprocess.Popen([str(profile_dir() / binary), *map(str, args)],
                                  env=env, stdout=log, stderr=log)
             processes.append(p)
             return p
@@ -63,7 +64,7 @@ def main():
             with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=2) as r:
                 return json.load(r)
         def cli(*args):
-            result = subprocess.run([str(ROOT / "target/debug/yoloforge"), "--server", url, *map(str, args)],
+            result = subprocess.run([str(profile_dir() / "yoloforge"), "--server", url, *map(str, args)],
                                     env=env, capture_output=True, text=True, timeout=15)
             if result.returncode:
                 raise RuntimeError(result.stderr)
@@ -181,7 +182,7 @@ def main():
                     token_path=base/"hosting.token";token_path.touch(mode=0o600);token_path.write_text(secret)
                     config=base/"hosting.json";config.write_text(json.dumps({"provider":"github","api_url":"https://api.github.com","repository":"farion/yoloforge-acceptance","git_remote":remote,"token_file":str(token_path)}))
                     def publish(review_id):
-                        return subprocess.run([str(ROOT/"target/debug/factory-runner"),"--server",url,"--id",ids["a"],"--name","hosting-acceptance","--journal",str(base/"a.sqlite3"),"--publish-review",review_id,"--hosting-config",str(config)],env=env,capture_output=True,text=True,timeout=120)
+                        return subprocess.run([str(profile_dir()/"factory-runner"),"--server",url,"--id",ids["a"],"--name","hosting-acceptance","--journal",str(base/"a.sqlite3"),"--publish-review",review_id,"--hosting-config",str(config)],env=env,capture_output=True,text=True,timeout=120)
                     published=publish(reviewed["id"]);assert published.returncode==0,published.stderr
                     pr_url=published.stdout.strip();assert pr_url.startswith("https://github.com/farion/yoloforge-acceptance/pull/")
                     assert publish(reviewed["id"]).stdout.strip()==pr_url,"Publication replay differs"

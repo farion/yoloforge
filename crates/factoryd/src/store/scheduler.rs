@@ -506,6 +506,16 @@ impl Store {
                 Err(error) => return Err(error),
             }
             tx.execute_batch("RELEASE question_orchestration")?;
+            tx.execute_batch("SAVEPOINT workspace_recovery")?;
+            match super::workspace_recovery::tick(&tx, &p) {
+                Ok(()) => {}
+                Err(StoreError::WorkConflict | StoreError::Invalid(_) | StoreError::RevisionConflict(_)) =>
+                    tx.execute_batch("ROLLBACK TO workspace_recovery")?,
+                Err(error) => return Err(error),
+            }
+            tx.execute_batch("RELEASE workspace_recovery")?;
+            // Recovery may update the execution command or commission a repair.
+            all = tickets(&tx, p.project_id)?;
             // Advance only our own prepared streams; never adopt a manual assignment.
             let mut stmt=tx.prepare("SELECT r.ticket_id,r.stream_id,r.prepare_id,r.prompt FROM scheduler_runs r JOIN tickets t ON t.id=r.ticket_id WHERE t.project_id=?1 AND r.agent_id IS NULL ORDER BY r.rowid")?;
             let preparing = stmt

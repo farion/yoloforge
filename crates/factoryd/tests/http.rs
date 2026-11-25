@@ -5,6 +5,33 @@ use reqwest::{Client, StatusCode};
 const TOKEN: &str = "test-only-credential-0123456789abcdef";
 
 #[tokio::test]
+async fn desktop_versions_and_server_features_are_reported_without_inventing_legacy_client_versions() {
+    let server = server().await;
+    let id = RequestId::new();
+    let client = factory_protocol::client::FactoryClient::new_desktop(&server.url, TOKEN, id).unwrap();
+    let snapshot = client.desktop_snapshot().await.unwrap();
+    assert!(snapshot.server_capabilities.iter().any(|c| c == TARGET_GIT_CAPABILITY));
+    assert!(snapshot.server_capabilities.iter().any(|c| c == RUNNER_RESTART_CAPABILITY));
+    let legacy = RequestId::new();
+    let response = Client::new().get(format!("{}/v1/desktop/snapshot",server.url))
+        .bearer_auth(TOKEN).header(VERSION_HEADER,"1")
+        .header("x-factory-client-id",legacy.to_string()).header("x-factory-client-kind","desktop")
+        .send().await.unwrap();
+    assert!(response.status().is_success());
+    let peers: Vec<ClientPresence> = serde_json::from_value(client.management_request(
+        "GET","/v1/desktop/clients",&serde_json::Value::Null).await.unwrap()).unwrap();
+    let current = peers.iter().find(|p| p.id.ends_with(&id.to_string())).unwrap();
+    assert_eq!(current.version.as_deref(),Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(current.protocol_version,Some(PROTOCOL_VERSION));
+    let old = peers.iter().find(|p| p.id.ends_with(&legacy.to_string())).unwrap();
+    assert!(old.version.is_none());
+    assert_eq!(old.protocol_version,Some(PROTOCOL_VERSION));
+    let mut value = serde_json::to_value(snapshot).unwrap();
+    value.as_object_mut().unwrap().remove("server_capabilities");
+    assert!(serde_json::from_value::<Snapshot>(value).unwrap().server_capabilities.is_empty());
+}
+
+#[tokio::test]
 async fn task_edit_endpoint_reserves_full_payload_and_requires_owner_to_release() {
     use factory_protocol::client::FactoryClient;
     let server = server().await;

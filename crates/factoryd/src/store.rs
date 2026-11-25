@@ -20,7 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
-pub const SCHEMA_VERSION: u32 = 40;
+pub const SCHEMA_VERSION: u32 = 42;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -204,6 +204,12 @@ impl Store {
         }
         if version < 40 {
             tx.execute_batch(include_str!("../migrations/040_remove_start_budget.sql"))?;
+        }
+        if version < 41 {
+            tx.execute_batch(include_str!("../migrations/041_workspace_recovery.sql"))?;
+        }
+        if version < 42 {
+            tx.execute_batch(include_str!("../migrations/042_runner_restart.sql"))?;
         }
         tx.commit()?;
         // Connection-local view centralizes fencing of removed projects without
@@ -654,6 +660,7 @@ mod question_orchestrator;
 mod questions;
 mod reviews;
 mod routing;
+mod runner_restart;
 mod scheduler;
 mod sessions;
 mod setup;
@@ -665,6 +672,7 @@ mod termination;
 mod token_budgets;
 mod usage;
 mod work;
+mod workspace_recovery;
 
 fn records<T: DeserializeOwned>(tx: &Transaction<'_>, sql: &str) -> Result<Vec<T>> {
     let mut stmt = tx.prepare(sql)?;

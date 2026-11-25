@@ -327,6 +327,9 @@ impl App {
     pub fn manage_local_runners(&mut self, action: crate::local_runners::Action) {
         if self.local_runners_busy || !self.online || !self.backend.is_connected() { return; }
         self.local_runners_busy = true;
+        if matches!(&action, crate::local_runners::Action::Restart(_)) {
+            self.notice(crate::tr!("Lokaler Runner wird neu gestartet …"));
+        }
         self.backend.local_runners(self.server.clone(), action);
     }
     pub fn disconnect(&mut self) {
@@ -510,6 +513,18 @@ impl App {
         self.backend
             .durable_request(id, self.settings.clone(), method.into(), path, body);
         id
+    }
+
+    pub fn requeue_task(&mut self, ticket: &Ticket) {
+        if self.snapshot.as_ref().is_none_or(|s| !retryable_task(s, ticket)) { return; }
+        let Some(previous_command) = ticket.execution_command else { return; };
+        let path = format!("/v1/tasks/{}/retry", ticket.id);
+        if !self.online || self.settings.pending.iter().any(|r| r.server == self.server && r.path == path) {
+            return;
+        }
+        self.write(crate::tr!("Intent erneut einreihen"), "POST", path, serde_json::json!(factory_protocol::RetryTask {
+            request_id: RequestId::new(), expected_revision: ticket.revision, previous_command,
+        }));
     }
     pub(crate) fn project_pause_pending(&self, project: ProjectId) -> bool {
         let path = format!("/v1/projects/{project}/pause");
@@ -1162,6 +1177,32 @@ impl App {
                         }
                     }
                     let mut task_notice = None;
+                    if let Some(request) = self.settings.pending.iter().find(|r| r.id == id
+                        && r.method == "POST" && r.path.starts_with("/v1/tasks/") && r.path.ends_with("/retry")).cloned()
+                    {
+                        if let Ok(value) = &result {
+                            match serde_json::from_value::<Ticket>(value.clone()) {
+                                Ok(ticket) if request.path == format!("/v1/tasks/{}/retry", ticket.id)
+                                    && ticket.execution_command.is_some()
+                                    && serde_json::to_value(ticket.execution_command).ok().as_ref() != Some(&request.body["previous_command"]) =>
+                                {
+                                    if request.server == self.server {
+                                        if let Some(snapshot) = &mut self.snapshot {
+                                            if let Some(current) = std::sync::Arc::make_mut(snapshot).tickets.iter_mut()
+                                                .find(|t| t.id == ticket.id && t.revision.0 <= ticket.revision.0)
+                                            { *current = ticket; }
+                                        }
+                                    }
+                                    task_notice = Some(crate::tr!("Intent erneut eingereiht."));
+                                }
+                                _ => result = Err(Failure { message: crate::tr!("Erneutes Einreihen nicht eindeutig bestätigt.").into(), uncertain: true }),
+                            }
+                        }
+                        if let Err(error) = &result {
+                            self.notice(crate::tr!("Intent konnte nicht erneut eingereiht werden. Details stehen in der Diagnose."));
+                            self.action_errors.push((crate::overview::now_ms(), format!("{}: {}", request.label, error.message)));
+                        }
+                    }
                     if let Some(request) = self.settings.pending.iter().find(|request| request.id == id
                         && request.method == "DELETE"
                         && request.path.strip_prefix("/v1/projects/").is_some_and(|id| id.parse::<ProjectId>().is_ok())).cloned()
@@ -1514,7 +1555,7 @@ impl App {
                             if self.action_errors.len() > 50 {
                                 self.action_errors.remove(0);
                             }
-                            self.notice(crate::tr!("Lokaler Runner konnte nicht gestartet oder entfernt werden. Details stehen in der Diagnose."));
+                            self.notice(crate::tr!("Lokale Runner-Aktion fehlgeschlagen. Details stehen in der Diagnose."));
                         }
                     }
                 },

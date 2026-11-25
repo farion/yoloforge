@@ -16,7 +16,8 @@ impl Store {
                 SELECT r.prepare_id FROM scheduler_runs r WHERE r.ticket_id=?1
                   AND r.rowid=(SELECT MIN(first.rowid) FROM scheduler_runs first WHERE first.prepare_id=r.prepare_id)
                 UNION SELECT agent_id FROM scheduler_runs WHERE ticket_id=?1 AND agent_id IS NOT NULL
-                UNION SELECT json_extract(data,'$.execution_command') FROM tickets WHERE id=?1
+                 UNION SELECT json_extract(data,'$.execution_command') FROM tickets WHERE id=?1
+                 UNION SELECT json_extract(payload,'$.previous_command') FROM events WHERE aggregate_id=?1 AND kind='task.retried'
              ), related(id) AS (
                 SELECT id FROM assigned_commands WHERE id IS NOT NULL
                 UNION SELECT id FROM questions WHERE command_id IN (SELECT id FROM assigned_commands)
@@ -25,7 +26,7 @@ impl Store {
              SELECT sequence, kind, created_unix_ms, payload FROM events
              WHERE aggregate_id IN (SELECT id FROM related) AND sequence<?2
                AND kind IN ('ticket.created','ticket.updated','task.saved','task.edit_started',
-                   'task.routing','scheduler.blocked','command.created','command.updated',
+                    'task.routing','task.retried','scheduler.blocked','command.created','command.updated',
                    'question.created','question.updated')
              ORDER BY sequence DESC LIMIT 101",
         )?;
@@ -61,6 +62,7 @@ fn summarize(kind: &str, data: &serde_json::Value) -> Option<(String, TaskHistor
         "ticket.created" => line("Aufgabe angelegt", Info),
         "task.saved" if data["draft"] == true => line("Entwurf gespeichert", Info),
         "task.saved" => line("Aufgabe eingereiht", Info),
+        "task.retried" => line("Intent erneut eingereiht", Info),
         "task.edit_started" => line("Aufgabe zur Bearbeitung geöffnet", Info),
         "task.routing" => {
             let note = data["routing_note"].as_str()?;

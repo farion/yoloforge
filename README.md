@@ -22,6 +22,32 @@ cargo build --locked -p factory-gui -p factory-runner
 cargo run --locked -p factory-gui --bin yoloforge-gui
 ```
 
+### Speicherbedarf von Rust-Builds
+
+Lokale Entwicklungs- und Test-Builds verwenden reduzierte Debug-Informationen
+(`profile.dev.debug = 1`); inkrementelles Kompilieren bleibt lokal aktiv.
+Verwaltete Runner geben ihren OpenCode-Unterprozessen für Cargo die Profile
+`DEV` und `TEST` mit `DEBUG=0` und `INCREMENTAL=false` mit. Diese Vorgaben gelten
+nach Neubau und Neustart des Runners auch für seine Agenten-Builds.
+Release-Profile bleiben unverändert.
+
+Vorhandene Builddateien werden durch die Profiländerung nicht gelöscht.
+`cargo clean` entfernt sie, aber auch die gebauten Programme; daher nur ohne
+laufende Builds und mit anschließendem Neubau verwenden. Workspaces und
+unveröffentlichte Änderungen niemals zum Aufräumen löschen.
+Entwicklungs-/Testskripte ermitteln den Buildordner über `cargo metadata`;
+`CARGO_TARGET_DIR` und Cargos `build.target-dir` werden dadurch berücksichtigt.
+GUI, Server und Runner müssen gemeinsam gebaut werden: Die GUI startet ihre
+Hilfsprogramme neben ihrer eigenen Programmdatei, unabhängig vom Buildordner.
+Verwaltete Runner reichen ein geerbtes `CARGO_TARGET_DIR` an ihre isolierte
+Laufzeit weiter. Bei einer isolierten Laufzeit genügt eine persönliche
+`~/.cargo/config.toml` allein nicht, da sie ein separates `HOME` hat.
+Ein gemeinsamer Ordner spart wiederverwendbare Abhängigkeiten, ist aber nicht
+größenbegrenzt. Gleichnamige Programme verschiedener Worktrees teilen sich dort
+den Ausgabepfad; vor dem Start immer den gewünschten Stand bauen.
+Bei einem gemeinsamen Ordner betrifft ein unbeschränktes `cargo clean` auch
+Builddateien anderer Projekte. Nicht während fremder Builds bereinigen.
+
 Dark Theme, Aufgaben-/Fragenverwaltung, schreibgeschützte OpenCode-Tabs,
 Instanzpräsenz, Orchestrator, Runner, Diagnose und globale Benachrichtigungen.
 Ohne Zugang öffnet sich ein Verbindungsdialog mit lokalem Startassistenten.

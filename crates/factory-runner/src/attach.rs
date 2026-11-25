@@ -170,7 +170,7 @@ pub(crate) fn read_record(
     let tx = db.transaction()?;
     let version: u32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
-        (1..=9).contains(&version),
+        (1..=10).contains(&version),
         "Unsupported runner journal version"
     );
     let (origin, owner): (String, String) =

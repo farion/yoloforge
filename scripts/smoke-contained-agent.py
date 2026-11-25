@@ -9,6 +9,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import secrets
 import shlex
 import shutil
@@ -95,7 +96,7 @@ def main():
     def spawn(name, *parts, child_env=None):
         log = open(directory / f"{name}-{len(logs)}.log", "w+")
         logs.append(log)
-        process = subprocess.Popen([str(ROOT / "target/debug" / name), *parts], env=child_env or env,
+        process = subprocess.Popen([str(profile_dir() / name), *parts], env=child_env or env,
                                    stdout=log, stderr=subprocess.STDOUT)
         processes.append(process)
         return process, log
@@ -122,7 +123,7 @@ def main():
         return http(endpoint, "Bearer " + token, method, path, body)
 
     def cli(*parts):
-        return json.loads(run(str(ROOT / "target/debug/yoloforge"), "--server", endpoint, *parts, env=env))
+        return json.loads(run(str(profile_dir() / "yoloforge"), "--server", endpoint, *parts, env=env))
 
     def snapshot():
         return api("GET", "/v1/snapshot")

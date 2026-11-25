@@ -10,6 +10,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import shutil
 import signal
 import subprocess
@@ -160,7 +161,7 @@ def main():
                                 return result
                     return find(tree)
 
-                gui = subprocess.Popen([str(ROOT / "target/debug/yoloforge-gui"), "--server", "http://127.0.0.1:1"], env=env, stdout=gui_log, stderr=gui_log)
+                gui = subprocess.Popen([str(profile_dir() / "yoloforge-gui"), "--server", "http://127.0.0.1:1"], env=env, stdout=gui_log, stderr=gui_log)
                 processes.append(gui)
                 target = wait_for(lambda: window("YoloForge"), "SDL3 Wayland window")
                 assert target.get("shell") == "xdg_shell", target

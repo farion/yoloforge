@@ -60,7 +60,7 @@ Ein vorhandener Zugang kann wie bei der TUI übergeben werden:
 
 ```sh
 FACTORY_TOKEN_FILE=/absoluter/pfad/device.token \
-  target/debug/yoloforge-gui --server https://factory.example
+  "$(python3 scripts/cargo_paths.py)/yoloforge-gui" --server https://factory.example
 ```
 
 `FACTORY_TOKEN` und `FACTORY_TOKEN_FILE` nicht gleichzeitig setzen. Direkt im
@@ -111,12 +111,36 @@ Factory-Runner behalten ihr bisheriges Verzeichnis. Nach erneutem Verbinden
 werden vorhandene Prozesse wiederverwendet und fehlende Runner gestartet.
 Ein Dateilock verhindert doppelte Verwaltung durch mehrere GUIs.
 
+Der runde Neustart-Button links neben dem X öffnet **Runner neu starten**.
+Mit Admin-Zugang wird die installierte `factory-runner`-Version neben der GUI
+gestartet; nach einem Paket-Update wird so der alte Hintergrundprozess ersetzt.
+ID, Zugang, Journal und Arbeitsdaten bleiben erhalten. Eingereihte Aufträge
+dürfen warten, laufende oder ungeklärte Aufträge blockieren den Neustart.
+Die Factory sperrt während des Wechsels neue Auftragsannahmen. Erfolg wird erst
+nach Anmeldung der neu gestarteten Instanz bestätigt. Ein gespeicherter
+Neustartauftrag kann nach einem GUI-Abbruch beim nächsten Verbinden fortgesetzt
+werden; die temporäre Annahmesperre läuft nach drei Minuten aus.
+
 Nur GUI-verwaltete lokale Runner haben einen runden X-Button auf der rechten
 oberen Kachelecke. Er öffnet eine Bestätigung; Entfernen stoppt den identifizierten
 Runner mitsamt seinem verwalteten OpenCode, widerruft seinen Zugang und entfernt
 ihn aus der lokalen Startliste. Laufende oder ungeklärte Aufträge blockieren das
 Entfernen. Journale und Arbeitsdaten werden nicht gelöscht, historische
 Serverdaten bleiben bestehen. GUI-Schließen allein beendet keine Runner.
+
+Jede Infrastruktur-Kachel zeigt die gemeldete Version; beim Runner steht auch
+die bekannte OpenCode-Version dabei. Client und Server zeigen zusätzlich ihr
+Protokoll, soweit es gemeldet wurde. Ältere oder fremde Clients ohne Metadaten
+werden ausdrücklich als unbekannt angezeigt.
+
+Eine eigene Kompatibilitätszeile und Phosphor-Symbole auf den Verbindungen
+unterscheiden kompatibel, eingeschränkt, blockiert und nicht bestätigt.
+Entscheidend sind Protokoll und gemeldete Fähigkeiten, nicht gleiche
+Versionsnummern. Der Tooltip nennt fehlende Fähigkeiten und betroffene Intents,
+beispielsweise `YOLO-8` und `target-git-v2`. Offline bleiben bekannte Versionen
+sichtbar, aber die Kompatibilität wird nicht als aktuell bestätigt dargestellt.
+Die Kachel-Farbe zeigt die Verbindung; Warteschlange und Kompatibilität sind
+davon getrennt.
 
 Die Infrastruktur zeigt OpenCode direkt in der Runner-Kachel, ohne separate
 Server-/Projektkacheln. Desktop- und Runner-Kacheln zeigen die von der Factory

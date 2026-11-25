@@ -19,6 +19,9 @@ pub struct LocalRunner {
     pub removing: bool,
     #[serde(default)]
     pub removed: bool,
+    /// Explicit restart intent survives a GUI crash without changing identity.
+    #[serde(default)]
+    pub restarting: Option<RequestId>,
     device: Option<DeviceId>,
     /// Older local-Factory installations used this journal and token.
     #[serde(default)]
@@ -46,6 +49,7 @@ pub enum Action {
     Add,
     Restore,
     Remove(RunnerId),
+    Restart(RunnerId),
 }
 pub struct Report {
     pub runners: Option<Vec<LocalRunner>>,
@@ -254,9 +258,14 @@ fn legacy_find_process(runner: &LocalRunner, root: &Path) -> Result<Option<Proce
 }
 
 fn start(runner: &LocalRunner) -> Result<()> {
+    start_instance(runner, None)
+}
+
+fn start_instance(runner: &LocalRunner, instance: Option<InstanceId>) -> Result<()> {
     let root = runner.root()?;
     private_dir(&root)?;
     if find_process(runner, &root)?.is_some() {
+        ensure!(instance.is_none(), crate::tr!("Runner wurde noch nicht vollständig beendet"));
         return Ok(());
     }
     ensure!(
@@ -284,6 +293,9 @@ fn start(runner: &LocalRunner) -> Result<()> {
     }
     let log = options.open(root.join("factory-runner.log"))?;
     let mut command = Command::new(runner_executable()?);
+    if let Some(instance) = instance {
+        command.args(["--instance-id", &instance.to_string()]);
+    }
     command
         .args([
             "--server",
@@ -459,6 +471,68 @@ pub fn busy(snapshot: &Snapshot, id: RunnerId) -> bool {
     })
 }
 
+pub fn restart_blocked(snapshot: &Snapshot, id: RunnerId) -> bool {
+    snapshot.commands.iter().any(|c| c.runner_id == id
+        && (c.state == CommandState::Accepted
+            || match &c.result {
+                Some(CommandOutput::Agent { agent }) => agent.phase == AgentPhase::Unknown,
+                _ => c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::Unknown),
+            }))
+        || snapshot.streams.iter().any(|s| s.runner_id == id
+            && matches!(s.status, StreamState::Running | StreamState::WaitingInput | StreamState::Pausing | StreamState::Paused))
+        || snapshot.controls.iter().any(|c| c.state != PauseState::Released
+            && snapshot.streams.iter().any(|s| s.id == c.stream_id && s.runner_id == id))
+        || snapshot.runtime_terminations.iter().any(|r| r.state != TerminationState::Stopped
+            && snapshot.commands.iter().any(|c| c.id == r.command_id && c.runner_id == id))
+}
+
+async fn wait_for_journal_release(root: &Path) -> Result<()> {
+    let path = root.join("runner.lock");
+    for _ in 0..50 {
+        let lock = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        if lock.try_lock().is_ok() {
+            lock.unlock()?;
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    bail!("{}", crate::tr!("Runner-Journal ist noch belegt; kein zweiter Runner gestartet"))
+}
+
+async fn restart(client: &FactoryClient, runner: &LocalRunner) -> Result<()> {
+    ensure!(!runner.removing, crate::tr!("Dieser Runner wird gerade entfernt"));
+    let request = runner.restarting.context(crate::tr!("Neustartauftrag fehlt"))?;
+    let root = runner.root()?;
+    // Validate all local prerequisites before stopping an existing process.
+    runner_executable()?;
+    ensure!(root.join("runner.token").is_file(), crate::tr!("Gespeicherter Runner-Zugang fehlt"));
+    // This transaction fences new claims and rejects already accepted work.
+    // A snapshot alone would have a race with a runner accepting queued work.
+    client.hold_runner_restart(runner.id, request).await?;
+    stop(runner).await?;
+    if root.join("runner.lock").exists() { wait_for_journal_release(&root).await?; }
+    let instance = InstanceId::new();
+    start_instance(runner, Some(instance))?;
+    for attempt in 0..300 {
+        if attempt >= 20 {
+            ensure!(find_process(runner, &root)?.is_some(), "{}", startup_diagnostic(&root, &runner.name));
+        }
+        let status = client.runner_restart_status(runner.id).await?;
+        // The prior registration can remain online until its lease expires.
+        // Only this exact newly spawned instance confirms a successful restart.
+        if restart_confirmed(&status, instance) {
+            client.release_runner_restart(runner.id, request).await?;
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    bail!("{}", crate::tr!("Runner-Neustart noch nicht bestätigt. Neustartauftrag bleibt gespeichert."))
+}
+
+fn restart_confirmed(status: &RunnerRestartStatus, expected: InstanceId) -> bool {
+    status.instance_id == Some(expected) && status.ready
+}
+
 async fn create(client: &FactoryClient, runner: &mut LocalRunner) -> Result<()> {
     let root = runner.root()?;
     private_dir(&root)?;
@@ -533,6 +607,7 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
                     ),
                     removing: false,
                     removed: false,
+                    restarting: None,
                     device: None,
                     legacy: false,
                     builtin: false,
@@ -557,6 +632,18 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
                         .into(),
                 )
             }
+            Action::Restart(id) => {
+                let index = runners.iter().position(|r| r.id == id && r.visible(server))
+                    .context(crate::tr!("Dieser Runner wird nicht von der GUI verwaltet"))?;
+                if runners[index].restarting.is_none() {
+                    runners[index].restarting = Some(RequestId::new());
+                    atomic_json(&catalog, &runners)?;
+                }
+                restart(client, &runners[index]).await?;
+                runners[index].restarting = None;
+                atomic_json(&catalog, &runners)?;
+                Some(crate::tr!("Lokaler Runner neu gestartet und bestätigt.").into())
+            }
             Action::Restore => {
                 let mut errors = vec![];
                 for index in 0..runners.len() {
@@ -566,6 +653,10 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
                     let restored = async {
                         if runners[index].removing {
                             remove(client, &mut runners, index, &catalog).await
+                        } else if runners[index].restarting.is_some() {
+                            restart(client, &runners[index]).await?;
+                            runners[index].restarting = None;
+                            atomic_json(&catalog, &runners)
                         } else {
                             create(client, &mut runners[index]).await?;
                             atomic_json(&catalog, &runners)?;
@@ -617,6 +708,7 @@ pub async fn ensure_builtin(client: &FactoryClient, server: &str, root: &Path) -
             name: crate::tr!("Lokaler Desktop-Runner").into(),
             removing: false,
             removed: false,
+            restarting: None,
             device: None,
             legacy: reuse_legacy,
             builtin: true,
@@ -634,6 +726,12 @@ pub async fn ensure_builtin(client: &FactoryClient, server: &str, root: &Path) -
         !runners[index].removing,
         crate::tr!("Entfernen des lokalen Runners zuerst abschließen")
     );
+    if runners[index].restarting.is_some() {
+        restart(client, &runners[index]).await?;
+        runners[index].restarting = None;
+        atomic_json(&dir.join("local-runners.json"), &runners)?;
+        return Ok(());
+    }
     create(client, &mut runners[index]).await?;
     atomic_json(&dir.join("local-runners.json"), &runners)?;
     start_and_confirm(client, &runners[index]).await?;
@@ -648,6 +746,7 @@ pub(crate) fn fixture(id: RunnerId, server: &str) -> LocalRunner {
         name: crate::tr!("Lokaler Test-Runner").into(),
         removing: false,
         removed: false,
+        restarting: None,
         device: None,
         legacy: false,
         builtin: false,
@@ -657,6 +756,45 @@ pub(crate) fn fixture(id: RunnerId, server: &str) -> LocalRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_keeps_identity_and_journal_and_requires_the_new_instance() {
+        let id = RunnerId::new();
+        let mut runner = fixture(id, "http://factory.invalid");
+        let request = RequestId::new();
+        runner.restarting = Some(request);
+        let dir = tempfile::tempdir().unwrap();
+        atomic_json(&dir.path().join("local-runners.json"), &vec![runner.clone()]).unwrap();
+        let restored = read_catalog(dir.path()).unwrap();
+        assert_eq!(restored[0].id, id);
+        assert_eq!(restored[0].device, runner.device);
+        assert_eq!(restored[0].server, runner.server);
+        assert_eq!(restored[0].restarting, Some(request));
+        assert!(!restored[0].removed);
+        let expected = InstanceId::new();
+        assert!(!restart_confirmed(&RunnerRestartStatus { instance_id: Some(InstanceId::new()), ready: true }, expected));
+        assert!(!restart_confirmed(&RunnerRestartStatus { instance_id: Some(expected), ready: false }, expected));
+        assert!(restart_confirmed(&RunnerRestartStatus { instance_id: Some(expected), ready: true }, expected));
+    }
+
+    #[test]
+    fn pending_work_allows_restart_but_accepted_unknown_or_paused_work_does_not() {
+        let app = crate::tests::fixture();
+        let mut snapshot = (**app.snapshot.as_ref().unwrap()).clone();
+        let id = snapshot.runners[0].id;
+        snapshot.commands[0].state = CommandState::Pending;
+        snapshot.streams[0].status = StreamState::Queued;
+        snapshot.commands[0].agent_progress = None;
+        assert!(!restart_blocked(&snapshot, id));
+        assert!(busy(&snapshot, id), "Removal must still reject queued work");
+        snapshot.commands[0].state = CommandState::Accepted;
+        assert!(restart_blocked(&snapshot, id));
+        snapshot.commands[0].state = CommandState::Failed;
+        snapshot.streams[0].status = StreamState::Blocked;
+        assert!(!restart_blocked(&snapshot, id));
+        snapshot.streams[0].status = StreamState::Paused;
+        assert!(restart_blocked(&snapshot, id));
+    }
 
     #[test]
     fn startup_failure_includes_bounded_log_content_not_just_the_path() {

@@ -936,6 +936,7 @@ mod tests {
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command).unwrap();
         let args = Args {
+            instance_id: None,
             control_file: None,
             open_session: None,
             fetch_repository: None,

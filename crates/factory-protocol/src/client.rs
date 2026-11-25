@@ -265,6 +265,21 @@ impl FactoryClient {
         )
         .await
     }
+    pub async fn retry_task(&self, id: TicketId, body: &RetryTask) -> Result<Ticket, ClientError> {
+        Self::decode(self.http.post(format!("{}/v1/tasks/{id}/retry", self.base))
+            .json(body).send().await).await
+    }
+    pub async fn hold_runner_restart(&self, id: RunnerId, request_id: RequestId) -> Result<RunnerRestartStatus, ClientError> {
+        Self::decode(self.http.put(format!("{}/v1/runners/{id}/restart", self.base))
+            .json(&RunnerRestartHold { request_id }).send().await).await
+    }
+    pub async fn release_runner_restart(&self, id: RunnerId, request_id: RequestId) -> Result<(), ClientError> {
+        Self::decode(self.http.delete(format!("{}/v1/runners/{id}/restart", self.base))
+            .json(&RunnerRestartHold { request_id }).send().await).await
+    }
+    pub async fn runner_restart_status(&self, id: RunnerId) -> Result<RunnerRestartStatus, ClientError> {
+        Self::decode(self.http.get(format!("{}/v1/runners/{id}/restart", self.base)).send().await).await
+    }
     pub async fn archive_files(
         &self,
         id: CommandId,
@@ -1386,6 +1401,10 @@ impl FactoryClient {
             "x-factory-client-kind",
             header::HeaderValue::from_static(kind),
         );
+        if matches!(kind, "desktop" | "tui" | "runner") {
+            headers.insert("x-factory-client-version",
+                header::HeaderValue::from_static(env!("CARGO_PKG_VERSION")));
+        }
         Ok(Self {
             http: Client::builder()
                 .default_headers(headers)

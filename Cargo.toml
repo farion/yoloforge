@@ -3,6 +3,10 @@ members = ["spikes/opencode", "crates/*"]
 resolver = "2"
 exclude = ["vendor/sdl3-sys"]
 
+# Keep useful line information without full development debug symbols.
+[profile.dev]
+debug = 1
+
 [patch.crates-io]
 # SDL's Wayland receiver must prefer file URIs over accompanying plain text.
 sdl3-sys = { path = "vendor/sdl3-sys" }

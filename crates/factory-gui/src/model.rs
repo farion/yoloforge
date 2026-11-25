@@ -321,13 +321,15 @@ pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
         Some(CommandOutput::Agent { agent }) => Some(agent),
         _ => None,
     });
-    let positive = command.kind == CommandKind::RunAgent
+    let positive = (command.kind == CommandKind::RunAgent
         && command.state == CommandState::Succeeded
         && !command
             .agent_spec
             .as_ref()
             .is_some_and(|spec| spec.read_only)
-        && progress.is_some_and(|p| p.phase == AgentPhase::Succeeded);
+        && progress.is_some_and(|p| p.phase == AgentPhase::Succeeded))
+        || (command.kind == CommandKind::TargetGit && command.state == CommandState::Succeeded
+            && matches!(&command.result, Some(CommandOutput::TargetGit { git_succeeded: true, .. })));
     let unresolved = snapshot
         .questions
         .iter()
@@ -341,6 +343,12 @@ pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
 
 pub fn needs_answer(q: &Question) -> bool {
     matches!(q.state, QuestionState::Pending | QuestionState::Rejected)
+}
+
+pub fn retryable_task(snapshot: &Snapshot, ticket: &Ticket) -> bool {
+    !ticket.draft && matches!(ticket.status, TicketState::InProgress | TicketState::Blocked)
+        && task_command(snapshot, ticket).is_some_and(|c| c.state == CommandState::Failed
+            && matches!(c.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit))
 }
 
 pub fn generic_question_title(title: &str) -> bool {

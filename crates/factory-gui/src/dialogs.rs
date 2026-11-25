@@ -68,6 +68,7 @@ pub enum Dialog {
     },
     LocalFactory { starting: bool },
     RemoveLocalRunner { id: RunnerId, name: String },
+    RestartLocalRunner { id: RunnerId, name: String },
     RemoveOfflineTask(RequestId),
     Task(Box<TaskDialog>),
     TaskEditing {
@@ -311,6 +312,9 @@ impl Dialog {
         if matches!(self, Self::ModelSetupRequired | Self::ModelDefaultsConfigured { .. }) {
             content_size.x = content_size.x.min(480.0);
         }
+        if matches!(self, Self::RestartLocalRunner { .. }) {
+            content_size.x = content_size.x.min(480.0);
+        }
         let width = content_size.x;
         let body_height = (content_size.y - 62.0).max(40.0);
         let height = (body_height - 160.0).max(80.0);
@@ -319,6 +323,7 @@ impl Dialog {
             Self::Connection { .. } => crate::tr!("Mit Factory verbinden").into(),
             Self::LocalFactory { .. } => crate::tr!("Lokale Factory").into(),
             Self::RemoveLocalRunner { .. } => crate::tr!("Lokalen Runner entfernen").into(),
+            Self::RestartLocalRunner { .. } => crate::tr!("Lokalen Runner neu starten").into(),
             Self::RemoveOfflineTask(_) => crate::tr!("Lokale Aufgabe entfernen").into(),
             Self::Task(task) => if task.read_only {
                 crate::tr!("Aufgabe anzeigen · schreibgeschützt")
@@ -362,6 +367,7 @@ impl Dialog {
             Self::FactorySettings => egui::Id::new("factory-settings-dialog"),
             Self::ModelSetupRequired => egui::Id::new("factory-model-setup-required"),
             Self::ModelDefaultsConfigured { .. } => egui::Id::new("factory-model-defaults-configured"),
+            Self::RestartLocalRunner { id, .. } => egui::Id::new(("factory-runner-restart", *id)),
             _ => egui::Id::new("factory-dialog"),
         };
         let response = egui::Modal::new(modal_id).frame(
@@ -427,8 +433,8 @@ impl Dialog {
                      }));
                      return;
                  }
-                 if matches!(self, Self::ConnectionInfo) {
-                     egui::ScrollArea::vertical().id_salt((modal_id, "body"))
+                  if matches!(self, Self::ConnectionInfo) {
+                      egui::ScrollArea::vertical().id_salt((modal_id, "body"))
                          .max_height((body_height - 60.0).max(40.0))
                          .auto_shrink([false, true])
                          .show(ui, |ui| crate::connection_info::show(ui, app));
@@ -436,9 +442,42 @@ impl Dialog {
                      crate::connection_info::actions(ui, app);
                      return;
                  }
-             let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body")).max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+               if let Self::RestartLocalRunner { id, name } = self {
+                  let blocked = app.snapshot.as_ref().is_none_or(|s| crate::local_runners::restart_blocked(s, *id));
+                  let admin = app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin);
+                   let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body"))
+                      .max_height((body_height - 72.0).max(24.0)).auto_shrink([false, true])
+                      .show(ui, |ui| {
+                          ui.label(crate::tr!("„{name}“ mit der installierten Runner-Version neben dieser GUI neu starten?", name = name));
+                          ui.label(crate::tr!("Runner-Identität, Zugang, Journal und Arbeitsdaten bleiben erhalten. Eingereihte Aufträge werden danach fortgesetzt."));
+                          if blocked { ui.label(crate::tr!("Laufende oder ungeklärte Aufträge müssen zuerst abgeschlossen werden.")); }
+                          if !admin { ui.label(crate::tr!("Für den Runner-Neustart ist ein Admin-Zugang erforderlich.")); }
+                       });
+                   #[cfg(test)]
+                   ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-runner-restart-body"), (_body.inner_rect, _body.content_size)));
+                  ui.add_space(12.0);
+                  ui.separator();
+                   let footer_bottom = ui.cursor().top() + design::SETTINGS_FOOTER_HEIGHT;
+                   design::settings_footer(ui, footer_bottom, |ui| {
+                      let confirm = ui.add_enabled(!blocked && admin && app.online && !app.local_runners_busy,
+                          egui::Button::new(crate::tr!("Runner neu starten")));
+                      #[cfg(test)]
+                      ui.ctx().data_mut(|d| {
+                          d.insert_temp(egui::Id::new("test-runner-restart-confirm"), confirm.rect);
+                          d.insert_temp(egui::Id::new("test-runner-restart-confirm-enabled"), confirm.enabled());
+                      });
+                       if confirm.clicked() {
+                          app.manage_local_runners(crate::local_runners::Action::Restart(*id));
+                          close = true;
+                      }
+                      if ui.button(crate::tr!("Abbrechen")).clicked() { close = true; }
+                   });
+                   return;
+              }
+              let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body")).max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
             match self {
-                Self::About => unreachable!("About uses its own full-bleed layout"),
+                 Self::About => unreachable!("About uses its own full-bleed layout"),
+                 Self::RestartLocalRunner { .. } => unreachable!("Restart uses a fixed footer"),
                 Self::ConnectionInfo=>crate::connection_info::show(ui,app),
                 Self::Connection { server, token } => {
                     ui.label(crate::tr!("Serveradresse (HTTPS oder Loopback)")); ui.add(design::singleline(server).desired_width(f32::INFINITY));
@@ -1320,6 +1359,16 @@ impl TaskDialog {
             return ui
                 .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut close = ui.button(crate::tr!("Schließen")).clicked();
+                    if let Some(ticket) = app.snapshot.as_ref().and_then(|s|
+                        s.tickets.iter().find(|t| Some(t.id) == self.draft.ticket && retryable_task(s, t))).cloned()
+                    {
+                        let path = format!("/v1/tasks/{}/retry", ticket.id);
+                        let pending = app.settings.pending.iter().any(|r| r.server == app.server && r.path == path);
+                        let retry = ui.add_enabled(app.online && !pending, egui::Button::new(crate::tr!("Erneut einreihen")));
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-retry", ticket.id)), retry.rect));
+                        if retry.clicked() { app.requeue_task(&ticket); }
+                    }
                     if let Some(root) = execution {
                         let open = ui.button(crate::tr!("OpenCode anzeigen"));
                         #[cfg(test)]
@@ -1479,7 +1528,7 @@ impl TaskDialog {
     }
 }
 
-fn answer_text(value: &Value, schema: Option<&Value>) -> String {
+pub(crate) fn answer_text(value: &Value, schema: Option<&Value>) -> String {
     if let Some(label) = schema
         .and_then(|s| s["options"].as_array())
         .and_then(|options| options.iter().find(|option| option["value"] == *value))
@@ -1496,6 +1545,22 @@ fn answer_text(value: &Value, schema: Option<&Value>) -> String {
         Value::Object(values) => values.iter()
             .map(|(key, value)| format!("{key}: {}", answer_text(value, None)))
             .collect::<Vec<_>>().join("\n"),
+    }
+}
+
+pub(crate) fn question_answer_text(question: &Question, field: Option<&Value>) -> String {
+    let answer = question.answer.as_ref().and_then(|answer| {
+        field.map_or(Some(answer), |field| field["key"].as_str().and_then(|key| answer.get(key)))
+    });
+    if question.external.kind == QuestionKind::Permission {
+        match answer.and_then(|answer| answer["decision"].as_str()) {
+            Some("once") => crate::tr!("Einmal erlaubt").into(),
+            Some("always") => crate::tr!("Dauerhaft erlaubt").into(),
+            Some("reject") => crate::tr!("Abgelehnt").into(),
+            _ => answer.map_or_else(|| crate::tr!("Noch nicht beantwortet.").into(), |v| answer_text(v, field)),
+        }
+    } else {
+        answer.map_or_else(|| crate::tr!("Noch nicht beantwortet.").into(), |v| answer_text(v, field))
     }
 }
 
@@ -1562,19 +1627,7 @@ fn question_answers(ui: &mut egui::Ui, questions: &[Question]) {
             }
             ui.add_space(8.0);
             design::question_heading(ui, crate::tr!("Antwort"));
-            let answer = question.answer.as_ref().and_then(|answer| {
-                field.map_or(Some(answer), |field| field["key"].as_str().and_then(|key| answer.get(key)))
-            });
-            let text = if question.external.kind == QuestionKind::Permission {
-                match answer.and_then(|answer| answer["decision"].as_str()) {
-                    Some("once") => crate::tr!("Einmal erlaubt").into(),
-                    Some("always") => crate::tr!("Dauerhaft erlaubt").into(),
-                    Some("reject") => crate::tr!("Abgelehnt").into(),
-                    _ => answer.map_or_else(|| crate::tr!("Noch nicht beantwortet.").into(), |v| answer_text(v, field)),
-                }
-            } else {
-                answer.map_or_else(|| crate::tr!("Noch nicht beantwortet.").into(), |v| answer_text(v, field))
-            };
+            let text = question_answer_text(question, field);
             read_text(ui, &text, false);
         }
     }

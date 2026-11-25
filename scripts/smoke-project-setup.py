@@ -17,6 +17,7 @@ import termios
 import struct
 import argparse
 from pathlib import Path
+from cargo_paths import profile_dir
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,7 +83,7 @@ def main():
             executable.chmod(0o700)
             env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
             env["XDG_STATE_HOME"] = str(base / "state")
-        server = subprocess.Popen([str(ROOT / "target/debug/factoryd"), "--listen", "127.0.0.1:0", "--database", str(base / "db")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        server = subprocess.Popen([str(profile_dir() / "factoryd"), "--listen", "127.0.0.1:0", "--database", str(base / "db")], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         worker = None
         pid = fd = None
         try:
@@ -92,14 +93,14 @@ def main():
                 req = urllib.request.Request(url + "/v1/snapshot", headers={"Authorization": "Bearer " + env["FACTORY_TOKEN"], "x-factory-protocol": "1"})
                 return json.load(urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5))
             runner = str(uuid.uuid4())
-            worker = subprocess.Popen([str(ROOT / "target/debug/factory-runner"), "--server", url, "--id", runner, "--name", "Setup host", "--journal", str(base / "journal"), "--workspace-root", str(base / "work")], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            worker = subprocess.Popen([str(profile_dir() / "factory-runner"), "--server", url, "--id", runner, "--name", "Setup host", "--journal", str(base / "journal"), "--workspace-root", str(base / "work")], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + 15
             while not snapshot()["runners"]:
                 assert time.monotonic() < deadline
                 time.sleep(.1)
             pid, fd = pty.fork()
             if pid == 0:
-                os.execve(str(ROOT / "target/debug/factory"), ["factory", "--server", url], env)
+                os.execve(str(profile_dir() / "factory"), ["factory", "--server", url], env)
             fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 150, 0, 0))
             def pump(seconds=.3):
                 deadline = time.monotonic() + seconds

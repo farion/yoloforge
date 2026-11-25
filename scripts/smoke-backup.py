@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import sqlite3
 import subprocess
 import tempfile
@@ -24,7 +25,7 @@ def main():
         env.pop("FACTORY_TOKEN", None)
 
         def start(path):
-            process = subprocess.Popen([str(ROOT / "target/debug/factoryd"), "--listen", "127.0.0.1:0", "--database", str(path)],
+            process = subprocess.Popen([str(profile_dir() / "factoryd"), "--listen", "127.0.0.1:0", "--database", str(path)],
                                        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             line = process.stdout.readline()
             if "listening on" not in line:

@@ -185,7 +185,22 @@ pub struct RunnerView {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerRestartHold {
+    pub request_id: RequestId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunnerRestartStatus {
+    pub instance_id: Option<InstanceId>,
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Optional feature metadata; an older server may omit this entirely.
+    #[serde(default)]
+    pub server_capabilities: Vec<String>,
     /// Observed input + output tokens; absent entries have no recorded usage.
     #[serde(default, skip_serializing_if = "ObservedTokenTotals::is_empty")]
     pub token_totals: ObservedTokenTotals,
@@ -230,6 +245,15 @@ pub struct Snapshot {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub controls: Vec<StreamControl>,
+}
+
+/// Explicitly retry the current failed execution without creating another intent.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryTask {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub previous_command: CommandId,
 }
 
 /// A user-directed follow-up. All execution settings come from the target session.

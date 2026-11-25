@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import pty
 import select
 import signal
@@ -26,7 +27,7 @@ runner = snapshot["runners"][0]["id"]
 env = {**os.environ, "TERM": "xterm-256color", "YOLOFORGE_SSH_CONFIG": str(config)}
 pid, fd = pty.fork()
 if pid == 0:
-    executable = str(root / "target/debug/yoloforge")
+    executable = str(profile_dir(root=root) / "yoloforge")
     os.execve(executable, [executable, "--server", server], env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 160, 0, 0))
 screen = pyte.Screen(160, 40)

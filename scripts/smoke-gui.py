@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from pathlib import Path
+from cargo_paths import profile_dir
 import socket
 import struct
 import subprocess
@@ -31,7 +32,7 @@ def main():
         token = uuid.uuid4().hex + uuid.uuid4().hex
         env = dict(os.environ, FACTORY_TOKEN=token, XDG_DATA_HOME=str(directory / "data"), XDG_CONFIG_HOME=str(directory / "config"))
         env.pop("FACTORY_TOKEN_FILE", None)
-        process = subprocess.Popen([str(ROOT / "target/debug/factoryd"), "--listen", f"127.0.0.1:{port}", "--database", str(directory / "db")], env=env, stdout=subprocess.DEVNULL)
+        process = subprocess.Popen([str(profile_dir() / "factoryd"), "--listen", f"127.0.0.1:{port}", "--database", str(directory / "db")], env=env, stdout=subprocess.DEVNULL)
 
         def api(path, body=None, method=None, registration=None):
             headers = {"Authorization": f"Bearer {token}", "x-factory-protocol": "1", "Content-Type": "application/json"}
@@ -123,7 +124,7 @@ def main():
                 args.screenshots.mkdir(parents=True, exist_ok=True)
                 output = args.screenshots.resolve() / "aufgaben.png"
                 assert not output.exists(), "Use a fresh screenshot directory; existing evidence is never overwritten"
-                subprocess.run([str(ROOT / "target/debug/yoloforge-gui"), "--server", server, "--screenshot", str(output), "--exit-after-ms", "6500"], env=env, check=True, timeout=25)
+                subprocess.run([str(profile_dir() / "yoloforge-gui"), "--server", server, "--screenshot", str(output), "--exit-after-ms", "6500"], env=env, check=True, timeout=25)
                 assert output.read_bytes().startswith(b"\x89PNG"), "No native window screenshot"
                 settings_files = list((directory / "data").rglob("desktop.json"))
                 assert len(settings_files) == 1
@@ -134,7 +135,7 @@ def main():
                     settings_path.write_text(json.dumps(settings))
                     output = args.screenshots.resolve() / (filename + ".png")
                     assert not output.exists()
-                    subprocess.run([str(ROOT / "target/debug/yoloforge-gui"), "--server", server, "--screenshot", str(output), "--exit-after-ms", "5000"], env=env, check=True, timeout=25)
+                    subprocess.run([str(profile_dir() / "yoloforge-gui"), "--server", server, "--screenshot", str(output), "--exit-after-ms", "5000"], env=env, check=True, timeout=25)
                     assert output.read_bytes().startswith(b"\x89PNG")
                 assert len(api("/v1/snapshot")["tickets"]) == 3, "GUI must not submit work by observing"
                 assert all(q["state"] == "pending" for q in api("/v1/snapshot")["questions"]), "GUI must not answer by observing"
