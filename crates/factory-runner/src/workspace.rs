@@ -53,7 +53,11 @@ pub(crate) fn git(repository: &Path, args: &[&str]) -> Result<String> {
     git_env(repository, args, &[])
 }
 pub(crate) fn git_env(repository: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
-    git_with_timeout(repository, args, env, Duration::from_secs(5))
+    // Git for Windows can take more than five seconds for fixture operations
+    // when tests are running in parallel on hosted CI. Keep production bounded
+    // by the existing timeout.
+    let timeout = if cfg!(all(test, windows)) { 30 } else { 5 };
+    git_with_timeout(repository, args, env, Duration::from_secs(timeout))
 }
 pub(crate) fn git_network(repository: &Path, args: &[&str]) -> Result<String> {
     git_with_timeout(repository, args, &[], Duration::from_secs(60))
