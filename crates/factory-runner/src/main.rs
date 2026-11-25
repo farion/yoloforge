@@ -266,7 +266,7 @@ async fn commands(
     for record in outbox {
         report(client, journal, registration, record, args).await?;
     }
-    // Process one command per heartbeat; local Git operations have timeouts.
+    // Process one command per poll in round-robin order.
     let pending = client.pending_wait(args.id, registration, 10).await?;
     let selected = if pending.is_empty() {
         None
@@ -401,9 +401,6 @@ async fn commands(
                 allow_compaction,
             )
             .await?;
-            if agent::capture(&mut record, args).await.is_ok() {
-                tokio::task::block_in_place(|| journal.save(&record))?;
-            }
             if client
                 .runner_control(
                     args.id,
@@ -416,6 +413,9 @@ async fn commands(
             {
                 questions::process(client, journal, &mut record, args, registration).await?;
             }
+            if agent::capture(&mut record, args).await.is_ok() {
+                tokio::task::block_in_place(|| journal.save(&record))?;
+            }
             if matches!(progress.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
                 if progress.phase == AgentPhase::Succeeded
                     && record
@@ -424,7 +424,7 @@ async fn commands(
                         .as_ref()
                         .is_some_and(|s| !s.read_only)
                 {
-                    match tokio::task::block_in_place(||publication::publish(journal,&record,args)) {
+                    match tokio::task::block_in_place(||publication::publish_with_summary(journal,&record,args,&progress.summary)) {
                         Ok(Some(path))=>progress.summary.push_str(&format!("\n\nErgebnis automatisch im Projektordner bereitgestellt: {}",path.display())),
                         Ok(None)=>{},
                         Err(e) if e.downcast_ref::<publication::PublicationConflict>().is_some()=> {
@@ -440,8 +440,6 @@ async fn commands(
                 tokio::task::block_in_place(|| journal.save(&record))?;
                 report(client, journal, registration, record, args).await?;
             } else {
-                sync_excerpt(client, registration, &record).await?;
-                archive::step(client, journal, &mut record, args, registration).await?;
                 client
                     .observe_agent(
                         args.id,
@@ -453,6 +451,8 @@ async fn commands(
                         },
                     )
                     .await?;
+                sync_excerpt(client, registration, &record).await?;
+                archive::step(client, journal, &mut record, args, registration).await?;
             }
             return Ok(true);
         }
@@ -683,6 +683,7 @@ async fn run(mut args: Args) -> Result<()> {
     let mut waiting_for_registration = false;
     let mut next_command = 0;
     let mut next_cleanup = 0;
+    let mut next_heartbeat = std::time::Instant::now();
     let mut next_presence = std::time::Instant::now();
     let mut mcp_probe: Option<tokio::task::JoinHandle<()>> = None;
     let mut next_model_catalog = std::time::Instant::now() + Duration::from_secs(30);
@@ -698,19 +699,23 @@ async fn run(mut args: Args) -> Result<()> {
                 next_model_catalog = std::time::Instant::now() + Duration::from_secs(30);
             }
         }
-        let opencode = opencode_status(&args.opencode_registration).await;
         let result = if let Some(current) = &registration {
-            client
-                .heartbeat(
-                    args.id,
-                    &Heartbeat {
-                        registration_id: current.registration_id,
-                        opencode,
-                    },
-                )
-                .await
+            if std::time::Instant::now() >= next_heartbeat {
+                let opencode = opencode_status(&args.opencode_registration).await;
+                let result = client.heartbeat(args.id, &Heartbeat {
+                    registration_id: current.registration_id,
+                    opencode,
+                }).await;
+                if result.is_ok() {
+                    next_heartbeat = std::time::Instant::now() + HEARTBEAT_INTERVAL;
+                }
+                result
+            } else {
+                Ok(current.clone())
+            }
         } else {
-            client
+            let opencode = opencode_status(&args.opencode_registration).await;
+            let result = client
                 .register(&RegisterRunner {
                     capabilities: vec![
                         SESSION_LIFECYCLE_CAPABILITY.into(),
@@ -740,9 +745,13 @@ async fn run(mut args: Args) -> Result<()> {
                     version: env!("CARGO_PKG_VERSION").into(),
                     opencode,
                 })
-                .await
+                .await;
+            if result.is_ok() {
+                next_heartbeat = std::time::Instant::now() + HEARTBEAT_INTERVAL;
+            }
+            result
         };
-        let mut delay = HEARTBEAT_INTERVAL;
+        let delay;
         match result {
             Ok(current) => {
                 waiting_for_registration = false;
@@ -778,9 +787,6 @@ async fn run(mut args: Args) -> Result<()> {
                 )
                 .await;
                 registration = Some(current);
-                if matches!(command_result, Ok(false)) {
-                    delay = Duration::ZERO;
-                }
                 if let Err(error) = command_result {
                     match error.downcast_ref::<ClientError>() {
                         Some(ClientError::Http {
@@ -807,6 +813,12 @@ async fn run(mut args: Args) -> Result<()> {
                         }
                         _ => return Err(error),
                     }
+                } else {
+                    delay = if matches!(command_result, Ok(true)) {
+                        Duration::from_secs(1)
+                    } else {
+                        Duration::ZERO // Idle polling already waited on Factory.
+                    };
                 }
             }
             Err(ClientError::Http {

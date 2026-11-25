@@ -382,6 +382,17 @@ pub fn question_status(state: QuestionState) -> &'static str {
         QuestionState::Unknown => crate::tr!("Zustellung ungeklärt"),
     }
 }
+
+pub(crate) fn command_waits_for_answer(s: &Snapshot, c: &RunnerCommand) -> bool {
+    if c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::Finalizing) {
+        return false;
+    }
+    let questions = || s.questions.iter().filter(|q| q.command_id == c.id);
+    questions().any(needs_answer)
+        || (questions().next().is_none()
+            && c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::WaitingInput))
+}
+
 pub fn session_status(s: &Snapshot, c: &RunnerCommand) -> &'static str {
     if s.session_closures
         .iter()
@@ -408,12 +419,22 @@ pub fn session_status(s: &Snapshot, c: &RunnerCommand) -> &'static str {
             PauseState::Released => {}
         }
     }
-    if !c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::Finalizing)
-        && s.questions
-        .iter()
-        .any(|q| q.session_id == c.session_id() && needs_answer(q))
-    {
+    if command_waits_for_answer(s, c) {
         return crate::tr!("Braucht Antwort");
+    }
+    if c.state == CommandState::Accepted
+        && c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::WaitingInput)
+    {
+        let questions = || s.questions.iter().filter(|q| q.command_id == c.id);
+        if questions().any(|q| q.state == QuestionState::AnswerQueued) {
+            return question_status(QuestionState::AnswerQueued);
+        }
+        if questions().any(|q| q.state == QuestionState::Unknown) {
+            return question_status(QuestionState::Unknown);
+        }
+        if questions().any(|q| q.state == QuestionState::Answered) {
+            return crate::tr!("Wird fortgesetzt");
+        }
     }
     command_status(c)
 }

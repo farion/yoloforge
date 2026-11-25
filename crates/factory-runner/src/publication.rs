@@ -58,6 +58,54 @@ fn unchanged_target(target: &Path, branch: &str, parent: &str) -> Result<()> {
     Ok(())
 }
 pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> {
+    let summary = match &r.result {
+        Some(CommandOutput::Agent { agent }) => &agent.summary,
+        _ => "",
+    };
+    publish_with_summary(j, r, args, summary)
+}
+
+fn summary_commit_message(summary: &str) -> Option<String> {
+    let summary: String = summary.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .take(12_000)
+        .collect();
+    let heading = summary.lines().find_map(|line| {
+        let line = line.trim().trim_start_matches(['#', '-', '*', '>']).trim().trim_end_matches('*').trim_end();
+        (!line.is_empty()).then_some(line)
+    });
+    heading.map(|heading| {
+        if summary.trim() == heading && heading.chars().count() <= 72 {
+            heading.into()
+        } else {
+            let mut subject: String = heading.chars().take(72).collect();
+            if heading.chars().count() > 72 {
+                subject = format!("{}…", subject.chars().take(71).collect::<String>().trim_end());
+            }
+            format!("{}\n\n{}", subject.trim_end(), summary.trim())
+        }
+    })
+}
+
+fn commit_tree(target: &Path, repository: &Path, args: &[&str]) -> Result<String> {
+    fn identity(target: &Path, kind: &str) -> Result<(String, String)> {
+        let ident = git(target, &["-c", "user.useConfigOnly=true", "var", kind])
+            .context("Git-Identität im Zielrepository fehlt; bitte user.name und user.email konfigurieren")?;
+        let (name, tail) = ident.rsplit_once(" <").context("Invalid Git identity")?;
+        let (email, _) = tail.split_once("> ").context("Invalid Git identity")?;
+        Ok((name.into(), email.into()))
+    }
+    let (author, author_email) = identity(target, "GIT_AUTHOR_IDENT")?;
+    let (committer, committer_email) = identity(target, "GIT_COMMITTER_IDENT")?;
+    git_env(repository, args, &[
+        ("GIT_AUTHOR_NAME", &author),
+        ("GIT_AUTHOR_EMAIL", &author_email),
+        ("GIT_COMMITTER_NAME", &committer),
+        ("GIT_COMMITTER_EMAIL", &committer_email),
+    ])
+}
+
+pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
     let spec = r
         .command
         .workspace_spec
@@ -134,18 +182,18 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
         }
         let mut commit_args = vec!["commit-tree", tree.as_str()];
         commit_args.extend(parents);
-        let message = format!("YoloForge task {}", r.command.id);
+        let message = if let Some(message) = summary_commit_message(summary) {
+            message
+        } else {
+            let changes = git(work, &["diff", "--stat", &parent, &tree, "--"])?;
+            if changes.is_empty() {
+                "Record task result".into()
+            } else {
+                format!("Update project files\n\n{changes}")
+            }
+        };
         commit_args.extend(["-m", message.as_str()]);
-        let commit = git_env(
-            work,
-            &commit_args,
-            &[
-                ("GIT_AUTHOR_NAME", "YoloForge"),
-                ("GIT_AUTHOR_EMAIL", "factory@yoloforge.invalid"),
-                ("GIT_COMMITTER_NAME", "YoloForge"),
-                ("GIT_COMMITTER_EMAIL", "factory@yoloforge.invalid"),
-            ],
-        )?;
+        let commit = commit_tree(&target, work, &commit_args)?;
         let plan = Plan {
             snapshot: Some(commit.clone()),
             stream: r.command.stream_id,
@@ -221,7 +269,9 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
                 return Err(PublicationConflict(format!("Paralleler Ergebniskonflikt. Ziel: {}; Basis: {}; Zielcommit: {}; Ergebnissnapshot: {}. Betroffene Dateien / Git-Diagnose:\n{}\nNacharbeit in derselben Session: Zielcommit in den Ausfuehrungsbranch mergen, Konflikte dort loesen und die Aufloesung committen; beide Ergebnisse bewahren und Tests ausfuehren. Nicht den Projektordner bearbeiten. Danach neuer Folgeauftrag statt Aenderung des gepinnten Snapshots.", target.display(), base, current, snapshot, details)).into());
             }
             let tree = output.lines().next().context("Merge tree missing")?;
-            let commit = git_env(
+            let message = git(&repository, &["show", "-s", "--format=%B", snapshot])?;
+            let commit = commit_tree(
+                &target,
                 &repository,
                 &[
                     "commit-tree",
@@ -231,13 +281,7 @@ pub fn publish(j: &Journal, r: &Record, args: &Args) -> Result<Option<PathBuf>> 
                     "-p",
                     snapshot,
                     "-m",
-                    &format!("YoloForge combined task {}", r.command.id),
-                ],
-                &[
-                    ("GIT_AUTHOR_NAME", "YoloForge"),
-                    ("GIT_AUTHOR_EMAIL", "factory@yoloforge.invalid"),
-                    ("GIT_COMMITTER_NAME", "YoloForge"),
-                    ("GIT_COMMITTER_EMAIL", "factory@yoloforge.invalid"),
+                    &message,
                 ],
             )?;
             plan.parent = current;
@@ -354,6 +398,8 @@ mod tests {
         crate::managed::ensure_repository(&journal, &mut record, &args)
             .await
             .unwrap();
+        git(&target, &["config", "--local", "user.name", "Local Developer"]).unwrap();
+        git(&target, &["config", "--local", "user.email", "developer@example.invalid"]).unwrap();
         let CommandOutput::Workspace { workspace } =
             workspace::prepare(&journal, &record.command, None, &root)
         else {
@@ -396,8 +442,15 @@ mod tests {
         fs::write(work.join("other.txt"), "second result").unwrap();
         let head = git(&work, &["rev-parse", "HEAD"]).unwrap();
         let index = git(&work, &["ls-files", "--stage"]).unwrap();
-        publish(&f.journal, &f.record, &f.args).unwrap();
-        publish(&f.journal, &second, &f.args).unwrap();
+        publish_with_summary(&f.journal, &f.record, &f.args, "Add first result").unwrap();
+        let first = git(&f.target, &["show", "-s", "--format=%an%n%ae%n%cn%n%ce%n%s"]).unwrap();
+        assert_eq!(first, "Local Developer\ndeveloper@example.invalid\nLocal Developer\ndeveloper@example.invalid\nAdd first result");
+        publish_with_summary(
+            &f.journal, &second, &f.args, "### Add second result\n\nWrite the parallel output to other.txt.",
+        ).unwrap();
+        let combined = git(&f.target, &["show", "-s", "--format=%an%n%ae%n%s%n%b"]).unwrap();
+        assert!(combined.starts_with("Local Developer\ndeveloper@example.invalid\nAdd second result\n"));
+        assert!(combined.contains("Write the parallel output to other.txt."));
         assert_eq!(
             fs::read_to_string(f.target.join("result.txt")).unwrap(),
             "result"

@@ -1575,6 +1575,20 @@ fn question_answers(ui: &mut egui::Ui, questions: &[Question]) {
 
 impl QuestionDialog {
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32) -> bool {
+        if let Some(snapshot) = &app.snapshot {
+            for entry in &mut self.questions {
+                if let Some(current) = snapshot.questions.iter().find(|current|
+                    current.id == entry.question.id && current.revision.0 > entry.question.revision.0
+                ) {
+                    if !needs_answer(current) {
+                        entry.question = current.clone();
+                    } else if !needs_answer(&entry.question) && current.external == entry.question.external {
+                        entry.question = current.clone();
+                        entry.request = None;
+                    }
+                }
+            }
+        }
         if self.questions.iter().all(|entry| !needs_answer(&entry.question)) {
             let questions: Vec<_> = self.questions.iter().map(|entry| entry.question.clone()).collect();
             question_answers(ui, &questions);

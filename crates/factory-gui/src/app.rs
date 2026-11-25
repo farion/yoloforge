@@ -915,7 +915,7 @@ impl App {
                 continue;
             }
             match envelope.event {
-                Event::Snapshot(Ok(s)) => {
+                Event::Snapshot(Ok(mut s)) => {
                     let reconnected = !self.online && (self.updated.is_some() || self.error.is_some());
                     if self
                         .snapshot
@@ -946,6 +946,20 @@ impl App {
                         .is_none_or(|p| !s.projects.iter().any(|v| v.id == p))
                     {
                         self.settings.project = s.projects.first().map(|p| p.id);
+                    }
+                    if let Some(old) = self.snapshot.as_ref().filter(|old|
+                        old.boot_id == s.boot_id && old.event_cursor <= s.event_cursor)
+                    {
+                        // A snapshot in flight can predate the answer's write receipt.
+                        let previous: std::collections::HashMap<_, _> =
+                            old.questions.iter().map(|q| (q.id, q)).collect();
+                        for question in &mut s.questions {
+                            if let Some(newer) = previous.get(&question.id)
+                                .filter(|newer| newer.revision.0 > question.revision.0)
+                            {
+                                *question = (**newer).clone();
+                            }
+                        }
                     }
                     self.cache_projects(&s.projects);
                     self.snapshot = Some(std::sync::Arc::new(s));
@@ -1253,13 +1267,26 @@ impl App {
                                         crate::tr!("Aufgabe eingereiht.")
                                     });
                             }
-                            if request.path.starts_with("/v1/questions/") {
+                            if request.path.starts_with("/v1/questions/") && request.path.ends_with("/answer") {
                                 if let Ok(question) =
                                     serde_json::from_value::<Question>(value.clone())
                                 {
-                                    self.settings.question_drafts.retain(|d| {
-                                        d.server != request.server || d.question != question.id
-                                    });
+                                    if request.path == format!("/v1/questions/{}/answer", question.id)
+                                        && question.answer_request.is_some_and(|id|
+                                            serde_json::json!(id) == request.body["request_id"])
+                                    {
+                                        self.settings.question_drafts.retain(|d| {
+                                            d.server != request.server || d.question != question.id
+                                        });
+                                        if let Some(snapshot) = self.snapshot.as_mut().filter(|_| request.server == self.server) {
+                                            if let Some(current) = std::sync::Arc::make_mut(snapshot)
+                                                .questions.iter_mut().find(|q| q.id == question.id
+                                                    && q.revision.0 < question.revision.0)
+                                            {
+                                                *current = question;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

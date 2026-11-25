@@ -152,17 +152,7 @@ struct Card<'a> {
 
 fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     let command = task_command(s, ticket);
-    let waiting = command.is_some_and(|c| {
-        if c.agent_progress.as_ref().is_some_and(|p| p.phase == AgentPhase::Finalizing) {
-            return false;
-        }
-        c.agent_progress
-            .as_ref()
-            .is_some_and(|p| p.phase == AgentPhase::WaitingInput)
-            || s.questions
-                .iter()
-                .any(|q| q.command_id == c.id && needs_answer(q))
-    });
+    let waiting = command.is_some_and(|c| crate::model::command_waits_for_answer(s, c));
     let failed = command.is_some_and(|c| {
         c.state == CommandState::Failed
             || c.agent_progress

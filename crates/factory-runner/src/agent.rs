@@ -718,6 +718,11 @@ async fn advance(
             ));
         }
     }
+    // A confirmed answer can make the question disappear before OpenCode
+    // reports active execution or a terminal outcome. Never replay the answer.
+    if crate::questions::recently_answered(record) {
+        return Ok(progress(&command, AgentPhase::Running, "OpenCode resuming after a confirmed answer"));
+    }
     Ok(progress(
         &command,
         AgentPhase::Unknown,

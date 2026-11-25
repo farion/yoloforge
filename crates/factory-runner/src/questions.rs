@@ -14,6 +14,33 @@ pub struct Receipt {
     delivery_request: RequestId,
     state: Option<QuestionState>,
     reported: bool,
+    #[serde(default)]
+    answered_at_ms: Option<u64>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub(crate) fn recently_answered(record: &Record) -> bool {
+    let now = now_ms();
+    record.replies.values().any(|receipt| receipt.is_recently_answered(now))
+}
+
+impl Receipt {
+    fn set_state(&mut self, state: QuestionState) {
+        self.state = Some(state);
+        self.answered_at_ms = (state == QuestionState::Answered).then(now_ms);
+    }
+
+    fn is_recently_answered(&self, now: u64) -> bool {
+        self.state == Some(QuestionState::Answered)
+            && self.answered_at_ms.and_then(|at| now.checked_sub(at))
+                .is_some_and(|elapsed| elapsed < 5_000)
+    }
 }
 
 async fn reconcile(api: &OpenCodeClient, receipt: &Receipt) -> QuestionState {
@@ -134,6 +161,7 @@ pub async fn process(
             delivery_request: RequestId::new(),
             state: None,
             reported: false,
+            answered_at_ms: None,
         };
         if !valid {
             receipt.state = Some(QuestionState::Unknown);
@@ -150,7 +178,7 @@ pub async fn process(
                 )
                 .await
                 .unwrap_or(QuestionState::Unknown);
-            record.replies.get_mut(&answer_id).unwrap().state = Some(state);
+            record.replies.get_mut(&answer_id).unwrap().set_state(state);
             tokio::task::block_in_place(|| journal.save(record))?;
         }
     } else {
@@ -159,7 +187,7 @@ pub async fn process(
             let observed = reconcile(&api, receipt).await;
             let receipt = record.replies.get_mut(&answer_id).unwrap();
             if receipt.state != Some(observed) {
-                receipt.state = Some(observed);
+                receipt.set_state(observed);
                 receipt.reported = false;
                 receipt.delivery_request = RequestId::new();
                 tokio::task::block_in_place(|| journal.save(record))?;
@@ -322,6 +350,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fake.question.lock().unwrap().state, QuestionState::Unknown);
+        assert!(!recently_answered(&record));
         assert_eq!(fake.posts.load(Ordering::SeqCst), 1);
         drop(journal);
         let journal = Journal::open(&path, &endpoint, runner).unwrap();
@@ -330,6 +359,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fake.question.lock().unwrap().state, QuestionState::Answered);
+        let receipt = &record.replies[&answer_request];
+        let confirmed_at = receipt.answered_at_ms.unwrap();
+        assert!(receipt.is_recently_answered(confirmed_at));
+        assert!(!receipt.is_recently_answered(confirmed_at + 5_000));
         assert_eq!(fake.posts.load(Ordering::SeqCst), 1);
         server.abort();
     }

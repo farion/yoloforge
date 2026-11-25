@@ -1957,6 +1957,7 @@ pub(crate) fn status_color(status: &str) -> egui::Color32 {
     else if [
         crate::tr!("Eingereiht"), crate::tr!("Antwort eingereiht"), crate::tr!("Wartet auf Start"),
         crate::tr!("Wird vorbereitet"), crate::tr!("Orchestrator prüft"), crate::tr!("Wird abgeschlossen"),
+        crate::tr!("Wird fortgesetzt"),
     ].contains(&status) { BLUE }
     else { MUTED }
 }

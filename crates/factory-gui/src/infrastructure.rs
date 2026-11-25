@@ -1,7 +1,7 @@
 //! Live topology and explicit management of desktop-owned runners.
 use crate::{
     app::{App, AMBER, BLUE, GREEN, MUTED, RED},
-    model::{command_project, needs_answer, session_title, timestamp},
+    model::{command_project, session_title, timestamp},
 };
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use factory_core::*;
@@ -48,14 +48,7 @@ impl Activity {
             match c.state {
                 CommandState::Pending => result.queued += 1,
                 CommandState::Accepted => {
-                    if c.agent_progress
-                        .as_ref()
-                        .is_some_and(|p| p.phase == AgentPhase::WaitingInput)
-                        || snapshot
-                            .questions
-                            .iter()
-                            .any(|q| q.command_id == c.id && needs_answer(q))
-                    {
+                    if crate::model::command_waits_for_answer(snapshot, c) {
                         result.waiting += 1;
                     } else {
                         result.running += 1;

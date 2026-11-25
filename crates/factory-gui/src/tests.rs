@@ -436,6 +436,49 @@ fn native_image_drop_and_clipboard_target_work_in_an_open_session() {
 }
 
 #[test]
+fn question_answer_receipt_updates_intent_status_before_the_next_snapshot() {
+    let mut app = fixture();
+    let mut original = app.snapshot.as_deref().unwrap().clone();
+    original.questions.truncate(1);
+    let mut answer = original.questions[0].clone();
+    app.snapshot = Some(Arc::new(original.clone()));
+    let status = |app: &App| {
+        let s = app.snapshot.as_ref().unwrap();
+        task_status(s, &s.tickets[0])
+    };
+    assert_eq!(status(&app), crate::tr!("Braucht Antwort"));
+    let request_id = RequestId::new();
+    let id = app.write(
+        crate::tr!("Frage beantworten"), "POST", format!("/v1/questions/{}/answer", answer.id),
+        json!({"request_id":request_id,"expected_revision":answer.revision,"answer":{}}),
+    );
+    answer.answer_request = Some(request_id);
+    answer.answer = Some(json!({}));
+    answer.state = QuestionState::AnswerQueued;
+    answer.revision.0 += 1;
+    app.backend.emit_for_test(crate::backend::Event::Request(id, Ok(json!(answer))));
+    app.receive();
+    assert_eq!(status(&app), crate::tr!("Antwort eingereiht"));
+
+    app.backend.emit_for_test(crate::backend::Event::Snapshot(Ok(original.clone())));
+    app.receive();
+    assert_eq!(status(&app), crate::tr!("Antwort eingereiht"));
+    answer.state = QuestionState::Answered;
+    answer.revision.0 += 1;
+    original.questions[0] = answer;
+    original.event_cursor += 1;
+    app.backend.emit_for_test(crate::backend::Event::Snapshot(Ok(original.clone())));
+    app.receive();
+    assert_eq!(status(&app), crate::tr!("Wird fortgesetzt"));
+
+    original.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Unknown;
+    original.event_cursor += 1;
+    app.backend.emit_for_test(crate::backend::Event::Snapshot(Ok(original)));
+    app.receive();
+    assert_eq!(status(&app), crate::tr!("Zustand ungeklärt"));
+}
+
+#[test]
 fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup() {
     let mut app = fixture();
     app.online = true;
