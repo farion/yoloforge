@@ -833,43 +833,154 @@ fn task_history_is_colored_and_rendered_below_the_prompt() {
 }
 
 #[test]
-fn sidebar_session_count_excludes_preparation_and_distinguishes_open_states() {
+fn overview_navigation_gear_rotates_only_during_factory_activity() {
     let mut app = fixture();
-    app.online = true;
-    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
-    let c = &mut snapshot.commands[0];
-    let agent = c.agent_spec.take();
-    c.kind = CommandKind::PrepareWorkspace;
-    assert_eq!(app.session_counts(Page::Sessions), SessionCounts::default());
-    let c = &mut Arc::make_mut(app.snapshot.as_mut().unwrap()).commands[0];
-    c.kind = CommandKind::RunAgent;
-    c.agent_spec = agent;
-    assert_eq!(app.session_counts(Page::Sessions).idle, 1);
-    assert_eq!(app.session_counts(Page::Orchestrator).running, 0);
-    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
-    snapshot.questions.clear();
-    let c = &mut snapshot.commands[0];
-    c.agent_progress.as_mut().unwrap().phase = AgentPhase::Running;
-    let presence = OpenCodeInstance {
-        id: "test-instance".into(),
-        runner_id: c.runner_id,
-        commands: vec![c.id],
-        observed_unix_ms: 1,
+    let ctx = app.backend.context().clone();
+    let draw = |app: &mut App, time| {
+        let output = ctx.run(egui::RawInput {
+            time: Some(time),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 1000.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let row: egui::Rect = ctx.data_mut(|d| d.get_temp(
+            egui::Id::new(("test-factory-navigation", Page::Overview)),
+        )).unwrap();
+        let gear = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == egui_phosphor::regular::GEAR_SIX
+                && row.contains(t.pos) => {
+                let center = t.pos + egui::emath::Rot2::from_angle(t.angle) * t.galley.mesh_bounds.center().to_vec2();
+                assert!((center.x - (row.right() - 26.0)).abs() < 0.1);
+                assert!((center.y - row.center().y).abs() < 0.1);
+                Some(t.angle)
+            }
+            _ => None,
+        });
+        (row, gear)
     };
-    assert_eq!(app.session_counts(Page::Sessions), SessionCounts { idle: 1, ..Default::default() });
-    app.instances = vec![presence.clone(), presence];
-    assert_eq!(app.session_counts(Page::Sessions).running, 1);
+    let _ = draw(&mut app, 0.0);
+    let (idle_row, idle) = draw(&mut app, 0.1);
+    assert_eq!(idle, None); // Waiting for answers is not work.
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let mut other_project = s.projects[0].clone();
+    other_project.id = ProjectId::new();
+    s.streams[0].project_id = other_project.id;
+    s.projects.push(other_project);
+    s.questions.clear();
+    s.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Running;
+    app.factory_flow.project_only = true;
+
+    let (working_row, first_angle) = draw(&mut app, 0.2);
+    let (_, second_angle) = draw(&mut app, 0.4);
+    assert_eq!(working_row, idle_row);
+    assert!(second_angle.unwrap() > first_angle.unwrap());
+    app.factory_flow.motion = false;
+    assert_eq!(draw(&mut app, 0.6).1, Some(0.0));
+    app.factory_flow.motion = true;
     app.online = false;
-    assert_eq!(app.session_counts(Page::Sessions), SessionCounts { idle: 1, ..Default::default() });
+    assert_eq!(draw(&mut app, 0.8).1, None);
     app.online = true;
-    for phase in [AgentPhase::Starting, AgentPhase::WaitingInput, AgentPhase::Succeeded] {
-        Arc::make_mut(app.snapshot.as_mut().unwrap()).commands[0].agent_progress.as_mut().unwrap().phase = phase;
-        assert_eq!(app.session_counts(Page::Sessions), SessionCounts { idle: 1, ..Default::default() });
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).commands[0].state = CommandState::Pending;
+    assert_eq!(draw(&mut app, 1.0).1, None);
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).commands[0].state = CommandState::Succeeded;
+    assert_eq!(draw(&mut app, 1.2).1, None);
+}
+
+#[test]
+fn sidebar_renders_all_current_status_colors_for_every_project_page() {
+    use crate::app::{AMBER, BLUE, GREEN, RED};
+
+    let mut app = fixture();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let project = s.projects[0].id;
+    let worker = s.commands[0].clone();
+    let mut add_run = |role: &str, state, phase| {
+        let mut command = worker.clone();
+        command.id = CommandId::new();
+        command.state = state;
+        command.agent_progress.as_mut().unwrap().phase = phase;
+        let spec = command.agent_spec.as_mut().unwrap();
+        spec.read_only = !role.is_empty();
+        spec.role = role.into();
+        let id = command.id;
+        s.commands.push(command);
+        id
+    };
+    let running = add_run("", CommandState::Accepted, AgentPhase::Running);
+    add_run("", CommandState::Failed, AgentPhase::Failed);
+    let answered = add_run("", CommandState::Succeeded, AgentPhase::Succeeded);
+    for role in ["orchestrator", "supervisor", "memorizer"] {
+        add_run(role, CommandState::Accepted, AgentPhase::Running);
+        add_run(role, CommandState::Pending, AgentPhase::Starting);
+        add_run(role, CommandState::Failed, AgentPhase::Failed); // archived
     }
-    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
-    snapshot.commands[0].state = CommandState::Failed;
-    snapshot.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Failed;
-    assert_eq!(app.session_counts(Page::Sessions).failed, 1);
+    let mut preparation = worker.clone();
+    preparation.id = CommandId::new();
+    preparation.kind = CommandKind::PrepareWorkspace;
+    preparation.state = CommandState::Failed;
+    preparation.agent_progress = None;
+    preparation.agent_spec = None;
+    s.streams[0].goal = "Orchestrator".into();
+    s.commands.push(preparation);
+
+    let mut question = s.questions[0].clone();
+    question.id = QuestionId::new();
+    question.state = QuestionState::Answered;
+    s.questions.push(question.clone()); // partially answered group
+    question.id = QuestionId::new();
+    question.command_id = answered;
+    s.questions.push(question.clone()); // archived group
+    question.id = QuestionId::new();
+    question.command_id = s.commands.iter().find(|c|
+        c.agent_spec.as_ref().is_some_and(|spec| spec.role == "supervisor")
+            && c.state == CommandState::Pending).unwrap().id;
+    question.state = QuestionState::AnswerQueued; // open, even though no action is needed
+    s.questions.push(question);
+
+    s.tickets[0].execution_command = Some(running);
+    let mut waiting = s.tickets[0].clone();
+    waiting.id = TicketId::new();
+    waiting.status = TicketState::Backlog;
+    waiting.execution_command = None;
+    waiting.routing_note = "Wartet auf erfolgreichen Abschluss der ausgewaehlten Session".into();
+    s.tickets.push(waiting.clone());
+    for (draft, status, project_id) in [
+        (true, TicketState::Backlog, project),
+        (false, TicketState::Cancelled, project),
+        (false, TicketState::Backlog, ProjectId::new()),
+    ] {
+        s.tickets.push(Ticket { id: TicketId::new(), draft, status, project_id, ..waiting.clone() });
+    }
+
+    app.task_filter = TaskBucket::Archive.index();
+    app.query = "does not match any current item".into();
+    let ctx = app.backend.context().clone();
+    let mut output = None;
+    for _ in 0..4 {
+        output = Some(ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 1200.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx)));
+    }
+    let output = output.unwrap();
+    let mut width = None;
+    for (page, expected) in [
+        (Page::Tasks, &[(1, GREEN), (1, AMBER)][..]),
+        (Page::Questions, &[(1, BLUE), (1, AMBER)][..]),
+        (Page::Sessions, &[(1, GREEN), (2, BLUE), (1, RED)][..]),
+        (Page::Orchestrator, &[(1, GREEN), (1, BLUE), (1, RED)][..]),
+        (Page::Supervisor, &[(1, GREEN), (1, BLUE)][..]),
+        (Page::Memorizer, &[(1, GREEN), (1, BLUE)][..]),
+    ] {
+        let rect: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-project-navigation", page)))).unwrap();
+        assert_eq!(*width.get_or_insert(rect.width()), rect.width());
+        let mut badges: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if rect.contains(t.pos) => t.galley.job.text.parse::<usize>().ok()
+                .map(|n| (t.pos.x, (n, t.galley.job.sections[0].format.color))),
+            _ => None,
+        }).collect();
+        badges.sort_by(|(x, _), (other, _)| x.total_cmp(other));
+        assert_eq!(badges.into_iter().map(|(_, badge)| badge).collect::<Vec<_>>(), expected, "{page:?}");
+    }
 }
 
 #[test]
@@ -908,18 +1019,6 @@ fn task_and_session_lists_show_neutral_observed_token_badges() {
             "{page:?} must show {label} in a neutral color");
     }
     assert_eq!(crate::design::token_label(None), "— Tks");
-}
-
-#[test]
-fn sidebar_queue_excludes_drafts_and_tasks_already_working() {
-    let app = fixture();
-    let mut snapshot = app.snapshot.as_deref().unwrap().clone();
-    let project = app.settings.project.unwrap();
-    assert_eq!(task_queue_counts(&snapshot, project), (0, 0));
-    snapshot.commands[0].state = CommandState::Pending;
-    assert_eq!(task_queue_counts(&snapshot, project), (1, 0));
-    snapshot.tickets[0].draft = true;
-    assert_eq!(task_queue_counts(&snapshot, project), (0, 0));
 }
 
 #[test]
@@ -1773,7 +1872,8 @@ fn memorizer_lists_old_and_new_extractions_without_counting_them_as_orchestratio
     assert_eq!(commands.iter().filter(|c| controller_archived(s, c)).count(), 1);
     assert!(sessions_for_page(s, project, Page::Orchestrator).is_empty());
     assert!(sessions_for_page(s, project, Page::Supervisor).is_empty());
-    assert_eq!(app.session_counts(Page::Memorizer).running, 1);
+    assert_eq!(crate::views::project_navigation_badges(s, project, Page::Memorizer).0,
+        [(1, crate::app::GREEN)]);
 }
 
 #[test]
@@ -4194,7 +4294,8 @@ fn queued_intent_explains_an_unavailable_assigned_runner_even_with_another_onlin
     assert_eq!(task_status(&s, &ticket), crate::tr!("Wartend"));
     assert_eq!(crate::views::status_color(task_status(&s, &ticket)), crate::app::AMBER);
     s.tickets[0] = ticket.clone();
-    assert_eq!(task_queue_counts(&s, ticket.project_id), (0, 1));
+    assert_eq!(crate::views::project_navigation_badges(&s, ticket.project_id, Page::Tasks).0,
+        [(1, crate::app::AMBER)]);
     assert_eq!(task_runner_blocker(&s, &ticket),
         Some(crate::tr!("Kein zugeordneter Runner ist online. Prüfe die Runner-Zuordnung im Projekt.")));
     s.scheduler_policies[0].runner_ids = vec![s.runners[0].id];

@@ -234,36 +234,30 @@ impl App {
                                 self.new_task();
                             }
                             ui.add_space(10.0);
-                            let project = self.settings.project;
-                            let question_count = snapshot
-                                .as_ref()
-                                .zip(project)
-                                .map_or(0, |(s, p)| question_groups(s, p, true).len());
-                             let (queue, waiting) = if self.online {
-                                 snapshot.as_ref().zip(project).map_or((0, 0), |(s,p)| task_queue_counts(s, p))
-                             } else {
-                                 (self.settings.offline_tasks.iter().filter(|t| t.draft.server == self.server && Some(t.draft.project) == project).count(), 0)
-                            };
-                            let work = self.session_counts(Page::Sessions);
-                            let controllers = self.session_counts(Page::Orchestrator);
-                            let supervisors = self.session_counts(Page::Supervisor);
-                            let memorizers = self.session_counts(Page::Memorizer);
-                            for (page, badges, hint) in [
-                                 (Page::Tasks, &[(queue, BLUE), (waiting, AMBER)][..], if self.online { crate::tr!("{queue} eingereiht · {waiting} wartend", queue = queue, waiting = waiting) } else { crate::tr!("{queue} lokal vorbereitet", queue = queue) }),
-                                (Page::Questions, &[(question_count, RED)][..], crate::tr!("{question_count} offen", question_count = question_count)),
-                                (Page::Sessions, &[(work.running, GREEN), (work.idle, BLUE), (work.failed, RED)][..],
-                                    crate::tr!("{} arbeiten · {} offen ohne bestätigte Aktivität · {} offen und fehlgeschlagen", work.running, work.idle, work.failed)),
-                                (Page::Orchestrator, &[(controllers.running, GREEN)][..], crate::tr!("{} laufend", controllers.running)),
-                                (Page::Supervisor, &[(supervisors.running, GREEN)][..], crate::tr!("{} laufend", supervisors.running)),
-                                (Page::Memorizer, &[(memorizers.running, GREEN)][..], crate::tr!("{} laufend", memorizers.running)),
-                            ] {
-                                let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
+                             for page in [
+                                 Page::Tasks, Page::Questions, Page::Sessions,
+                                 Page::Orchestrator, Page::Supervisor, Page::Memorizer,
+                             ] {
+                                 let (badges, hint) = if page == Page::Tasks && !self.online {
+                                     let queue = self.settings.offline_tasks.iter().filter(|t|
+                                         t.draft.server == self.server && Some(t.draft.project) == self.settings.project).count();
+                                     (vec![(queue, BLUE)], crate::tr!("{queue} lokal vorbereitet", queue = queue))
+                                 } else {
+                                     snapshot.as_deref().zip(self.settings.project).map_or_else(
+                                         || (Vec::new(), String::new()),
+                                         |(s, project)| project_navigation_badges(s, project, page),
+                                     )
+                                 };
+                                 let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
                                     ui,
                                     Some(page.icon()),
                                     page.title(),
                                     self.page() == page,
-                                    badges,
-                                )).inner.on_hover_text(hint);
+                                     &badges,
+                                 )).inner;
+                                 let row = if hint.is_empty() { row } else { row.on_hover_text(hint) };
+                                 #[cfg(test)]
+                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-project-navigation", page)), row.rect));
                                 if reveal_selected && self.page() == page {
                                     row.scroll_to_me(Some(egui::Align::Center));
                                 }
@@ -273,24 +267,27 @@ impl App {
                             }
                             ui.add_space(16.0);
                             ui.separator();
-                            ui.add_space(10.0);
-                            ui.colored_label(MUTED, "FACTORY");
-                            for page in [
+                             ui.add_space(10.0);
+                             ui.colored_label(MUTED, "FACTORY");
+                             let working = self.online && snapshot.as_deref().is_some_and(crate::overview::factory_is_working);
+                             for page in [
                                 Page::Overview,
                                 Page::Notifications,
                                 Page::Infrastructure,
                                 Page::Diagnostics,
                             ] {
-                                let row = ui.add_enabled_ui(self.online, |ui| design::navigation_row_with_icon(
-                                    ui,
-                                    Some(page.icon()),
-                                    page.title(),
-                                    self.page() == page,
-                                    (page == Page::Notifications).then_some((
-                                        usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
-                                        AMBER,
-                                    )),
-                                )).inner;
+                                 let row = ui.add_enabled_ui(self.online, |ui| {
+                                     let selected = self.page() == page;
+                                     if page == Page::Overview && working {
+                                         design::navigation_row_with_activity(ui, page.icon(), page.title(), selected, self.factory_flow.motion)
+                                     } else {
+                                         let unread = (page == Page::Notifications).then(|| (
+                                             usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
+                                             AMBER,
+                                         ));
+                                         design::navigation_row_with_icon(ui, Some(page.icon()), page.title(), selected, unread)
+                                     }
+                                 }).inner;
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d| {
                                     d.insert_temp(
@@ -542,12 +539,6 @@ impl App {
         });
     }
 
-    pub(crate) fn session_counts(&self, page: Page) -> SessionCounts {
-        let (Some(s), Some(project)) = (&self.snapshot, self.settings.project) else {
-            return SessionCounts::default();
-        };
-        sidebar_session_counts(s, project, page, self.online, &self.instances)
-    }
     pub fn new_task(&mut self) {
         if self.online && self.models.needs_setup() {
             self.dialog = Some(Dialog::ModelSetupRequired);
@@ -1072,12 +1063,8 @@ impl App {
             .show(ui, |ui| {
                 for group in groups {
                     let command = group.command;
-                    let total: usize = group.questions.iter().map(|q| question_field_count(q).max(1)).sum();
-                    let answered: usize = group.questions.iter().filter(|q| q.state == QuestionState::Answered)
-                        .map(|q| question_field_count(q).max(1)).sum();
-                    let (status, color) = if answered == total { (crate::tr!("Beantwortet"), GREEN) }
-                        else if answered > 0 { (crate::tr!("Teilweise beantwortet"), BLUE) }
-                        else { (crate::tr!("Unbeantwortet"), AMBER) };
+                    let (total, answered) = question_group_progress(&group);
+                    let (status, color) = question_group_pill(total, answered);
                     ui.push_id(command.id, |ui| {
                         let row = design::task_row_frame().show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -1132,19 +1119,7 @@ impl App {
         };
         let mut sessions = sessions_for_page(&s, project, page);
         {
-            let archived = |c: &RunnerCommand| {
-                if controllers {
-                    if c.kind == CommandKind::PrepareWorkspace {
-                        c.state == CommandState::Failed && s.commands.iter().any(|later|
-                            later.stream_id == c.stream_id && later.kind == CommandKind::PrepareWorkspace
-                                && later.state == CommandState::Succeeded && later.created_unix_ms >= c.created_unix_ms)
-                    } else {
-                        controller_archived(&s, c)
-                    }
-                } else {
-                    session_closed(&s, c)
-                }
-            };
+            let archived = |c: &RunnerCommand| session_archived_for_page(&s, page, c);
             let closed = sessions.iter().filter(|c| archived(c)).count();
             let mut selected = usize::from(self.sessions_closed);
             design::section_toolbar(
@@ -1208,7 +1183,7 @@ impl App {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y=4.0;
                             ui.horizontal_top(|ui| {
-                                let status=if controllers && c.state == CommandState::Failed { crate::tr!("Fehlgeschlagen") } else { session_row_status(&s,&c) };
+                                let (status, color) = session_list_pill(&s, page, &c);
                                 let tokens=s.token_totals.by_session.get(&c.session_root()).copied();
                                 let badges_width=design::badge_width(ui,status)+design::badge_width(ui,&design::token_label(tokens));
                                 let width=(ui.available_width()-badges_width.max(185.0)).max(1.0);
@@ -1220,9 +1195,6 @@ impl App {
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-title",c.session_root())),_title.rect));
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min),|ui| {
-                                    let color=if status == crate::tr!("Fehlgeschlagen") { RED }
-                                        else if status == "Working" { GREEN }
-                                        else if status == crate::tr!("Offen") { BLUE } else { MUTED };
                                     ui.scope(|ui|badge(ui,status,color)).response.on_hover_text(session_status(&s,&c));
                                     design::token_pill(ui, tokens);
                                 });
@@ -1969,6 +1941,70 @@ impl App {
             ui.close();
         }
     }
+}
+
+pub(crate) fn project_navigation_badges(
+    s: &Snapshot, project: ProjectId, page: Page,
+) -> (Vec<(usize, egui::Color32)>, String) {
+    let mut badges = [GREEN, BLUE, AMBER, RED, MUTED].map(|color| (0, color));
+    let mut statuses = BTreeMap::new();
+    let mut count = |(status, color)| {
+        if let Some((n, _)) = badges.iter_mut().find(|(_, badge_color)| *badge_color == color) {
+            *n += 1;
+        }
+        *statuses.entry(status).or_insert(0) += 1;
+    };
+    match page {
+        Page::Tasks => s.tickets.iter()
+            .filter(|t| t.project_id == project && task_bucket(s, t) == TaskBucket::Current)
+            .map(|t| {
+                let status = task_status(s, t);
+                (status, status_color(status))
+            }).for_each(&mut count),
+        Page::Questions => question_task_groups(s, project, false).iter()
+            .map(|group| {
+                let (total, answered) = question_group_progress(group);
+                question_group_pill(total, answered)
+            }).for_each(&mut count),
+        Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer => {
+            sessions_for_page(s, project, page).iter()
+                .filter(|c| !session_archived_for_page(s, page, c))
+                .map(|c| session_list_pill(s, page, c))
+                .for_each(&mut count);
+        }
+        _ => {}
+    }
+    let hint = statuses.into_iter().map(|(status, n)| format!("{n} × {status}"))
+        .collect::<Vec<_>>().join("\n");
+    (badges.into_iter().filter(|(n, _)| *n > 0).collect(), hint)
+}
+
+fn question_group_progress(group: &QuestionTaskGroup<'_>) -> (usize, usize) {
+    group.questions.iter().fold((0, 0), |(total, answered), q| {
+        let fields = question_field_count(q).max(1);
+        (total + fields, answered + if q.state == QuestionState::Answered { fields } else { 0 })
+    })
+}
+
+fn question_group_pill(total: usize, answered: usize) -> (&'static str, egui::Color32) {
+    if answered == total { (crate::tr!("Beantwortet"), GREEN) }
+    else if answered > 0 { (crate::tr!("Teilweise beantwortet"), BLUE) }
+    else { (crate::tr!("Unbeantwortet"), AMBER) }
+}
+
+fn session_list_pill(s: &Snapshot, page: Page, c: &RunnerCommand) -> (&'static str, egui::Color32) {
+    let phase = c.agent_progress.as_ref().map(|p| p.phase);
+    if (page != Page::Sessions && c.state == CommandState::Failed)
+        || (page == Page::Sessions && !session_closed(s, c)
+            && (phase == Some(AgentPhase::Failed)
+                || c.state == CommandState::Failed && phase != Some(AgentPhase::Interrupted)))
+    {
+        return (crate::tr!("Fehlgeschlagen"), RED);
+    }
+    let status = session_row_status(s, c);
+    let color = if status == "Working" { GREEN }
+        else if status == crate::tr!("Offen") { BLUE } else { MUTED };
+    (status, color)
 }
 
 pub(crate) fn status_color(status: &str) -> egui::Color32 {

@@ -1,5 +1,5 @@
 use factory_core::*;
-use factory_protocol::{OpenCodeInstance, Snapshot};
+use factory_protocol::Snapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub fn hash_of(value: impl std::hash::Hash) -> u64 {
@@ -553,77 +553,16 @@ pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<Ru
     commands
 }
 
-pub fn task_queue_counts(s: &Snapshot, project: ProjectId) -> (usize, usize) {
-    let queued = s.tickets.iter().filter(|t| {
-        if t.project_id != project || t.draft {
-            return false;
-        }
-        match t.status {
-            TicketState::Backlog | TicketState::Ready => true,
-            TicketState::InProgress => task_command(s, t).is_some_and(|c|
-                c.state == CommandState::Pending || c.kind == CommandKind::PrepareWorkspace
-                    && matches!(c.state, CommandState::Accepted | CommandState::Succeeded)),
-            _ => false,
-        }
-    });
-    queued.fold((0, 0), |(ready, waiting), ticket| {
-        let status = task_status(s, ticket);
-        if [
-            crate::tr!("Wartend"), crate::tr!("Wartet auf Session"),
-            crate::tr!("Wartet auf Wiederholung"), crate::tr!("Orchestrator wartet"),
-            crate::tr!("Projekt pausiert"), crate::tr!("Verteilung pausiert"),
-            crate::tr!("Blockiert"),
-        ].contains(&status) {
-            (ready, waiting + 1)
-        } else {
-            (ready + 1, waiting)
-        }
-    })
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct SessionCounts {
-    pub running: usize,
-    pub idle: usize,
-    pub failed: usize,
-}
-
-pub fn sidebar_session_counts(
-    s: &Snapshot,
-    project: ProjectId,
-    page: Page,
-    online: bool,
-    instances: &[OpenCodeInstance],
-) -> SessionCounts {
-    let mut counts = SessionCounts::default();
-    for command in sessions_for_page(s, project, page) {
-        if command.kind != CommandKind::RunAgent || session_closed(s, &command) {
-            continue;
-        }
-        let phase = command.agent_progress.as_ref().map(|p| p.phase);
-        let active = command.state == CommandState::Accepted
-            && matches!(phase, Some(AgentPhase::Starting | AgentPhase::Running))
-            && [crate::tr!("Wird gestartet"), crate::tr!("In Bearbeitung")].contains(&session_status(s, &command));
-        let runner_online = online && s.runners.iter().any(|runner|
-            runner.id == command.runner_id && runner.connection == ConnectionState::Online);
-        if page != Page::Sessions {
-            counts.running += usize::from(active && runner_online);
-            continue;
-        }
-        let present = instances.iter().any(|instance|
-            instance.runner_id == command.runner_id && instance.commands.contains(&command.id));
-        if phase == Some(AgentPhase::Failed)
-            || command.state == CommandState::Failed && phase != Some(AgentPhase::Interrupted) {
-            counts.failed += 1;
-        } else if active && phase == Some(AgentPhase::Running) && runner_online && present {
-            counts.running += 1;
-        } else if present || phase.is_some() || command.state == CommandState::Succeeded
-            || command.session_root() != command.id {
-            // A reusable session stays open between runs, even when a follow-up is queued.
-            counts.idle += 1;
-        }
+pub fn session_archived_for_page(s: &Snapshot, page: Page, c: &RunnerCommand) -> bool {
+    if page == Page::Sessions {
+        session_closed(s, c)
+    } else if c.kind == CommandKind::PrepareWorkspace {
+        c.state == CommandState::Failed && s.commands.iter().any(|later|
+            later.stream_id == c.stream_id && later.kind == CommandKind::PrepareWorkspace
+                && later.state == CommandState::Succeeded && later.created_unix_ms >= c.created_unix_ms)
+    } else {
+        controller_archived(s, c)
     }
-    counts
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

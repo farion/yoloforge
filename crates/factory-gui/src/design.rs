@@ -778,6 +778,27 @@ pub fn navigation_row_with_icon(
 pub fn navigation_row_with_badges(
     ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool, counts: &[(usize, Color32)],
 ) -> egui::Response {
+    navigation_row_content(ui, icon, title, selected, counts, None)
+}
+
+pub fn navigation_row_with_activity(
+    ui: &mut egui::Ui, icon: &str, title: &str, selected: bool, animate: bool,
+) -> egui::Response {
+    let angle = if animate {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        (ui.input(|i| i.time) % 2.4 / 2.4) as f32 * std::f32::consts::TAU
+    } else {
+        0.0
+    };
+    navigation_row_content(ui, Some(icon), title, selected, &[], Some(angle))
+        .on_hover_text(crate::tr!("Factory arbeitet"))
+}
+
+fn navigation_row_content(
+    ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool,
+    counts: &[(usize, Color32)], activity_angle: Option<f32>,
+) -> egui::Response {
+    const BADGE_MIN_WIDTH: f32 = 24.0;
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), LIST_ROW_HEIGHT),
         egui::Sense::click(),
@@ -816,10 +837,11 @@ pub fn navigation_row_with_badges(
     };
     let badges: Vec<_> = counts.iter().copied().filter(|(n, _)| *n > 0).map(|(n, color)| {
         let text = ui.painter().layout_no_wrap(n.to_string(), egui::FontId::proportional(14.0), color);
-        let size = egui::vec2((text.size().x + 14.0).max(24.0), 22.0);
+        let size = egui::vec2((text.size().x + 14.0).max(BADGE_MIN_WIDTH), 22.0);
         (text, size, color)
     }).collect();
-    let badge_width = badges.iter().map(|(_, size, _)| size.x + 6.0).sum::<f32>();
+    let badge_width = badges.iter().map(|(_, size, _)| size.x + 6.0).sum::<f32>()
+        + activity_angle.map_or(0.0, |_| BADGE_MIN_WIDTH + 6.0);
     let icon_width = if icon.is_some() { 28.0 } else { 0.0 };
     if let Some(icon) = icon {
         ui.painter().text(
@@ -845,7 +867,19 @@ pub fn navigation_row_with_badges(
         ui.painter().galley(center - text.mesh_bounds.center().to_vec2(), text, color);
         right -= size.x + 6.0;
     }
+    if let Some(angle) = activity_angle {
+        paint_gear(ui, egui::pos2(right - BADGE_MIN_WIDTH / 2.0, rect.center().y),
+            18.0, crate::app::GREEN, angle);
+    }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub fn paint_gear(ui: &egui::Ui, center: egui::Pos2, size: f32, color: Color32, angle: f32) {
+    let gear = ui.painter().layout_no_wrap(
+        egui_phosphor::regular::GEAR_SIX.into(), egui::FontId::proportional(size), color,
+    );
+    let offset = egui::emath::Rot2::from_angle(angle) * gear.mesh_bounds.center().to_vec2();
+    ui.painter().add(egui::epaint::TextShape::new(center - offset, gear, color).with_angle(angle));
 }
 
 /// Flat full-width session choice, with a wrapping title and a separate status.
