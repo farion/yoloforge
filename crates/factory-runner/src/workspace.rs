@@ -258,9 +258,15 @@ pub fn prepare(
     match prepare_inner(journal, command, mapping, root) {
         Ok(workspace) => CommandOutput::Workspace { workspace },
         // Errors here are ours, never Git stderr (which could contain credentials).
-        Err(error) => CommandOutput::WorkspaceError {
-            workspace_error: error.to_string().chars().take(240).collect(),
-        },
+        Err(error) => {
+            #[cfg(test)]
+            let message = format!("{error:#}");
+            #[cfg(not(test))]
+            let message = error.to_string();
+            CommandOutput::WorkspaceError {
+                workspace_error: message.chars().take(240).collect(),
+            }
+        }
     }
 }
 
