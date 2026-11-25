@@ -124,6 +124,11 @@ fn git_status(
 ) -> Result<(bool, String)> {
     let out = tempfile::tempfile()?;
     let mut command = Command::new("git");
+    // Managed checkpoint repositories are nested under project, checkpoint,
+    // and command IDs. Git's worktree metadata can exceed MAX_PATH even when
+    // the checkout itself is short. Do not modify the user's Git config.
+    #[cfg(windows)]
+    command.args(["-c", "core.longpaths=true"]);
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(key);
@@ -282,7 +287,8 @@ fn prepare_inner(
         )
         .context("Invalid base branch")?;
         let commit = if let Some(import) = &spec.checkpoint {
-            crate::checkpoint::import_objects(&repository, &root, import)?
+            crate::checkpoint::import_objects(&repository, &root, import)
+                .context("Cannot import checkpoint into the workspace repository")?
         } else {
             git(
                 &repository,
@@ -353,7 +359,8 @@ fn prepare_inner(
                     &plan.commit,
                     &"0".repeat(plan.commit.len()),
                 ],
-            )?;
+            )
+            .context("Cannot create the planned workspace branch")?;
         } else {
             ensure!(
                 refs == plan.commit,
@@ -369,7 +376,8 @@ fn prepare_inner(
                 &git_path(&path)?,
                 &spec.branch,
             ],
-        )?;
+        )
+        .context("Cannot create the linked Git worktree")?;
     }
     plan.ready = true;
     save(journal, key(command), &plan)?;

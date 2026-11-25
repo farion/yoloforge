@@ -502,7 +502,11 @@ mod tests {
             bundle_sha256: committed.bundle_sha256.clone(), bundle_bytes: committed.bundle_bytes,
         };
         let target = RunnerId::new();
-        let target_root = dir.path().join("target");
+        // Exercise worktree metadata beyond the legacy Windows path limit,
+        // without relying on the length of the CI runner's temp directory.
+        let target_root = fs::canonicalize(dir.path()).unwrap()
+            .join("target")
+            .join("checkpoint-handoff".repeat(5));
         install_bundle(&target_root, &import, &bundle_bytes(&committed).unwrap()).unwrap();
         let target_journal = Journal::open(&dir.path().join("target.sqlite3"), &args.server, target).unwrap();
         let mut target_command = cmd.clone();
