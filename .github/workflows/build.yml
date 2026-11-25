@@ -1,6 +1,13 @@
 name: Native packages
 
 on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to verify
+        required: true
+        default: main
+        type: string
   workflow_call:
     inputs:
       ref:

@@ -129,6 +129,19 @@ fn git_status(
             command.env_remove(key);
         }
     }
+    // Hosted CI images install global filters such as Git LFS. Test fixtures
+    // must not inherit machine-specific Git behavior, especially when testing
+    // that checkpoint returns reject configured checkout filters.
+    #[cfg(test)]
+    command
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env(
+            "GIT_CONFIG_SYSTEM",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        );
     let mut child = command
         .current_dir(repository)
         .args(["-c", "core.hooksPath=/dev/null"])

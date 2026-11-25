@@ -514,9 +514,9 @@ mod tests {
         let mut record = target_journal.receive(target_command.clone()).unwrap();
         let target_args = Args { id: target, repositories: None, workspace_root: Some(target_root.clone()), ..args.clone() };
         crate::managed::ensure_repository(&target_journal, &mut record, &target_args).await.unwrap();
-        let CommandOutput::Workspace { workspace } =
-            workspace::prepare(&target_journal, &target_command, None, &target_root)
-        else { panic!("checkpoint did not prepare a new target workspace") };
+        let prepared = workspace::prepare(&target_journal, &target_command, None, &target_root);
+        let CommandOutput::Workspace { workspace } = prepared
+        else { panic!("checkpoint did not prepare a new target workspace: {prepared:?}") };
         let restored = Path::new(&workspace.path);
         assert_eq!(fs::read_to_string(restored.join("tracked")).unwrap(), "initial");
         assert!(restored.join("deleted").exists());
