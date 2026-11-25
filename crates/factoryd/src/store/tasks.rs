@@ -175,7 +175,12 @@ impl Store {
             Fingerprint::Extended(&submission)
         };
          let result = self.mutate(b.request_id,if direct { "session.prompt" } else if legacy { "task.save" } else if implementer.is_some() { "task.submit_with_model" } else { "task.submit" },&fingerprint,|tx|{
-            if (b.prompt.trim().is_empty() && b.images.is_empty() && submission.files.is_empty()) || b.prompt.len()>12000 || b.prompt.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\r'|'\t')){return Err(StoreError::Invalid("Aufgabe braucht Text oder Anhänge; Text maximal 12000 UTF-8 Bytes"));}
+            if b.prompt.trim().is_empty() && b.images.is_empty() && submission.files.is_empty() {
+                return Err(StoreError::Invalid("Intent braucht Text oder Anhänge"));
+            }
+            if b.prompt.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+                return Err(StoreError::Invalid("Prompt enthält ungültige Steuerzeichen"));
+            }
             validate_images(&b.images).map_err(StoreError::Invalid)?;
             validate_files(&submission.files).map_err(StoreError::Invalid)?;
             let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM active_projects WHERE id=?1)",[b.project_id.to_string()],|r|r.get(0))?;if !exists{return Err(StoreError::NotFound);}
@@ -200,8 +205,9 @@ impl Store {
                 let held:Option<String>=tx.query_row("SELECT token FROM task_edits WHERE ticket_id=?1",[id.to_string()],|r|r.get(0)).optional()?;
                 if held.is_some() && held!=submission.edit_token.map(|id|id.to_string()) {return Err(StoreError::Invalid("Bearbeitung gehört zu einem anderen Entwurf"));}
                 t
-            }else{if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}Ticket{key:super::numbering::next_reference(tx,b.project_id)?,draft:false,files:vec![],execution_command:None,requested_session:None,routing_note:String::new(),id:TicketId::new(),project_id:b.project_id,revision:Revision(0),title:String::new(),description:String::new(),acceptance_criteria:String::new(),priority:1,status:TicketState::Backlog,created_unix_ms:now,updated_unix_ms:now,depends_on:vec![],prompt:None,images:vec![]}};
+            }else{if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}Ticket{key:super::numbering::next_reference(tx,b.project_id)?,draft:false,files:vec![],execution_command:None,requested_session:None,session_prompt_request:None,routing_note:String::new(),id:TicketId::new(),project_id:b.project_id,revision:Revision(0),title:String::new(),description:String::new(),acceptance_criteria:String::new(),priority:1,status:TicketState::Backlog,created_unix_ms:now,updated_unix_ms:now,depends_on:vec![],prompt:None,images:vec![]}};
             t.draft = submission.draft;
+            t.session_prompt_request = direct.then_some(b.request_id);
             t.files = submission.files.clone();
             t.title=b.prompt.lines().next().unwrap_or("").chars().take(80).collect();if t.title.trim().is_empty(){t.title=if !submission.files.is_empty() { "Dateiaufgabe" } else { "Bildaufgabe" }.into();}
             t.description=b.prompt.clone();t.prompt=Some(b.prompt.clone());t.images=b.images.clone();t.revision.0+=1;t.updated_unix_ms=now;

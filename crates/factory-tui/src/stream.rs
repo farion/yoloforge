@@ -97,7 +97,7 @@ impl Dialog {
             .collect();
     }
     pub fn insert(&mut self, text: &str) {
-        if self.request.is_none() && self.prompt.len() + text.len() <= 16384 {
+        if self.request.is_none() {
             self.prompt.extend(
                 text.chars()
                     .filter(|c| !c.is_control() || matches!(c, '\n' | '\t')),

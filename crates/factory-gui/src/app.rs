@@ -40,6 +40,7 @@ pub struct SessionTab {
 
 pub struct App {
     pub session_prompts: BTreeMap<CommandId, Box<crate::dialogs::TaskDialog>>,
+    pub confirmed_session_prompts: BTreeMap<RequestId, Ticket>,
     pub local_runners: Vec<crate::local_runners::LocalRunner>,
     pub local_runners_busy: bool,
     pub action_errors: Vec<(u64, String)>,
@@ -152,6 +153,7 @@ impl App {
             factory_flow: crate::overview::FlowState::default(),
             local_runners: vec![],
             session_prompts: BTreeMap::new(),
+            confirmed_session_prompts: BTreeMap::new(),
             local_runners_busy: false,
             action_errors: vec![],
             restore_local_runners: true,
@@ -284,6 +286,7 @@ impl App {
         self.settings.credential_file = None;
         self.settings_dirty = true;
         self.snapshot = None;
+        self.confirmed_session_prompts.clear();
         self.updated = None;
         self.online = false;
         self.access = None;
@@ -962,6 +965,8 @@ impl App {
                         }
                     }
                     self.cache_projects(&s.projects);
+                    self.confirmed_session_prompts.retain(|_, confirmed|
+                        !s.tickets.iter().any(|ticket| ticket.id == confirmed.id));
                     self.snapshot = Some(std::sync::Arc::new(s));
                     self.updated = Some(Instant::now());
                     self.online = true;
@@ -1234,8 +1239,16 @@ impl App {
                     {
                         if let Ok(value) = &result {
                             match serde_json::from_value::<Ticket>(value.clone()) {
-                                Ok(ticket) if ticket.requested_session.is_some_and(|root|
-                                    request.path == format!("/v1/commands/{root}/prompt")) => {
+                                 Ok(mut ticket) if ticket.requested_session.is_some_and(|root|
+                                     request.path == format!("/v1/commands/{root}/prompt")) => {
+                                     if request.server == self.server && !self.snapshot.as_ref().is_some_and(|s|
+                                         s.tickets.iter().any(|current| current.id == ticket.id && current.session_prompt_request.is_some())) {
+                                         if let Ok(request_id) = serde_json::from_value(request.body["request_id"].clone()) {
+                                             for image in &mut ticket.images { image.data.clear(); }
+                                             for file in &mut ticket.files { file.data.clear(); }
+                                             self.confirmed_session_prompts.insert(request_id, ticket);
+                                         }
+                                     }
                                     self.settings.session_prompts.retain(|saved|
                                         saved.draft.server != request.server || serde_json::json!(saved.id) != request.body["request_id"]);
                                     task_notice = Some(crate::tr!("Prompt in die Session eingereiht."));
@@ -1438,6 +1451,7 @@ impl App {
                                 .err()
                                 .map(str::to_string);
                             task.dirty = true;
+                            task.refocus_prompt();
                         } else {
                             self.notice(crate::tr!("Anhang gehört zu einem anderen oder bereits gesendeten Entwurf und wurde nicht übernommen."));
                         }

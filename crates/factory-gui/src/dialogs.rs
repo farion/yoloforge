@@ -686,6 +686,12 @@ fn german_count(value: u128) -> String {
 }
 
 impl TaskDialog {
+    fn has_prompt_content(&self) -> bool {
+        !self.draft.prompt.trim().is_empty()
+            || !self.draft.images.is_empty()
+            || !self.draft.files.is_empty()
+    }
+
     pub(crate) fn offline(draft: TaskDraft, id: RequestId) -> Box<Self> {
         let Dialog::Task(mut task) = Dialog::task(draft.server.clone(), draft.project, None) else { unreachable!() };
         task.draft = draft;
@@ -698,8 +704,8 @@ impl TaskDialog {
             app.notice(crate::tr!("Bestehende Serveraufgaben können erst nach Wiederverbindung geändert werden."));
             return;
         }
-        if self.draft.prompt.len() > 12000 || (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty()) {
-            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+        if !self.has_prompt_content() {
+            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben.").into());
             return;
         }
         if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
@@ -731,7 +737,11 @@ impl TaskDialog {
         composer
     }
 
-    pub(crate) fn show_session_prompt(&mut self, ui: &mut egui::Ui, app: &mut App) {
+    pub(crate) fn refocus_prompt(&mut self) {
+        self.focused = false;
+    }
+
+    pub(crate) fn show_session_prompt(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
         let root = self.draft.requested_session.expect("Session composer target");
         let path = format!("/v1/commands/{root}/prompt");
         if self.request.is_none() {
@@ -758,20 +768,24 @@ impl TaskDialog {
                 _ => {},
             }
         }
-        egui::ScrollArea::vertical().id_salt(("session-prompt-editor", root))
-            .max_height((ui.ctx().content_rect().height() * 0.35).clamp(100.0, 280.0))
+        let editor_height = (ui.ctx().content_rect().height() * 0.35).clamp(100.0, 280.0);
+        let enter = egui::ScrollArea::vertical().id_salt(("session-prompt-editor", root))
+            .max_height(editor_height)
+            // Measure against the editor budget, not the bottom panel's cached
+            // height. Auto-shrink still fits short prompts to their content.
+            .min_scrolled_height(editor_height)
             .auto_shrink([false, true])
-            .show(ui, |ui| self.show_body(ui, app));
+            .show(ui, |ui| self.show_body(ui, app)).inner;
+        let mut submitted = false;
         ui.horizontal(|ui| {
             let editable = self.request.is_none();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let submit = design::accent_button(ui, egui::Button::new(crate::tr!("Prompten")), app.online && editable, BLUE.gamma_multiply(0.7));
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-prompt-submit", root)), submit.rect));
-                if submit.clicked() {
-                    if self.draft.prompt.len() > 12000 ||
-                        (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty()) {
-                        self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+                if submit.clicked() || (submit.enabled() && enter) {
+                    if !self.has_prompt_content() {
+                        self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben.").into());
                     } else if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
                         self.error = Some(error.into());
                     } else {
@@ -781,6 +795,7 @@ impl TaskDialog {
                             request_id: self.id, prompt: self.draft.prompt.clone(),
                             images: self.draft.images.clone(), files: self.draft.files.clone(),
                         })));
+                        submitted = true;
                         self.dirty = true;
                     }
                 }
@@ -796,6 +811,7 @@ impl TaskDialog {
             self.persist(app);
             self.dirty = false;
         }
+        submitted
     }
 
     pub(crate) fn receive_history(&mut self, before: Option<u64>, result: Result<TaskHistoryPage, String>) {
@@ -984,13 +1000,13 @@ impl TaskDialog {
             .max_height((height - footer_height).max(40.0))
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                self.show_body(ui, app);
+                self.show_body(ui, app)
             });
         ui.separator();
         let close = if self.read_only {
-            ui.horizontal(|ui| self.show_footer(ui, app)).inner
+            ui.horizontal(|ui| self.show_footer(ui, app, false)).inner
         } else {
-            self.show_footer(ui, app)
+            self.show_footer(ui, app, _body.inner)
         };
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
@@ -1057,7 +1073,7 @@ impl TaskDialog {
         }
         app.settings_dirty = true;
     }
-    fn show_body(&mut self, ui: &mut egui::Ui, app: &mut App) {
+    fn show_body(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
         ui.spacing_mut().item_spacing.y = 6.0;
         if !self.read_only && !self.session_prompt && app.online {
             self.load_model(app);
@@ -1076,7 +1092,7 @@ impl TaskDialog {
                 }
             }
             self.show_read_only_body(ui, app);
-            return;
+            return false;
         }
         if self.draft.edit_token.is_some() && self.request.is_none() {
             if let Some(current) = app
@@ -1126,7 +1142,7 @@ impl TaskDialog {
                 .map(|image| image_digest(std::slice::from_ref(image)))
                 .collect();
         }
-        ui.add_enabled_ui(!locked, |ui| {
+        let enter = ui.add_enabled_ui(!locked, |ui| {
             let mut remove_image = None;
             let mut remove_file = None;
             if !self.draft.images.is_empty() || !self.draft.files.is_empty() {
@@ -1171,14 +1187,29 @@ impl TaskDialog {
                 self.dirty = true;
             }
             let prompt = design::task_prompt(ui, &mut self.draft.prompt, 3);
-            if !self.focused {
+            let active = !locked && (!self.session_prompt || app.dialog.is_none());
+            if active && !self.focused {
                 prompt.request_focus();
                 self.focused = true;
             }
             if prompt.changed() {
                 self.dirty = true;
             }
-        });
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-task-prompt-widget"), prompt.id));
+            active && prompt.has_focus() && ui.input_mut(|input| {
+                let mut submit = false;
+                input.events.retain(|event| {
+                    if let egui::Event::Key { key: egui::Key::Enter, pressed: true, repeat, modifiers: egui::Modifiers::NONE, .. } = event {
+                        submit |= !repeat;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                submit
+            })
+        }).inner;
         if !self.session_prompt { self.show_history(ui, app); }
         if let Some(error) = &self.error {
             ui.colored_label(RED, error);
@@ -1194,6 +1225,7 @@ impl TaskDialog {
                 self.request = None;
             }
         }
+        enter
     }
     fn load_model(&mut self, app: &mut App) {
         if !app.models.managed() { return; }
@@ -1268,10 +1300,8 @@ impl TaskDialog {
             self.error = Some(crate::tr!("Die zugeordnete Session ist nicht mehr verfügbar. Bitte eine offene Session oder Auto Runner wählen.").into());
             return;
         }
-        if self.draft.prompt.len() > 12000
-            || (self.draft.prompt.trim().is_empty() && self.draft.images.is_empty() && self.draft.files.is_empty())
-        {
-            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.").into());
+        if !self.has_prompt_content() {
+            self.error = Some(crate::tr!("Bitte Text oder Anhänge angeben.").into());
             return;
         }
         if let Err(error) = validate_images(&self.draft.images).and_then(|()| validate_files(&self.draft.files)) {
@@ -1304,7 +1334,7 @@ impl TaskDialog {
         self.request = Some(app.write(label, "POST", path.into(), value));
     }
 
-    fn show_footer(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
+    fn show_footer(&mut self, ui: &mut egui::Ui, app: &mut App, enter: bool) -> bool {
         if self.read_only {
             let execution = app.snapshot.as_ref().and_then(|s| {
                 let ticket = s.tickets.iter().find(|t| Some(t.id) == self.draft.ticket)?;
@@ -1446,7 +1476,7 @@ impl TaskDialog {
             let submit = design::accent_button(ui, egui::Button::new(label).min_size(egui::vec2(200.0, 36.0)), enabled, BLUE.gamma_multiply(0.7));
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-action", self.id, false)), submit.rect));
-            if submit.clicked() {
+            if submit.clicked() || (enabled && enter) {
                 self.submit(app, match (draft, keep) {
                     (false, false) => TaskSubmitAction::Queue,
                     (false, true) => TaskSubmitAction::QueueAndNew,

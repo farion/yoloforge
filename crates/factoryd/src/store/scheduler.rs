@@ -572,6 +572,7 @@ impl Store {
                     pins.as_ref().and_then(|m| m.implementer.as_ref()),
                     Some((&repo_skills, &local_mcps)),
                     super::routing::assigned_git(&tx, tid)?,
+                    false,
                 ) {
                     Ok(c) => {
                         let mut ticket = t.clone();
@@ -680,20 +681,9 @@ impl Store {
                         t.id, t.title, t.description, t.acceptance_criteria
                     )
                 });
-                if prompt.trim().is_empty() && (!t.images.is_empty() || !t.files.is_empty()) {
+                if t.session_prompt_request.is_none() && prompt.trim().is_empty() && (!t.images.is_empty() || !t.files.is_empty()) {
                     prompt =
                         "Bearbeite die Aufgabe anhand der angehängten Bilder und Dateien.".into();
-                }
-                if prompt.len() > 16384 {
-                    t.status = TicketState::Blocked;
-                    save_ticket(&tx, &mut t)?;
-                    event(
-                        &tx,
-                        "scheduler.blocked",
-                        t.id.to_string(),
-                        &serde_json::json!({"reason":"Ticket prompt exceeds 16384 UTF-8 bytes"}),
-                    )?;
-                    continue;
                 }
                 let goal = t.title.chars().take(60).collect::<String>();
                 tx.execute_batch("SAVEPOINT routing_evaluation")?;
@@ -777,6 +767,7 @@ impl Store {
                     None,
                     None,
                     direct_git,
+                    false,
                 )?;
                 tx.execute("INSERT INTO scheduler_runs(ticket_id,stream_id,prepare_id,prompt,agent_id) VALUES(?1,?2,?3,?4,?5)",params![t.id.to_string(),stream.id.to_string(),c.id.to_string(),prompt,direct.then(|| c.id.to_string())])?;
                 t.status = TicketState::InProgress;

@@ -880,6 +880,9 @@ pub struct Ticket {
     pub execution_command: Option<CommandId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_session: Option<CommandId>,
+    /// Request that queued this prompt directly from the session composer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_prompt_request: Option<RequestId>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub routing_note: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -508,22 +508,24 @@ fn peon_prompt_hint(ui: &egui::Ui) -> &'static str {
 /// OpenCode-like composer. The editor grows with its content; the surrounding
 /// dialog owns scrolling, so this never creates a second scroll area.
 pub fn task_prompt(ui: &mut egui::Ui, text: &mut String, rows: usize) -> egui::Response {
-    task_prompt_buffer(ui, text, rows)
+    task_prompt_buffer(ui, text, rows, egui::Modifiers::SHIFT)
 }
 
 pub fn task_prompt_read_only(ui: &mut egui::Ui, text: &str, rows: usize) -> egui::Response {
     let mut buffer = text;
-    task_prompt_buffer(ui, &mut buffer, rows)
+    task_prompt_buffer(ui, &mut buffer, rows, egui::Modifiers::NONE)
 }
 
 fn task_prompt_buffer(
     ui: &mut egui::Ui,
     text: &mut dyn egui::TextBuffer,
     rows: usize,
+    newline_modifiers: egui::Modifiers,
 ) -> egui::Response {
     let hint = peon_prompt_hint(ui);
     let background = ui.painter().add(egui::epaint::Shape::Noop);
     let mut editor = None;
+    let editor_id = ui.make_persistent_id("task-prompt-editor");
     let width = ui.available_width();
     let panel = egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(12, 0))
@@ -533,6 +535,8 @@ fn task_prompt_buffer(
             ui.add_space((height - INPUT_MARGIN.top as f32).max(0.0));
             editor = Some(
                 multiline(text)
+                    .id(editor_id)
+                    .return_key(egui::KeyboardShortcut::new(newline_modifiers, egui::Key::Enter))
                     .font(egui::FontId::monospace(crate::conversation::CLI_FONT_SIZE))
                     .frame(false)
                     .hint_text(input_hint(hint))

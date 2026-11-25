@@ -824,9 +824,9 @@
     "Bestehende Server-Intents können erst nach Wiederverbindung geändert werden.",
     "Existing server Intents can only be edited after reconnecting."
   ],
-  "Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.": [
-    "Bitte Text oder Anhänge angeben; Prompt maximal 12000 UTF-8-Bytes.",
-    "Enter text or add attachments; prompt limited to 12000 UTF-8 bytes."
+  "Bitte Text oder Anhänge angeben.": [
+    "Bitte Text oder Anhänge angeben.",
+    "Enter text or add attachments."
   ],
   "Bilder und Dateien hinzufügen": [
     "Bilder und Dateien hinzufügen",

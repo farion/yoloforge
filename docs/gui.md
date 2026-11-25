@@ -480,12 +480,17 @@ Vorrang. Details und festgelegte Quellversion: `vendor/sdl3-sys/YOLOFORGE-PATCH.
 
 - **Entwurf auf Server speichern** startet keine Arbeit.
 - **Einreihen** gibt die Aufgabe ausdrücklich zur Bearbeitung frei.
+- Im Prompt löst Enter die aktuelle Hauptaktion aus, Shift+Enter fügt eine
+  neue Zeile ein. Strg+V hängt kopierte Dateien an und setzt den Fokus zurück
+  in den Prompt. Das gilt auch für den Prompt in der OpenCode-Ansicht.
+- Direkt in der OpenCode-Ansicht gesendete Prompts erscheinen sofort im Verlauf
+  und werden ohne zusätzlichen Text in genau diese Session eingereiht.
 - Automatische Verteilung oder eine konkrete bestehende Arbeitssession auswählen.
 - Bilder und Dateien über Dateiauswahl oder Drag-and-drop hinzufügen; Bilder auch
   aus der Zwischenablage. Anhänge können vor dem Senden entfernt werden.
 - Grenzen: vier Bilder mit zusammen 4 MiB sowie 16 weitere Dateien mit zusammen
-  4 MiB. Der Prompt hat höchstens 12000 UTF-8-Bytes. Grenzen werden angezeigt,
-  nicht durch stilles Abschneiden umgangen.
+  4 MiB. Factory hat keine separate Längenbegrenzung für den Prompt und kürzt ihn
+  nicht. Die Größenlimits für HTTP-Anfragen und das Kontextlimit des Modells gelten weiterhin.
 - Vorschauen dekodieren im Hintergrund mit Größen-/Speichergrenzen. Die Anzeige
   ist eine skalierte Vorschau, kein Ersatz für die unveränderten Originalbytes.
 
