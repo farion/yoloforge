@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "factory-client-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "factory-core",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "factory-core"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "base64 0.22.1",
  "png",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "factory-gui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "factory-opencode"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "factory-core",
@@ -1172,7 +1172,7 @@ dependencies = [
 
 [[package]]
 name = "factory-platform"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "libc",
@@ -1184,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "factory-protocol"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "factory-core",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "factory-runner"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "factory-tui"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "factoryd"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "axum",
