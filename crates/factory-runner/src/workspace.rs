@@ -123,6 +123,8 @@ fn git_status(
     allow_conflict: bool,
 ) -> Result<(bool, String)> {
     let out = tempfile::tempfile()?;
+    #[cfg(test)]
+    let mut err = tempfile::tempfile()?;
     let mut command = Command::new("git");
     // Managed checkpoint repositories are nested under project, checkpoint,
     // and command IDs. Git's worktree metadata can exceed MAX_PATH even when
@@ -171,8 +173,11 @@ fn git_status(
         .env("GIT_TERMINAL_PROMPT", "0")
         .envs(env.iter().copied())
         .stdin(Stdio::null())
-        .stdout(out.try_clone()?)
-        .stderr(Stdio::null());
+        .stdout(out.try_clone()?);
+    #[cfg(test)]
+    command.stderr(err.try_clone()?);
+    #[cfg(not(test))]
+    command.stderr(Stdio::null());
     // `git init <path>` loads command configuration before creating the target,
     // unlike both CreateProcess.current_dir and Git's startup-level -C option.
     #[cfg(windows)]
@@ -183,10 +188,22 @@ fn git_status(
     let deadline = Instant::now() + timeout;
     let success = loop {
         if let Some(status) = child.try_wait()? {
-            ensure!(
-                status.success() || (allow_conflict && status.code() == Some(1)),
-                "Git operation failed; inspect repository/worktree before retrying"
-            );
+            if !status.success() && !(allow_conflict && status.code() == Some(1)) {
+                #[cfg(test)]
+                {
+                    use std::io::{Read, Seek, SeekFrom};
+                    err.seek(SeekFrom::Start(0))?;
+                    let mut diagnostic = String::new();
+                    err.take(8_193).read_to_string(&mut diagnostic)?;
+                    ensure!(
+                        diagnostic.len() <= 8_192,
+                        "Git test diagnostic exceeds inspection limit"
+                    );
+                    bail!("Git fixture operation failed: {}", diagnostic.trim());
+                }
+                #[cfg(not(test))]
+                bail!("Git operation failed; inspect repository/worktree before retrying");
+            }
             break status.success();
         }
         if Instant::now() >= deadline {
