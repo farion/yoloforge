@@ -909,6 +909,33 @@ impl App {
             .request(id, method.into(), path.clone(), Value::Null);
         self.dialog = Some(Dialog::read(title.into(), id, path));
     }
+    pub(crate) fn notification_label(&self, n: &Notification) -> String {
+        let snapshot = self.snapshot.as_deref();
+        let project = n
+            .project_id
+            .and_then(|id| snapshot?.projects.iter().find(|project| project.id == id));
+        let project_name = project.map_or("Factory", |project| project.name.as_str());
+        // Older servers identify successful runs by their stored notification title.
+        if n.kind == "command.updated" && n.title == "Aufgabe abgeschlossen" {
+            if let Some(key) = snapshot.and_then(|snapshot| {
+                let mut tickets = snapshot.tickets.iter().filter(|ticket| {
+                    Some(ticket.project_id) == n.project_id
+                        && match n.ticket_id {
+                            Some(id) => ticket.id == id,
+                            None => n.command_id.is_some() && ticket.execution_command == n.command_id,
+                        }
+                });
+                let ticket = tickets.next()?;
+                (tickets.next().is_none() && !ticket.key.is_empty()).then_some(ticket.key.as_str())
+            }) {
+                return crate::tr!("{key} abgeschlossen", key = key);
+            }
+            let status = crate::tr!("Intent abgeschlossen");
+            return format!("{project_name}: {status}");
+        }
+        format!("{project_name}: {}", n.title)
+    }
+
     pub fn notification_target(&self, n: &Notification) -> Option<Target> {
         let Some(project) = n.project_id else { return Some(Target::Diagnose(None)) };
         if let Some(q) = n.question_id {
@@ -1078,18 +1105,7 @@ impl App {
                                     .rev()
                                     .filter(|n| n.id > self.latest_notification)
                                 {
-                                    let project = n
-                                        .project_id
-                                        .and_then(|p| {
-                                            self.snapshot
-                                                .as_ref()?
-                                                .projects
-                                                .iter()
-                                                .find(|v| v.id == p)
-                                        })
-                                        .map(|p| p.name.as_str())
-                                        .unwrap_or("Factory");
-                                    let label = format!("{project}: {}", n.title);
+                                    let label = self.notification_label(n);
                                     self.notices.push((label.clone(), Instant::now()));
                                     if self.settings.desktop_notifications {
                                         self.backend.desktop_notification(
