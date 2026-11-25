@@ -3946,6 +3946,57 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
 }
 
 #[test]
+fn project_delete_dialog_keeps_its_action_close_to_the_content() {
+    let mut app = fixture();
+    let project = app.project().unwrap().clone();
+    let mut dialog = Dialog::form(
+        "Projekt löschen",
+        "Zum Bestätigen den vollständigen Projektnamen eingeben.",
+        "DELETE",
+        format!("/v1/projects/{}", project.id),
+        json!(DeleteProject {
+            request_id: RequestId::new(),
+            expected_revision: project.revision,
+            confirm_name: String::new(),
+        }),
+    );
+    let Dialog::Form(form) = &dialog else { unreachable!() };
+    let modal_id = egui::Id::new(("factory-form", form.id));
+    let ctx = app.backend.context().clone();
+    let render = |dialog: &mut Dialog, app: &mut App, size: egui::Vec2| {
+        for _ in 0..4 {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            }, |ctx| { assert!(!dialog.show(ctx, app)); });
+        }
+        let (body, content): (egui::Rect, egui::Vec2) = ctx.data_mut(|data|
+            data.get_temp(modal_id.with("test-body-scroll"))).unwrap();
+        let (button, enabled): (egui::Rect, bool) = ctx.data_mut(|data|
+            data.get_temp(egui::Id::new("test-project-delete-button"))).unwrap();
+        let modal = ctx.memory(|memory| memory.area_rect(modal_id)).unwrap();
+        // egui reports the pre-shrink scroll rectangle, so use the visible content height.
+        let body_end = body.top() + content.y.min(body.height());
+        assert!((12.0..=40.0).contains(&(button.top() - body_end)), "{body:?} {content:?} {button:?}");
+        assert!((0.0..=36.0).contains(&(modal.bottom() - button.bottom())), "{modal:?} {button:?}");
+        assert!(modal.top() >= 0.0 && modal.bottom() <= size.y);
+        (body, content, modal, enabled)
+    };
+
+    let (body, content, modal, enabled) = render(&mut dialog, &mut app, egui::vec2(1100.0, 900.0));
+    assert!(!enabled);
+    assert!(modal.height() < 300.0);
+    assert!(content.y <= body.height() + 1.0);
+
+    let Dialog::Form(form) = &mut dialog else { unreachable!() };
+    form.body["confirm_name"] = json!(project.name);
+    form.help = "Zum Bestätigen den vollständigen Projektnamen eingeben.\n".repeat(20);
+    let (body, content, _, enabled) = render(&mut dialog, &mut app, egui::vec2(450.0, 320.0));
+    assert!(enabled);
+    assert!(content.y > body.height());
+}
+
+#[test]
 fn orchestrator_settings_live_in_project_settings_not_above_the_list() {
     use crate::project_settings::ProjectSection;
     let mut app = fixture();
