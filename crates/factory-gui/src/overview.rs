@@ -358,10 +358,40 @@ impl CardMotion {
 struct Lane<'a> {
     key: String,
     title: String,
-    subtitle: String,
+    subtitle: Option<&'static str>,
     column: usize,
     cards: Vec<Card<'a>>,
-    session: Option<(ProjectId, CommandId)>,
+    runner_busy: Option<bool>,
+}
+
+impl Lane<'_> {
+    fn subtitle(&self) -> Option<&'static str> {
+        match self.runner_busy {
+            Some(true) => Some(crate::tr!("Busy")),
+            Some(false) => Some(crate::tr!("Idle")),
+            None => self.subtitle,
+        }
+    }
+}
+
+fn runner_lane_key(id: RunnerId) -> String {
+    format!("runner:{id}")
+}
+
+const HEADER_HEIGHT: f32 = 54.0;
+const CANVAS_TOP: f32 = 12.0;
+
+fn header_fill(active: bool, animate: bool, clock: u64) -> Color32 {
+    if !active {
+        return design::FLOW_HEADER_FILL;
+    }
+    let pulse = if animate {
+        let phase = (clock % 2100) as f32 / 2100.0 * std::f32::consts::TAU;
+        (1.0 - phase.cos()) * 0.5
+    } else {
+        0.5
+    };
+    design::FLOW_HEADER_BUSY_LOW.lerp_to_gamma(design::FLOW_HEADER_BUSY_HIGH, pulse)
 }
 
 fn orchestration_active(s: &Snapshot, project: Option<ProjectId>) -> bool {
@@ -397,29 +427,44 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
         Lane {
             key: "input".into(),
             title: crate::tr!("Eingang").into(),
-            subtitle: crate::tr!("Entwürfe & neue Aufgaben").into(),
+            subtitle: Some(crate::tr!("Entwürfe & neue Aufgaben")),
             column: 0,
             cards: vec![],
-            session: None,
+            runner_busy: None,
         },
         Lane {
             key: "routing".into(),
             title: crate::tr!("Verteilung").into(),
-            subtitle: crate::tr!("Orchestrierung & Start").into(),
+            subtitle: Some(crate::tr!("Orchestrierung & Start")),
             column: 1,
             cards: vec![],
-            session: None,
+            runner_busy: None,
         },
         Lane {
             key: "result".into(),
             title: crate::tr!("Ergebnis").into(),
-            subtitle: crate::tr!("Erfolg bleibt 2 Minuten").into(),
+            subtitle: Some(crate::tr!("Erfolg bleibt 2 Minuten")),
             column: 3,
             cards: vec![],
-            session: None,
+            runner_busy: None,
         },
     ];
-    let mut executions: BTreeMap<String, Lane<'a>> = BTreeMap::new();
+    // Runner status is global even when the visible Intents are project-filtered.
+    let busy_runners: BTreeSet<_> = s.commands.iter().filter(|c| {
+        c.state == CommandState::Accepted && c.agent_progress.as_ref().is_none_or(|p|
+            !matches!(p.phase, AgentPhase::Succeeded | AgentPhase::Failed | AgentPhase::Interrupted))
+    }).map(|c| c.runner_id).collect();
+    let mut executions: BTreeMap<_, _> = s.runners.iter().map(|runner| {
+        let key = runner_lane_key(runner.id);
+        (key.clone(), Lane {
+            key,
+            title: runner.name.clone(),
+            subtitle: None,
+            column: 2,
+            cards: vec![],
+            runner_busy: Some(busy_runners.contains(&runner.id)),
+        })
+    }).collect();
     for ticket in s
         .tickets
         .iter()
@@ -440,38 +485,17 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
             Stage::Execution => {
                 let key = c.command.map_or_else(
                     || "unassigned".into(),
-                    |command| format!("{}:{}", command.runner_id, command.session_root()),
+                    |command| runner_lane_key(command.runner_id),
                 );
                 let lane = executions.entry(key.clone()).or_insert_with(|| {
-                    let (title, subtitle, session) = c.command.map_or_else(
-                        || {
-                            (
-                                crate::tr!("Zuordnung unbekannt").into(),
-                                crate::tr!("Keine bestätigte Session").into(),
-                                None,
-                            )
-                        },
-                        |command| {
-                            (
-                                s.runners
-                                    .iter()
-                                    .find(|r| r.id == command.runner_id)
-                                    .map_or_else(
-                                        || crate::tr!("Unbekannter Runner").into(),
-                                        |r| r.name.clone(),
-                                    ),
-                                session_title(s, command),
-                                Some((ticket.project_id, command.session_root())),
-                            )
-                        },
-                    );
                     Lane {
                         key,
-                        title,
-                        subtitle,
+                        title: if c.command.is_some() { crate::tr!("Unbekannter Runner") }
+                            else { crate::tr!("Zuordnung unbekannt") }.into(),
+                        subtitle: None,
                         column: 2,
                         cards: vec![],
-                        session,
+                        runner_busy: c.command.map(|c| busy_runners.contains(&c.runner_id)),
                     }
                 });
                 lane.cards.push(c);
@@ -484,10 +508,10 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
             Lane {
                 key: "idle".into(),
                 title: crate::tr!("Ausführung").into(),
-                subtitle: crate::tr!("Noch keine Aufgaben zugewiesen").into(),
+                subtitle: Some(crate::tr!("Noch keine Aufgaben zugewiesen")),
                 column: 2,
                 cards: vec![],
-                session: None,
+                runner_busy: None,
             },
         );
     }
@@ -560,7 +584,6 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     let routing_active = orchestrating || lanes[1].cards.iter().any(|c| c.active);
     ui.add_space(12.0);
     let mut task = None;
-    let mut session = None;
     egui::ScrollArea::both()
         .id_salt("factory-flow")
         .auto_shrink([false, false])
@@ -578,6 +601,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 app.factory_flow.layout = Some(layout);
             }
             let lane_height = |lane: &Lane<'_>| {
+                if lane.runner_busy.is_some() && lane.cards.is_empty() {
+                    return HEADER_HEIGHT;
+                }
                 let count = if app.factory_flow.expanded.contains(&lane.key) {
                     lane.cards.len()
                 } else {
@@ -600,9 +626,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 .filter(|l| l.column != 2)
                 .map(&lane_height)
                 .fold(execution_height, f32::max)
-                + 72.0;
+                + CANVAS_TOP + 8.0;
             let (canvas, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-            let mut next_execution = 64.0;
+            let mut next_execution = CANVAS_TOP;
             let mut placements = Vec::new();
             for lane in &lanes {
                 let top = if lane.column == 2 {
@@ -610,27 +636,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     next_execution += lane_height(lane) + 20.0;
                     top
                 } else {
-                    64.0
+                    CANVAS_TOP
                 };
                 let origin = canvas.min + egui::vec2(16.0 + lane.column as f32 * stride, top);
                 placements.push((lane, origin, lane_height(lane)));
             }
             let clock = app.factory_flow.clock;
             let animate = app.online && app.factory_flow.motion;
-            for (column, title) in [crate::tr!("Eingang"), crate::tr!("Verteilung"), crate::tr!("Ausführung"), crate::tr!("Ergebnis")]
-                .iter()
-                .enumerate()
-            {
-                text(
-                    ui,
-                    canvas.min + egui::vec2(16.0 + column as f32 * stride, 12.0),
-                    title,
-                    16.0,
-                    MUTED,
-                    card_width,
-                );
-            }
-            // Edges connect actual stages and assigned session branches. Idle edges
+            // Edges connect actual stages and assigned runner branches. Idle edges
             // stay quiet; only observed activity produces moving light packets.
             let routing = placements.iter().find(|(l, _, _)| l.column == 1).unwrap().1;
             let input = placements.iter().find(|(l, _, _)| l.column == 0).unwrap().1;
@@ -663,31 +676,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 );
             }
             for (lane, origin, height) in placements {
-                let header = Rect::from_min_size(origin, egui::vec2(card_width, 54.0));
+                let header = Rect::from_min_size(origin, egui::vec2(card_width, HEADER_HEIGHT));
                 let active = if lane.column == 1 {
                     routing_active
                 } else {
-                    lane.cards.iter().any(|c| c.active)
+                    lane.runner_busy.unwrap_or_else(|| lane.cards.iter().any(|c| c.active))
                 };
-                let header_response = lane.session.map(|_| {
-                    ui.interact(
-                        header,
-                        ui.id().with(("flow-session", &lane.key)),
-                        Sense::click(),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                });
                 ui.painter().rect_filled(
                     header,
                     10,
-                    if header_response
-                        .as_ref()
-                        .is_some_and(|r| r.hovered() || r.has_focus())
-                    {
-                        design::HOVER_FILL
-                    } else {
-                        Color32::from_rgb(29, 34, 43)
-                    },
+                    header_fill(active, animate, clock),
                 );
                 ui.painter().rect_stroke(
                     header,
@@ -695,43 +693,26 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Stroke::new(1.0_f32, design::SEPARATOR_COLOR),
                     egui::StrokeKind::Inside,
                 );
-                let phase = clock as f32 / 1000.0;
-                if active {
-                    let radius = if animate {
-                        4.0 + (phase * 3.0).sin() * 1.4
-                    } else {
-                        4.0
-                    };
-                    ui.painter()
-                        .circle_filled(header.min + egui::vec2(16.0, 18.0), radius, BLUE);
-                }
+                let title = format!("{} ({})", lane.title, lane.cards.len());
+                let subtitle = lane.subtitle();
                 text(
                     ui,
-                    header.min + egui::vec2(28.0, 7.0),
-                    &format!("{} · {}", lane.title, lane.cards.len()),
+                    header.min + egui::vec2(12.0, if subtitle.is_some() { 7.0 } else { 18.0 }),
+                    &title,
                     14.0,
                     ui.visuals().text_color(),
-                    header.width() - 42.0,
-                );
-                text(
-                    ui,
-                    header.min + egui::vec2(12.0, 31.0),
-                    &lane.subtitle,
-                    11.0,
-                    MUTED,
                     header.width() - 24.0,
                 );
-                if let Some(target) = lane.session {
-                    let response = header_response.unwrap().on_hover_text(crate::tr!("{}\n{}\nSession öffnen", lane.title, lane.subtitle));
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, crate::tr!("Session öffnen"))
-                    });
-                    if response.clicked() {
-                        session = Some(target);
-                    }
+                if let Some(subtitle) = subtitle {
+                    text(ui, header.min + egui::vec2(12.0, 31.0), subtitle,
+                        11.0, MUTED, header.width() - 24.0);
+                }
+                if lane.column == 2 {
+                    ui.interact(header, ui.id().with(("flow-runner", &lane.key)), Sense::hover())
+                        .on_hover_text(title);
                     #[cfg(test)]
                     ui.ctx().data_mut(|d| {
-                        d.insert_temp(egui::Id::new(("test-flow-session", target.1)), header)
+                        d.insert_temp(egui::Id::new(("test-flow-runner", &lane.key)), header)
                     });
                 }
                 let expanded = app.factory_flow.expanded.contains(&lane.key);
@@ -740,7 +721,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 } else {
                     lane.cards.len().min(design::FLOW_VISIBLE_CARDS)
                 };
-                if lane.cards.is_empty() {
+                if lane.cards.is_empty() && lane.runner_busy.is_none() {
                     text(
                         ui,
                         origin + egui::vec2(12.0, 92.0),
@@ -829,15 +810,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     if let Some(id) = task {
         app.view_task(id);
     }
-    if let Some((project, root)) = session {
-        app.open_session(project, root);
-    }
     // A heartbeat while moving; one inexpensive tick otherwise for expiry.
     if app.online {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(
                 if app.factory_flow.motion
-                    && (lanes.iter().any(|lane| !lane.cards.is_empty())
+                    && (lanes.iter().any(|lane| !lane.cards.is_empty() || lane.runner_busy == Some(true))
                         || orchestrating
                         || app
                             .factory_flow
@@ -1266,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn project_filter_and_stacks_prioritize_waiting_work_with_exact_session_targets() {
+    fn project_filter_and_runner_stacks_prioritize_waiting_work() {
         let app = crate::tests::fixture();
         let mut s = (*app.snapshot.unwrap()).clone();
         let first = s.tickets[0].project_id;
@@ -1292,10 +1270,7 @@ mod tests {
         let executing = scoped.iter().find(|l| l.column == 2).unwrap();
         assert_eq!(executing.cards.len(), 7);
         assert!(executing.cards[0].waiting);
-        assert_eq!(
-            executing.session,
-            Some((first, s.commands[0].session_root()))
-        );
+        assert_eq!(executing.key, runner_lane_key(s.commands[0].runner_id));
         assert_eq!(executing.title, "Test-Runner");
         let other = lanes(&s, &state, Some(second));
         assert_eq!(other.iter().map(|l| l.cards.len()).sum::<usize>(), 1);
@@ -1333,37 +1308,116 @@ mod tests {
     }
 
     #[test]
-    fn flow_cards_render_equal_geometry_and_open_task_and_exact_session_without_writes() {
+    fn overview_stacks_multiple_sessions_under_one_runner_and_keeps_intents_clickable() {
         let mut app = crate::tests::fixture();
         app.settings.page = Page::Overview;
         app.factory_flow.motion = false;
-        let size = egui::vec2(1800.0, 1000.0);
-        let s = app.snapshot.clone().unwrap();
+        let size = egui::vec2(1800.0, 1100.0);
+        let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
         let ticket = s.tickets[0].id;
-        let command = s.commands[0].session_root();
+        let runner = s.commands[0].runner_id;
+        let mut other = s.runners[0].clone();
+        other.id = RunnerId::new();
+        let other_runner = other.id;
+        s.runners.push(other);
+        let mut idle = s.runners[0].clone();
+        idle.id = RunnerId::new();
+        idle.name = "Idle-Runner".into();
+        let idle_runner = idle.id;
+        s.runners.push(idle);
+        let mut add_execution = |runner_id| {
+            let mut t = s.tickets[0].clone();
+            t.id = TicketId::new();
+            let mut stream = s.streams[0].clone();
+            stream.id = StreamId::new();
+            stream.runner_id = runner_id;
+            stream.ticket_ids = vec![t.id];
+            let mut command = s.commands[0].clone();
+            command.id = CommandId::new();
+            command.stream_id = stream.id;
+            command.runner_id = runner_id;
+            let progress = command.agent_progress.as_mut().unwrap();
+            progress.session_id = agent_session_id(command.id);
+            progress.message_id = agent_message_id(command.id);
+            progress.phase = AgentPhase::Running;
+            t.execution_command = Some(command.id);
+            let id = t.id;
+            s.tickets.push(t);
+            s.streams.push(stream);
+            s.commands.push(command);
+            id
+        };
+        let second_ticket = add_execution(runner);
+        let third_ticket = add_execution(other_runner);
+        assert_ne!(s.commands[0].session_root(), s.commands[1].session_root());
+        let lanes = lanes(s, &app.factory_flow, None);
+        let execution: Vec<_> = lanes.iter().filter(|lane| lane.column == 2).collect();
+        assert_eq!(execution.len(), 3, "One lane per runner ID, including idle runners");
+        let lane = |id| execution.iter().find(|lane| lane.key == runner_lane_key(id)).unwrap();
+        assert_eq!(lane(runner).cards.iter().map(|c| c.ticket.id).collect::<Vec<_>>(), [ticket, second_ticket]);
+        assert_eq!(lane(other_runner).cards[0].ticket.id, third_ticket);
+        assert_eq!(lane(runner).subtitle(), Some("Busy"));
+        assert_eq!(lane(other_runner).subtitle(), Some("Busy"));
+        assert_eq!(lane(idle_runner).subtitle(), Some("Idle"));
+        assert!(lane(idle_runner).cards.is_empty());
+        let filtered = self::lanes(s, &app.factory_flow, Some(ProjectId::new()));
+        let filtered_runner = filtered.iter().find(|lane| lane.key == runner_lane_key(runner)).unwrap();
+        assert!(filtered_runner.cards.is_empty());
+        assert_eq!(filtered_runner.subtitle(), Some("Busy"));
+
         for _ in 0..4 {
             frame(&mut app, size, vec![]);
         }
         let ctx = app.backend.context().clone();
-        let rect = ctx
-            .data_mut(|d| d.get_temp::<Rect>(egui::Id::new(("test-flow-task", ticket))))
-            .unwrap();
-        assert_eq!(rect.size(), design::FLOW_CARD_SIZE);
-        assert!(rect.right() < size.x && rect.bottom() < size.y);
-        click(&mut app, size, rect);
+        let output = frame(&mut app, size, vec![]);
+        let labels: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
+            _ => None,
+        }).collect();
+        for label in ["Eingang (0)", "Verteilung (0)", "Test-Runner (2)", "Idle-Runner (0)", "Ergebnis (0)", "Busy", "Idle"] {
+            assert!(labels.contains(&label), "Missing {label}: {labels:?}");
+        }
+        for label in ["Eingang", "Verteilung", "Ausführung", "Ergebnis"] {
+            assert!(!labels.contains(&label), "Redundant column heading: {label}");
+        }
+        let header = ctx.data_mut(|d| d.get_temp::<Rect>(egui::Id::new((
+            "test-flow-runner", runner_lane_key(runner),
+        )))).unwrap();
+        let card = |id| ctx.data_mut(|d| d.get_temp::<Rect>(egui::Id::new(("test-flow-task", id)))).unwrap();
+        let first = card(ticket);
+        let second = card(second_ticket);
+        assert_eq!(first.size(), design::FLOW_CARD_SIZE);
+        assert_eq!(second.size(), first.size());
+        assert_eq!(header.left(), first.left());
+        assert_eq!(first.left(), second.left());
+        assert!(header.bottom() < first.top() && first.bottom() < second.top());
+        let header_text: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if header.contains(text.pos) => Some(text),
+            _ => None,
+        }).collect();
+        assert_eq!(header_text.len(), 2);
+        assert_eq!(header_text[0].pos.x, header_text[1].pos.x);
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Circle(circle) if header.shrink(6.0).contains(circle.center))));
+        assert!(second.right() < size.x && second.bottom() < size.y);
+        click(&mut app, size, header);
+        assert!(app.tabs.is_empty(), "A runner heading has no single session target");
+        click(&mut app, size, second);
         let Some(Dialog::Task(task)) = app.dialog.take() else {
             panic!("Task dialog missing")
         };
         assert!(task.read_only);
-        assert_eq!(task.draft.ticket, Some(ticket));
-        let header = ctx
-            .data_mut(|d| d.get_temp::<Rect>(egui::Id::new(("test-flow-session", command))))
-            .unwrap();
-        click(&mut app, size, header);
-        assert_eq!(app.tabs.len(), 1);
-        assert_eq!(app.tabs[0].root, command);
+        assert_eq!(task.draft.ticket, Some(second_ticket));
         assert!(app.settings.pending.is_empty());
         assert!(app.in_flight.is_empty());
+    }
+
+    #[test]
+    fn active_header_pulses_between_dark_blues_only_with_motion_enabled() {
+        assert_eq!(header_fill(false, true, 1050), design::FLOW_HEADER_FILL);
+        assert_eq!(header_fill(true, true, 0), design::FLOW_HEADER_BUSY_LOW);
+        assert_eq!(header_fill(true, true, 1050), design::FLOW_HEADER_BUSY_HIGH);
+        assert_eq!(header_fill(true, false, 0), header_fill(true, false, 1050));
     }
 
     #[test]
@@ -1378,11 +1432,7 @@ mod tests {
             s.streams[0].ticket_ids.push(t.id);
             s.tickets.push(t);
         }
-        let key = format!(
-            "{}:{}",
-            s.commands[0].runner_id,
-            s.commands[0].session_root()
-        );
+        let key = runner_lane_key(s.commands[0].runner_id);
         let original = s.tickets.clone();
         let size = egui::vec2(1800.0, 1600.0);
         for _ in 0..4 {
@@ -1434,7 +1484,7 @@ mod tests {
             })
             .collect();
         assert!(
-            fills.contains(&Color32::from_rgb(29, 34, 43)),
+            fills.contains(&design::FLOW_HEADER_FILL),
             "Neutral stage header"
         );
         assert!(fills.contains(&design::FLOW_TASK_FILL), "Blue task surface");
@@ -1447,7 +1497,7 @@ mod tests {
             fills.contains(&AMBER.gamma_multiply(0.45)),
             "Colored question pill"
         );
-        assert_ne!(design::FLOW_TASK_FILL, Color32::from_rgb(29, 34, 43));
+        assert_ne!(design::FLOW_TASK_FILL, design::FLOW_HEADER_FILL);
 
         let mut s = (*app.snapshot.unwrap()).clone();
         s.commands.clear();

@@ -1758,6 +1758,44 @@ fn global_header_uses_shared_tabs_and_close_only_removes_the_view() {
 }
 
 #[test]
+fn footer_shows_live_server_version_runner_count_and_gui_version() {
+    let mut app = fixture();
+    let ctx = app.backend.context().clone();
+    let draw = |app: &mut App| ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO, egui::vec2(820.0, 560.0),
+            )),
+            ..Default::default()
+        },
+        |ctx| app.draw_shell(ctx),
+    );
+    let has_footer_label = |output: &egui::FullOutput, label: &str| {
+        let footer = ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-footer-panel"))).unwrap();
+        output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if footer.contains(text.pos) && text.galley.job.text == label))
+    };
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.server_version = "0.1.11".into();
+    let mut runner = snapshot.runners[0].clone();
+    runner.id = RunnerId::new();
+    runner.connection = ConnectionState::Unreachable;
+    snapshot.runners.push(runner);
+    let output = draw(&mut app);
+    assert!(has_footer_label(&output, "Verbunden - Serverversion v0.1.11 - 2 Runner"));
+    assert!(has_footer_label(&output, concat!("YoloForge GUI ", env!("CARGO_PKG_VERSION"))));
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.server_version = "v0.1.12".into();
+    snapshot.runners.pop();
+    let output = draw(&mut app);
+    assert!(has_footer_label(&output, "Verbunden - Serverversion v0.1.12 - 1 Runner"));
+    app.online = false;
+    let output = draw(&mut app);
+    assert!(has_footer_label(&output, "Offline"));
+    assert!(!has_footer_label(&output, "Verbunden - Serverversion v0.1.12 - 1 Runner"));
+}
+
+#[test]
 fn footer_info_opens_about_with_current_version_and_github_link() {
     let mut app = fixture();
     let ctx = app.backend.context().clone();

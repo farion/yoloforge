@@ -557,6 +557,20 @@
     "Verbunden",
     "Connected"
   ],
+  "Verbunden - Serverversion {version} - {runners}": [
+    "Verbunden - Serverversion {version} - {runners}",
+    "Connected - Server version {version} - {runners}"
+  ],
+  "1 Runner": [
+    "1 Runner",
+    "1 runner"
+  ],
+  "Busy": ["Busy", "Busy"],
+  "Idle": ["Idle", "Idle"],
+  "{count} Runner": [
+    "{count} Runner",
+    "{count} runners"
+  ],
   "Zugriff": [
     "Zugriff",
     "Access"
@@ -3112,6 +3126,18 @@
   "Lokal": [
     "Lokal",
     "Local"
+  ],
+  "Local": [
+    "Local",
+    "Local"
+  ],
+  "Server": [
+    "Server",
+    "Server"
+  ],
+  "Remote": [
+    "Remote",
+    "Remote"
   ],
   "MCP bearbeiten": [
     "MCP bearbeiten",
