@@ -126,11 +126,10 @@ fn git_status(
     #[cfg(test)]
     let mut err = tempfile::tempfile()?;
     let mut command = Command::new("git");
-    // Managed checkpoint repositories are nested under project, checkpoint,
-    // and command IDs. Git's worktree metadata can exceed MAX_PATH even when
-    // the checkout itself is short. Passing that directory to CreateProcess
-    // fails before Git can apply core.longpaths. Git also processes -C before
-    // long-path repository setup, so address bare repositories directly.
+    // Git for Windows rejects a long explicit GIT_DIR before core.longpaths
+    // applies, and passes that value to helpers such as pack-objects. Address
+    // bare repositories by their short name relative to the direct parent.
+    // This also avoids using the repository itself as CreateProcess.current_dir.
     // Do not modify the user's Git config.
     #[cfg(windows)]
     let bare_init = args.first() == Some(&"init") && args.contains(&"--bare");
@@ -142,7 +141,16 @@ fn git_status(
             && repository.join("HEAD").is_file()
             && repository.join("objects").is_dir()
         {
-            command.arg(format!("--git-dir={}", git_path(repository)?));
+            let parent = repository
+                .parent()
+                .context("Bare repository parent missing")?;
+            let name = repository
+                .file_name()
+                .context("Bare repository name missing")?;
+            command
+                .current_dir(parent)
+                .arg("--git-dir")
+                .arg(name);
         } else if !bare_init {
             command.arg("-C").arg(git_path(repository)?.as_ref());
         }
