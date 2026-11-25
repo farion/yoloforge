@@ -250,6 +250,8 @@ mod tests {
         let store = Store::open(&dir.path().join("db")).unwrap();
         let runner = RunnerId::new();
         let other = RunnerId::new();
+        let program = std::env::current_exe().unwrap();
+        let program = program.to_str().unwrap();
         let catalog = store
             .save_local_mcp_catalog(SetLocalMcpCatalog {
                 request_id: RequestId::new(),
@@ -260,7 +262,7 @@ mod tests {
                         id: "blender".into(),
                         name: "Blender".into(),
                         runners: vec![runner],
-                        command: vec!["/opt/blender-mcp".into()],
+                        command: vec![program.into()],
                     }],
                 },
             })
@@ -348,7 +350,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(received.id, created.id);
-        assert_eq!(received.command, ["/opt/blender-mcp"]);
+        assert_eq!(received.command, [program]);
         assert_eq!(
             take(runner, &a)
                 .send()

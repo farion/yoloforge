@@ -343,6 +343,10 @@ mod tests {
     use super::*;
     use factory_protocol::models::SubmitTaskWithModel;
 
+    fn fixture_program() -> String {
+        std::env::current_exe().unwrap().into_os_string().into_string().unwrap()
+    }
+
     #[test]
     fn catalog_defaults_to_all_runners_and_persists_explicit_exclusions() {
         let store = Store::open(Path::new(":memory:")).unwrap();
@@ -350,7 +354,7 @@ mod tests {
         let future = RunnerId::new();
         let old = serde_json::json!({
             "revision": 0,
-            "entries": [{"id":"test","name":"Test","command":["/opt/mcp"],"runners":[first]}]
+            "entries": [{"id":"test","name":"Test","command":[fixture_program()],"runners":[first]}]
         });
         store.0.lock().unwrap().execute(
             "INSERT INTO local_mcp_catalog(id,data) VALUES(1,?1)", [old.to_string()]
@@ -380,7 +384,7 @@ mod tests {
         store.observe_mcp_runner(runner, true, false).unwrap();
         let mut pinned = McpProfile {
             local: vec![LocalMcp {
-                id: "test".into(), name: "Test".into(), command: vec!["/opt/mcp".into()],
+                id: "test".into(), name: "Test".into(), command: vec![fixture_program()],
                 runners: vec![], all_runners: true, excluded_runners: vec![],
             }],
             ..Default::default()
@@ -427,7 +431,7 @@ mod tests {
             all_runners: false, excluded_runners: vec![],
             id: "blender".into(),
             name: "Blender".into(),
-            command: vec!["/opt/blender-mcp".into()],
+            command: vec![fixture_program()],
             runners: vec![runner],
         };
         let catalog = store

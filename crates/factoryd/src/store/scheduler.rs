@@ -155,7 +155,8 @@ mod automatic_runner_tests {
         let store = Store::open(std::path::Path::new(":memory:")).unwrap();
         let project = store.create_project(CreateProject {
             request_id: RequestId::new(), key: None, logo: None,
-            name: "Automatic runner".into(), repository: "/project".into(),
+            name: "Automatic runner".into(),
+            repository: if cfg!(windows) { "C:/project" } else { "/project" }.into(),
             base_branch: "main".into(), runner_mapping: None,
         }).unwrap();
         let old = RunnerId::new();
