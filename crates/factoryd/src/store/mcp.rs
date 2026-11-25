@@ -545,45 +545,83 @@ mod tests {
         assert!(store.pending(another).unwrap().is_empty());
         store.observe_mcp_runner(runner, true, false).unwrap();
         store.scheduler_tick().unwrap();
+        let complete = |command: &RunnerCommand, result| {
+            store
+                .acknowledge(
+                    command.runner_id,
+                    command.id,
+                    AckCommand {
+                        request_id: RequestId::new(),
+                        ownership_epoch: command.ownership_epoch,
+                    },
+                )
+                .unwrap();
+            store
+                .complete(
+                    command.runner_id,
+                    command.id,
+                    CommandResult {
+                        request_id: RequestId::new(),
+                        ownership_epoch: command.ownership_epoch,
+                        result,
+                    },
+                )
+                .unwrap();
+        };
+        let prepare = |command: &RunnerCommand| {
+            complete(
+                command,
+                CommandOutput::Workspace {
+                    workspace: Workspace {
+                        path: format!("/fixture/{}", command.stream_id),
+                        branch: command.workspace_spec.as_ref().unwrap().branch.clone(),
+                        base_commit: "a".repeat(40),
+                    },
+                },
+            );
+        };
+        // A prompt task is routed by a read-only agent before its worker starts.
+        let controller = store
+            .snapshot()
+            .unwrap()
+            .commands
+            .into_iter()
+            .find(|c| c.kind == CommandKind::PrepareWorkspace)
+            .unwrap();
+        prepare(&controller);
+        store.scheduler_tick().unwrap();
+        let routing = store
+            .pending(controller.runner_id)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "orchestrator"))
+            .unwrap();
+        assert!(routing.agent_spec.as_ref().unwrap().local_mcps.is_empty());
+        complete(
+            &routing,
+            CommandOutput::Agent {
+                agent: AgentProgress {
+                    session_id: routing.session_id(),
+                    message_id: agent_message_id(routing.id),
+                    phase: AgentPhase::Succeeded,
+                    summary: r#"{"action":"new","reason":"Start a fresh session"}"#.into(),
+                },
+            },
+        );
+        store.scheduler_tick().unwrap();
         let prep = store
             .pending(runner)
             .unwrap()
             .into_iter()
             .find(|c| c.kind == CommandKind::PrepareWorkspace)
             .unwrap();
-        store
-            .acknowledge(
-                runner,
-                prep.id,
-                AckCommand {
-                    request_id: RequestId::new(),
-                    ownership_epoch: prep.ownership_epoch,
-                },
-            )
-            .unwrap();
-        store
-            .complete(
-                runner,
-                prep.id,
-                CommandResult {
-                    request_id: RequestId::new(),
-                    ownership_epoch: prep.ownership_epoch,
-                    result: CommandOutput::Workspace {
-                        workspace: Workspace {
-                            path: "/fixture/work".into(),
-                            branch: prep.workspace_spec.unwrap().branch,
-                            base_commit: "a".repeat(40),
-                        },
-                    },
-                },
-            )
-            .unwrap();
+        prepare(&prep);
         store.scheduler_tick().unwrap();
         let command = store
             .pending(runner)
             .unwrap()
             .into_iter()
-            .find(|c| c.kind == CommandKind::RunAgent)
+            .find(|c| c.kind == CommandKind::RunAgent && c.stream_id == prep.stream_id)
             .unwrap();
         assert_eq!(
             command.agent_spec.as_ref().unwrap().local_mcps,

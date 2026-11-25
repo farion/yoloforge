@@ -55,6 +55,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             config.define("SDL_TESTS", "OFF");
             config.define("SDL_TEST_LIBRARY", "OFF");
 
+            // The Visual Studio generator selects its CRT through this
+            // property, independently of the compiler flags passed by cc.
+            if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+                && env::var("CARGO_CFG_TARGET_FEATURE")
+                    .is_ok_and(|features| features.split(',').any(|f| f == "crt-static"))
+            {
+                config.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded");
+            }
+
             if LINK_FRAMEWORK {
                 config.define("SDL_FRAMEWORK", "ON");
             } else if cfg!(feature = "link-static") {
