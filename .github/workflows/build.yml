@@ -75,18 +75,14 @@ jobs:
         run: python scripts/test-package-release.py
       - name: Native runner, protocol and headless GUI tests
         run: cargo +stable test --locked --target "$BUILD_TARGET" -p factory-platform -p factory-core -p factory-protocol -p factory-opencode -p factory-runner -p factory-gui --all-targets
-      - name: Verify pinned native OpenCode distribution
-        run: cargo +stable test --locked --target "$BUILD_TARGET" -p factory-opencode distribution::tests::downloads_verified_binary_and_reuses_it -- --ignored
       - name: Server tests
-        if: runner.os == 'Linux'
         run: cargo +stable test --locked --target "$BUILD_TARGET" -p factoryd --all-targets
-      - name: Build GUI and runner
+      - name: Build GUI, server and runner
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
-        run: cargo +stable build --locked --release --target "$BUILD_TARGET" -p factory-gui -p factory-runner
-      - name: Build server
-        if: runner.os == 'Linux'
-        run: cargo +stable build --locked --release --target "$BUILD_TARGET" -p factoryd
+        run: cargo +stable build --locked --release --target "$BUILD_TARGET" -p factory-gui -p factory-runner -p factoryd
+      - name: Stage the verified OpenCode runtime
+        run: cargo +stable run --locked --target "$BUILD_TARGET" -p factory-opencode --example package_distribution -- "target/$BUILD_TARGET/release"
       - name: Package native binaries
         run: |
           set -euo pipefail

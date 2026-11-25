@@ -6,7 +6,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     net::TcpListener,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -21,17 +20,7 @@ const CONFIG_FILES: &[&str] = &[
 ];
 
 fn private_dir(path: &Path) -> Result<PathBuf> {
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    ensure!(
-        metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0,
-        "Factory OpenCode directory must be private: {}",
-        path.display()
-    );
+    factory_platform::private_dir(path)?;
     Ok(path.canonicalize()?)
 }
 
@@ -81,17 +70,19 @@ fn model_key(path: &Path) -> Result<String> {
     if absent(path)? {
         let mut file =
             tempfile::NamedTempFile::new_in(path.parent().context("Missing state directory")?)?;
+        factory_platform::private_file(file.path())?;
         writeln!(file, "{}", secret())?;
         file.as_file().sync_all()?;
         file.persist_noclobber(path)?;
-        File::open(path.parent().expect("validated parent"))?.sync_all()?;
+        factory_platform::sync_dir(path.parent().expect("validated parent"))?;
     }
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
-        metadata.is_file() && metadata.permissions().mode() & 0o077 == 0 && metadata.len() <= 130,
+        metadata.is_file() && metadata.len() <= 130,
         "Factory model key must be a private regular file: {}",
         path.display()
     );
+    factory_platform::ensure_private(path)?;
     Ok(fs::read_to_string(path)?
         .trim_end_matches(['\n', '\r'])
         .to_owned())
@@ -118,13 +109,18 @@ impl Runtime {
         let mut directory = name.to_os_string();
         directory.push(".opencode");
         let root = private_dir(&database.with_file_name(directory))?;
-        let lock = OpenOptions::new()
+        let mut options = OpenOptions::new();
+        options
             .read(true)
             .write(true)
             .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(root.join("runtime.lock"))?;
+            .truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock = options.open(root.join("runtime.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock)
             .context("This Factory OpenCode state is already in use")?;
         let workspace = private_dir(&root.join("workspace"))?;
@@ -191,13 +187,30 @@ impl Runtime {
         command
             .env_clear()
             .envs(self.environment.iter().map(|(key, path)| (*key, path)))
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
             .env("OPENCODE_PASSWORD", &self.password)
             .current_dir(&self.workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+        #[cfg(windows)]
+        {
+            for key in ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "PATH"] {
+                if let Some(value) = std::env::var_os(key) {
+                    command.env(key, value);
+                }
+            }
+            for (key, source) in [
+                ("USERPROFILE", "HOME"), ("APPDATA", "XDG_CONFIG_HOME"),
+                ("LOCALAPPDATA", "XDG_DATA_HOME"), ("TEMP", "TMPDIR"), ("TMP", "TMPDIR"),
+            ] {
+                if let Some((_, path)) = self.environment.iter().find(|(name, _)| *name == source) {
+                    command.env(key, path);
+                }
+            }
+        }
         command
     }
 
@@ -338,10 +351,7 @@ mod tests {
         drop(runtime);
         let (mut restarted, _) = Runtime::start(&db, Some(&binary)).await.unwrap();
         assert_eq!(fs::read(&key_path).unwrap(), first_key);
-        assert_eq!(
-            fs::symlink_metadata(key_path).unwrap().permissions().mode() & 0o077,
-            0
-        );
+        factory_platform::ensure_private(&key_path).unwrap();
         restarted.shutdown().await;
     }
 }

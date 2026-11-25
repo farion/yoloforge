@@ -290,8 +290,6 @@ pub enum QuestionCommand {
     },
     Answer {
         id: QuestionId,
-        #[arg(long)]
-        expected_revision: u64,
         /// Form field answers as a JSON object.
         #[arg(
             long,
@@ -1073,7 +1071,6 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
             command:
                 QuestionCommand::Answer {
                     id,
-                    expected_revision,
                     answer_json,
                     decision,
                     request_id,
@@ -1090,7 +1087,7 @@ pub async fn execute(client: &FactoryClient, command: Command) -> Result<()> {
                         id,
                         &AnswerQuestion {
                             request_id: request(request_id),
-                            expected_revision: Revision(expected_revision),
+                            legacy_revision: None,
                             answer,
                         },
                     )

@@ -100,6 +100,7 @@ pub struct TaskDialog {
     session_prompt: bool,
     pub read_only: bool,
     pub payloads_complete: bool,
+    pub(super) return_to_questions: Option<Box<Dialog>>,
     pub id: RequestId,
     image_keys: Vec<String>,
     focused: bool,
@@ -129,6 +130,7 @@ enum TaskSubmitAction {
 pub struct QuestionDialog {
     pub questions: Vec<QuestionAnswer>,
     pub error: Option<String>,
+    step: usize,
 }
 pub struct QuestionAnswer {
     pub question: Question,
@@ -184,6 +186,7 @@ impl Dialog {
             session_prompt: false,
             read_only: false,
             payloads_complete: true,
+            return_to_questions: None,
             id: RequestId::new(),
             image_keys: vec![],
             focused: false,
@@ -243,6 +246,7 @@ impl Dialog {
                 })
                 .collect(),
             error: None,
+            step: 0,
         })
     }
     pub fn task_read_only(
@@ -382,8 +386,12 @@ impl Dialog {
                  }
                 let header_top = ui.cursor().top();
                 header_close = design::dialog_header(ui, &title).clicked();
-                ui.separator();
-                let body_height = (content_size.y - (ui.cursor().top() - header_top)).max(40.0);
+                 ui.separator();
+                 let body_height = (content_size.y - (ui.cursor().top() - header_top)).max(40.0);
+                 if let Self::Questions(group) = self {
+                     close = group.show(ui, app, body_height);
+                     return;
+                 }
                 if let Self::Task(task) = self {
                     close = task.show_layout(ui,app,body_height,modal_id);
                     return;
@@ -486,18 +494,7 @@ impl Dialog {
                     ui.horizontal(|ui| {
                         if design::accent_button(ui,egui::Button::new(crate::tr!("Verbinden")),!app.connection_active(),BLUE.gamma_multiply(0.7)).clicked() {
                             match app.connect(server.clone(), token.clone()) {
-                                Ok(()) => {
-                                    let saved = crate::persistence::save_connection_token(server, token)
-                                        .and_then(|path| {
-                                            app.settings.credential_file = Some(path);
-                                            crate::persistence::save_settings(&app.settings)
-                                        });
-                                    if let Err(error) = saved {
-                                        app.error = Some(crate::tr!("Verbindung konnte nicht gespeichert werden: {error}", error = error));
-                                        app.notice(crate::tr!("Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden."));
-                                    }
-                                    close = true;
-                                }
+                                Ok(()) => close = true,
                                 Err(e) => app.notice(e),
                             }
                         }
@@ -552,8 +549,18 @@ impl Dialog {
                     ui.small(crate::tr!("Aufgabe {id}", id = id));
                     close = ui.button(crate::tr!("Schließen")).clicked();
                 }
-                Self::Questions(group) => close = group.show(ui, app, height),
-                Self::QuestionView(questions) => question_answers(ui, questions),
+                 Self::Questions(_) => unreachable!("Questions use a fixed footer"),
+                 Self::QuestionView(questions) => {
+                     if let Some((id, key)) = app.snapshot.as_deref().and_then(|snapshot| {
+                         let mut intents = questions.iter().map(|q| question_intent(snapshot, q));
+                         let first = intents.next().flatten()?;
+                         intents.all(|intent| intent.is_some_and(|t| t.id == first.id))
+                             .then(|| (first.id, first.key.clone()))
+                     }) {
+                         question_intent_link(ui, app, id, &key);
+                     }
+                     question_answers(ui, questions);
+                 }
                 Self::Form(form) => close = form.show(ui, app, if form.is_project_editor() { body_height } else { height }),
                 Self::Read { request, path, .. } if is_project_usage(path) => {
                     match app.responses.get(request) {
@@ -1633,25 +1640,67 @@ fn question_answers(ui: &mut egui::Ui, questions: &[Question]) {
     }
 }
 
+fn question_intent_link(ui: &mut egui::Ui, app: &mut App, id: TicketId, key: &str) {
+    let label = if key.is_empty() { crate::tr!("Intent anzeigen").into() }
+        else { crate::tr!("Intent {key} anzeigen", key = key) };
+    let button = ui.button(label).on_hover_cursor(egui::CursorIcon::PointingHand);
+    #[cfg(test)]
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-question-intent", id)), button.rect));
+    if button.clicked() {
+        app.view_task(id);
+    }
+    ui.add_space(8.0);
+}
+
 impl QuestionDialog {
+    fn steps(&self) -> Vec<(usize, Option<usize>)> {
+        let mut steps = Vec::new();
+        for (index, entry) in self.questions.iter().enumerate() {
+            if !needs_answer(&entry.question) {
+                continue;
+            }
+            let start = steps.len();
+            if entry.question.external.kind == QuestionKind::Form {
+                if let Some(fields) = entry.question.external.payload["fields"].as_array() {
+                    steps.extend(fields.iter().enumerate()
+                        .filter(|(_, field)| field["hidden"] != true && field_enabled(field, &entry.values))
+                        .map(|(field, _)| (index, Some(field))));
+                }
+            }
+            if steps.len() == start {
+                steps.push((index, None));
+            }
+        }
+        steps
+    }
+
     pub(crate) fn show(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32) -> bool {
         if let Some(snapshot) = &app.snapshot {
             for entry in &mut self.questions {
                 if let Some(current) = snapshot.questions.iter().find(|current|
-                    current.id == entry.question.id && current.revision.0 > entry.question.revision.0
+                    current.id == entry.question.id && current.update_seq.0 > entry.question.update_seq.0
                 ) {
                     if !needs_answer(current) {
                         entry.question = current.clone();
-                    } else if !needs_answer(&entry.question) && current.external == entry.question.external {
+                    } else if current.external == entry.question.external {
+                        if !needs_answer(&entry.question) {
+                            entry.request = None;
+                        }
                         entry.question = current.clone();
-                        entry.request = None;
                     }
                 }
             }
         }
         if self.questions.iter().all(|entry| !needs_answer(&entry.question)) {
+            if self.questions.iter().any(|entry| entry.request.is_some())
+                && self.questions.iter().all(|entry| matches!(
+                    entry.question.state, QuestionState::AnswerQueued | QuestionState::Answered))
+            {
+                return true;
+            }
             let questions: Vec<_> = self.questions.iter().map(|entry| entry.question.clone()).collect();
-            question_answers(ui, &questions);
+            egui::ScrollArea::vertical().max_height(height).auto_shrink([false, true])
+                .show(ui, |ui| question_answers(ui, &questions));
             return false;
         }
         for entry in &mut self.questions {
@@ -1664,9 +1713,6 @@ impl QuestionDialog {
                 {
                     entry.values = draft.values.clone();
                     entry.decision = draft.decision.clone();
-                    if draft.revision != entry.question.revision {
-                        self.error = Some(crate::tr!("Gespeicherter Antwortentwurf stammt aus einer älteren Fragenrevision. Bitte alle Werte prüfen.").into());
-                    }
                 }
                 entry.request = app
                     .settings
@@ -1679,98 +1725,87 @@ impl QuestionDialog {
                     .map(|r| r.id);
                 entry.restored = true;
             }
+            if entry.request.and_then(|id| app.responses.get(&id))
+                .is_some_and(|result| result.as_ref().is_err_and(|error| !error.uncertain))
+            {
+                entry.request = None;
+            }
         }
+        let steps = self.steps();
+        self.step = self.step.min(steps.len().saturating_sub(1));
+        let (index, field) = steps[self.step];
+        let entry = &mut self.questions[index];
+        let question_id = entry.question.id;
+        let height = if let Some((id, key)) = app.snapshot.as_deref()
+            .and_then(|snapshot| question_intent(snapshot, &entry.question))
+            .map(|intent| (intent.id, intent.key.clone()))
+        {
+            let top = ui.cursor().top();
+            question_intent_link(ui, app, id, &key);
+            height - (ui.cursor().top() - top)
+        } else { height };
         egui::ScrollArea::vertical()
-            .id_salt("questions-dialog-scroll")
-            .max_height(height)
+            .id_salt(("questions-dialog-scroll", question_id, field))
+            .max_height((height - design::SETTINGS_FOOTER_HEIGHT - 26.0).max(20.0))
+            .auto_shrink([false, true])
             .show(ui, |ui| {
-                for (index, entry) in self.questions.iter_mut().enumerate() {
-                    if index > 0 {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
+                    if steps.len() > 1 {
+                        ui.colored_label(MUTED, crate::tr!("Frage {current} von {total}", current = self.step + 1, total = steps.len()));
                     }
-                    if !needs_answer(&entry.question) {
-                        question_answers(ui, std::slice::from_ref(&entry.question));
-                        continue;
-                    }
-                    let mut reload = None;
                     ui.push_id(entry.question.id, |ui| {
                         ui.vertical(|ui| {
                             let q = &entry.question;
-                            design::question_heading(ui, crate::tr!("Frage"));
-                            let title = q.external.payload["title"].as_str().unwrap_or(
+                             let title = q.external.payload["title"].as_str().unwrap_or(
                                 if q.external.kind == QuestionKind::Permission {
                                     crate::tr!("Berechtigung")
                                 } else {
                                     crate::tr!("Rückfrage")
                                 },
-                            );
-                            if !generic_question_title(title) {
-                                read_text(ui, title, false);
-                            }
-                            if let Some(text) = q.external.payload["description"].as_str() {
-                                ui.label(text);
-                            }
+                             );
+                             if field.is_none() {
+                                 design::question_heading(ui, title);
+                                 if let Some(text) = q.external.payload["description"].as_str() {
+                                     read_text(ui, text, false);
+                                 }
+                             }
                             permission_details(ui, q);
-                            let current = app
-                                .snapshot
-                                .as_ref()
-                                .and_then(|s| s.questions.iter().find(|v| v.id == q.id))
-                                .cloned();
-                            let changed = current
-                                .as_ref()
-                                .is_none_or(|v| v.revision != q.revision || !needs_answer(v));
-                            if changed {
-                                ui.colored_label(
-                                    AMBER,
-                                    crate::tr!("Serverzustand geändert: {:?}. Entwurf bleibt erhalten.", current.as_ref().map(|q| q.state)),
-                                );
-                            }
                             if let Some(id) = entry.request {
-                                request_status(ui, app, id);
-                                if let Some(v) = current.as_ref() {
-                                    ui.label(crate::tr!("Zustellung: {:?}", v.state));
+                                if app.in_flight.contains(&id) {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(crate::tr!("Wird übertragen …"));
+                                    });
                                 }
                             }
-                            ui.add_space(8.0);
-                            design::question_heading(ui, crate::tr!("Antwort"));
-                            ui.add_enabled_ui(entry.request.is_none() && !changed, |ui| {
+                             ui.add_enabled_ui(entry.request.is_none(), |ui| {
                                 if q.external.kind == QuestionKind::Permission {
-                                    ui.radio_value(
-                                        &mut entry.decision,
-                                        "once".into(),
-                                        crate::tr!("Einmal erlauben"),
-                                    );
-                                    ui.radio_value(
-                                        &mut entry.decision,
-                                        "always".into(),
-                                        crate::tr!("Dauerhaft erlauben (erweiterte Freigabe)"),
-                                    );
-                                    ui.radio_value(
-                                        &mut entry.decision,
-                                        "reject".into(),
-                                        crate::tr!("Ablehnen"),
-                                    );
-                                } else if let Some(fields) = q.external.payload["fields"].as_array()
-                                {
-                                    let current_values = entry.values.clone();
-                                    for schema in fields {
-                                        if !field_enabled(schema, &current_values)
-                                            || schema["hidden"] == true
-                                        {
-                                            continue;
+                                    for (value, label) in [
+                                        ("once", crate::tr!("Einmal erlauben")),
+                                        ("always", crate::tr!("Dauerhaft erlauben (erweiterte Freigabe)")),
+                                        ("reject", crate::tr!("Ablehnen")),
+                                    ] {
+                                        if question_option(ui, entry.decision == value, false, label, None) {
+                                            entry.decision = value.into();
                                         }
-                                        let Some(key) = schema["key"].as_str() else {
-                                            ui.colored_label(RED, crate::tr!("Feld ohne Schlüssel"));
-                                            continue;
-                                        };
-                                        question_field(
-                                            ui,
-                                            schema,
-                                            entry.values.entry(key.into()).or_insert(Value::Null),
-                                        );
                                     }
+                                 } else if let Some(schema) = field.and_then(|field| q.external.payload["fields"].get(field))
+                                 {
+                                         let Some(key) = schema["key"].as_str() else {
+                                             ui.colored_label(RED, crate::tr!("Feld ohne Schlüssel"));
+                                             return;
+                                        };
+                                         ui.push_id(key, |ui| {
+                                              question_field(
+                                                  ui,
+                                                  schema,
+                                                  q.external.payload["description"].as_str(),
+                                                  entry.values.entry(key.into()).or_insert(Value::Null),
+                                             );
+                                         });
+                                 } else if q.external.payload["fields"].is_array() {
+                                     if q.external.payload["fields"].as_array().is_some_and(|fields| fields.is_empty()) {
+                                         ui.colored_label(RED, crate::tr!("Dieses Frageformat kann hier nicht beantwortet werden."));
+                                     }
                                 } else {
                                     ui.colored_label(
                                         RED,
@@ -1778,40 +1813,64 @@ impl QuestionDialog {
                                     );
                                 }
                             });
-                            let rejected = entry.request.and_then(|id| app.responses.get(&id)).is_some_and(|v| v.as_ref().is_err_and(|e| !e.uncertain));
-                            if changed || rejected {
-                                if let Some(current) = current.as_ref().filter(|q| needs_answer(q)) {
-                                    if ui.button(crate::tr!("Aktuelle Frage übernehmen · Eingaben behalten und prüfen")).clicked() { reload = Some(current.clone()); }
-                                }
-                            }
                         });
                     });
-                    if let Some(question) = reload { entry.question = question; entry.request = None; }
+                if let Some(error) = &self.error {
+                    ui.colored_label(RED, error);
                 }
             });
-        if let Some(e) = &self.error {
-            ui.colored_label(RED, e);
-        }
-        if design::accent_button(
-                ui, egui::Button::new(crate::tr!("Alle vorbereiteten Antworten senden")),
-                app.online && self.questions.iter().any(|q| q.request.is_none() && needs_answer(&q.question)),
+        ui.add_space(12.0);
+        ui.separator();
+        let footer_bottom = ui.cursor().top() + design::SETTINGS_FOOTER_HEIGHT;
+        let steps = self.steps();
+        let current = steps.iter().position(|step| *step == (index, field))
+            .unwrap_or_else(|| self.step.min(steps.len().saturating_sub(1)));
+        self.step = current;
+        let last = current + 1 >= steps.len();
+        let submit = design::settings_footer(ui, footer_bottom, |ui| {
+            let enabled = !last || (app.online && self.questions.iter().any(|q|
+                q.request.is_none() && needs_answer(&q.question)));
+            let button = design::accent_button(
+                ui, egui::Button::new(if last { crate::tr!("Antwort abgeben") } else { crate::tr!("Weiter") }),
+                enabled,
                 BLUE.gamma_multiply(0.7),
-            )
-            .clicked()
-        {
+            );
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-question-submit"), button.rect));
+            let back = if current > 0 {
+                let back = ui.button(crate::tr!("Zurück")).on_hover_cursor(egui::CursorIcon::PointingHand);
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-question-back"), back.rect));
+                back.clicked()
+            } else { false };
+            if back {
+                self.step -= 1;
+                self.error = None;
+            } else if !last && button.clicked() {
+                self.step += 1;
+                self.error = None;
+            }
+            last && button.clicked()
+        });
+        if submit {
             let mut bodies = Vec::new();
             self.error = None;
             for (index, q) in self.questions.iter().enumerate().filter(|(_, q)| {
-                q.request.is_none()
-                    && app
-                        .snapshot
-                        .as_ref()
-                        .and_then(|s| s.questions.iter().find(|v| v.id == q.question.id))
-                        .is_some_and(|v| v.revision == q.question.revision && needs_answer(v))
+                q.request.is_none() && needs_answer(&q.question)
             }) {
-                match q.payload(app) {
+                if !app.snapshot.as_ref().is_some_and(|s| s.questions.iter().any(|current|
+                    current.id == q.question.id && current.external == q.question.external && needs_answer(current)))
+                {
+                    app.notice(crate::tr!("Die Frage ist nicht mehr offen. Dein Entwurf bleibt erhalten."));
+                    bodies.clear();
+                    break;
+                }
+                match q.payload() {
                     Ok(body) => bodies.push((index, body)),
                     Err(e) => {
+                        if let Some(step) = steps.iter().position(|(entry, _)| *entry == index) {
+                            self.step = step;
+                        }
                         self.error = Some(e);
                         break;
                     }
@@ -1843,7 +1902,6 @@ impl QuestionDialog {
             let draft = crate::persistence::QuestionDraft {
                 server: app.server.clone(),
                 question: entry.question.id,
-                revision: entry.question.revision,
                 values: entry.values.clone(),
                 decision: entry.decision.clone(),
             };
@@ -1855,7 +1913,6 @@ impl QuestionDialog {
             if let Some(old) = old {
                 if old.values != draft.values
                     || old.decision != draft.decision
-                    || old.revision != draft.revision
                 {
                     *old = draft;
                     app.settings_dirty = true;
@@ -1865,20 +1922,12 @@ impl QuestionDialog {
                 app.settings_dirty = true;
             }
         }
-        ui.button(crate::tr!("Schließen · Antwortentwürfe behalten")).clicked()
+        false
     }
 }
 impl QuestionAnswer {
-    fn payload(&self, app: &App) -> Result<AnswerQuestion, String> {
+    fn payload(&self) -> Result<AnswerQuestion, String> {
         let q = &self.question;
-        if app
-            .snapshot
-            .as_ref()
-            .and_then(|s| s.questions.iter().find(|v| v.id == q.id))
-            .is_none_or(|v| v.revision != q.revision || !needs_answer(v))
-        {
-            return Err(crate::tr!("Frage wurde geändert oder beantwortet. Dialog neu öffnen; alte Eingaben nicht ungeprüft senden.").into());
-        }
         let answer = if q.external.kind == QuestionKind::Permission {
             if self.decision.is_empty() {
                 return Err(crate::tr!("Bitte jede Berechtigung ausdrücklich entscheiden.").into());
@@ -1914,7 +1963,7 @@ impl QuestionAnswer {
         }
         Ok(AnswerQuestion {
             request_id: RequestId::new(),
-            expected_revision: q.revision,
+            legacy_revision: None,
             answer,
         })
     }
@@ -2723,16 +2772,43 @@ fn field_enabled(schema: &Value, values: &BTreeMap<String, Value>) -> bool {
         })
     })
 }
-fn question_field(ui: &mut egui::Ui, schema: &Value, value: &mut Value) {
+
+fn question_option(ui: &mut egui::Ui, selected: bool, multiple: bool, label: &str, description: Option<&str>) -> bool {
+    ui.add_space(6.0);
+    let width = ui.available_width();
+    let row = ui.vertical(|ui| {
+        ui.set_min_width(width);
+        let label = egui::RichText::new(label).strong();
+        let clicked = if multiple {
+            let mut checked = selected;
+            ui.checkbox(&mut checked, label).on_hover_cursor(egui::CursorIcon::PointingHand).changed()
+        } else {
+            ui.radio(selected, label).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+        };
+        let description_clicked = description.filter(|text| !text.trim().is_empty()).is_some_and(|text| {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.add(egui::Label::new(egui::RichText::new(text).color(MUTED)).wrap().sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+            }).inner
+        });
+        clicked || description_clicked
+    });
+    #[cfg(test)]
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-question-option", label)), row.response.rect));
+    row.inner
+}
+
+fn question_field(ui: &mut egui::Ui, schema: &Value, fallback_description: Option<&str>, value: &mut Value) {
     let title = schema["title"]
         .as_str()
         .or(schema["key"].as_str())
         .unwrap_or(crate::tr!("Feld"));
-    ui.strong(format!(
+    design::question_heading(ui, &format!(
         "{title}{}",
         if schema["required"] == true { " *" } else { "" }
     ));
-    if let Some(description) = schema["description"].as_str() {
+    if let Some(description) = schema["description"].as_str().or(fallback_description) {
         ui.label(description);
     }
     if schema["type"] == "external" {
@@ -2749,33 +2825,52 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, value: &mut Value) {
     }
     let multiple = schema["type"] == "multiselect";
     if let Some(options) = schema["options"].as_array().filter(|v| !v.is_empty()) {
-        for option in options {
+        let custom = schema["custom"] == true && schema["type"] == "string";
+        let custom_id = ui.make_persistent_id("custom-answer-mode");
+        let mut own = custom && ui.data(|d| d.get_temp(custom_id)).unwrap_or_else(||
+            value.is_string() && !options.iter().any(|option| option["value"] == *value));
+        for (index, option) in options.iter().enumerate() {
             let label = option["label"]
                 .as_str()
                 .or(option["value"].as_str())
-                .unwrap_or("Option");
+                .unwrap_or(crate::tr!("Option"));
+            let description = option["description"].as_str();
             if multiple {
                 let mut values = value.as_array().cloned().unwrap_or_default();
-                let mut selected = values.contains(&option["value"]);
-                if ui.checkbox(&mut selected, label).changed() {
+                let selected = values.contains(&option["value"]);
+                if ui.push_id(index, |ui| question_option(ui, selected, true, label, description)).inner {
                     if selected {
-                        values.push(option["value"].clone());
-                    } else {
                         values.retain(|v| v != &option["value"]);
+                    } else {
+                        values.push(option["value"].clone());
                     }
                     *value = Value::Array(values);
                 }
-            } else if ui.radio(*value == option["value"], label).clicked() {
+            } else if ui.push_id(index, |ui| question_option(ui, !own && *value == option["value"], false, label, description)).inner {
+                if own {
+                    ui.data_mut(|d| d.insert_temp(custom_id.with("text"), value.as_str().unwrap_or("").to_owned()));
+                }
+                own = false;
                 *value = option["value"].clone();
             }
-            if let Some(description) = option["description"].as_str() {
-                ui.colored_label(MUTED, description);
+        }
+        if custom {
+            if ui.push_id("own", |ui| question_option(ui, own, false, crate::tr!("Eigene Antwort"), None)).inner && !own {
+                own = true;
+                *value = json!(ui.data(|d| d.get_temp::<String>(custom_id.with("text"))).unwrap_or_default());
             }
+            ui.data_mut(|d| d.insert_temp(custom_id, own));
+            if !own {
+                return;
+            }
+            ui.add_space(4.0);
+        } else {
+            if schema["custom"] != true {
+                return;
+            }
+            ui.add_space(8.0);
+            ui.label(crate::tr!("Eigene Antwort (optional)"));
         }
-        if schema["custom"] != true {
-            return;
-        }
-        ui.label(crate::tr!("Eigene Antwort (optional)"));
     }
     match schema["type"].as_str() {
         Some("boolean") => {
@@ -2790,14 +2885,10 @@ fn question_field(ui: &mut egui::Ui, schema: &Value, value: &mut Value) {
         }
         Some("string") => {
             let mut text = value.as_str().unwrap_or("").to_string();
-            if ui
-                .add(
-                    design::multiline(&mut text)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY),
-                )
-                .changed()
-            {
+            let input = design::question_answer_editor(ui, &mut text);
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-question-text-editor"), input.rect));
+            if input.changed() {
                 *value = json!(text);
             }
         }

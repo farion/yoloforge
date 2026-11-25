@@ -3,9 +3,61 @@ use crate::{
     app::{App, AMBER, BLUE, GREEN, MUTED},
     dialogs::Dialog,
 };
+use std::net::IpAddr;
+
+fn public_peer(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(ip) => !matches!(ip.octets(),
+            [0 | 10 | 127 | 224..=255, ..]
+            | [100, 64..=127, ..]
+            | [169, 254, ..]
+            | [172, 16..=31, ..]
+            | [192, 0, 0 | 2, _]
+            | [192, 88, 99, _]
+            | [192, 168, ..]
+            | [198, 18 | 19, ..]
+            | [198, 51, 100, _]
+            | [203, 0, 113, _]),
+        IpAddr::V6(ip) => {
+            let [first, second, ..] = ip.segments();
+            (0x2000..=0x3fff).contains(&first)
+                && !(first == 0x2001 && (second <= 0x01ff || second == 0x0db8))
+                && !(first == 0x3fff && second < 0x1000)
+        }
+    }
+}
+
+pub(crate) fn via_internet(app: &App) -> bool {
+    app.online && (app.server_peer.is_some_and(public_peer)
+        || app.internet_tunnel_endpoint.as_ref().is_some_and(|endpoint|
+            endpoint == app.server.trim_end_matches('/')))
+}
+
+pub(crate) const INTERNET_ICON: &str = egui_phosphor::regular::GLOBE;
+
+pub(crate) fn internet_tooltip() -> &'static str {
+    crate::tr!("Verbindung zur Factory übers Internet")
+}
+
+pub(crate) fn internet_link_badge(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    id: egui::Id,
+) {
+    let badge = egui::Rect::from_center_size(center, egui::Vec2::splat(30.0));
+    painter.circle_filled(center, 15.0, ui.visuals().window_fill());
+    painter.text(
+        center, egui::Align2::CENTER_CENTER, INTERNET_ICON,
+        egui::FontId::proportional(22.0), BLUE,
+    );
+    let response = ui.interact(badge, id, egui::Sense::hover()).on_hover_text(internet_tooltip());
+    response.widget_info(|| egui::WidgetInfo::labeled(
+        egui::WidgetType::Label, true, internet_tooltip()));
+}
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
-    graph(ui, app.online);
+    graph(ui, app.online, via_internet(app));
     ui.separator();
     egui::Grid::new("connection-info-details")
         .num_columns(2)
@@ -75,7 +127,7 @@ pub fn actions(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-fn graph(ui: &mut egui::Ui, connected: bool) {
+fn graph(ui: &mut egui::Ui, connected: bool, internet: bool) {
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 160.0),
         egui::Sense::hover(),
@@ -116,6 +168,10 @@ fn graph(ui: &mut egui::Ui, connected: bool) {
             ],
             egui::Stroke::new(2.0_f32, color),
         );
+    }
+    if internet {
+        let center = centers[0].lerp(centers[1], 0.5);
+        internet_link_badge(ui, &painter, center, ui.id().with("internet-link"));
     }
     for (i, (icon, name, status, color)) in nodes.into_iter().enumerate() {
         painter.rect_filled(

@@ -123,6 +123,27 @@ pub fn task_command<'a>(s: &'a Snapshot, t: &Ticket) -> Option<&'a RunnerCommand
         })
 }
 
+pub fn question_intent<'a>(s: &'a Snapshot, question: &Question) -> Option<&'a Ticket> {
+    let command = s.commands.iter().find(|c| c.id == question.command_id)?;
+    let stream = s.streams.iter().find(|w| w.id == command.stream_id)?;
+    let mut assigned = s.tickets.iter().filter(|t|
+        t.project_id == stream.project_id && t.execution_command == Some(command.id));
+    if let Some(ticket) = assigned.next() {
+        return assigned.next().is_none().then_some(ticket);
+    }
+    // Legacy assignments predate execution_command. Only use an unambiguous
+    // original execution, never the root intent for an unrelated follow-up.
+    let [id] = stream.ticket_ids.as_slice() else { return None; };
+    if command.kind != CommandKind::RunAgent
+        || command.agent_spec.as_ref().is_some_and(|spec| spec.read_only || spec.continuation.is_some())
+        || s.commands.iter().any(|c| c.stream_id == stream.id && c.id != command.id
+            && c.kind == CommandKind::RunAgent)
+    {
+        return None;
+    }
+    s.tickets.iter().find(|t| t.id == *id && t.project_id == stream.project_id && t.execution_command.is_none())
+}
+
 pub fn task_tokens(s: &Snapshot, t: &Ticket) -> Option<u64> {
     t.execution_command.and_then(|id| s.token_totals.by_execution.get(&id).copied())
 }
@@ -156,6 +177,9 @@ pub fn command_status(c: &RunnerCommand) -> &'static str {
 }
 
 pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
+    if t.status == TicketState::Cancelled {
+        return crate::tr!("Abgebrochen");
+    }
     if t.draft {
         return crate::tr!("Entwurf");
     }
@@ -302,12 +326,15 @@ impl TaskBucket {
     }
 }
 
-/// Archive only confirmed success, never a merely completed tool or a pending question.
+/// Archive cancelled intents and confirmed successes, not unresolved work.
 pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
+    if ticket.status == TicketState::Cancelled {
+        return TaskBucket::Archive;
+    }
     if ticket.draft {
         return TaskBucket::Draft;
     }
-    if matches!(ticket.status, TicketState::Cancelled | TicketState::Blocked) {
+    if ticket.status == TicketState::Blocked {
         return TaskBucket::Current;
     }
     let Some(command) = task_command(snapshot, ticket) else {

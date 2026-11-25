@@ -393,6 +393,15 @@ fn resolve(
         e.outcome = "wait".into();
         return Ok(());
     }
+    let waiting_for_answer: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM questions WHERE command_id=?1 AND json_extract(data,'$.state') IN ('pending','answer_queued','rejected'))",
+        [target.id.to_string()],
+        |r| r.get(0),
+    )?;
+    if waiting_for_answer {
+        e.outcome = "pending_answer_preserves_session".into();
+        return Ok(());
+    }
     if matches!(
         decision.action,
         SupervisorAction::Close | SupervisorAction::Terminate | SupervisorAction::Continue

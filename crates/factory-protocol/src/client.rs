@@ -100,13 +100,21 @@ impl FactoryClient {
     }
 
     pub async fn desktop_snapshot(&self) -> Result<Snapshot, ClientError> {
-        Self::decode(
-            self.http
-                .get(format!("{}/v1/desktop/snapshot", self.base))
-                .send()
-                .await,
-        )
-        .await
+        self.desktop_snapshot_with_peer().await.map(|(snapshot, _)| snapshot)
+    }
+
+    /// The HTTP peer address, not the server's address behind a proxy or tunnel.
+    pub async fn desktop_snapshot_with_peer(
+        &self,
+    ) -> Result<(Snapshot, Option<std::net::IpAddr>), ClientError> {
+        let response = self.http
+            .get(format!("{}/v1/desktop/snapshot", self.base))
+            .send()
+            .await;
+        let peer = response.as_ref().ok()
+            .and_then(reqwest::Response::remote_addr)
+            .map(|addr| addr.ip());
+        Ok((Self::decode(response).await?, peer))
     }
     pub async fn task_payload(&self, id: TicketId) -> Result<Ticket, ClientError> {
         Self::decode(

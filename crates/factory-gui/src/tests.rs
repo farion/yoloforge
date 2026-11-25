@@ -450,12 +450,12 @@ fn question_answer_receipt_updates_intent_status_before_the_next_snapshot() {
     let request_id = RequestId::new();
     let id = app.write(
         crate::tr!("Frage beantworten"), "POST", format!("/v1/questions/{}/answer", answer.id),
-        json!({"request_id":request_id,"expected_revision":answer.revision,"answer":{}}),
+        json!({"request_id":request_id,"answer":{}}),
     );
     answer.answer_request = Some(request_id);
     answer.answer = Some(json!({}));
     answer.state = QuestionState::AnswerQueued;
-    answer.revision.0 += 1;
+    answer.update_seq.0 += 1;
     app.backend.emit_for_test(crate::backend::Event::Request(id, Ok(json!(answer))));
     app.receive();
     assert_eq!(status(&app), crate::tr!("Antwort eingereiht"));
@@ -464,7 +464,7 @@ fn question_answer_receipt_updates_intent_status_before_the_next_snapshot() {
     app.receive();
     assert_eq!(status(&app), crate::tr!("Antwort eingereiht"));
     answer.state = QuestionState::Answered;
-    answer.revision.0 += 1;
+    answer.update_seq.0 += 1;
     original.questions[0] = answer;
     original.event_cursor += 1;
     app.backend.emit_for_test(crate::backend::Event::Snapshot(Ok(original.clone())));
@@ -1114,9 +1114,117 @@ fn generic_question_cards_use_concrete_titles_and_count_real_subquestions() {
 }
 
 #[test]
+fn question_options_group_labels_with_descriptions_and_use_one_submit_button() {
+    let mut app = fixture();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    s.questions.truncate(1);
+    s.questions[0].external.payload = json!({"title":"Questions","fields":[{
+        "key":"restart","title":"Runner-Neustart","description":"Welche Variante?",
+        "type":"string","required":true,"custom":true,
+        "options":[
+            {"value":"local","label":"In Infrastructure","description":"Runner auf diesem Rechner starten."},
+            {"value":"external","label":"Extern","description":"Nur die Verbindung beobachten."}
+        ]
+    }]});
+    let question = s.questions[0].clone();
+    let mut dialog = Dialog::questions(vec![question.clone()]);
+    let ctx = app.backend.context().clone();
+    let frame = |dialog: &mut Dialog, app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 650.0))),
+        events, ..Default::default()
+    }, |ctx| { dialog.show(ctx, app); });
+    for _ in 0..4 { let _ = frame(&mut dialog, &mut app, vec![]); }
+    let output = frame(&mut dialog, &mut app, vec![]);
+    let mut text = vec![];
+    for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+    assert_eq!(text.iter().filter(|t| t.as_str() == crate::tr!("Antwort abgeben")).count(), 1);
+    assert!(!text.iter().any(|t| t.contains("Antwortentwürfe behalten") || t.contains("Alle vorbereiteten")));
+    let option = |label| ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-question-option", label)))).unwrap();
+    let first = option("In Infrastructure");
+    let second = option("Extern");
+    assert!((first.width() - second.width()).abs() < 1.0);
+    assert!(second.top() - first.bottom() >= 6.0);
+    let editor = egui::Id::new("test-question-text-editor");
+    assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(editor)).is_none());
+    let find_description = |shape: &egui::epaint::ClippedShape| match &shape.shape {
+        egui::Shape::Text(t) if t.galley.job.text == "Nur die Verbindung beobachten." => Some(t.visual_bounding_rect().center()),
+        _ => None,
+    };
+    let click = output.shapes.iter().find_map(find_description).unwrap();
+    assert!(second.contains(click));
+    let _ = frame(&mut dialog, &mut app, click_events(click));
+    assert_eq!(app.settings.question_drafts[0].values["restart"], "external");
+    let own = option(crate::tr!("Eigene Antwort"));
+    let _ = frame(&mut dialog, &mut app, click_events(own.left_center() + egui::vec2(6.0, 0.0)));
+    let _ = frame(&mut dialog, &mut app, vec![]);
+    let input: egui::Rect = ctx.data_mut(|d| d.get_temp(editor)).unwrap();
+    let _ = frame(&mut dialog, &mut app, click_events(input.center()));
+    let _ = frame(&mut dialog, &mut app, vec![egui::Event::Text("Meine Variante".into())]);
+    assert_eq!(app.settings.question_drafts[0].values["restart"], "Meine Variante");
+    let updated = &mut Arc::make_mut(app.snapshot.as_mut().unwrap()).questions[0];
+    updated.update_seq.0 += 1;
+    updated.orchestration_note = "human: explicit interview".into();
+    let update_seq = updated.update_seq;
+    let _ = frame(&mut dialog, &mut app, vec![]);
+    let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-question-submit"))).unwrap();
+    assert!(submit.top() > second.bottom());
+    let _ = frame(&mut dialog, &mut app, click_events(submit.center()));
+    assert_eq!(app.settings.pending.len(), 1);
+    assert_eq!(app.settings.pending[0].body["answer"]["restart"], "Meine Variante");
+    assert!(app.settings.pending[0].body.get("expected_revision").is_none());
+    let pending = app.settings.pending[0].clone();
+    let mut closed = false;
+    let mut render = |app: &mut App| {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| { closed = dialog.show(ctx, app); });
+        closed
+    };
+    assert!(!render(&mut app), "Keep the dialog open until the server confirms");
+    let mut confirmed = question;
+    confirmed.state = QuestionState::AnswerQueued;
+    confirmed.update_seq.0 = update_seq.0 + 1;
+    confirmed.answer_request = serde_json::from_value(pending.body["request_id"].clone()).ok();
+    confirmed.answer = Some(pending.body["answer"].clone());
+    app.backend.emit_for_test(crate::backend::Event::Request(pending.id, Ok(json!(confirmed))));
+    app.receive();
+    assert!(render(&mut app), "Close immediately after confirmation");
+}
+
+#[test]
+fn question_links_to_its_original_intent_and_returns_to_the_draft() {
+    let mut app = fixture();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    s.tickets[0].key = "DKER-7".into();
+    let ticket_id = s.tickets[0].id;
+    let question = s.questions[0].clone();
+    app.dialog = Some(Dialog::questions(vec![question.clone()]));
+    let ctx = app.backend.context().clone();
+    let frame = |app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 760.0))),
+        events, ..Default::default()
+    }, |ctx| app.draw_dialog(ctx));
+    for _ in 0..3 { let _ = frame(&mut app, vec![]); }
+    let button: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-question-intent", ticket_id)))).unwrap();
+    let mut text = vec![];
+    for shape in frame(&mut app, vec![]).shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|t| t == "Intent DKER-7 anzeigen"));
+    let _ = frame(&mut app, click_events(button.center()));
+    assert!(matches!(&app.dialog, Some(Dialog::Task(task)) if task.read_only && task.draft.ticket == Some(ticket_id)));
+    for _ in 0..3 { let _ = frame(&mut app, vec![]); }
+    let close: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-dialog-close-rect"))).unwrap();
+    let _ = frame(&mut app, click_events(close.center()));
+    assert!(matches!(&app.dialog, Some(Dialog::Questions(group)) if group.questions[0].question.id == question.id));
+    assert!(app.settings.question_drafts.iter().any(|draft| draft.question == question.id));
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
 fn unanswered_question_windows_keep_inputs_but_hide_raw_data_and_export() {
     let mut app = fixture();
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    s.questions[0].external.payload["fields"].as_array_mut().unwrap().extend([
+        json!({"key":"comment","title":"Weitere Hinweise?","type":"string"}),
+        json!({"key":"secret","title":"Verstecktes Feld","type":"string","hidden":true}),
+    ]);
     s.questions[1].external.kind = QuestionKind::Permission;
     s.questions[1].external.payload = json!({
         "title":"Test ausführen?",
@@ -1124,27 +1232,50 @@ fn unanswered_question_windows_keep_inputs_but_hide_raw_data_and_export() {
         "resource":"cargo test",
         "metadata":{"private":"NICHT_ANZEIGEN"},
     });
+    let mut answered = s.questions[0].clone();
+    answered.id = QuestionId::new();
+    answered.state = QuestionState::Answered;
+    answered.external.payload["title"] = json!("Bereits beantwortete Frage");
+    s.questions.insert(0, answered);
     let mut dialog = Dialog::questions(s.questions.clone());
     let ctx = app.backend.context().clone();
+    let render = |app: &mut App, dialog: &mut Dialog, events| ctx.run(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO, egui::vec2(1360.0, 1000.0),
+            )),
+            events, ..Default::default()
+        },
+        |ctx| { dialog.show(ctx, app); },
+    );
     let mut output = None;
     for _ in 0..4 {
-        output = Some(ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO, egui::vec2(1360.0, 1000.0),
-                )),
-                ..Default::default()
-            },
-            |ctx| { dialog.show(ctx, &mut app); },
-        ));
+        output = Some(render(&mut app, &mut dialog, vec![]));
     }
     let mut text = vec![];
     for shape in &output.unwrap().shapes { shape_text(&shape.shape, &mut text); }
-    assert_eq!(text.iter().filter(|t| t.as_str() == "Frage").count(), 2);
-    assert_eq!(text.iter().filter(|t| t.as_str() == "Antwort").count(), 2);
-    for expected in ["Blau", "Einmal erlauben", "Aktion: shell", "Ziel: cargo test"] {
+    assert!(text.iter().any(|t| t == "Frage 1 von 3"));
+    assert!(text.iter().any(|t| t == "Blau"));
+    assert!(!text.iter().any(|t| t == "Einmal erlauben" || t == "Bereits beantwortete Frage" || t == "Weitere Hinweise?"));
+    let next = || ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-question-submit"))).unwrap().center();
+    let _ = render(&mut app, &mut dialog, click_events(next()));
+    text.clear();
+    for shape in render(&mut app, &mut dialog, vec![]).shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|t| t == "Frage 2 von 3"));
+    assert!(text.iter().any(|t| t == "Weitere Hinweise?"));
+    assert!(!text.iter().any(|t| t == "Blau" || t == "Verstecktes Feld"));
+    let _ = render(&mut app, &mut dialog, click_events(next()));
+    text.clear();
+    for shape in render(&mut app, &mut dialog, vec![]).shapes { shape_text(&shape.shape, &mut text); }
+    for expected in ["Frage 3 von 3", "Einmal erlauben", "Aktion: shell", "Ziel: cargo test", "Antwort abgeben", "Zurück"] {
         assert!(text.iter().any(|t| t == expected), "{expected}: {text:?}");
     }
+    assert!(!text.iter().any(|t| t == "Blau"));
+    let back: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new("test-question-back"))).unwrap();
+    let _ = render(&mut app, &mut dialog, click_events(back.center()));
+    text.clear();
+    for shape in render(&mut app, &mut dialog, vec![]).shapes { shape_text(&shape.shape, &mut text); }
+    assert!(text.iter().any(|t| t == "Weitere Hinweise?"));
     for forbidden in ["Exportieren", "Originaldaten", "Vollständige Daten", "Metadaten", "NICHT_ANZEIGEN"] {
         assert!(!text.iter().any(|t| t.contains(forbidden)), "{forbidden}: {text:?}");
     }
@@ -2426,7 +2557,7 @@ fn prompt_summary_marks_truncated_prefixes_without_changing_original_content() {
 }
 
 #[test]
-fn task_archive_requires_confirmed_success_and_no_unresolved_question() {
+fn non_cancelled_task_archive_requires_confirmed_success_and_no_unresolved_question() {
     let app = fixture();
     let mut snapshot = (**app.snapshot.as_ref().unwrap()).clone();
     let mut ticket = snapshot.tickets[0].clone();
@@ -4218,6 +4349,50 @@ fn project_settings_keep_general_and_runner_drafts_separate() {
 }
 
 #[test]
+fn internet_globe_marks_only_active_public_or_explicit_tunnel_connections() {
+    let mut app = fixture();
+    app.settings.page = Page::Overview;
+    app.server = "http://127.0.0.1:17432".into();
+    let ctx = app.backend.context().clone();
+    let mut dialog = Dialog::ConnectionInfo;
+    let input = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        ..Default::default()
+    };
+    for (peer, tunnel, online, expected) in [
+        (Some("8.8.8.8"), None, true, true),
+        (Some("2001:4860::8844"), None, true, true),
+        (Some("::ffff:192.168.1.1"), None, true, false),
+        (Some("100.64.0.1"), None, true, false),
+        (Some("127.0.0.1"), None, true, false),
+        (Some("127.0.0.1"), Some("http://127.0.0.1:17432"), true, true),
+        (Some("127.0.0.1"), Some("http://127.0.0.1:17433"), true, false),
+        (Some("127.0.0.1"), Some("http://127.0.0.1:17432"), false, false),
+        (Some("8.8.8.8"), None, false, false),
+        (None, None, true, false),
+    ] {
+        app.server_peer = peer.map(|ip| ip.parse().unwrap());
+        app.internet_tunnel_endpoint = tunnel.map(str::to_owned);
+        app.online = online;
+        let overview = ctx.run(input(), |ctx| app.draw_shell(ctx));
+        let mut details = egui::FullOutput::default();
+        for _ in 0..3 {
+            details = ctx.run(input(), |ctx| { dialog.show(ctx, &mut app); });
+        }
+        for output in [overview, details] {
+            let mut text = vec![];
+            for shape in &output.shapes {
+                shape_text(&shape.shape, &mut text);
+            }
+            assert_eq!(
+                text.iter().any(|v| v == crate::connection_info::INTERNET_ICON),
+                expected, "{peer:?}, {tunnel:?}, online={online}",
+            );
+        }
+    }
+}
+
+#[test]
 fn connection_overview_has_status_graph_and_disconnected_actions() {
     let mut app = fixture();
     app.online = false;
@@ -4892,7 +5067,7 @@ fn opencode_question_rows_are_execution_scoped_stable_and_invalidate_on_answer_u
     assert_eq!(rows.len(), 3);
     assert!(matches!(&rows[1], crate::conversation::TranscriptRow::Question(q) if q.id == question.id));
     let old_key = rows[1].key();
-    snapshot.questions[0].revision.0 += 1;
+    snapshot.questions[0].update_seq.0 += 1;
     snapshot.questions[0].state = QuestionState::AnswerQueued;
     snapshot.questions[0].answer = Some(json!({"color":"blue"}));
     let updated = crate::conversation::transcript_rows(entries.clone(), Some(snapshot), root, Some(command));

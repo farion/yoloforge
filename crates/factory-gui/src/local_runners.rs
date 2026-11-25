@@ -166,14 +166,7 @@ fn owns_process(identity: &Process, runner: &LocalRunner, journal: &Path) -> boo
     arguments_match(&args, runner, journal)
 }
 fn runner_executable() -> Result<PathBuf> {
-    let path = std::env::current_exe()?
-        .parent()
-        .context(crate::tr!("Programmverzeichnis fehlt"))?
-        .join(if cfg!(windows) {
-            "factory-runner.exe"
-        } else {
-            "factory-runner"
-        });
+    let path = crate::persistence::companion_binary("factory-runner")?;
     ensure!(
         path.is_file(),
         crate::tr!("factory-runner fehlt neben der GUI")
@@ -293,6 +286,7 @@ fn start_instance(runner: &LocalRunner, instance: Option<InstanceId>) -> Result<
     }
     let log = options.open(root.join("factory-runner.log"))?;
     let mut command = Command::new(runner_executable()?);
+    crate::persistence::configure_bundled_opencode(&mut command)?;
     if let Some(instance) = instance {
         command.args(["--instance-id", &instance.to_string()]);
     }

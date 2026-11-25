@@ -508,20 +508,24 @@ fn peon_prompt_hint(ui: &egui::Ui) -> &'static str {
 /// OpenCode-like composer. The editor grows with its content; the surrounding
 /// dialog owns scrolling, so this never creates a second scroll area.
 pub fn task_prompt(ui: &mut egui::Ui, text: &mut String, rows: usize) -> egui::Response {
-    task_prompt_buffer(ui, text, rows)
+    task_prompt_buffer(ui, text, rows, peon_prompt_hint(ui))
+}
+
+pub fn question_answer_editor(ui: &mut egui::Ui, text: &mut String) -> egui::Response {
+    task_prompt_buffer(ui, text, 2, crate::tr!("Antwort eingeben …"))
 }
 
 pub fn task_prompt_read_only(ui: &mut egui::Ui, text: &str, rows: usize) -> egui::Response {
     let mut buffer = text;
-    task_prompt_buffer(ui, &mut buffer, rows)
+    task_prompt_buffer(ui, &mut buffer, rows, peon_prompt_hint(ui))
 }
 
 fn task_prompt_buffer(
     ui: &mut egui::Ui,
     text: &mut dyn egui::TextBuffer,
     rows: usize,
+    hint: &str,
 ) -> egui::Response {
-    let hint = peon_prompt_hint(ui);
     let background = ui.painter().add(egui::epaint::Shape::Noop);
     let mut editor = None;
     let width = ui.available_width();

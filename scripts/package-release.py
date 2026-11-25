@@ -78,12 +78,12 @@ def main():
         elif args.kind == "tui":
             shutil.copy2(ROOT / "docs/client-installation.md", package / "README.md")
         elif args.kind == "gui":
-            runner = "factory-runner.exe" if args.os == "windows" else "factory-runner"
-            shutil.copy2(args.binaries / runner, binary_dir / runner)
-            executables.add(binary_dir / runner)
-            if args.os == "linux":
-                shutil.copy2(args.binaries / "factoryd", package / "factoryd")
-                executables.add(package / "factoryd")
+            suffix = ".exe" if args.os == "windows" else ""
+            for companion in ("factoryd", "factory-runner", "opencode"):
+                filename = companion + suffix
+                shutil.copy2(args.binaries / filename, binary_dir / filename)
+                executables.add(binary_dir / filename)
+            shutil.copy2(ROOT / "deploy/OPENCODE-LICENSE", package / "OPENCODE-LICENSE")
             shutil.copy2(ROOT / "docs/gui.md", package / "README.md")
             if args.os == "linux":
                 shutil.copy2(ROOT / "deploy/yoloforge.desktop", package / "yoloforge.desktop")

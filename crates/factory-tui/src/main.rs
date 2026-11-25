@@ -371,7 +371,7 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
                     .map(|c| Row::new(vec![c.agent_spec.as_ref().filter(|a|!a.role.is_empty()).map(|a|a.role.clone()).unwrap_or_else(||format!("{:?}",c.kind)),c.agent_progress.as_ref().map(|a|format!("{:?}",a.phase)).unwrap_or_else(||format!("{:?}",c.state)),c.result.as_ref().map(command_output).or_else(||c.agent_progress.as_ref().map(|a|a.summary.clone())).unwrap_or_else(||"ausstehend".into()),c.id.to_string()])).collect()).unwrap_or_default()
             } else {
                 last.as_ref().map(|s|project_questions(s,selected_project).into_iter()
-                    .map(|q|Row::new(vec![q.external.payload["title"].as_str().or_else(||q.external.payload["action"].as_str()).unwrap_or("Frage").to_string(),format!("{:?}",q.state),if q.orchestration_note.is_empty(){format!("{:?} / r{}",q.external.kind,q.revision.0)}else{q.orchestration_note.clone()},q.id.to_string()])).collect()).unwrap_or_default()
+                    .map(|q|Row::new(vec![q.external.payload["title"].as_str().or_else(||q.external.payload["action"].as_str()).unwrap_or("Frage").to_string(),format!("{:?}",q.state),if q.orchestration_note.is_empty(){format!("{:?}",q.external.kind)}else{q.orchestration_note.clone()},q.id.to_string()])).collect()).unwrap_or_default()
             };
             let project_name = last.as_ref().and_then(|s| s.projects.get(selected_project)).map(|p| p.name.as_str()).unwrap_or("kein Projekt");
             let (header, title) = match view {

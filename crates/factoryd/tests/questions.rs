@@ -234,7 +234,7 @@ fn durable_pause_blocks_answers_and_requires_pre_execution_hold_for_resume() {
             q.id,
             AnswerQuestion {
                 request_id: RequestId::new(),
-                expected_revision: q.revision,
+                legacy_revision: None,
                 answer: json!({"choice":"yes"})
             }
         ),
@@ -945,7 +945,7 @@ fn sync(
 }
 
 #[test]
-fn concurrent_answers_are_revision_protected_and_replay_survives_restart() {
+fn first_answer_wins_without_revision_check_and_replay_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let a = Store::open(&path).unwrap();
@@ -954,7 +954,7 @@ fn concurrent_answers_are_revision_protected_and_replay_survives_restart() {
     let question = sync(&a, runner, cmd.id, vec![external(cmd.id)])[0].clone();
     let input = AnswerQuestion {
         request_id: RequestId::new(),
-        expected_revision: Revision(1),
+        legacy_revision: Some(Revision(0)),
         answer: json!({"choice":"A"}),
     };
     let retry = input.clone();
@@ -970,15 +970,15 @@ fn concurrent_answers_are_revision_protected_and_replay_survives_restart() {
         question.id,
         AnswerQuestion {
             request_id: RequestId::new(),
-            expected_revision: Revision(1),
+            legacy_revision: Some(Revision(0)),
             answer: json!({"choice":"B"}),
         },
     );
     let first = task.join().unwrap();
     assert!(matches!(
         (&first, &second),
-        (Ok(_), Err(StoreError::RevisionConflict(_)))
-            | (Err(StoreError::RevisionConflict(_)), Ok(_))
+        (Ok(_), Err(StoreError::WorkConflict))
+            | (Err(StoreError::WorkConflict), Ok(_))
     ));
     if let Ok(first) = first {
         assert_eq!(a.answer_question(question.id, retry).unwrap(), first);
@@ -1028,7 +1028,7 @@ fn missing_or_changed_questions_remain_unknown_and_are_not_recreated() {
             question.id,
             AnswerQuestion {
                 request_id: RequestId::new(),
-                expected_revision: missing.revision,
+                legacy_revision: None,
                 answer: json!({"choice":"unsafe"})
             }
         ),
@@ -1057,7 +1057,7 @@ fn queued_answer_missing_after_reply_can_be_confirmed_and_rejected_answer_can_be
             question.id,
             AnswerQuestion {
                 request_id: RequestId::new(),
-                expected_revision: question.revision,
+                legacy_revision: None,
                 answer: json!({"choice":"A"}),
             },
         )
@@ -1074,12 +1074,13 @@ fn queued_answer_missing_after_reply_can_be_confirmed_and_rejected_answer_can_be
             },
         )
         .unwrap();
+    assert_eq!(rejected.state, QuestionState::Rejected);
     let corrected = store
         .answer_question(
             question.id,
             AnswerQuestion {
                 request_id: RequestId::new(),
-                expected_revision: rejected.revision,
+                legacy_revision: None,
                 answer: json!({"choice":"B"}),
             },
         )

@@ -54,6 +54,9 @@ pub struct App {
     pub backend: Backend,
     pub settings: Settings,
     pub server: String,
+    pending_credential: Option<ConnectionCredential>,
+    pub(crate) server_peer: Option<std::net::IpAddr>,
+    pub(crate) internet_tunnel_endpoint: Option<String>,
     pub snapshot: Option<std::sync::Arc<Snapshot>>,
     pub online: bool,
     pub access: Option<AccessView>,
@@ -113,6 +116,10 @@ struct ViewState {
     sessions_closed: bool,
     detail: Option<TicketId>,
 }
+enum ConnectionCredential {
+    Existing(std::path::PathBuf),
+    New(String),
+}
 pub struct CachedList {
     pub list: egui_virtual_list::VirtualList,
     version: u64,
@@ -131,21 +138,12 @@ impl App {
         } else {
             crate::persistence::load_settings()
         };
-        let mut settings = loaded.as_ref().cloned().unwrap_or_default();
+        let settings = loaded.as_ref().cloned().unwrap_or_default();
         #[cfg(test)]
-        { settings.language = crate::i18n::Language::German; }
+        let settings = Settings { language: crate::i18n::Language::German, ..settings };
         crate::i18n::set_language(settings.language);
-        let server = if server == "http://127.0.0.1:7432" && !settings.server.is_empty() {
-            settings.server.clone()
-        } else {
-            server
-        };
-        let stored_credential = if settings.server == server {
-            settings.credential_file.clone()
-        } else {
-            None
-        };
-        settings.server = server.clone();
+        let server = settings.startup_server(server);
+        let stored_credential = settings.credential_for(&server).cloned();
         let backend = Backend::new(ctx.clone());
         let next_request = settings.pending.iter().map(|r| r.id).max().unwrap_or(0) + 1;
         let mut app = Self {
@@ -164,6 +162,9 @@ impl App {
             backend,
             settings,
             server: server.clone(),
+            pending_credential: None,
+            server_peer: None,
+            internet_tunnel_endpoint: std::env::var("YOLOFORGE_INTERNET_TUNNEL_ENDPOINT").ok(),
             snapshot: None,
             online: false,
             access: None,
@@ -226,42 +227,41 @@ impl App {
                 }
             }
         }
-        let mut credential_file = None;
-        let token = match (
+        let (token, credential_file) = match (
             std::env::var("FACTORY_TOKEN"),
             std::env::var_os("FACTORY_TOKEN_FILE"),
         ) {
-            (Ok(token), None) => Some(token),
-            (Err(_), Some(path)) => {
-                credential_file = Some(std::path::PathBuf::from(path));
-                credential_file
-                    .as_ref()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .map(|s| s.trim_end().to_string())
-            }
-            (Err(_), None) => {
-                credential_file = stored_credential;
-                credential_file
-                    .as_ref()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .map(|s| s.trim_end().to_string())
+            (Ok(token), None) => (Some(token), None),
+            (Err(_), source) => {
+                let (file, keep_path) = match source {
+                    Some(path) => (Some(std::path::PathBuf::from(path)), false),
+                    None => (stored_credential, true),
+                };
+                let token = file.as_ref().and_then(|path| {
+                    match std::fs::read_to_string(path) {
+                        Ok(token) => Some(token.trim_end_matches(['\r', '\n']).to_owned()),
+                        Err(_) => {
+                            app.notice(crate::tr!("Gespeichertes Zugangstoken konnte nicht gelesen werden."));
+                            None
+                        }
+                    }
+                });
+                (token, if keep_path { file } else { None })
             }
             (Ok(_), Some(_)) => {
                 let error = crate::tr!("Nur FACTORY_TOKEN oder FACTORY_TOKEN_FILE setzen, nicht beides.");
                 app.error = Some(error.into());
                 app.notice(error);
-                None
+                (None, None)
             }
         };
         if let Some(token) = token {
             if cfg!(test) {
                 return app;
             }
-            if let Err(error) = app.connect(server.clone(), token) {
+            if let Err(error) = app.connect_with_credential(server, token, credential_file) {
                 app.error = Some(error);
                 app.notice(crate::tr!("Factory-Verbindung konnte nicht eingerichtet werden."));
-            } else {
-                app.settings.credential_file = credential_file;
             }
         } else {
             app.dialog = None;
@@ -269,6 +269,12 @@ impl App {
         app
     }
     pub fn connect(&mut self, server: String, token: String) -> Result<(), String> {
+        self.connect_with_credential(server, token, None)
+    }
+
+    fn connect_with_credential(
+        &mut self, server: String, token: String, credential_file: Option<std::path::PathBuf>,
+    ) -> Result<(), String> {
         if self.connection_active() {
             return Err(crate::tr!("Bitte zuerst die bestehende Verbindung trennen.").into());
         }
@@ -278,11 +284,13 @@ impl App {
         if let Some(settings) = self.factory_settings.take() {
             settings.persist(self);
         }
-        self.server = server.clone();
+        self.pending_credential = Some(match credential_file {
+            Some(path) => ConnectionCredential::Existing(path),
+            None => ConnectionCredential::New(token),
+        });
+        self.server = server;
+        self.server_peer = None;
         self.restore_local_runners = true;
-        self.settings.server = server;
-        self.settings.credential_file = None;
-        self.settings_dirty = true;
         self.snapshot = None;
         self.updated = None;
         self.online = false;
@@ -317,6 +325,23 @@ impl App {
         self.latest_notification = 0;
         Ok(())
     }
+
+    fn remember_confirmed_connection(
+        &mut self,
+        save_token: impl FnOnce(&str, &str) -> anyhow::Result<std::path::PathBuf>,
+    ) -> anyhow::Result<bool> {
+        let Some(credential) = self.pending_credential.take() else { return Ok(false); };
+        let path = match credential {
+            ConnectionCredential::Existing(path) => path,
+            ConnectionCredential::New(token) => save_token(&self.server, &token)?,
+        };
+        if self.settings.server == self.server && self.settings.credential_file.as_ref() == Some(&path) {
+            return Ok(false);
+        }
+        self.settings.server = self.server.clone();
+        self.settings.credential_file = Some(path);
+        Ok(true)
+    }
     pub fn connection_active(&self) -> bool {
         self.online || self.backend.is_connected()
     }
@@ -335,6 +360,8 @@ impl App {
     pub fn disconnect(&mut self) {
         egui::Popup::close_all(self.backend.context());
         self.backend.disconnect();
+        self.pending_credential = None;
+        self.server_peer = None;
         self.online = false;
         self.access = None;
         self.error = None;
@@ -712,6 +739,27 @@ impl App {
             data.is_some(),
         ));
     }
+    pub(crate) fn draw_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.dialog.take() else { return; };
+        let active_tab = self.active_tab;
+        let close = dialog.show(ctx, self);
+        if let Dialog::Task(task) = &mut dialog {
+            if close && self.dialog.is_none() && self.active_tab == active_tab {
+                self.dialog = task.return_to_questions.take().map(|parent| *parent);
+            }
+        }
+        if !close {
+            if matches!(&dialog, Dialog::Questions(_) | Dialog::QuestionView(_)) {
+                if let Some(Dialog::Task(task)) = &mut self.dialog {
+                    task.return_to_questions = Some(Box::new(dialog));
+                    return;
+                }
+            }
+            if self.dialog.is_none() {
+                self.dialog = Some(dialog);
+            }
+        }
+    }
     pub(crate) fn accept_task_edit(&mut self, request: u64, edit: TaskEdit) {
         let ticket = edit.ticket;
         let newer = self
@@ -930,6 +978,7 @@ impl App {
                 continue;
             }
             match envelope.event {
+                Event::SnapshotPeer(peer) => self.server_peer = peer,
                 Event::Snapshot(Ok(mut s)) => {
                     let reconnected = !self.online && (self.updated.is_some() || self.error.is_some());
                     if self
@@ -970,7 +1019,7 @@ impl App {
                             old.questions.iter().map(|q| (q.id, q)).collect();
                         for question in &mut s.questions {
                             if let Some(newer) = previous.get(&question.id)
-                                .filter(|newer| newer.revision.0 > question.revision.0)
+                                .filter(|newer| newer.update_seq.0 > question.update_seq.0)
                             {
                                 *question = (**newer).clone();
                             }
@@ -981,6 +1030,11 @@ impl App {
                     self.updated = Some(Instant::now());
                     self.online = true;
                     self.error = None;
+                    match self.remember_confirmed_connection(crate::persistence::save_connection_token) {
+                        Ok(true) if !cfg!(test) => self.backend.persist(self.settings.clone()),
+                        Ok(_) => {},
+                        Err(_) => self.notice(crate::tr!("Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden.")),
+                    }
                     self.sync_offline_tasks(reconnected);
                     if self.restore_local_runners && !self.local_runners_busy && !cfg!(test) {
                         self.restore_local_runners = false;
@@ -991,6 +1045,7 @@ impl App {
                     }
                 }
                 Event::Snapshot(Err(e)) => {
+                    self.server_peer = None;
                     self.connection_lost(e);
                 }
                 Event::Instances(result) => match result {
@@ -1294,6 +1349,19 @@ impl App {
                     }
                     let project_update = self.settings.pending.iter().any(|r| r.id == id
                         && crate::dialogs::is_project_update(&r.method, &r.path));
+                    if let Err(error) = &result {
+                        if self.settings.pending.iter().any(|r| r.id == id
+                            && r.method == "POST" && r.path.starts_with("/v1/questions/") && r.path.ends_with("/answer"))
+                        {
+                            self.notice(if error.uncertain {
+                                crate::tr!("Antwort nicht bestätigt. Bitte die Zustellung in der Diagnose prüfen.")
+                            } else {
+                                crate::tr!("Antwort konnte nicht abgegeben werden. Der Entwurf bleibt erhalten.")
+                            });
+                            self.action_errors.push((crate::overview::now_ms(), error.message.clone()));
+                            if self.action_errors.len() > 50 { self.action_errors.remove(0); }
+                        }
+                    }
                     let batch_update = matches!(&self.dialog, Some(Dialog::ProjectSettings(settings)) if settings.owns_request(id));
                     if project_update {
                         match &result {
@@ -1354,7 +1422,7 @@ impl App {
                                         if let Some(snapshot) = self.snapshot.as_mut().filter(|_| request.server == self.server) {
                                             if let Some(current) = std::sync::Arc::make_mut(snapshot)
                                                 .questions.iter_mut().find(|q| q.id == question.id
-                                                    && q.revision.0 < question.revision.0)
+                                                    && q.update_seq.0 < question.update_seq.0)
                                             {
                                                 *current = question;
                                             }
@@ -1561,11 +1629,9 @@ impl App {
                 },
                 Event::Local(result) => match result {
                     Ok(c) => {
-                        if let Err(e) = self.connect(c.server, c.token) {
+                        if let Err(e) = self.connect_with_credential(c.server, c.token, Some(c.credential_file)) {
                             self.notice(e);
                         } else {
-                            self.settings.credential_file = Some(c.credential_file);
-                            self.settings_dirty = true;
                             self.dialog = None;
                         }
                     }
@@ -1756,12 +1822,7 @@ impl App {
         }
         self.draw_shell(ctx);
         self.handle_file_drop(ctx);
-        if let Some(mut dialog) = self.dialog.take() {
-            let close = dialog.show(ctx, self);
-            if !close && self.dialog.is_none() {
-                self.dialog = Some(dialog);
-            }
-        }
+        self.draw_dialog(ctx);
         crate::design::file_drop_overlay(
             ctx,
             self.clipboard_image_target().is_some(),
@@ -1891,4 +1952,54 @@ pub fn card() -> egui::Frame {
         .corner_radius(10)
         .inner_margin(20)
         .outer_margin(egui::Margin::symmetric(0, 6))
+}
+
+#[cfg(test)]
+mod remembered_connection_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_confirmed_snapshot_replaces_the_saved_factory_and_token_reference() {
+        let mut app = crate::tests::fixture();
+        let snapshot = app.snapshot.as_deref().unwrap().clone();
+        app.settings.server = "https://old.example".into();
+        app.settings.credential_file = Some("old.token".into());
+        app.server = "https://remote.example".into();
+        app.pending_credential = Some(ConnectionCredential::Existing("remote.token".into()));
+
+        app.backend.emit_for_test(Event::Snapshot(Err("not connected".into())));
+        app.receive();
+        assert_eq!(app.settings.server, "https://old.example");
+        assert_eq!(app.settings.credential_file.as_deref(), Some(std::path::Path::new("old.token")));
+
+        app.backend.emit_for_test(Event::Snapshot(Ok(snapshot)));
+        app.receive();
+        assert_eq!(app.settings.server, app.server);
+        assert_eq!(app.settings.credential_file.as_deref(), Some(std::path::Path::new("remote.token")));
+        app.disconnect();
+        assert_eq!(app.settings.server, "https://remote.example");
+        assert!(app.settings.credential_file.is_some());
+    }
+
+    #[test]
+    fn newly_entered_token_survives_restart_without_being_written_to_settings() {
+        let mut app = crate::tests::fixture();
+        app.server = "https://remote.example".into();
+        let token = "a-fake-token-from-the-dialog-or-environment";
+        app.pending_credential = Some(ConnectionCredential::New(token.into()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote.token");
+        assert!(app.remember_confirmed_connection(|server, secret| {
+            assert_eq!(server, "https://remote.example");
+            crate::persistence::write_new(&path, secret.as_bytes())?;
+            Ok(path.clone())
+        }).unwrap());
+        let json = serde_json::to_string(&app.settings).unwrap();
+        assert!(!json.contains(token));
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        let server = restored.startup_server("http://127.0.0.1:7432".into());
+        assert_eq!(server, "https://remote.example");
+        assert_eq!(std::fs::read_to_string(restored.credential_for(&server).unwrap()).unwrap(), token);
+        assert!(restored.credential_for("https://other.example").is_none());
+    }
 }

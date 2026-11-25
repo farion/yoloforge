@@ -4,7 +4,7 @@ Die Workflows folgen dem Aufbau von LAML: native Runner, schreibgeschützte
 Build-Jobs und eine getrennte Veröffentlichung des vollständigen Paketsets.
 Frühere TUI-, Android- und Container-Image-Builds sind ersetzt.
 
-| Plattform | Architektur | GUI | Runner | Server |
+| Plattform | Architektur | GUI | Runner | Separates Server-Paket |
 | --- | --- | --- | --- | --- |
 | Linux / Ubuntu 24.04 | x86_64, aarch64 | ja | ja | ja |
 | macOS | Apple Silicon aarch64 | ja | ja | nein |
@@ -12,17 +12,18 @@ Frühere TUI-, Android- und Container-Image-Builds sind ersetzt.
 
 Insgesamt entstehen zehn Archive mit einzelnen `.sha256`-Dateien. macOS-GUIs
 enthalten eine `.app`, Windows verwendet ZIP, Unix-Pakete verwenden `.tar.gz`.
-GUI-Pakete enthalten immer den passenden Runner, Linux zusätzlich `factoryd`.
+GUI-Pakete enthalten auf jeder Plattform den passenden Runner, `factoryd`
+und die verifizierte OpenCode-Laufzeit.
 Kein Paket enthält Laufzeitdaten, Tokens oder Journale.
 
 ## Workflows
 
 - `.github/workflows/ci.yml`: Push auf `main`, Pull Requests und manueller Start.
 - `.github/workflows/build.yml`: gemeinsame native Build-Matrix für CI und Releases;
-  Tests für Plattformcode, Protokoll, Runner, GUI und auf Linux den Server.
+  Tests für Plattformcode, Protokoll, Runner, GUI und Server.
   GUI-Tests sind zustandslose egui-Tests ohne Benutzerfenster.
-  Der gepinnte OpenCode-Download wird auf jeder Plattform mit `--version` geprüft,
-  ohne einen Dienst zu starten. Anschließend werden die fertigen Archive in ein
+  Die gepinnte OpenCode-Laufzeit wird heruntergeladen, per SHA-512 geprüft
+  und vor dem Paketieren mit `--version` geprüft. Anschließend werden die fertigen Archive in ein
   temporäres Verzeichnis entpackt und alle enthaltenen Binaries mit `--version`
   außerhalb des Build-Verzeichnisses geprüft, ohne Dienste oder GUI-Fenster.
   Pakete stehen als `packages-OS-ARCH` sieben Tage
@@ -56,6 +57,14 @@ actionlint
 ```
 
 `scripts/package-release.py` erstellt Pakete aus bereits gebauten Binaries.
+Für ein lokales GUI-Paket die verifizierte Laufzeit zuerst in dasselbe
+Binary-Verzeichnis kopieren:
+
+```sh
+CARGO_TARGET_DIR="$PWD/target" cargo build --locked --release -p factory-gui -p factoryd -p factory-runner
+cargo run --locked -p factory-opencode --example package_distribution -- "$PWD/target/release"
+```
+
 `scripts/verify-release.py` weist fehlende, zusätzliche oder beschädigte Pakete
 zurück und schreibt `SHA256SUMS`.
 Herstellersignaturen und macOS-Notarisierung sind noch nicht eingerichtet.

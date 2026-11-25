@@ -29,12 +29,12 @@ class Packages(unittest.TestCase):
             root = Path(directory)
             binaries = root / "binaries"
             binaries.mkdir()
-            for name in ["factoryd", "factory-runner", "yoloforge-gui", "factory-runner.exe", "yoloforge-gui.exe"]:
-                path = binaries / name
-                path.write_bytes(b"binary fixture")
-                # Deliberately non-executable: Unix archives must set their own modes,
-                # including when these contract tests run on Windows.
-                path.chmod(0o644)
+            for name in ("factoryd", "factory-runner", "yoloforge-gui", "opencode"):
+                for suffix in ("", ".exe"):
+                    path = binaries / (name + suffix)
+                    path.write_bytes(b"binary fixture")
+                    # Unix packages set executable bits regardless of staging permissions.
+                    path.chmod(0o644)
             output = root / "dist"
             for os, arch in VERIFY.PLATFORMS:
                 kinds = ["gui", "runner", "server"] if os == "linux" else ["gui", "runner"]
@@ -59,16 +59,20 @@ class Packages(unittest.TestCase):
                                 info = plistlib.loads(contents.extractfile(name + "/YoloForge.app/Contents/Info.plist").read())
                                 self.assertEqual(info["CFBundleExecutable"], "yoloforge-gui")
                             binary_path = name + ("/YoloForge.app/Contents/MacOS/" if os == "macos" and kind == "gui" else "/")
-                            binary_path += {"gui": "yoloforge-gui", "runner": "factory-runner", "server": "factoryd"}[kind]
-                            self.assertTrue(contents.getmember(binary_path).mode & 0o111)
+                            filenames = {
+                                "gui": ("yoloforge-gui", "factoryd", "factory-runner", "opencode"),
+                                "runner": ("factory-runner",), "server": ("factoryd",),
+                            }[kind]
+                            for filename in filenames:
+                                self.assertTrue(contents.getmember(binary_path + filename).mode & 0o111)
                     names = {entry.removeprefix(name + "/") for entry in names}
                     self.assertFalse(any(entry.endswith((".sqlite3", ".token", ".log")) for entry in names))
                     if kind == "gui":
                         prefix = "YoloForge.app/Contents/MacOS/" if os == "macos" else ""
                         suffix = ".exe" if os == "windows" else ""
-                        self.assertIn(prefix + "yoloforge-gui" + suffix, names)
-                        self.assertIn(prefix + "factory-runner" + suffix, names)
-                        self.assertEqual("factoryd" in names, os == "linux")
+                        for filename in ("yoloforge-gui", "factoryd", "factory-runner", "opencode"):
+                            self.assertIn(prefix + filename + suffix, names)
+                        self.assertIn("OPENCODE-LICENSE", names)
                         self.assertEqual("yoloforge.desktop" in names, os == "linux")
                     if kind == "runner":
                         self.assertEqual("factory-runner@.service" in names, os == "linux")
@@ -77,7 +81,7 @@ class Packages(unittest.TestCase):
                             self.assertIn(required, names)
                     with mock.patch.object(NATIVE.subprocess, "run") as startup:
                         NATIVE.check_archive(archive)
-                    expected_binaries = 3 if kind == "gui" and os == "linux" else 2 if kind == "gui" else 1
+                    expected_binaries = 4 if kind == "gui" else 1
                     self.assertEqual(startup.call_count, expected_binaries)
                     for call in startup.call_args_list:
                         self.assertEqual(call.args[0][1:], ["--version"])

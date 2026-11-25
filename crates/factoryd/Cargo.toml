@@ -10,6 +10,7 @@ axum.workspace = true
 clap.workspace = true
 factory-core.workspace = true
 factory-opencode.workspace = true
+factory-platform.workspace = true
 factory-protocol.workspace = true
 tokio = { workspace = true, features = ["process"] }
 sha2 = "0.10"

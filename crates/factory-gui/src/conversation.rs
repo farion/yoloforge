@@ -28,7 +28,7 @@ impl TranscriptRow {
     pub fn key(&self) -> String {
         match self {
             Self::Message(_, entry) => format!("message/{}/{}", entry.message["id"].as_str().unwrap_or(""), entry.sequence),
-            Self::Question(q) => format!("question/{}/{}", q.id, q.revision.0),
+            Self::Question(q) => format!("question/{}/{}", q.id, q.update_seq.0),
         }
     }
 }

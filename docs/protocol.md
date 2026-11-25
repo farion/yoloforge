@@ -131,8 +131,10 @@ Lesetransaktion. Implementierte Work-Routen:
 - `POST /v1/runners/{runner}/commands/{command}/questions`: Ownership-Epoch und
   vollständige beobachtete Fragenliste; liefert die dauerhaften Factory-Fragen
   dieses Commands inklusive eingereihter Antworten zurück.
-- `POST /v1/questions/{id}/answer`: Request-ID, erwartete Fragenrevision und
+- `POST /v1/questions/{id}/answer`: Request-ID und
   `answer` (Formular-Feldobjekt oder `{"decision":"once|always|reject"}`).
+  Die Frage-ID bleibt gleich; die erste Antwort auf eine offene Frage gewinnt.
+  Ein altes `expected_revision` wird nur für idempotente Wiederholungen mitgeführt.
 - `POST /v1/runners/{runner}/questions/{id}/delivery`: Request-ID, Ownership-Epoch,
   `answer_request` und bestätigter/ungeklärter/zurückgewiesener Zustellstatus.
 

@@ -276,7 +276,7 @@ mod tests {
             id: QuestionId::new(),
             command_id,
             session_id: session.clone(),
-            revision: Revision(2),
+            update_seq: Revision(2),
             state: QuestionState::AnswerQueued,
             external: ExternalQuestion {
                 external_id: "form_test".into(),

@@ -29,6 +29,23 @@ pub struct Settings {
     pub question_drafts: Vec<QuestionDraft>,
     pub form_drafts: Vec<FormDraft>,
 }
+impl Settings {
+    pub fn startup_server(&self, requested: String) -> String {
+        if requested == "http://127.0.0.1:7432" && !self.server.is_empty() {
+            self.server.clone()
+        } else {
+            requested
+        }
+    }
+
+    pub fn credential_for(&self, server: &str) -> Option<&PathBuf> {
+        if self.server.trim_end_matches('/') == server.trim_end_matches('/') {
+            self.credential_file.as_ref()
+        } else {
+            None
+        }
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CachedProjects {
     pub server: String,
@@ -64,7 +81,6 @@ pub struct FormDraft {
 pub struct QuestionDraft {
     pub server: String,
     pub question: QuestionId,
-    pub revision: Revision,
     pub values: std::collections::BTreeMap<String, serde_json::Value>,
     pub decision: String,
 }
@@ -256,10 +272,29 @@ pub struct LocalConnection {
     pub credential_file: PathBuf,
 }
 
+pub(crate) fn companion_binary(name: &str) -> Result<PathBuf> {
+    let gui = std::env::current_exe()?;
+    let directory = gui.parent().context(crate::tr!("Programmverzeichnis fehlt"))?;
+    Ok(directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// Release packages use their included runtime. Cargo development builds can
+/// still fall back to the existing explicit override or managed download.
+pub(crate) fn configure_bundled_opencode(command: &mut std::process::Command) -> Result<()> {
+    let binary = companion_binary("opencode")?;
+    if binary.is_file() {
+        command.env("FACTORY_OPENCODE_BIN", binary);
+    }
+    Ok(())
+}
+
 /// Dedicated user-owned processes. Dropping the GUI never signals these children.
 pub async fn start_local() -> Result<LocalConnection> {
     let root = data_dir()?.join("local");
-    fs::create_dir_all(&root)?;
+    // Do not change permissions of an existing installation's state directory.
+    if !root.exists() {
+        factory_platform::private_dir(&root)?;
+    }
     let token_path = root.join("token");
     if !token_path.exists() {
         write_new(
@@ -270,12 +305,8 @@ pub async fn start_local() -> Result<LocalConnection> {
     let token = fs::read_to_string(&token_path)?;
     let server = "http://127.0.0.1:17433".to_string();
     let client = FactoryClient::new_desktop(&server, &token, desktop_client_id()?)?;
-    let bin_dir = std::env::current_exe()?
-        .parent()
-        .context(crate::tr!("Programmverzeichnis fehlt"))?
-        .to_path_buf();
     let start = |binary: &str, arguments: &[String]| -> Result<()> {
-        let executable = bin_dir.join(binary);
+        let executable = companion_binary(binary)?;
         ensure!(
             executable.is_file(),
             crate::tr!("{binary} fehlt neben der GUI. Server und Runner zusammen mit der GUI installieren.", binary = binary)
@@ -285,6 +316,7 @@ pub async fn start_local() -> Result<LocalConnection> {
             .create(true)
             .open(root.join(format!("{binary}.log")))?;
         let mut command = std::process::Command::new(executable);
+        configure_bundled_opencode(&mut command)?;
         command
             .args(arguments)
             .current_dir(&root)
@@ -297,6 +329,11 @@ pub async fn start_local() -> Result<LocalConnection> {
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         }
         let mut child = command.spawn()?;
         // Reap eventual exits without tying the process to the UI's lifetime.

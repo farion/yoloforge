@@ -73,9 +73,13 @@ async fn main() -> Result<()> {
     }
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     let binary = env::var_os("FACTORY_OPENCODE_BIN").map(PathBuf::from);
+    #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut shutdown = Box::pin(async move {
+        #[cfg(unix)]
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+        #[cfg(windows)]
+        let _ = tokio::signal::ctrl_c().await;
     });
     let (mut opencode, gateway) = tokio::select! {
         result = managed_opencode::Runtime::start(&args.database, binary.as_deref()) => result?,

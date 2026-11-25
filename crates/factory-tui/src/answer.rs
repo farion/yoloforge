@@ -155,7 +155,7 @@ impl Dialog {
             }) => {
                 self.state = State::Conflict;
                 self.message =
-                    "Konflikt: Frage wurde geaendert. Entwurf bleibt erhalten. Ctrl-R: neu laden"
+                    "Antwort konnte nicht gespeichert werden. Entwurf bleibt erhalten. Ctrl-R: Status prüfen"
                         .into();
             }
             Err(ClientError::Http { status, .. }) if status.is_client_error() => {
@@ -331,18 +331,18 @@ impl Dialog {
                     if self
                         .current
                         .as_ref()
-                        .is_none_or(|q| q.revision != self.question.revision || !answerable(q))
+                        .is_none_or(|q| q.external != self.question.external || !answerable(q))
                     {
                         self.state = State::Conflict;
                         self.message =
-                            "Frage geaendert. Entwurf bleibt erhalten; Ctrl-R zum Neuladen.".into();
+                            "Frage nicht mehr offen. Entwurf bleibt erhalten.".into();
                         return Action::None;
                     }
                     match self.payload() {
                         Ok(answer) => {
                             let request = AnswerQuestion {
                                 request_id: RequestId::new(),
-                                expected_revision: self.question.revision,
+                                legacy_revision: None,
                                 answer,
                             };
                             self.request = Some(request.clone());
@@ -858,7 +858,7 @@ mod tests {
             id: QuestionId::new(),
             command_id,
             session_id: agent_session_id(command_id),
-            revision: Revision(1),
+            update_seq: Revision(1),
             external: ExternalQuestion {
                 kind: QuestionKind::Form,
                 external_id: "form_test".into(),
@@ -958,36 +958,46 @@ mod tests {
         let retry = sent(control(&mut dialog, 's'));
         assert_eq!(retry.request_id, first.request_id);
         assert_eq!(retry.answer, first.answer);
-        assert_eq!(retry.expected_revision, first.expected_revision);
         let mut snapshot = dialog.question.clone();
         snapshot.answer_request = Some(first.request_id);
         snapshot.state = QuestionState::AnswerQueued;
-        snapshot.revision = Revision(2);
+        snapshot.update_seq = Revision(2);
         dialog.observe(Some(&snapshot));
         dialog.response(first.request_id, Err(ClientError::InvalidResponse));
         assert_eq!(dialog.state, State::Submitted);
         assert!(matches!(control(&mut dialog, 's'), Action::None));
     }
     #[test]
-    fn conflict_reload_preserves_draft_but_requires_explicit_rebase() {
+    fn status_updates_do_not_invalidate_an_open_answer_draft() {
+        let mut dialog = Dialog::new(form(json!([{"key":"choice","type":"string"}])));
+        dialog.insert("retained draft");
+        let mut current = dialog.question.clone();
+        current.update_seq.0 += 1;
+        current.orchestration_note = "Internal note".into();
+        dialog.observe(Some(&current));
+        let request = sent(control(&mut dialog, 's'));
+        assert_eq!(request.answer, json!({"choice":"retained draft"}));
+        assert!(request.legacy_revision.is_none());
+    }
+    #[test]
+    fn retry_after_delivery_rejection_preserves_draft() {
         let mut dialog = Dialog::new(form(json!([{"key":"choice","type":"string"}])));
         dialog.insert("retained draft");
         let first = sent(control(&mut dialog, 's'));
         let error = ClientError::Http {
             status: "409".parse().unwrap(),
-            code: Some(ErrorCode::RevisionConflict),
-            current_revision: Some(Revision(3)),
+            code: Some(ErrorCode::WorkConflict),
+            current_revision: None,
         };
         dialog.response(first.request_id, Err(error));
         assert!(matches!(control(&mut dialog, 's'), Action::None));
         let mut current = dialog.question.clone();
-        current.revision = Revision(3);
+        current.update_seq = Revision(3);
         current.state = QuestionState::Rejected;
         dialog.observe(Some(&current));
         control(&mut dialog, 'r');
         let rebased = sent(control(&mut dialog, 's'));
         assert_ne!(rebased.request_id, first.request_id);
-        assert_eq!(rebased.expected_revision, Revision(3));
         assert_eq!(rebased.answer, first.answer);
     }
     #[test]

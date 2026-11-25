@@ -376,7 +376,9 @@ pub struct QuestionSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct AnswerQuestion {
     pub request_id: RequestId,
-    pub expected_revision: Revision,
+    /// Kept only to replay requests persisted by older clients.
+    #[serde(default, rename = "expected_revision", skip_serializing_if = "Option::is_none")]
+    pub legacy_revision: Option<Revision>,
     pub answer: serde_json::Value,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

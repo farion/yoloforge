@@ -67,17 +67,26 @@ FACTORY_TOKEN_FILE=/absoluter/pfad/device.token \
 Dialog eingegebene Tokens werden in einer privaten Datei unter
 `$XDG_CONFIG_HOME/yoloforge/` (standardmäßig `~/.config/yoloforge/`) gespeichert.
 Das Verzeichnis hat Rechte `0700`, die Tokendatei `0600`. Die Desktop-Einstellungen
-merken sich Serveradresse und Dateipfad, nicht den Token selbst. Beim nächsten
-Start wird die Verbindung automatisch wiederhergestellt.
+merken sich nach erfolgreicher Anmeldung die Serveradresse und den Dateipfad,
+nicht den Token selbst. Das gilt auch für einen per Umgebungsvariable
+übergebenen Zugang. Beim nächsten Start ohne andere Serveradresse oder
+Zugangsdaten wird die zuletzt bestätigte Verbindung automatisch wiederhergestellt.
+Ein fehlgeschlagener Verbindungsversuch ersetzt den gespeicherten Zugang nicht.
 Beim lokalen Start legt die Anwendung private Tokendateien an und
 merkt sich nur deren Pfad. Der nächste Start kann diese Verbindung wiederverwenden.
 
 ### Lokale Factory
 
-`factoryd` und `factory-runner` müssen neben `yoloforge-gui` liegen. Das ist nach
-dem Workspace-Build und im GUI-Releasepaket der Fall. Der lokale Start verwendet
-einen eigenen Datenbestand unter `$XDG_DATA_HOME/yoloforge/local`, standardmäßig
-`~/.local/share/yoloforge/local`, sowie `127.0.0.1:17433`.
+Das GUI-Releasepaket enthält Server, Runner und die passende OpenCode-Version
+für Linux, macOS und Windows. Das Paket vollständig entpacken bzw. die ganze
+`YoloForge.app` übernehmen und **Lokale Factory** wählen. Dafür sind weder
+Docker noch eine separate Installation oder ein OpenCode-Download nötig.
+Modellzugänge, externe Repositories und projektspezifische Tools werden bei
+Bedarf weiter separat eingerichtet.
+
+Der lokale Start verwendet einen eigenen Datenbestand im lokalen
+Benutzerdatenverzeichnis (`$XDG_DATA_HOME/yoloforge/local` bzw.
+`~/.local/share/yoloforge/local` unter Linux) sowie `127.0.0.1:17433`.
 
 - Vorhandene Server auf 7432 und die Daten des Entwicklungsskripts werden nicht verändert.
 - Token, Runner-ID, SQLite-Daten und Journal bleiben erhalten.
@@ -97,9 +106,10 @@ Runner-Zugang; der Admin-Token wird nicht an den Runner weitergegeben.
 Auch **Lokale Factory** startet automatisch einen solchen Runner.
 
 Die Runner richten ihren eigenen verwalteten OpenCode-Server automatisch ein.
-Sie laden die Factory-Version von OpenCode bei Bedarf herunter, verwenden einen
-dauerhaft gespeicherten Loopback-Port und beziehen den Modellkatalog von der
-Factory. Anbieter und Standardmodelle werden weiterhin zentral in der Factory
+Sie verwenden die OpenCode-Version aus dem GUI-Paket. Bei einem
+Workspace-Build ohne gebündelte Laufzeit wird sie bei Bedarf heruntergeladen.
+Sie verwenden einen dauerhaft gespeicherten Loopback-Port und beziehen den
+Modellkatalog von der Factory. Anbieter und Standardmodelle werden zentral in der Factory
 eingerichtet. Die Factory muss den Modellzugang mit Runner-Zugang unterstützen
 (GUI, Runner und Factory zusammen aktualisieren).
 

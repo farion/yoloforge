@@ -53,7 +53,7 @@ pub fn task_routing_level(note: &str) -> TaskHistoryLevel {
         || note.contains("blockiert") || note.contains("nicht mehr verfuegbar")
     {
         TaskHistoryLevel::Error
-    } else if note.starts_with("Orchestrator wartet:") || note.contains("abgebrochen")
+    } else if note.starts_with("Orchestrator wartet:") || note.starts_with("Orchestrator: Intent verworfen.") || note.contains("abgebrochen")
         || note.starts_with("Orchestrator kann noch nicht starten")
         || note.starts_with("Wartet auf ")
         || note.starts_with("Fortsetzung wartet") || note.starts_with("Session wartet")

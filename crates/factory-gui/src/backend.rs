@@ -9,6 +9,7 @@ use std::{path::PathBuf, sync::mpsc, time::Duration};
 
 pub enum Event {
     Snapshot(Result<Snapshot, String>),
+    SnapshotPeer(Option<std::net::IpAddr>),
     Instances(Result<Vec<OpenCodeInstance>, String>),
     Clients(Result<Vec<ClientPresence>, String>),
     Notifications(Result<NotificationPage, String>, bool),
@@ -80,6 +81,7 @@ pub struct Backend {
     pub rx: mpsc::Receiver<Envelope>,
     ctx: egui::Context,
     client: Option<FactoryClient>,
+    pub(crate) desktop_id: Option<RequestId>,
     connection: Option<tokio::task::JoinHandle<()>>,
     pub generation: u64,
     storage_tx: tokio::sync::mpsc::UnboundedSender<StorageWrite>,
@@ -117,6 +119,7 @@ impl Backend {
             rx,
             ctx,
             client: None,
+            desktop_id: None,
             connection: None,
             generation: 0,
             storage_tx,
@@ -156,12 +159,14 @@ impl Backend {
     }
     pub fn connect(&mut self, server: &str, token: &str) -> anyhow::Result<()> {
         anyhow::ensure!(!self.is_connected(), crate::tr!("Bitte zuerst die bestehende Verbindung trennen."));
-        let client = FactoryClient::new_desktop(server, token, crate::persistence::desktop_client_id()?)?;
+        let desktop_id = crate::persistence::desktop_client_id()?;
+        let client = FactoryClient::new_desktop(server, token, desktop_id)?;
         if let Some(task) = self.connection.take() {
             task.abort();
         }
         self.generation += 1;
         self.client = Some(client.clone());
+        self.desktop_id = Some(desktop_id);
         let sender = self.sender();
         self.connection = Some(self.runtime.spawn(async move {
             let mut cursor = None;
@@ -171,8 +176,8 @@ impl Backend {
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! { _ = timer.tick() => {}, _ = dirty_rx.changed() => { tokio::time::sleep(Duration::from_millis(120)).await; } }
-                match client.desktop_snapshot().await {
-                    Ok(snapshot) => {
+                match client.desktop_snapshot_with_peer().await {
+                    Ok((snapshot, peer)) => {
                         // Restart on server restore: durable cursors may move backwards.
                         if cursor.is_some_and(|v| snapshot.event_cursor < v) {
                             feed = None;
@@ -189,6 +194,7 @@ impl Backend {
                                 }
                             })));
                         }
+                        sender.send(Event::SnapshotPeer(peer));
                         sender.send(Event::Snapshot(Ok(snapshot)));
                         sender.send(Event::Access(client.management_request("GET", "/v1/me", &Value::Null).await.map_err(|e| e.to_string()).and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))));
                         sender.send(Event::Instances(client.instances().await.map_err(|e| e.to_string())));
@@ -209,6 +215,7 @@ impl Backend {
             task.abort();
         }
         self.client = None;
+        self.desktop_id = None;
         // Ignore already queued responses from the previous connection.
         self.generation += 1;
     }

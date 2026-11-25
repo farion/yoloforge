@@ -12,9 +12,9 @@ bleiben kompatibel. Ab v0.1.1 sind die Komponenten getrennt:
 | Release-Asset | Inhalt |
 | --- | --- |
 | `yoloforge-server-vVERSION-linux-ARCH.tar.gz` | Server-Binary, Dockerfile für dieses Binary, Compose, Backup-Werkzeug, Betriebsdokumentation |
-| `yoloforge-gui-vVERSION-linux-ARCH.tar.gz` | Linux-GUI mit Server und Runner |
-| `yoloforge-gui-vVERSION-macos-aarch64.tar.gz` | macOS-App mit nativem Runner (Apple Silicon) |
-| `yoloforge-gui-vVERSION-windows-x86_64.zip` | Windows-GUI mit nativem Runner |
+| `yoloforge-gui-vVERSION-linux-ARCH.tar.gz` | Linux-GUI mit Server, Runner und OpenCode |
+| `yoloforge-gui-vVERSION-macos-aarch64.tar.gz` | macOS-App mit Server, Runner und OpenCode (Apple Silicon) |
+| `yoloforge-gui-vVERSION-windows-x86_64.zip` | Windows-GUI mit Server, Runner und OpenCode |
 | `yoloforge-runner-vVERSION-linux-ARCH.tar.gz` | Separater Linux-Runner und Dienstvorlagen |
 | `yoloforge-runner-vVERSION-macos-aarch64.tar.gz` | Separater macOS-Runner (Apple Silicon) |
 | `yoloforge-runner-vVERSION-windows-x86_64.zip` | Separater Windows-Runner |
@@ -138,6 +138,17 @@ verwendet bestehende SSH-Konfiguration und Agent, `StrictHostKeyChecking=yes`,
 export FACTORY_TOKEN_FILE=/privat/tui.token
 python3 scripts/factory-connect.py --host factory-server --local-port 17432 -- factory
 ```
+
+Für die Desktop-GUI am Hetzner-Server den Tunnel ausdrücklich als
+Internetverbindung markieren:
+
+```sh
+python3 scripts/factory-connect.py --host rs9tm --via-internet -- yoloforge-gui
+```
+
+Die Overview zeigt dann bei aktiver Verbindung eine Weltkugel. Für SSH im LAN
+`--via-internet` weglassen. Ohne Kennzeichnung sieht die GUI bei einem Tunnel
+nur den lokalen Endpunkt und kann den weiteren Weg nicht erkennen.
 
 Der Tunnel ist an den Clientprozess gebunden. Bei Tunnelende wird dieser beendet,
 bei Clientende der Tunnel. Entfernte Agenten und deren Workspace-Ownership bleiben

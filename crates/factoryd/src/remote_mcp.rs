@@ -18,7 +18,6 @@ use std::{
     fs,
     io::Write,
     net::{IpAddr, SocketAddr},
-    os::unix::fs::PermissionsExt,
     path::Path as FsPath,
     time::Duration,
 };
@@ -52,6 +51,7 @@ impl Gateway {
                     .filter(|p| !p.as_os_str().is_empty())
                     .unwrap_or(FsPath::new(".")),
             )?;
+            factory_platform::private_file(temp.path())?;
             temp.write_all(&key)?;
             temp.as_file().sync_all()?;
             match temp.persist_noclobber(path) {
@@ -59,18 +59,18 @@ impl Gateway {
                 Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e.error.into()),
             }
-            fs::File::open(
+            factory_platform::sync_dir(
                 path.parent()
                     .filter(|p| !p.as_os_str().is_empty())
                     .unwrap_or(FsPath::new(".")),
-            )?
-            .sync_all()?;
+            )?;
         }
         let meta = fs::symlink_metadata(path)?;
         anyhow::ensure!(
-            meta.is_file() && meta.permissions().mode() & 0o077 == 0 && meta.len() == 32,
+            meta.is_file() && meta.len() == 32,
             "Remote MCP vault key must be a private regular file of 32 bytes"
         );
+        factory_platform::ensure_private(path)?;
         let key = fs::read(path)?;
         let vault = aead::UnboundKey::new(&aead::AES_256_GCM, &key)
             .map_err(|_| anyhow::anyhow!("Invalid MCP vault key"))?;

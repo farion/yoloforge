@@ -21,7 +21,8 @@ def check_archive(archive):
         binaries = sorted(
             path for path in package.rglob("*")
             if path.is_file() and path.name in {
-                "factoryd", "factory-runner", "factory-runner.exe",
+                "factoryd", "factoryd.exe", "factory-runner", "factory-runner.exe",
+                "opencode", "opencode.exe",
                 "yoloforge-gui", "yoloforge-gui.exe",
             }
         )

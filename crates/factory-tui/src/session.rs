@@ -350,7 +350,7 @@ mod tests {
             id: q,
             command_id: third,
             session_id: "third".into(),
-            revision: Revision(1),
+            update_seq: Revision(1),
             external: ExternalQuestion {
                 external_id: "question".into(),
                 kind: QuestionKind::Form,

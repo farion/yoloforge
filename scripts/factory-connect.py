@@ -30,6 +30,8 @@ def main():
     parser.add_argument("--ssh-config", help="Optional explicit OpenSSH config file")
     parser.add_argument("--local-port", type=int, default=17432)
     parser.add_argument("--remote-port", type=int, default=7432)
+    parser.add_argument("--via-internet", action="store_true",
+                        help="Mark this SSH route as an internet connection in the Desktop overview")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@-]*", args.host):
@@ -62,7 +64,12 @@ def main():
                 if time.monotonic() >= deadline:
                     raise RuntimeError("SSH tunnel did not become ready")
                 time.sleep(0.1)
-            child = subprocess.Popen([command[0], "--server", f"http://127.0.0.1:{args.local_port}", *command[1:]])
+            endpoint = f"http://127.0.0.1:{args.local_port}"
+            env = os.environ.copy()
+            env.pop("YOLOFORGE_INTERNET_TUNNEL_ENDPOINT", None)
+            if args.via_internet:
+                env["YOLOFORGE_INTERNET_TUNNEL_ENDPOINT"] = endpoint
+            child = subprocess.Popen([command[0], "--server", endpoint, *command[1:]], env=env)
             while child.poll() is None:
                 if ssh.poll() is not None:
                     raise RuntimeError("SSH connection ended; Factory client stopped, remote work ownership unchanged")

@@ -44,7 +44,7 @@ Request mit identischem Inhalt wiederholen. API: `GET/PUT
 Projektprofilrevision; veraltete Änderungen werden abgewiesen. Server-Schema: **30**.
 
 - **Arbeit**: normale Aufgaben und Fortsetzungen.
-- **Orchestrierung**: Routing, automatische Rückfragenbeantwortung und Supervisor.
+- **Orchestrierung**: Routing, Auswertung von Berechtigungsanfragen und Supervisor. Formularfragen warten auf deine Antwort.
 - **Gedächtnis**: automatische Extraktion und Widerspruchskorrektur.
 
 Gezählt werden gemeldete **Input + Output** seit Projektbeginn, über alle Modelle

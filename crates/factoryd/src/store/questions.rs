@@ -1,8 +1,8 @@
 use super::*;
 
 pub(super) fn save(tx: &Transaction<'_>, question: &mut Question) -> Result<()> {
-    question.revision.0 = question
-        .revision
+    question.update_seq.0 = question
+        .update_seq
         .0
         .checked_add(1)
         .ok_or(StoreError::Internal)?;
@@ -95,7 +95,9 @@ impl Store {
             if let Some(value) = existing.iter_mut().find(|q| {
                 q.external.kind == external.kind && q.external.external_id == external.external_id
             }) {
-                if value.external != *external && value.state != QuestionState::Unknown {
+                if value.external != *external
+                    && !matches!(value.state, QuestionState::Answered | QuestionState::Unknown)
+                {
                     value.state = QuestionState::Unknown;
                     save(&tx, value)?;
                 }
@@ -105,7 +107,7 @@ impl Store {
                     id: QuestionId::new(),
                     command_id: id,
                     session_id: command.session_id(),
-                    revision: Revision(1),
+                    update_seq: Revision(1),
                     external: external.clone(),
                     state: QuestionState::Pending,
                     answer: None,
@@ -146,9 +148,6 @@ impl Store {
         body: &AnswerQuestion,
     ) -> Result<Question> {
         let mut value = load(tx, id)?;
-        if value.revision != body.expected_revision {
-            return Err(StoreError::RevisionConflict(value.revision));
-        }
         let data: String = tx.query_row(
             "SELECT data FROM commands WHERE id=?1",
             [value.command_id.to_string()],

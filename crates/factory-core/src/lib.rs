@@ -322,7 +322,9 @@ pub struct Question {
     pub id: QuestionId,
     pub command_id: CommandId,
     pub session_id: String,
-    pub revision: Revision,
+    /// Orders status updates and receipts. Never a precondition for answering.
+    #[serde(rename = "revision", default)]
+    pub update_seq: Revision,
     pub external: ExternalQuestion,
     pub state: QuestionState,
     pub answer: Option<serde_json::Value>,

@@ -528,7 +528,7 @@ Format-/Pattern-Prüfungen und die endgültige Validierung übernimmt OpenCode.
 Externe Link-Felder werden angezeigt und nicht automatisch geöffnet oder beantwortet.
 
 Während des HTTP-Aufrufs bleibt die Oberfläche bedienbar. Bei unklarer Antwort
-bleiben Payload, Revision und Request-ID unverändert; Bearbeitung ist bis zum
+bleiben Payload und Request-ID unverändert; Bearbeitung ist bis zum
 Abgleich gesperrt. Ein Snapshot mit derselben `answer_request` bestätigt die
 Speicherung auch bei verlorener HTTP-Antwort. Konflikte überschreiben keine
 fremden Antworten: Der Entwurf bleibt erhalten, `Ctrl-R` ist ein bewusster
@@ -541,9 +541,9 @@ Alternativ liefert und bearbeitet die CLI dieselben Fragen:
 ```sh
 "$CARGO_BIN_DIR/factory" question list
 "$CARGO_BIN_DIR/factory" question list --command <COMMAND-ID>
-"$CARGO_BIN_DIR/factory" question answer <FRAGE-ID> --expected-revision 1 \
+"$CARGO_BIN_DIR/factory" question answer <FRAGE-ID> \
   --answer-json '{"choice":"meine Antwort"}'
-"$CARGO_BIN_DIR/factory" question answer <PERMISSION-FRAGE-ID> --expected-revision 1 \
+"$CARGO_BIN_DIR/factory" question answer <PERMISSION-FRAGE-ID> \
   --decision once
 ```
 
@@ -552,7 +552,7 @@ Für Permissions sind `once`, `always` und `reject` erlaubt. `always` verwendet
 OpenCodes dauerhafte Freigabesemantik; Factory entscheidet dies nicht selbst.
 Wie andere Mutationen unterstützen Antworten `--request-id` für Wiederholungen.
 Ein konkurrierender Client kann eine bereits eingereihte Antwort nicht unbemerkt
-ersetzen; veraltete Revisionen ergeben HTTP 409.
+ersetzen; eine nicht mehr offene Frage ergibt HTTP 409.
 
 Fragenzustände:
 
@@ -561,7 +561,7 @@ Fragenzustände:
 | `pending` | Offene, beobachtete Frage; kann beantwortet werden |
 | `answer_queued` | Antwort dauerhaft gespeichert, noch nicht bestätigt |
 | `answered` | OpenCode hat die Antwort bestätigt oder der Formularzustand belegt exakt diese Antwort |
-| `rejected` | OpenCode hat die Eingabe mit HTTP 400 zurückgewiesen; korrigierte Antwort mit neuer Request-ID/Revision möglich |
+| `rejected` | OpenCode hat die Eingabe mit HTTP 400 zurückgewiesen; korrigierte Antwort auf dieselbe Frage mit neuer Request-ID möglich |
 | `unknown` | Frage verschwunden/verändert, Lauf unklar oder Zustellung nicht nachweisbar |
 
 Der Runner prüft vor der Zustellung erneut den exakten Frageinhalt und einen

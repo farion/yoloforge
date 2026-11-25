@@ -1,4 +1,17 @@
 {
+  "Gespeichertes Zugangstoken konnte nicht gelesen werden.": ["Gespeichertes Zugangstoken konnte nicht gelesen werden.", "Could not read the saved access token."],
+  "Verbindung zur Factory übers Internet": ["Verbindung zur Factory übers Internet", "Factory connection over the internet"],
+  "Intent anzeigen": ["Intent anzeigen", "View intent"],
+  "Intent {key} anzeigen": ["Intent {key} anzeigen", "View intent {key}"],
+  "Die Frage ist nicht mehr offen. Dein Entwurf bleibt erhalten.": ["Die Frage ist nicht mehr offen. Dein Entwurf bleibt erhalten.", "The question is no longer open. Your draft is preserved."],
+  "Antwort eingeben …": ["Antwort eingeben …", "Enter an answer …"],
+  "Frage {current} von {total}": ["Frage {current} von {total}", "Question {current} of {total}"],
+  "Weiter": ["Weiter", "Next"],
+  "Eigene Antwort": ["Eigene Antwort", "Own answer"],
+  "Option": ["Option", "Option"],
+  "Antwort abgeben": ["Antwort abgeben", "Submit answer"],
+  "Antwort nicht bestätigt. Bitte die Zustellung in der Diagnose prüfen.": ["Antwort nicht bestätigt. Bitte die Zustellung in der Diagnose prüfen.", "Answer not confirmed. Check delivery in Diagnostics."],
+  "Antwort konnte nicht abgegeben werden. Der Entwurf bleibt erhalten.": ["Antwort konnte nicht abgegeben werden. Der Entwurf bleibt erhalten.", "Could not submit the answer. Your draft is preserved."],
   "OpenCode inkompatibel": ["OpenCode inkompatibel", "OpenCode incompatible"],
   "Der Runner meldet die OpenCode-Version {version} als nicht unterstützt.": ["Der Runner meldet die OpenCode-Version {version} als nicht unterstützt.", "The runner reports OpenCode version {version} as unsupported."],
   "Bekannte Server-Funktionen und Anforderungen der offenen Aufträge werden vom Runner unterstützt. Gleiche Versionsnummern sind nicht erforderlich.": ["Bekannte Server-Funktionen und Anforderungen der offenen Aufträge werden vom Runner unterstützt. Gleiche Versionsnummern sind nicht erforderlich.", "The runner supports known server features and open-task requirements. Matching version numbers are not required."],
@@ -1086,10 +1099,6 @@
     "Abgelehnt",
     "Denied"
   ],
-  "Gespeicherter Antwortentwurf stammt aus einer älteren Fragenrevision. Bitte alle Werte prüfen.": [
-    "Gespeicherter Antwortentwurf stammt aus einer älteren Fragenrevision. Bitte alle Werte prüfen.",
-    "The saved answer draft is from an older question revision. Check all values."
-  ],
   "Serverzustand geändert: {:?}. Entwurf bleibt erhalten.": [
     "Serverzustand geändert: {:?}. Entwurf bleibt erhalten.",
     "Server state changed: {:?}. The draft is preserved."
@@ -1118,10 +1127,6 @@
     "Dieses Frageformat kann hier nicht beantwortet werden.",
     "This question format cannot be answered here."
   ],
-  "Aktuelle Frage übernehmen · Eingaben behalten und prüfen": [
-    "Aktuelle Frage übernehmen · Eingaben behalten und prüfen",
-    "Use current question · keep and review input"
-  ],
   "Alle vorbereiteten Antworten senden": [
     "Alle vorbereiteten Antworten senden",
     "Send all prepared answers"
@@ -1133,10 +1138,6 @@
   "Schließen · Antwortentwürfe behalten": [
     "Schließen · Antwortentwürfe behalten",
     "Close · keep answer drafts"
-  ],
-  "Frage wurde geändert oder beantwortet. Dialog neu öffnen; alte Eingaben nicht ungeprüft senden.": [
-    "Frage wurde geändert oder beantwortet. Dialog neu öffnen; alte Eingaben nicht ungeprüft senden.",
-    "Question changed or answered. Reopen the dialog; do not submit old input without reviewing it."
   ],
   "Bitte jede Berechtigung ausdrücklich entscheiden.": [
     "Bitte jede Berechtigung ausdrücklich entscheiden.",

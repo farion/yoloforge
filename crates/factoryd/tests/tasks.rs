@@ -474,17 +474,17 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
 }
 
 #[test]
-fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
+fn forms_wait_for_humans_and_permission_orchestration_remains_once_only() {
     for (human, reply, expected) in [
         (
             false,
-            r#"{"action":"answer","answer":{"color":"blue"},"reason":"Matches the task"}"#,
-            Some("blue"),
+            r#"{"action":"answer","answer":{"decision":"once"},"reason":"Matches the task"}"#,
+            Some("once"),
         ),
         (
             true,
-            r#"{"action":"answer","answer":{"color":"blue"},"reason":"Matches the task"}"#,
-            Some("red"),
+            r#"{"action":"answer","answer":{"decision":"once"},"reason":"Matches the task"}"#,
+            Some("reject"),
         ),
         (
             false,
@@ -493,10 +493,11 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
         ),
         (
             false,
-            r#"{"action":"answer","answer":{"color":"invalid"},"reason":"Unsupported choice"}"#,
+            r#"{"action":"answer","answer":{"decision":"always"},"reason":"Unsupported choice"}"#,
             None,
         ),
         (false, "interview", None),
+        (false, "ordinary form", None),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
@@ -542,9 +543,22 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
             },
         )
         .unwrap();
-        let question=s.sync_questions(runner,worker.id,QuestionSnapshot{ownership_epoch:1,questions:vec![ExternalQuestion{kind:QuestionKind::Form,external_id:"form_color".into(),payload:serde_json::json!({"id":"form_color","sessionID":worker.session_id(),"title":"Which color?","fields":[{"key":"color","type":"string","required":true,"options":[{"value":"blue","label":"Blue"},{"value":"red","label":"Red"}]}]})}]}).unwrap()[0].clone();
+        let form = matches!(reply, "interview" | "ordinary form");
+        let external = ExternalQuestion {
+            external_id: "request_test".into(),
+            kind: if form { QuestionKind::Form } else { QuestionKind::Permission },
+            payload: if form {
+                serde_json::json!({"id":"request_test","sessionID":worker.session_id(),"title":"Which color?","fields":[{"key":"color","type":"string","required":true}]})
+            } else {
+                serde_json::json!({"id":"request_test","sessionID":worker.session_id(),"action":"read","resources":["resource"]})
+            },
+        };
+        let question = s.sync_questions(runner, worker.id, QuestionSnapshot {
+            ownership_epoch: 1,
+            questions: vec![external.clone()],
+        }).unwrap()[0].clone();
         s.scheduler_tick().unwrap();
-        if reply == "interview" {
+        if form {
             drop(s);
             let s = Store::open(&path).unwrap();
             for _ in 0..3 {
@@ -553,13 +567,29 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
             let snapshot = s.snapshot().unwrap();
             assert_eq!(snapshot.questions[0].state, QuestionState::Pending);
             assert!(snapshot.questions[0].answer.is_none());
-            assert!(snapshot.questions[0]
-                .orchestration_note
-                .contains("explicit user interview"));
+            assert_eq!(snapshot.questions[0], question);
             assert!(!snapshot.commands.iter().any(|c| c
                 .agent_spec
                 .as_ref()
                 .is_some_and(|a| a.role == "orchestrator-question")));
+            let queued = s.answer_question(question.id, AnswerQuestion {
+                request_id: RequestId::new(),
+                legacy_revision: None,
+                answer: serde_json::json!({"color":"red"}),
+            }).unwrap();
+            let answered = s.answer_delivery(runner, question.id, AnswerDelivery {
+                request_id: RequestId::new(),
+                ownership_epoch: 1,
+                answer_request: queued.answer_request.unwrap(),
+                state: QuestionState::Answered,
+            }).unwrap();
+            let mut repeated_external = external;
+            repeated_external.payload["title"] = serde_json::json!("Changed text under the same ID");
+            let repeated = s.sync_questions(runner, worker.id, QuestionSnapshot {
+                ownership_epoch: 1,
+                questions: vec![repeated_external],
+            }).unwrap();
+            assert_eq!(repeated, vec![answered]);
             continue;
         }
         let prep = s
@@ -586,8 +616,8 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
                 question.id,
                 AnswerQuestion {
                     request_id: RequestId::new(),
-                    expected_revision: question.revision,
-                    answer: serde_json::json!({"color":"red"}),
+                    legacy_revision: None,
+                    answer: serde_json::json!({"decision":"reject"}),
                 },
             )
             .unwrap();
@@ -609,7 +639,7 @@ fn question_orchestrator_answers_once_survives_restart_and_yields_to_human() {
         s.scheduler_tick().unwrap();
         let q = s.snapshot().unwrap().questions[0].clone();
         assert_eq!(
-            q.answer.as_ref().and_then(|v| v["color"].as_str()),
+            q.answer.as_ref().and_then(|v| v["decision"].as_str()),
             expected
         );
         assert_eq!(
@@ -1116,11 +1146,13 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
 fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
     for answer in [
         r#"{"action":"wait","reason":"Need a related result"}"#,
+        r#"{"action":"discard","reason":"Repeated text without an intent"}"#,
         r#"{"action":"session","session_id":"00000000-0000-0000-0000-000000000000","reason":"invalid candidate"}"#,
         "not JSON",
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let s = Store::open(&dir.path().join("db")).unwrap();
+        let path = dir.path().join("db");
+        let s = Store::open(&path).unwrap();
         let p = s
             .create_project(CreateProject {
                 logo: None,
@@ -1153,6 +1185,20 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
         s.scheduler_tick().unwrap();
         let c = s.pending(runner).unwrap()[0].clone();
         decide(&s, &c, answer);
+        s.scheduler_tick().unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        // Simulate the old retry timer expiring, also for malformed replies
+        // after they have reached the bounded attempt limit.
+        let terminal = answer.contains("\"wait\"") || answer.contains("\"discard\"");
+        if !terminal {
+            let count: u32 = db.query_row("SELECT json_extract(data,'$.attempts') FROM task_routing WHERE ticket_id=?1",
+                [t.id.to_string()], |r| r.get(0)).unwrap();
+            assert_eq!(count, 1);
+        }
+        db.execute("UPDATE task_routing SET data=json_set(data,'$.after_ms',0,'$.attempts',?2) WHERE ticket_id=?1",
+            rusqlite::params![t.id.to_string(), if terminal { 1 } else { 3 }]).unwrap();
+        drop(s);
+        let s = Store::open(&path).unwrap();
         for _ in 0..5 {
             s.scheduler_tick().unwrap();
         }
@@ -1163,6 +1209,14 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
             .iter()
             .any(|stream| stream.ticket_ids.contains(&t.id)));
         assert!(!snap.tickets[0].routing_note.is_empty());
+        if answer.contains("\"discard\"") {
+            assert_eq!(snap.tickets[0].status, TicketState::Cancelled);
+            assert!(snap.tickets[0].routing_note.contains("Repeated text without an intent"));
+            assert_eq!(snap.tickets[0].prompt.as_deref(), Some("Follow up"));
+            assert!(s.task_history(t.id,None).unwrap().entries.iter().any(|e| e.message.contains("Intent verworfen")));
+        } else {
+            assert_eq!(snap.tickets[0].status, TicketState::Backlog);
+        }
     }
 }
 

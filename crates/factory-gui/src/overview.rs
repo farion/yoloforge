@@ -90,7 +90,8 @@ impl FlowState {
         self.deadlines.retain(|id, _| present.contains(id));
         self.positions.retain(|id, _| present.contains(id));
         for ticket in &s.tickets {
-            let success = task_bucket(s, ticket) == TaskBucket::Archive;
+            let success = ticket.status != TicketState::Cancelled
+                && task_bucket(s, ticket) == TaskBucket::Archive;
             let previous = self.previous.insert(ticket.id, success);
             if success && previous != Some(true) {
                 // Don't resurrect an old archive on startup. Newly observed
@@ -182,10 +183,7 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
             Stage::Routing
         }
     } else if success
-        || matches!(
-            ticket.status,
-            TicketState::Review | TicketState::Done | TicketState::Cancelled
-        )
+        || matches!(ticket.status, TicketState::Review | TicketState::Done)
     {
         Stage::Result
     } else if let Some(c) = command {
@@ -408,7 +406,7 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
     for ticket in s
         .tickets
         .iter()
-        .filter(|t| project.is_none_or(|p| p == t.project_id))
+        .filter(|t| t.status != TicketState::Cancelled && project.is_none_or(|p| p == t.project_id))
     {
         if s.projects
             .iter()
@@ -518,6 +516,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     (_filter.rect, _animation.rect, _right),
                 )
             });
+            if crate::connection_info::via_internet(app) {
+                let label = crate::connection_info::internet_tooltip();
+                let response = ui.label(egui::RichText::new(crate::connection_info::INTERNET_ICON)
+                    .size(20.0).color(BLUE)).on_hover_text(label);
+                response.widget_info(|| egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label, true, label));
+            }
         },
     );
     let Some(s) = app.snapshot.clone() else {
@@ -1236,6 +1241,17 @@ mod tests {
             state.position(id, egui::vec2(400.0, 20.0)),
             egui::vec2(400.0, 20.0)
         );
+    }
+
+    #[test]
+    fn cancelled_intents_disappear_from_the_flow_and_remain_in_the_archive() {
+        let mut s = (*crate::tests::fixture().snapshot.unwrap()).clone();
+        let state = FlowState::default();
+        assert!(lanes(&s, &state, None).iter().any(|lane| !lane.cards.is_empty()));
+        s.tickets[0].status = TicketState::Cancelled;
+        assert!(lanes(&s, &state, None).iter().all(|lane| lane.cards.is_empty()));
+        assert_eq!(task_bucket(&s, &s.tickets[0]), TaskBucket::Archive);
+        assert_eq!(crate::model::task_status(&s, &s.tickets[0]), crate::tr!("Abgebrochen"));
     }
 
     #[test]
