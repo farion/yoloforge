@@ -116,10 +116,13 @@ Mit Admin-Zugang wird die installierte `factory-runner`-Version neben der GUI
 gestartet; nach einem Paket-Update wird so der alte Hintergrundprozess ersetzt.
 ID, Zugang, Journal und Arbeitsdaten bleiben erhalten. Eingereihte Aufträge
 dürfen warten, laufende oder ungeklärte Aufträge blockieren den Neustart.
-Die Factory sperrt während des Wechsels neue Auftragsannahmen. Erfolg wird erst
-nach Anmeldung der neu gestarteten Instanz bestätigt. Ein gespeicherter
-Neustartauftrag kann nach einem GUI-Abbruch beim nächsten Verbinden fortgesetzt
-werden; die temporäre Annahmesperre läuft nach drei Minuten aus.
+Die Factory sperrt während des Wechsels neue Auftragsannahmen. Nach der
+Bestätigung im Dialog zeigt nur die betroffene Runner-Kachel statt ihrer Details
+eine animierte Ladeanzeige. Die Details kehren nach der Rückmeldung zurück, auch
+bei einem Fehler. Erfolg wird erst nach Anmeldung der neu gestarteten Instanz
+bestätigt. Ein gespeicherter Neustartauftrag kann nach einem GUI-Abbruch beim
+nächsten Verbinden fortgesetzt werden; die temporäre Annahmesperre läuft nach
+drei Minuten aus.
 
 Nur GUI-verwaltete lokale Runner haben einen runden X-Button auf der rechten
 oberen Kachelecke. Er öffnet eine Bestätigung; Entfernen stoppt den identifizierten
@@ -281,6 +284,9 @@ Der Zähler zeigt ungelesene Meldungen; der bisherige Meldungsbutton im Kopfbere
 Eingang, Verteilung, Ausführung und Ergebnis. Die Ausführung verzweigt nach den
 tatsächlich zugeordneten Runnern und Sessions. Standardmäßig werden alle Projekte
 angezeigt; ein Filter beschränkt die Ansicht auf das aktuell ausgewählte Projekt.
+Rechts im Menüeintrag zeigt ein Ladeindikator aktive Arbeit in der gesamten Factory,
+auch wenn eine andere Seite oder ein anderes Projekt ausgewählt ist. Bloßes Warten
+in der Queue oder auf eine Rückfrage sowie der Offline-Modus lösen ihn nicht aus.
 Aufgabenkarten heben sich mit blauer Fläche und einem blauen Seitenakzent von
 den neutralen Stationsköpfen ab. Sie tragen Phosphor-Icon, blaue Ticket-ID-Pill,
 Titel und farbig gefüllte Status-Pill. Das Projekt ergibt sich aus der Ticket-ID;
@@ -404,8 +410,11 @@ Funktion müssen Server und GUI aktualisiert werden; ältere Server liefern
 keine Ticketnummern.
 
 Die Aufgabenliste besteht aus flachen, rahmenlosen Zeilen mit dezenter Fläche
-und nur 2 pt Rundung. Sie zeigt die Prompt-Zusammenfassung in normaler Schrift,
-den Status rechts oben als Pill und darunter die Anzahl der Anhänge
+und nur 2 pt Rundung. Sobald für den Intent ein erfolgreiches Agenten-Ergebnis
+vorliegt, ersetzt dessen Vorschau den bisherigen Prompt-Titel in der Liste,
+der Overview und den Session-Bezügen. Der vollständige Ergebnistext ist im
+schreibgeschützten Intent-Dialog neben dem unveränderten Originalprompt verfügbar.
+Die Liste zeigt den Status rechts oben als Pill und darunter die Anzahl der Anhänge
 (Bilder und Dateien) sowie in einer eigenen Zeile das Erstellungsdatum.
 Entwürfe tragen die Pill **Draft**. Rechts unten erscheint **OpenCode anzeigen**,
 sobald eine Session nachgewiesen ist; andernfalls **Bearbeiten**, solange die

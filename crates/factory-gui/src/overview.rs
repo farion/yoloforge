@@ -949,10 +949,12 @@ fn draw_card(
         rect.width() - 56.0,
         None,
     );
+    let title = task_text(s, c.ticket);
+    let result_summary = s.task_result_summary(c.ticket);
     text(
         ui,
         at(12.0, 44.0),
-        &task_text(c.ticket),
+        &title,
         14.0,
         ui.visuals().text_color(),
         rect.width() - 24.0,
@@ -974,7 +976,7 @@ fn draw_card(
     let response = response.on_hover_ui(|ui| {
         ui.set_max_width(440.0);
         ui.strong(&reference);
-        ui.label(&c.ticket.title);
+        ui.label(result_summary.unwrap_or(&title));
         ui.colored_label(color, c.status(s));
         ui.label(project);
         if !c.ticket.routing_note.is_empty() {
@@ -987,7 +989,7 @@ fn draw_card(
             if let Some(progress) = &command.agent_progress {
                 if progress.phase == AgentPhase::Finalizing {
                     ui.label(crate::tr!("Ergebnis liegt vor. Der Session-Verlauf wird noch gespeichert."));
-                } else {
+                } else if result_summary.is_none() {
                     ui.label(&progress.summary);
                 }
             }
@@ -997,7 +999,7 @@ fn draw_card(
         egui::WidgetInfo::labeled(
             egui::WidgetType::Button,
             true,
-            format!("{} · {} · {}", reference, c.ticket.title, c.status(s)),
+            format!("{} · {} · {}", reference, title, c.status(s)),
         )
     });
     #[cfg(test)]

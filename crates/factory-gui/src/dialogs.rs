@@ -1012,6 +1012,15 @@ impl TaskDialog {
                 }
             });
         }
+        if let Some(result) = app.snapshot.as_ref().and_then(|snapshot| {
+            let id = self.draft.ticket?;
+            let ticket = snapshot.tickets.iter().find(|ticket| ticket.id == id)?;
+            snapshot.task_result_summary(ticket)
+        }) {
+            ui.strong(crate::tr!("Ergebnis"));
+            ui.add(egui::Label::new(result).wrap().selectable(true));
+            ui.add_space(8.0);
+        }
         design::task_prompt_read_only(ui, &self.draft.prompt, 3);
         self.show_history(ui, app);
     }
@@ -3086,7 +3095,7 @@ fn management_editor(ui: &mut egui::Ui, value: &mut Value, key: &str, app: &App,
                 s.tickets
                     .iter()
                     .filter(|t| Some(t.project_id) == app.settings.project && !t.draft)
-                    .map(|t| (json!(t.id), task_summary(t)))
+                    .map(|t| (json!(t.id), task_summary(s, t)))
                     .collect()
             };
             let mut values = value.as_array().cloned().unwrap_or_default();

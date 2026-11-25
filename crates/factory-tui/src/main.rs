@@ -76,6 +76,25 @@ fn task_command<'a>(s: &'a Snapshot, t: &Ticket) -> Option<&'a RunnerCommand> {
             .any(|stream| stream.id == c.stream_id && stream.ticket_ids.contains(&t.id))
     })
 }
+
+fn task_label(snapshot: &Snapshot, ticket: &Ticket) -> String {
+    let text = snapshot
+        .task_result_summary(ticket)
+        .or_else(|| ticket.prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()))
+        .unwrap_or(&ticket.title);
+    let mut lines = text.lines();
+    let mut chars = lines.next().unwrap_or("Bildaufgabe").chars();
+    let mut label: String = chars.by_ref().take(80).collect();
+    if (chars.next().is_some() || lines.next().is_some()) && !label.ends_with('…') {
+        label.push('…');
+    }
+    if ticket.key.is_empty() {
+        label
+    } else {
+        format!("{} {label}", ticket.key)
+    }
+}
+
 fn stream_label(state: StreamState) -> &'static str {
     match state {
         StreamState::Idle => "Bereit",
@@ -362,7 +381,7 @@ async fn run_tui(client: FactoryClient) -> Result<()> {
                     s.tickets.iter().filter(|t| t.project_id == p.id).count().to_string(), p.id.to_string()])).collect()).unwrap_or_default()
             } else if view == 2 {
                 last.as_ref().map(|s| s.tickets.iter().filter(|t| s.projects.get(selected_project).is_some_and(|p| p.id == t.project_id))
-                    .map(|t| {let (progress,detail)=task_progress(s,t);let text=t.prompt.as_deref().unwrap_or(&t.title).lines().next().unwrap_or("Bildaufgabe");let title=if t.key.is_empty(){text.to_string()}else{format!("{} {text}",t.key)};Row::new(vec![title, progress, t.images.len().to_string(),detail])}).collect()).unwrap_or_default()
+                    .map(|t| {let (progress,detail)=task_progress(s,t);Row::new(vec![task_label(s, t), progress, t.images.len().to_string(),detail])}).collect()).unwrap_or_default()
             } else if view == 3 {
                 last.as_ref().map(|s| s.streams.iter().filter(|t| s.projects.get(selected_project).is_some_and(|p| p.id == t.project_id))
                     .map(|t| Row::new(vec![t.goal.clone(),stream_label(t.status).into(),t.ticket_ids.len().to_string(),t.id.to_string()])).collect()).unwrap_or_default()

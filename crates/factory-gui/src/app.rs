@@ -42,6 +42,7 @@ pub struct App {
     pub session_prompts: BTreeMap<CommandId, Box<crate::dialogs::TaskDialog>>,
     pub local_runners: Vec<crate::local_runners::LocalRunner>,
     pub local_runners_busy: bool,
+    pub(crate) restarting_runner: Option<RunnerId>,
     pub action_errors: Vec<(u64, String)>,
     restore_local_runners: bool,
     pub factory_flow: crate::overview::FlowState,
@@ -153,6 +154,7 @@ impl App {
             local_runners: vec![],
             session_prompts: BTreeMap::new(),
             local_runners_busy: false,
+            restarting_runner: None,
             action_errors: vec![],
             restore_local_runners: true,
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
@@ -327,8 +329,10 @@ impl App {
     pub fn manage_local_runners(&mut self, action: crate::local_runners::Action) {
         if self.local_runners_busy || !self.online || !self.backend.is_connected() { return; }
         self.local_runners_busy = true;
-        if matches!(&action, crate::local_runners::Action::Restart(_)) {
+        if let crate::local_runners::Action::Restart(id) = &action {
+            self.restarting_runner = Some(*id);
             self.notice(crate::tr!("Lokaler Runner wird neu gestartet …"));
+            self.backend.context().request_repaint();
         }
         self.backend.local_runners(self.server.clone(), action);
     }
@@ -1546,6 +1550,7 @@ impl App {
                 Event::OpenNotification(id, target) => self.open_notification(id, target),
                 Event::LocalRunners(report) => {
                     self.local_runners_busy = false;
+                    self.restarting_runner = None;
                     if let Some(runners) = report.runners { self.local_runners = runners; }
                     match report.result {
                         Ok(Some(message)) => self.notice(message),

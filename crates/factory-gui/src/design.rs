@@ -774,6 +774,28 @@ pub fn navigation_row_with_icon(
 pub fn navigation_row_with_badges(
     ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool, counts: &[(usize, Color32)],
 ) -> egui::Response {
+    navigation_row_content(ui, icon, title, selected, counts, None)
+}
+
+pub fn navigation_row_with_activity(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    selected: bool,
+    activity: Option<&str>,
+) -> egui::Response {
+    navigation_row_content(ui, Some(icon), title, selected, &[], activity)
+        .on_hover_text(activity.unwrap_or(title))
+}
+
+fn navigation_row_content(
+    ui: &mut egui::Ui,
+    icon: Option<&str>,
+    title: &str,
+    selected: bool,
+    counts: &[(usize, Color32)],
+    activity: Option<&str>,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), LIST_ROW_HEIGHT),
         egui::Sense::click(),
@@ -783,7 +805,7 @@ pub fn navigation_row_with_badges(
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             selected,
-            title,
+            activity.map_or_else(|| title.to_owned(), |status| format!("{title} · {status}")),
         )
     });
     let hovered = ui.is_enabled() && ui.rect_contains_pointer(rect);
@@ -815,7 +837,11 @@ pub fn navigation_row_with_badges(
         let size = egui::vec2((text.size().x + 14.0).max(24.0), 22.0);
         (text, size, color)
     }).collect();
-    let badge_width = badges.iter().map(|(_, size, _)| size.x + 6.0).sum::<f32>();
+    let badge_width = if activity.is_some() {
+        30.0
+    } else {
+        badges.iter().map(|(_, size, _)| size.x + 6.0).sum::<f32>()
+    };
     let icon_width = if icon.is_some() { 28.0 } else { 0.0 };
     if let Some(icon) = icon {
         ui.painter().text(
@@ -834,6 +860,13 @@ pub fn navigation_row_with_badges(
     let text_pos = egui::pos2(rect.left() + 14.0 + icon_width, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(text_pos, galley, color);
     let mut right = rect.right() - 14.0;
+    if activity.is_some() {
+        let bounds = egui::Rect::from_center_size(
+            egui::pos2(right - 12.0, rect.center().y),
+            egui::vec2(20.0, 20.0),
+        );
+        egui::Spinner::new().color(crate::app::BLUE).paint_at(ui, bounds);
+    }
     for (text, size, color) in badges.into_iter().rev() {
         let center = egui::pos2(right - size.x / 2.0, rect.center().y);
         let pill = egui::Rect::from_center_size(center, size);
