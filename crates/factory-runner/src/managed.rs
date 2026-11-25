@@ -32,9 +32,22 @@ fn directory(root: &Path, spec: &WorkspaceSpec) -> Result<PathBuf> {
         Ok(project)
     }
 }
+fn repository_path(root: &Path, dir: &Path, spec: &WorkspaceSpec, command: CommandId) -> PathBuf {
+    if spec
+        .setup
+        .as_ref()
+        .is_some_and(|setup| setup.repository_source == CHECKPOINT_REPOSITORY)
+    {
+        root.join(".checkpoint-repositories")
+            .join(command.to_string())
+    } else {
+        dir.join(command.to_string())
+    }
+}
 pub fn resolve(spec: &WorkspaceSpec, root: &Path) -> Result<PathBuf> {
     let setup = spec.setup.as_ref().context("Setup missing")?;
-    let dir = directory(&fs::canonicalize(root)?, spec)?;
+    let root = fs::canonicalize(root)?;
+    let dir = directory(&root, spec)?;
     ensure!(
         fs::canonicalize(&dir)? == dir,
         "Managed repository directory replaced"
@@ -49,8 +62,12 @@ pub fn resolve(spec: &WorkspaceSpec, root: &Path) -> Result<PathBuf> {
         plan.ready && plan.source == setup.repository_source && plan.branch == spec.base_branch,
         "Managed repository binding differs"
     );
+    let checkpoint_parent = root.join(".checkpoint-repositories");
     ensure!(
-        plan.path.parent() == Some(dir.as_path()) && fs::canonicalize(&plan.path)? == plan.path,
+        (plan.path.parent() == Some(dir.as_path())
+            || (setup.repository_source == CHECKPOINT_REPOSITORY
+                && plan.path.parent() == Some(checkpoint_parent.as_path())))
+            && fs::canonicalize(&plan.path)? == plan.path,
         "Managed repository path replaced"
     );
     ensure!(
@@ -100,10 +117,11 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
         return Ok(());
     }
     let mut plan = if let Some(plan) = &r.repository {
+        let expected = repository_path(&root, &dir, &spec, r.command.id);
         ensure!(
             plan.source == setup.repository_source
                 && plan.branch == spec.base_branch
-                && plan.path == dir.join(r.command.id.to_string()),
+                && (plan.path == expected || plan.path == dir.join(r.command.id.to_string())),
             "Repository plan changed"
         );
         plan.clone()
@@ -111,7 +129,7 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
         let plan = Plan {
             source: setup.repository_source.clone(),
             branch: spec.base_branch.clone(),
-            path: dir.join(r.command.id.to_string()),
+            path: repository_path(&root, &dir, &spec, r.command.id),
             attempted: false,
             ready: false,
             create_local: Path::new(&setup.repository_source).is_absolute()
@@ -127,25 +145,13 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
             })?;
         }
         ensure!(!plan.attempted,"Repository creation outcome unconfirmed; retry preparation as a new command (previous attempt retained)");
-        #[cfg(windows)]
-        let checkpoint_staging = if plan.source == CHECKPOINT_REPOSITORY {
-            let parent = root.join(".repository-attempts");
-            fs::create_dir_all(&parent)?;
-            ensure!(
-                fs::canonicalize(&parent)? == parent,
-                "Managed repository attempt directory is a symlink"
-            );
-            Some((parent.clone(), parent.join(r.command.id.to_string())))
-        } else {
-            None
-        };
-        #[cfg(not(windows))]
-        let checkpoint_staging: Option<(PathBuf, PathBuf)> = None;
-        let destination = checkpoint_staging
-            .as_ref()
-            .map(|(_, path)| path)
-            .unwrap_or(&plan.path);
-        fs::create_dir(destination)
+        let repository_parent = plan.path.parent().context("Managed repository parent missing")?;
+        fs::create_dir_all(repository_parent)?;
+        ensure!(
+            fs::canonicalize(repository_parent)? == repository_parent,
+            "Managed repository parent is a symlink"
+        );
+        fs::create_dir(&plan.path)
             .context("Managed repository destination already occupied; nothing overwritten")?;
         plan.attempted = true;
         save(j, r, &plan)?;
@@ -156,18 +162,12 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                 64 => "--object-format=sha256",
                 _ => anyhow::bail!("Invalid checkpoint commit hash"),
             };
-            tokio::task::block_in_place(|| git(destination, &["init", "--bare", hash]))
+            tokio::task::block_in_place(|| git(&plan.path, &["init", "--bare", hash]))
                 .context("Cannot initialize checkpoint repository")?;
             tokio::task::block_in_place(|| {
-                crate::checkpoint::import_objects(destination, &root, import)
+                crate::checkpoint::import_objects(&plan.path, &root, import)
             })
             .context("Cannot import checkpoint repository objects")?;
-            if let Some((attempts, staging)) = &checkpoint_staging {
-                fs::rename(staging, &plan.path)
-                    .context("Cannot publish initialized checkpoint repository")?;
-                factory_platform::sync_dir(attempts)?;
-                factory_platform::sync_dir(&dir)?;
-            }
         } else if plan.source == "factory:managed" {
             tokio::task::block_in_place(|| -> Result<()> {
                 git(

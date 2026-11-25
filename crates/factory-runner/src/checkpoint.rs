@@ -502,8 +502,8 @@ mod tests {
             bundle_sha256: committed.bundle_sha256.clone(), bundle_bytes: committed.bundle_bytes,
         };
         let target = RunnerId::new();
-        // Exercise worktree metadata beyond the legacy Windows path limit,
-        // without relying on the length of the CI runner's temp directory.
+        // Exercise a deeply nested workspace root. Managed checkpoint
+        // repositories must keep Git metadata in their separate flat layout.
         let target_root = fs::canonicalize(dir.path()).unwrap()
             .join("target")
             .join("checkpoint-handoff".repeat(5));
