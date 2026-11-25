@@ -233,7 +233,7 @@ fn git_status(
     Ok((success, text.trim().to_string()))
 }
 
-fn common_dir(repository: &Path) -> Result<PathBuf> {
+pub(crate) fn common_dir(repository: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(git(
         repository,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],

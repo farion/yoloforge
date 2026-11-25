@@ -172,6 +172,7 @@ fn capture(
         .context("Workspace root missing")?;
     let work = workspace::existing(journal, &record.command, args.repositories.as_deref(), root)?;
     let path = Path::new(&work.path);
+    let common = workspace::common_dir(path)?;
     let mut plan = if let Some(plan) = &record.checkpoint {
         ensure!(
             plan.spec == *spec && plan.workspace == work,
@@ -301,8 +302,8 @@ fn capture(
         let temp = tempfile::tempdir_in(&plan.directory)?;
         let temp_bundle = temp.path().join("bundle");
         let git_bundle = git_path(&temp_bundle)?;
-        git(path, &["bundle", "create", &git_bundle, &reference])?;
-        git(path, &["bundle", "verify", &git_bundle])?;
+        git(&common, &["bundle", "create", &git_bundle, &reference])?;
+        git(&common, &["bundle", "verify", &git_bundle])?;
         let (sha, size) = digest(&temp_bundle)?;
         ensure!(
             size <= CHECKPOINT_BUNDLE_LIMIT as u64,
