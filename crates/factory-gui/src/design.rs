@@ -20,8 +20,11 @@ pub const FLOW_COLUMN_GAP: f32 = 48.0;
 pub const FLOW_VISIBLE_CARDS: usize = 3;
 pub const FLOW_SUCCESS_MS: u64 = 120_000;
 pub const FLOW_TRANSITION_MS: f32 = 650.0;
-// Task identity is always blue; stage headers remain neutral. Status colors
-// belong to the separate status pill, never to the ticket number.
+pub const FLOW_HEADER_FILL: Color32 = Color32::from_rgb(29, 34, 43);
+pub const FLOW_HEADER_BUSY_LOW: Color32 = Color32::from_rgb(25, 39, 58);
+pub const FLOW_HEADER_BUSY_HIGH: Color32 = Color32::from_rgb(32, 55, 83);
+// Task identity is always blue. Status colors belong to the separate status
+// pill, never to the ticket number.
 pub const FLOW_TASK_FILL: Color32 = Color32::from_rgb(32, 51, 75);
 pub const FLOW_TASK_ACCENT: Color32 = Color32::from_rgb(112, 179, 255);
 pub const FLOW_ID_FILL: Color32 = Color32::from_rgb(36, 77, 121);

@@ -74,10 +74,32 @@ impl App {
                                 .vertical(|ui| {
                                     ui.spacing_mut().item_spacing.y = 0.0;
                                     let color = if self.online { GREEN } else { AMBER };
-                                    let status = ui.colored_label(
-                                        color,
-                                        if self.online { crate::tr!("Verbunden") } else { "Offline" },
-                                    );
+                                    let status_text = if !self.online {
+                                        "Offline".into()
+                                    } else if let Some(snapshot) = &snapshot {
+                                        let version = snapshot.server_version.trim();
+                                        let version = if version.is_empty() {
+                                            crate::tr!("unbekannt").into()
+                                        } else if version.starts_with('v') {
+                                            version.into()
+                                        } else {
+                                            format!("v{version}")
+                                        };
+                                        let count = snapshot.runners.iter()
+                                            .filter(|runner| !self.runner_removed(runner.id)).count();
+                                        let runners = if count == 1 {
+                                            crate::tr!("1 Runner").into()
+                                        } else {
+                                            crate::tr!("{count} Runner", count = count)
+                                        };
+                                        crate::tr!("Verbunden - Serverversion {version} - {runners}",
+                                            version = version, runners = runners)
+                                    } else {
+                                        crate::tr!("Verbunden").into()
+                                    };
+                                    let status = ui.add(egui::Label::new(
+                                        RichText::new(&status_text).color(color),
+                                    ).truncate()).on_hover_text(status_text);
                                     let url = ui
                                         .add(
                                             egui::Label::new(
@@ -127,7 +149,7 @@ impl App {
                             self.dialog = Some(Dialog::FactorySettings);
                         }
                         let _version = ui.label(
-                            RichText::new(format!("YoloForge {}", env!("CARGO_PKG_VERSION")))
+                             RichText::new(concat!("YoloForge GUI ", env!("CARGO_PKG_VERSION")))
                                 .color(MUTED),
                         );
                         #[cfg(test)]

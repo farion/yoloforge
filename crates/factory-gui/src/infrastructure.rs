@@ -195,7 +195,11 @@ fn infrastructure(app: &App, now: u64) -> Graph {
         })
         .collect();
     Graph {
-        columns: vec![("Clients", clients), ("Server", vec![server])],
+        columns: vec![
+            (crate::tr!("Local"), clients),
+            (crate::tr!("Server"), vec![server]),
+            (crate::tr!("Remote"), vec![]),
+        ],
         edges,
         internet_client,
         internet_runners: Default::default(),
@@ -380,66 +384,58 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let mut infra = infrastructure(app, now);
-            let mut worker = workers(app, None, false, now);
             // Service health belongs to the runner; no separate service/project boxes.
-            worker.columns.truncate(1);
-            worker.edges.clear();
+            let mut runners = workers(app, None, false, now).columns.into_iter()
+                .next().map_or_else(Vec::new, |(_, nodes)| nodes);
             let removed: Vec<_> = app.local_runners.iter().filter(|r| app.runner_removed(r.id))
                 .map(|r| runner_key(r.id)).collect();
-            for (_, nodes) in &mut worker.columns {
-                nodes.retain(|node| !removed.contains(&node.id));
-            }
-            let managed: Vec<_> = app.local_runners.iter().filter(|r| r.visible(&app.server)).cloned().collect();
+            runners.retain(|node| !removed.contains(&node.id));
+            let managed: Vec<_> = app.local_runners.iter().filter(|r| r.visible(&app.server)).collect();
             // Persisted runners stay manageable even before first registration or after a failed start.
-            if let Some((_, nodes)) = worker.columns.first_mut() {
-                for runner in &managed {
-                    if !nodes.iter().any(|node| node.id == runner_key(runner.id)) {
-                         nodes.push(Node {
-                             version:version_text(None,None),
-                             compatibility:Some(Compatibility::unknown(crate::tr!("Noch kein Runner-Kontakt bestätigt."))),
-                            service: Some(crate::tr!("OpenCode: nicht bestätigt").into()),
-                            id: runner_key(runner.id), icon: crate::design::RUNNER_ICON,
-                            title: runner.name.clone(), address: Some(crate::tr!("IP unbekannt").into()),
-                            status: if runner.removing { crate::tr!("Entfernen ausstehend") } else { crate::tr!("Nicht bestätigt") }.into(),
-                            activity: crate::tr!("Lokal gespeichert").into(),
-                            detail: crate::tr!("Von dieser GUI verwalteter lokaler Runner. Noch kein aktueller Kontakt bestätigt.").into(),
-                            color: MUTED,
-                        });
-                    }
+            for runner in &managed {
+                let key = runner_key(runner.id);
+                if !runners.iter().any(|node| node.id == key) {
+                    runners.push(Node {
+                        version:version_text(None,None),
+                        compatibility:Some(Compatibility::unknown(crate::tr!("Noch kein Runner-Kontakt bestätigt."))),
+                        service: Some(crate::tr!("OpenCode: nicht bestätigt").into()),
+                        id: key, icon: crate::design::RUNNER_ICON,
+                        title: runner.name.clone(), address: Some(crate::tr!("IP unbekannt").into()),
+                        status: if runner.removing { crate::tr!("Entfernen ausstehend") } else { crate::tr!("Nicht bestätigt") }.into(),
+                        activity: crate::tr!("Lokal gespeichert").into(),
+                        detail: crate::tr!("Von dieser GUI verwalteter lokaler Runner. Noch kein aktueller Kontakt bestätigt.").into(),
+                        color: MUTED,
+                    });
                 }
             }
-            if let Some((_, runners)) = worker.columns.first_mut() {
-                let server_runners: std::collections::BTreeSet<_> = app.snapshot.iter()
+            let server_runners: std::collections::BTreeSet<_> = app.snapshot.iter()
+                .flat_map(|snapshot| &snapshot.runners)
+                .filter(|runner| runner.location == RunnerLocation::Server)
+                .map(|runner| runner_key(runner.id))
+                .collect();
+            // A registered runner can belong to this desktop even when the
+            // Factory is opened at a different URL than the runner uses.
+            // Only the exact configured URL can show unregistered runners or
+            // enable their management actions (see `managed` above).
+            let desktop_runners: std::collections::BTreeSet<_> = app.local_runners.iter()
+                .filter(|runner| !runner.removed)
+                .map(|runner| runner_key(runner.id))
+                .collect();
+            // Preserve the straight first lane for the server-hosted runner.
+            runners.sort_by_key(|runner| !server_runners.contains(&runner.id));
+            if crate::connection_info::via_internet(app) {
+                infra.internet_runners.extend(app.snapshot.iter()
                     .flat_map(|snapshot| &snapshot.runners)
-                    .filter(|runner| runner.location == RunnerLocation::Server)
-                    .map(|runner| runner_key(runner.id))
-                    .collect();
-                let desktop_runners: std::collections::BTreeSet<_> =
-                    managed.iter().map(|runner| runner_key(runner.id)).collect();
-                // The direct, server-hosted runner gets the straight first lane.
-                runners.sort_by_key(|runner| {
-                    if desktop_runners.contains(&runner.id) {
-                        2
-                    } else if server_runners.contains(&runner.id) {
-                        0
-                    } else {
-                        1
-                    }
-                });
-                if crate::connection_info::via_internet(app) {
-                    infra.internet_runners.extend(app.snapshot.iter()
-                        .flat_map(|snapshot| &snapshot.runners)
-                        .filter(|runner| runner_is_online(runner, now))
-                        .map(|runner| runner_key(runner.id))
-                        .filter(|key| desktop_runners.contains(key)));
-                }
-                for r in runners {
-                    infra.edges.push(("server".into(), r.id.clone(),
-                        r.compatibility.as_ref().map_or(r.color,Compatibility::color)));
-                }
+                    .filter(|runner| runner_is_online(runner, now))
+                    .filter(|runner| managed.iter().any(|local| local.id == runner.id))
+                    .map(|runner| runner_key(runner.id)));
             }
-            infra.columns.extend(worker.columns);
-            infra.edges.extend(worker.edges);
+            for runner in runners {
+                infra.edges.push(("server".into(), runner.id.clone(),
+                    runner.compatibility.as_ref().map_or(runner.color, Compatibility::color)));
+                let column = if desktop_runners.contains(&runner.id) { 0 } else { 2 };
+                infra.columns[column].1.push(runner);
+            }
             let removable = if !app.local_runners_busy {
                 managed.iter().map(|r| (runner_key(r.id), r.id)).collect()
             } else { vec![] };
@@ -459,6 +455,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
 #[derive(Clone, Copy)]
 enum RunnerNodeAction { Remove(RunnerId), Restart(RunnerId) }
+
+const ROW_HEIGHT: f32 = 212.0;
+const NODE_HEIGHT: f32 = 188.0;
 
 fn edge_route(a: Rect, b: Rect, server_on_left: bool, row: usize, rows: usize) -> [Pos2; 4] {
     let mut start = a.right_center();
@@ -481,6 +480,21 @@ fn edge_route(a: Rect, b: Rect, server_on_left: bool, row: usize, rows: usize) -
     [start, Pos2::new(elbow, start.y), Pos2::new(elbow, end.y), end]
 }
 
+fn local_runner_route(server: Rect, runner: Rect, row: usize, rows: usize) -> [Pos2; 6] {
+    let depth = row as f32 / rows.saturating_sub(1).max(1) as f32;
+    let end = runner.right_center();
+    let gap = server.left() - end.x;
+    // Use the lower right ports, inside the remote bends, then pass through
+    // the gap after the last client card before returning down the left lane.
+    let start = server.right_bottom() - Vec2::new(0.0, 10.0 + 10.0 * depth);
+    let right = start.x + gap * (0.15 + 0.2 * depth);
+    let left = end.x + gap * (0.4 + 0.2 * depth);
+    let turn_y = runner.top() - row as f32 * ROW_HEIGHT
+        - (ROW_HEIGHT - NODE_HEIGHT) * 0.5 + 6.0 * depth;
+    [start, Pos2::new(right, start.y), Pos2::new(right, turn_y),
+        Pos2::new(left, turn_y), Pos2::new(left, end.y), end]
+}
+
 fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)]) -> Option<RunnerNodeAction> {
     let mut remove = None;
     if graph.columns.iter().all(|(_, nodes)| nodes.is_empty()) {
@@ -499,7 +513,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
         .max()
         .unwrap_or(1)
         .max(1);
-    let height = 40.0 + rows as f32 * 212.0;
+    let height = 40.0 + rows as f32 * ROW_HEIGHT;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let col = width / n as f32;
     let node_width = (col - 40.0).min(280.0);
@@ -514,40 +528,50 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             MUTED,
         );
         for (row, node) in nodes.iter().enumerate() {
-            let center = Pos2::new(x, rect.top() + 42.0 + row as f32 * 212.0 + 94.0);
+            let center = Pos2::new(x, rect.top() + 42.0 + row as f32 * ROW_HEIGHT + NODE_HEIGHT * 0.5);
             placements.push((
                 node,
-                Rect::from_center_size(center, Vec2::new(node_width, 188.0)),
+                Rect::from_center_size(center, Vec2::new(node_width, NODE_HEIGHT)),
+                column,
+                row,
             ));
         }
     }
+    let client_rows = graph.edges.iter().filter(|(_, to, _)| to == "server").count();
     let mut internet_badges = Vec::new();
     for (from, to, color) in &graph.edges {
-        let a = placements.iter().find(|(node, _)| node.id == *from);
-        let b = placements.iter().find(|(node, _)| node.id == *to);
-        if let (Some((source, a)), Some((destination, b))) = (a, b) {
-            let server_on_left = from == "server";
-            let branches = if server_on_left {
-                graph.columns.get(2).map(|(_, nodes)| (nodes, to))
-            } else if to == "server" {
-                graph.columns.first().map(|(_, nodes)| (nodes, from))
+        let a = placements.iter().find(|(node, ..)| node.id == *from);
+        let b = placements.iter().find(|(node, ..)| node.id == *to);
+        if let (Some((source, a, _, source_row)), Some((destination, b, dest_col, dest_row))) = (a, b) {
+            let from_server = from == "server";
+            let (route, center) = if from_server && *dest_col == 0 {
+                let route = local_runner_route(*a, *b, *dest_row - client_rows,
+                    graph.columns[0].1.len() - client_rows);
+                (route.to_vec(), route[3].lerp(route[4], 0.5))
             } else {
-                None
+                let (row, rows) = if from_server {
+                    (*dest_row, graph.columns[*dest_col].1.len())
+                } else if to == "server" {
+                    (*source_row, client_rows)
+                } else {
+                    (0, 1)
+                };
+                let route = edge_route(*a, *b, from_server, row, rows);
+                (route.to_vec(), route[1].lerp(route[2], 0.5))
             };
-            let (row, rows) = branches.and_then(|(nodes, key)| nodes.iter()
-                .position(|node| &node.id == key).map(|row| (row, nodes.len())))
-                .unwrap_or((0, 1));
-            let route = edge_route(*a, *b, server_on_left, row, rows);
-            let [start, upper_elbow, lower_elbow, end] = route;
+            let target = if from_server { route[0] } else { route[route.len() - 1] };
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(egui::Id::new(("test-infrastructure-edge-target", from, to)), target);
+                d.insert_temp(egui::Id::new(("test-infrastructure-edge-route", from, to)), route.clone());
+            });
             ui.painter().add(egui::epaint::PathShape::line(
-                route.to_vec(),
+                route,
                 Stroke::new(2.0_f32, color.gamma_multiply(0.55)),
             ));
-            let target = if server_on_left { start } else { end };
             ui.painter().circle_filled(target, 5.0, *color);
-            let center = upper_elbow.lerp(lower_elbow, 0.5);
             let internet = (to == "server" && graph.internet_client.as_ref() == Some(from))
-                || (server_on_left && graph.internet_runners.contains(to));
+                || (from_server && graph.internet_runners.contains(to));
             if internet {
                 internet_badges.push((center, ui.id().with(("internet-link", from, to))));
                 #[cfg(test)]
@@ -555,7 +579,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                     egui::Id::new(("test-infrastructure-internet-edge", from, to)), center,
                 ));
             }
-            let compatibility = if from == "server" { destination.compatibility.as_ref() } else { source.compatibility.as_ref() };
+            let compatibility = if from_server { destination.compatibility.as_ref() } else { source.compatibility.as_ref() };
             if let Some(compatibility) = compatibility.filter(|_| !internet) {
                 ui.painter().circle_filled(center, 13.0, Color32::from_rgb(21, 25, 32));
                 ui.painter().text(center, egui::Align2::CENTER_CENTER, compatibility.icon(),
@@ -568,17 +592,12 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-infrastructure-compatibility-edge",from,to)),badge.rect));
             }
-            #[cfg(test)]
-            ui.ctx().data_mut(|d| {
-                d.insert_temp(egui::Id::new(("test-infrastructure-edge-target", from, to)), target);
-                d.insert_temp(egui::Id::new(("test-infrastructure-edge-route", from, to)), route);
-            });
         }
     }
     for (center, id) in internet_badges {
         crate::connection_info::internet_link_badge(ui, ui.painter(), center, id);
     }
-    for (node, rect) in placements {
+    for (node, rect, ..) in placements {
         let response = ui.interact(rect, ui.id().with((id, &node.id)), Sense::hover());
         let hovered = response.hovered();
         ui.painter().rect_filled(
@@ -819,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn server_runner_is_straight_and_desktop_runner_has_its_own_internet_route() {
+    fn runner_columns_and_ports_preserve_remote_and_local_routes() {
         let mut app = live_fixture();
         app.settings.page = crate::model::Page::Infrastructure;
         app.server = "https://factory.example".into();
@@ -830,35 +849,110 @@ mod tests {
         hosted.location = RunnerLocation::Server;
         hosted.connection = ConnectionState::Online;
         let hosted_key = runner_key(hosted.id);
+        let mut remote = hosted.clone();
+        remote.id = RunnerId::new();
+        remote.location = RunnerLocation::Local;
+        let remote_key = runner_key(remote.id);
         let desktop = &mut snapshot.runners[0];
         desktop.location = RunnerLocation::Local;
         desktop.connection = ConnectionState::Online;
         let desktop_key = runner_key(desktop.id);
         app.local_runners.push(crate::local_runners::fixture(desktop.id, &app.server));
+        let pending = RunnerId::new();
+        app.local_runners.push(crate::local_runners::fixture(pending, &app.server));
+        let pending_key = runner_key(pending);
+        snapshot.runners.push(remote);
         snapshot.runners.push(hosted);
+        let ctx = app.backend.context().clone();
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1360.0, 900.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let headings: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => match text.galley.job.text.as_str() {
+                heading @ ("Local" | "Server" | "Remote") => Some(heading),
+                _ => None,
+            },
+            _ => None,
+        }).collect();
+        assert_eq!(headings, ["Local", "Server", "Remote"]);
+        let route = |key: &String| ctx.data_mut(|d| d.get_temp::<Vec<Pos2>>(
+            egui::Id::new(("test-infrastructure-edge-route", "server", key)),
+        )).unwrap();
+        let card = |key: &str| ctx.data_mut(|d| d.get_temp::<Rect>(
+            egui::Id::new(("test-overview-node", "all", key)),
+        )).unwrap();
+        let server = card("server");
+        let local = card(&desktop_key);
+        assert_eq!(local.center().x, card("client:client-test").center().x);
+        assert_eq!(local.center().x, card(&pending_key).center().x);
+        assert!(local.right() < server.left());
+        assert!(server.right() < card(&remote_key).left());
+        assert_eq!(card(&remote_key).center().x, card(&hosted_key).center().x);
+        let direct = route(&hosted_key);
+        let remote = route(&remote_key);
+        let local_route = route(&desktop_key);
+        assert!(direct.iter().all(|point| point.y == direct[0].y));
+        assert_eq!(remote[0].x, server.right());
+        assert_eq!(remote[3], card(&remote_key).left_center());
+        assert_eq!(local_route[0].x, server.right());
+        assert!(local_route[0].y > remote[0].y);
+        assert!(local_route[1].x > server.right() && local_route[1].x < remote[1].x);
+        assert!(local_route[2].y > server.bottom());
+        assert!(local_route[4].x > local.right());
+        assert_eq!(local_route[5], local.right_center());
+        assert_eq!(route(&pending_key)[5], card(&pending_key).right_center());
+        let globe = |key: &String| ctx.data_mut(|d| d.get_temp::<Pos2>(
+            egui::Id::new(("test-infrastructure-internet-edge", "server", key)),
+        ));
+        assert_eq!(globe(&hosted_key), None);
+        assert_eq!(globe(&remote_key), None);
+        assert_eq!(globe(&desktop_key), Some(local_route[3].lerp(local_route[4], 0.5)));
+    }
+
+    #[test]
+    fn registered_local_runner_stays_left_when_factory_is_opened_at_another_url() {
+        let mut app = live_fixture();
+        app.settings.page = crate::model::Page::Infrastructure;
+        app.server = "https://factory.example".into();
+        let alternate_url = "http://192.168.1.20:7432";
+        let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        let local = snapshot.runners[0].id;
+        let mut remote = snapshot.runners[0].clone();
+        remote.id = RunnerId::new();
+        let remote_key = runner_key(remote.id);
+        snapshot.runners.push(remote);
+        let unregistered = RunnerId::new();
+        app.local_runners.push(crate::local_runners::fixture(local, alternate_url));
+        app.local_runners.push(crate::local_runners::fixture(unregistered, alternate_url));
         let ctx = app.backend.context().clone();
         let _ = ctx.run(egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1360.0, 900.0))),
             ..Default::default()
         }, |ctx| app.draw_shell(ctx));
-        let route = |key: &String| ctx.data_mut(|d| d.get_temp::<[Pos2; 4]>(
-            egui::Id::new(("test-infrastructure-edge-route", "server", key)),
-        )).unwrap();
-        let direct = route(&hosted_key);
-        let internet = route(&desktop_key);
-        assert!(direct.iter().all(|point| point.y == direct[0].y));
-        assert!(internet.iter().all(|point| point.y > direct[0].y));
-        let globe = |key: &String| ctx.data_mut(|d| d.get_temp::<Pos2>(
-            egui::Id::new(("test-infrastructure-internet-edge", "server", key)),
+        let card = |key: &str| ctx.data_mut(|d| d.get_temp::<Rect>(
+            egui::Id::new(("test-overview-node", "all", key)),
         ));
-        assert_eq!(globe(&hosted_key), None);
-        assert_eq!(globe(&desktop_key), Some(internet[1].lerp(internet[2], 0.5)));
+        let local_key = runner_key(local);
+        let local_card = card(&local_key).unwrap();
+        let server = card("server").unwrap();
+        assert!(local_card.right() < server.left());
+        assert!(card(&remote_key).unwrap().left() > server.right());
+        assert!(card(&runner_key(unregistered)).is_none());
+        let route = ctx.data_mut(|d| d.get_temp::<Vec<Pos2>>(
+            egui::Id::new(("test-infrastructure-edge-route", "server", &local_key)),
+        )).unwrap();
+        assert_eq!(route[0].x, server.right());
+        assert_eq!(route.last(), Some(&local_card.right_center()));
+        assert!(ctx.data_mut(|d| d.get_temp::<Rect>(
+            egui::Id::new(("test-local-runner-remove", local)),
+        )).is_none(), "Placement must not grant management on another URL");
     }
 
     #[test]
     fn lower_branches_never_cross_the_earlier_branches() {
         let card = |x, row| Rect::from_center_size(
-            Pos2::new(x, 136.0 + row as f32 * 212.0), Vec2::new(200.0, 188.0),
+            Pos2::new(x, 136.0 + row as f32 * ROW_HEIGHT), Vec2::new(200.0, NODE_HEIGHT),
         );
         for row in 1..5 {
             let a = edge_route(card(0.0, 0), card(240.0, row), true, row, 6);
@@ -867,6 +961,13 @@ mod tests {
             let a = edge_route(card(0.0, row), card(240.0, 0), false, row, 6);
             let b = edge_route(card(0.0, row + 1), card(240.0, 0), false, row + 1, 6);
             assert!(b[0].y > a[0].y && b[1].x > a[1].x && b[3].y > a[3].y);
+        }
+        for row in 0..5 {
+            let a = local_runner_route(card(240.0, 0), card(0.0, row + 2), row, 6);
+            let b = local_runner_route(card(240.0, 0), card(0.0, row + 3), row + 1, 6);
+            assert!(b[0].y < a[0].y && b[1].x > a[1].x && b[2].y > a[2].y);
+            assert!(b[3].x > a[3].x && b[4].y > a[4].y);
+            assert!(a[2].y > card(0.0, 1).bottom() && b[2].y < card(0.0, 2).top());
         }
     }
 
