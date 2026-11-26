@@ -358,6 +358,7 @@ impl Dialog {
                  ui.set_max_height(content_size.y);
                   if matches!(self, Self::ProjectSettings(settings) if settings.is_saving())
                       || matches!(self, Self::Task(task) if task.is_transferring(app))
+                      || matches!(self, Self::Questions(group) if group.is_transferring(app))
                   {
                      ui.disable();
                  }
@@ -429,13 +430,19 @@ impl Dialog {
                  }
                if let Self::RestartLocalRunner { id, name } = self {
                   let blocked = app.snapshot.as_ref().is_none_or(|s| crate::local_runners::restart_blocked(s, *id));
+                  let recovery_start = blocked && app.snapshot.as_ref()
+                      .is_some_and(|s| crate::local_runners::recovery_start_available(s, *id));
                   let admin = app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin);
                    let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body"))
                       .max_height((body_height - 72.0).max(24.0)).auto_shrink([false, true])
                       .show(ui, |ui| {
                           ui.label(crate::tr!("„{name}“ mit der installierten Runner-Version neben dieser GUI neu starten?", name = name));
                           ui.label(crate::tr!("Runner-Identität, Zugang, Journal und Arbeitsdaten bleiben erhalten. Eingereihte Aufträge werden danach fortgesetzt."));
-                          if blocked { ui.label(crate::tr!("Laufende oder ungeklärte Aufträge müssen zuerst abgeschlossen werden.")); }
+                          if recovery_start {
+                              ui.label(crate::tr!("Der Runner wird nur gestartet, wenn er lokal bereits beendet ist. Offene Aufträge bleiben zur Wiederaufnahme erhalten."));
+                          } else if blocked {
+                              ui.label(crate::tr!("Laufende oder ungeklärte Aufträge müssen zuerst abgeschlossen werden."));
+                          }
                           if !admin { ui.label(crate::tr!("Für den Runner-Neustart ist ein Admin-Zugang erforderlich.")); }
                        });
                    #[cfg(test)]
@@ -444,15 +451,16 @@ impl Dialog {
                   ui.separator();
                    let footer_bottom = ui.cursor().top() + design::SETTINGS_FOOTER_HEIGHT;
                    design::settings_footer(ui, footer_bottom, |ui| {
-                      let confirm = ui.add_enabled(!blocked && admin && app.online && !app.local_runners_busy,
-                          egui::Button::new(crate::tr!("Runner neu starten")));
+                      let confirm = ui.add_enabled((!blocked || recovery_start) && admin && app.online && !app.local_runners_busy,
+                          egui::Button::new(if recovery_start { crate::tr!("Runner starten") }
+                              else { crate::tr!("Runner neu starten") }));
                       #[cfg(test)]
                       ui.ctx().data_mut(|d| {
                           d.insert_temp(egui::Id::new("test-runner-restart-confirm"), confirm.rect);
                           d.insert_temp(egui::Id::new("test-runner-restart-confirm-enabled"), confirm.enabled());
                       });
                        if confirm.clicked() {
-                          app.manage_local_runners(crate::local_runners::Action::Restart(*id));
+                          app.manage_local_runners(crate::local_runners::Action::Restart { id: *id, recovery_start });
                           close = true;
                       }
                       if ui.button(crate::tr!("Abbrechen")).clicked() { close = true; }
@@ -618,7 +626,9 @@ impl Dialog {
             if !close {
                 close = settings.overlay(ctx, app);
             }
-        } else if matches!(self, Self::Task(task) if task.is_transferring(app)) {
+        } else if matches!(self, Self::Task(task) if task.is_transferring(app))
+            || matches!(self, Self::Questions(group) if group.is_transferring(app))
+        {
             design::dialog_loading_overlay(&response.response, frame.corner_radius);
         } else if header_close || response.should_close() {
             close = true;
@@ -1058,15 +1068,6 @@ impl TaskDialog {
                     });
                 }
             });
-        }
-        if let Some(result) = app.snapshot.as_ref().and_then(|snapshot| {
-            let id = self.draft.ticket?;
-            let ticket = snapshot.tickets.iter().find(|ticket| ticket.id == id)?;
-            snapshot.task_result_summary(ticket)
-        }) {
-            ui.strong(crate::tr!("Ergebnis"));
-            ui.add(egui::Label::new(result).wrap().selectable(true));
-            ui.add_space(8.0);
         }
         design::task_prompt_read_only(ui, &self.draft.prompt, 3);
         self.show_history(ui, app);
@@ -1690,6 +1691,12 @@ fn question_intent_link(ui: &mut egui::Ui, app: &mut App, id: TicketId, key: &st
 }
 
 impl QuestionDialog {
+    fn is_transferring(&self, app: &App) -> bool {
+        self.questions.iter().any(|entry| needs_answer(&entry.question)
+            && entry.request.or_else(|| entry.pending_request(app))
+                .is_some_and(|id| app.in_flight.contains(&id)))
+    }
+
     fn steps(&self) -> Vec<(usize, Option<usize>)> {
         let mut steps = Vec::new();
         for (index, entry) in self.questions.iter().enumerate() {

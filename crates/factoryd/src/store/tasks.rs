@@ -2,12 +2,65 @@ use super::*;
 use factory_protocol::models::{ModelSelection, SubmitTaskWithModel};
 
 fn delete_intent_in(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<()> {
+    require_no_publication_recovery(tx, ticket.project_id)?;
+    tombstone_intent(tx, ticket)
+}
+
+fn tombstone_intent(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<()> {
     let id = ticket.id.to_string();
     ticket.status = TicketState::Cancelled;
     ticket.routing_note = "Intent gelöscht".into();
     super::scheduler::save_ticket(tx, ticket)?;
     tx.execute("INSERT INTO deleted_intents(ticket_id) VALUES(?1)", [&id])?;
     event(tx, "task.deleted", id, ticket)
+}
+
+pub(super) fn deletion_stop_requested(tx: &Connection, command: CommandId) -> Result<bool> {
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE aggregate_id=?1 AND kind='task.delete_stop_requested')",
+        [command.to_string()], |row| row.get(0))?)
+}
+
+fn stop_deleted_intent(tx: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
+    let rows = {
+        let mut stmt = tx.prepare("SELECT c.data FROM commands c JOIN stream_tickets st ON st.stream_id=c.stream_id
+            WHERE st.ticket_id=?1 AND c.state IN ('pending','accepted')
+              AND (c.id=?2 OR ?2 IS NULL)
+              AND NOT EXISTS(SELECT 1 FROM stream_tickets linked JOIN tickets t ON t.id=linked.ticket_id
+                   WHERE linked.stream_id=c.stream_id AND t.id<>?1
+                     AND json_extract(t.data,'$.status') NOT IN ('done','cancelled')
+                     AND (json_extract(t.data,'$.execution_command')=c.id
+                          OR json_extract(t.data,'$.execution_command') IS NULL))")?;
+        let rows = stmt.query_map(params![ticket.id.to_string(), ticket.execution_command.map(|id| id.to_string())],
+            |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for raw in rows {
+        let mut command: RunnerCommand = serde_json::from_str(&raw)?;
+        let mut owner = super::work::stream(tx, command.stream_id)?;
+        if owner.runner_id != command.runner_id || owner.ownership_epoch != command.ownership_epoch {
+            continue; // Do not stop an execution whose identity no longer matches.
+        }
+        event(tx, "task.delete_stop_requested", command.id.to_string(), ticket)?;
+        super::questions::close(tx, command.id)?;
+        if command.state == CommandState::Pending {
+            command.state = CommandState::Failed;
+            super::work::save_command(tx, &command, "failed")?;
+            super::work::save_stream(tx, &mut owner, StreamState::Blocked)?;
+        } else if command.kind == CommandKind::RunAgent {
+            if !Store::terminate_deleted_runtime(tx, &command)? {
+                super::controls::hold_deleted_intent(tx, &mut owner, command.id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn require_no_publication_recovery(tx: &Connection, project: ProjectId) -> Result<()> {
+    let busy = tx.query_row("SELECT EXISTS(SELECT 1 FROM publication_recovery_holds
+        WHERE project_id=?1 AND expires_ms>?2)",
+        params![project.to_string(), super::super::unix_ms()], |row| row.get::<_, bool>(0))?;
+    if busy { return Err(StoreError::WorkConflict); }
+    Ok(())
 }
 
 pub(super) fn block_unpublished_intents(tx: &Transaction<'_>, owner: &Workstream, command: CommandId) -> Result<()> {
@@ -35,6 +88,49 @@ pub(super) fn set_publication_state(
     }
     Ok(())
 }
+
+fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId) -> Result<Option<(RunnerCommand, Workstream)>> {
+    let row: Option<(String, String, String)> = tx.query_row(
+        "SELECT c.data,s.data,p.data FROM commands c JOIN streams s ON s.id=c.stream_id
+         JOIN active_projects p ON p.id=s.project_id
+         WHERE c.id=?1 AND c.runner_id=?2 AND c.state='succeeded'
+           AND COALESCE(json_extract(p.data,'$.paused'),0)=0
+           AND c.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
+           AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=c.id
+                AND json_extract(a.data,'$.final_scan_complete')=1)
+           AND EXISTS(SELECT 1 FROM stream_tickets st JOIN tickets t ON t.id=st.ticket_id
+                WHERE st.stream_id=c.stream_id AND json_extract(t.data,'$.execution_command')=c.id
+                  AND json_extract(t.data,'$.status') IN ('in_progress','blocked')
+                  AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id))
+           AND NOT EXISTS(SELECT 1 FROM commands n JOIN streams w ON w.id=n.stream_id
+                WHERE w.project_id=s.project_id AND n.state IN ('pending','accepted'))",
+        params![id.to_string(), runner.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional()?;
+    let Some((command, owner, project)) = row else { return Ok(None); };
+    let command: RunnerCommand = serde_json::from_str(&command)?;
+    let owner: Workstream = serde_json::from_str(&owner)?;
+    let project: Project = serde_json::from_str(&project)?;
+    if command.kind != CommandKind::RunAgent || command.requires_target_git()
+        || owner.runner_id != runner || owner.ownership_epoch != command.ownership_epoch
+        || !matches!(owner.status, StreamState::Blocked | StreamState::Review)
+        || command.agent_spec.as_ref().is_none_or(|s| s.read_only || s.role == factory_protocol::directs::ROLE)
+        || command.workspace_spec.as_ref().is_none_or(|w| w.project_id != project.id
+            || w.base_branch != project.base_branch
+            || w.setup.as_ref().is_none_or(|setup| setup.runner_id != runner
+                || !setup.repository_path.is_empty()
+                || setup.repository_source != project.repository
+                || !super::work::absolute_runner_path(&setup.repository_source)))
+        || !matches!(&command.result, Some(CommandOutput::Agent { agent })
+            if agent.phase == AgentPhase::Succeeded
+                && publication_was_blocked(&agent.summary)
+                && !publication_was_confirmed(&agent.summary)
+                && !agent.summary.starts_with(PUBLICATION_CONFLICT_PREFIX))
+    {
+        return Ok(None);
+    }
+    Ok(Some((command, owner)))
+}
 pub(super) fn editable(db: &Connection, t: &Ticket) -> Result<bool> {
     if t.execution_command.is_some()
         || !matches!(t.status, TicketState::Backlog | TicketState::Ready)
@@ -52,6 +148,88 @@ pub(super) fn editable(db: &Connection, t: &Ticket) -> Result<bool> {
     )?)
 }
 impl Store {
+    pub fn delete_task(&self, id: TicketId, body: DeleteTask) -> Result<Ticket> {
+        let result = self.mutate(body.request_id, &format!("task.delete/{id}"), &body, |tx| {
+            let raw: Option<String> = tx.query_row("SELECT data FROM tickets WHERE id=?1",
+                [id.to_string()], |row| row.get(0)).optional()?;
+            let mut ticket: Ticket = serde_json::from_str(&raw.ok_or(StoreError::NotFound)?)?;
+            let already_deleted = tx.query_row("SELECT EXISTS(SELECT 1 FROM deleted_intents WHERE ticket_id=?1)",
+                [id.to_string()], |row| row.get::<_, bool>(0))?;
+            if !already_deleted {
+                tombstone_intent(tx, &mut ticket)?;
+                stop_deleted_intent(tx, &ticket)?;
+            }
+            Ok(ticket)
+        });
+        if result.is_ok() { self.wake_scheduler(); }
+        result
+    }
+
+    pub fn claim_publication_recovery(&self, runner: RunnerId, id: CommandId, grant: RequestId) -> Result<bool> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some((_, owner)) = recoverable_publication(&tx, runner, id)? else { return Ok(false); };
+        let now = super::super::unix_ms();
+        if tx.query_row("SELECT EXISTS(SELECT 1 FROM runner_restart_holds WHERE runner_id=?1 AND expires_ms>?2)",
+            params![runner.to_string(), now], |row| row.get::<_, bool>(0))? {
+            return Ok(false);
+        }
+        tx.execute("DELETE FROM publication_recovery_holds WHERE expires_ms<=?1", [now])?;
+        let acquired = tx.execute("INSERT OR IGNORE INTO publication_recovery_holds
+            (project_id,command_id,runner_id,grant_id,expires_ms) VALUES(?1,?2,?3,?4,?5)",
+            params![owner.project_id.to_string(), id.to_string(), runner.to_string(), grant.to_string(), now.saturating_add(120_000)])? == 1;
+        tx.commit()?;
+        Ok(acquired)
+    }
+
+    pub fn release_publication_recovery(&self, runner: RunnerId, id: CommandId, grant: RequestId) -> Result<()> {
+        let db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        db.execute("DELETE FROM publication_recovery_holds WHERE command_id=?1 AND runner_id=?2 AND grant_id=?3",
+            params![id.to_string(), runner.to_string(), grant.to_string()])?;
+        self.wake_scheduler();
+        Ok(())
+    }
+
+    pub fn report_recovered_publication(&self, runner: RunnerId, id: CommandId, body: ReportRecoveredPublication) -> Result<()> {
+        let oid = |value: &str| matches!(value.len(), 40 | 64)
+            && value.bytes().all(|b| b.is_ascii_hexdigit());
+        if !oid(&body.snapshot_commit) || !oid(&body.target_commit)
+            || body.snapshot_commit.len() != body.target_commit.len()
+        {
+            return Err(StoreError::Invalid("Invalid Git commit IDs"));
+        }
+        self.mutate(body.request_id, &format!("publication.recover/{runner}/{id}"), &body, |tx| {
+            let (mut command, mut owner) = recoverable_publication(tx, runner, id)?
+                .ok_or(StoreError::WorkConflict)?;
+            if command.ownership_epoch != body.ownership_epoch
+                || command.workspace_spec.as_ref().is_none_or(|s| s.base_branch != body.base_branch)
+                || tx.execute("DELETE FROM publication_recovery_holds
+                      WHERE command_id=?1 AND runner_id=?2 AND grant_id=?3 AND expires_ms>?4",
+                    params![id.to_string(), runner.to_string(), body.grant_id.to_string(), super::super::unix_ms()])? != 1
+            {
+                return Err(StoreError::WorkConflict);
+            }
+            let Some(CommandOutput::Agent { agent }) = &mut command.result else {
+                return Err(StoreError::WorkConflict);
+            };
+            let previous = agent.summary.lines().filter(|line|
+                !line.starts_with("Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:")
+            ).collect::<Vec<_>>().join("\n");
+            agent.summary = format!("{PUBLICATION_CONFIRMED_PREFIX}\nGit: {} @ {} (Snapshot {})\n\nVorheriger Bericht:\n{}",
+                body.base_branch, body.target_commit, body.snapshot_commit, previous);
+            let mut end = agent.summary.len().min(32768);
+            while !agent.summary.is_char_boundary(end) { end -= 1; }
+            agent.summary.truncate(end);
+            command.agent_progress = Some(agent.clone());
+            super::work::save_command(tx, &command, "succeeded")?;
+            set_publication_state(tx, &owner, id, TicketState::Done,
+                "Factory hat das gesicherte Ergebnis auf dem Zielbranch bestätigt.")?;
+            super::work::save_stream(tx, &mut owner, StreamState::Review)?;
+            event(tx, "publication.recovered", id.to_string(), &body)?;
+            Ok(())
+        })
+    }
+
     pub fn reconcile_publication(&self, id: TicketId, body: ReconcilePublication) -> Result<Ticket> {
         let oid = |value: &str| matches!(value.len(), 40 | 64)
             && value.bytes().all(|b| b.is_ascii_hexdigit());
@@ -67,6 +245,7 @@ impl Store {
                 [id.to_string()], |row| row.get(0),
             ).optional()?.ok_or(StoreError::NotFound)?;
             let mut ticket: Ticket = serde_json::from_str(&raw)?;
+            require_no_publication_recovery(tx, ticket.project_id)?;
             if ticket.revision != body.expected_revision {
                 return Err(StoreError::RevisionConflict(ticket.revision));
             }
@@ -225,6 +404,7 @@ impl Store {
         self.mutate(body.request_id,&format!("project.delete/{id}"),&body,|tx| {
             let raw:Option<String>=tx.query_row("SELECT data FROM active_projects WHERE id=?1",[id.to_string()],|row|row.get(0)).optional()?;
             let mut project:Project=serde_json::from_str(&raw.ok_or(StoreError::NotFound)?)?;
+            require_no_publication_recovery(tx, id)?;
             if project.revision!=body.expected_revision {return Err(StoreError::RevisionConflict(project.revision));}
             if body.confirm_name!=project.name {return Err(StoreError::Invalid("Zum Löschen den vollständigen Projektnamen bestätigen"));}
             let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.state IN ('pending','accepted'))",[id.to_string()],|row|row.get(0))?;
@@ -276,6 +456,7 @@ impl Store {
     }
     pub fn pause_project(&self, id: ProjectId, b: PauseProject) -> Result<Project> {
         self.mutate(b.request_id, &format!("project.pause/{id}"), &b, |tx| {
+            require_no_publication_recovery(tx, id)?;
             let data: Option<String> = tx
                 .query_row(
                     "SELECT data FROM active_projects WHERE id=?1",

@@ -796,6 +796,107 @@ fn final_archive(s: &Store, c: &RunnerCommand) {
 }
 
 #[test]
+fn deleting_an_intent_with_an_open_question_hides_it_and_persists_the_stop_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("db");
+    let s = Store::open(&db).unwrap();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Delete active".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let intent = s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: "Work".into(),
+        description: "Wait for input".into(), acceptance_criteria: String::new(), priority: 1,
+    }).unwrap();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let run = s.pending(runner).unwrap().pop().unwrap();
+    s.acknowledge(runner, run.id, AckCommand {
+        request_id: RequestId::new(), ownership_epoch: run.ownership_epoch,
+    }).unwrap();
+    let snapshot = || QuestionSnapshot { ownership_epoch: run.ownership_epoch, questions: vec![ExternalQuestion {
+        external_id: "request_form".into(), kind: QuestionKind::Form,
+        payload: serde_json::json!({"id":"request_form","sessionID":run.session_id(),"title":"Continue?",
+            "fields":[{"key":"answer","type":"string","required":true}]}),
+    }] };
+    let question = s.sync_questions(runner, run.id, snapshot()).unwrap().pop().unwrap();
+    let request = DeleteTask { request_id: RequestId::new() };
+    assert_eq!(s.delete_task(intent.id, request).unwrap().status, TicketState::Cancelled);
+    drop(s);
+    let s = Store::open(&db).unwrap();
+    assert_eq!(s.delete_task(intent.id, request).unwrap().status, TicketState::Cancelled);
+    assert!(s.task_payload(intent.id).is_err());
+    assert!(s.sync_questions(runner, run.id, snapshot()).unwrap().is_empty());
+    assert!(s.answer_question(question.id, AnswerQuestion {
+        request_id: RequestId::new(), legacy_revision: None, answer: serde_json::json!({"answer":"yes"}),
+    }).is_err());
+    let control = s.runner_control(runner, run.id, run.ownership_epoch).unwrap().unwrap();
+    assert_eq!(control.state, PauseState::Requested);
+    assert_eq!(control.command_id, Some(run.id));
+    assert_eq!(s.command_payload(run.id).unwrap().state, CommandState::Accepted,
+        "Deleting must not fabricate proof that the runner stopped");
+}
+
+#[test]
+fn saved_publication_requires_the_current_runner_grant_and_does_not_rerun_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(&dir.path().join("db")).unwrap();
+    let runner = RunnerId::new();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None,
+        request_id: RequestId::new(), name: "Saved result".into(),
+        repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let intent = s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: "Work".into(),
+        description: "Verify publication".into(), acceptance_criteria: String::new(), priority: 1,
+    }).unwrap();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let run = s.pending(runner).unwrap().pop().unwrap_or_else(|| {
+        panic!("Agent did not queue: {}", s.task_payload(intent.id).unwrap().routing_note)
+    });
+    agent_reply(&s, &run, &format!("{PUBLICATION_BLOCKED_PREFIX}\nBlocked checkout"));
+    // Model a completed local-checkout command without running a runner in this store test.
+    let db = rusqlite::Connection::open(dir.path().join("db")).unwrap();
+    db.execute("UPDATE projects SET data=json_set(data,'$.repository','/local/project') WHERE id=?1",
+        [project.id.to_string()]).unwrap();
+    db.execute("UPDATE commands SET data=json_set(data,'$.workspace_spec.setup.repository_source','/local/project') WHERE id=?1",
+        [run.id.to_string()]).unwrap();
+    let grant = RequestId::new();
+    assert!(!s.claim_publication_recovery(runner, run.id, grant).unwrap(), "Require a final archive");
+    final_archive(&s, &run);
+    assert!(!s.claim_publication_recovery(RunnerId::new(), run.id, grant).unwrap());
+    assert!(s.claim_publication_recovery(runner, run.id, grant).unwrap());
+    assert!(!s.claim_publication_recovery(runner, run.id, RequestId::new()).unwrap());
+    let blocked = s.task_payload(intent.id).unwrap();
+    assert!(s.delete_inactive_task(intent.id, DeleteInactiveTask {
+        request_id: RequestId::new(), expected_revision: blocked.revision, execution_command: Some(run.id),
+    }).is_err());
+    let proof = ReportRecoveredPublication {
+        request_id: RequestId::new(), grant_id: grant, ownership_epoch: run.ownership_epoch,
+        base_branch: "main".into(), snapshot_commit: "b".repeat(40), target_commit: "c".repeat(40),
+    };
+    let mut wrong = proof.clone();
+    wrong.base_branch = "other".into();
+    assert!(s.report_recovered_publication(runner, run.id, wrong).is_err());
+    s.report_recovered_publication(runner, run.id, proof.clone()).unwrap();
+    s.report_recovered_publication(runner, run.id, proof).unwrap();
+    let ticket = s.task_payload(intent.id).unwrap();
+    assert_eq!(ticket.status, TicketState::Done);
+    assert_eq!(ticket.execution_command, Some(run.id));
+    assert!(!s.claim_publication_recovery(runner, run.id, RequestId::new()).unwrap());
+    assert!(s.pending(runner).unwrap().is_empty());
+}
+
+#[test]
 fn inactive_delete_accepts_unstarted_and_publication_blocked_intents_but_not_active_work() {
     let dir = tempfile::tempdir().unwrap();
     let s = Store::open(&dir.path().join("db")).unwrap();

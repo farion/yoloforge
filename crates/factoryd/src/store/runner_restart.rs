@@ -27,8 +27,9 @@ impl Store {
              OR EXISTS(SELECT 1 FROM controls c JOIN streams s ON s.id=c.stream_id
                 WHERE json_extract(s.data,'$.runner_id')=?1 AND json_extract(c.data,'$.state')<>'released')
              OR EXISTS(SELECT 1 FROM runtime_terminations r JOIN commands c ON c.id=r.command_id
-                WHERE c.runner_id=?1 AND json_extract(r.data,'$.state')<>'stopped')",
-            [runner.to_string()], |r| r.get(0),
+                WHERE c.runner_id=?1 AND json_extract(r.data,'$.state')<>'stopped')
+              OR EXISTS(SELECT 1 FROM publication_recovery_holds WHERE runner_id=?1 AND expires_ms>?2)",
+            params![runner.to_string(), now], |r| r.get(0),
         )?;
         if blocked {
             return Err(StoreError::Invalid(

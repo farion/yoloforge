@@ -1207,6 +1207,37 @@ fn overview_navigation_gear_rotates_only_during_factory_activity() {
 }
 
 #[test]
+fn overview_navigation_warns_for_waiting_and_blocked_intents() {
+    let mut app = fixture();
+    let ctx = app.backend.context().clone();
+    let warning_color = |app: &mut App| {
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1360.0, 1000.0),
+            )),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let row: egui::Rect = ctx.data_mut(|d| d.get_temp(
+            egui::Id::new(("test-factory-navigation", Page::Overview)),
+        )).unwrap();
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text)
+                if text.galley.job.text == egui_phosphor::regular::WARNING
+                    && row.contains(text.pos) =>
+            {
+                Some(text.galley.job.sections[0].format.color)
+            }
+            _ => None,
+        })
+    };
+
+    assert_eq!(warning_color(&mut app), Some(crate::app::AMBER));
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).tickets[0].status = TicketState::Blocked;
+    assert_eq!(warning_color(&mut app), Some(crate::app::RED));
+}
+
+#[test]
 fn sidebar_renders_all_current_status_colors_for_every_project_page() {
     use crate::app::{AMBER, BLUE, GREEN, RED};
 
@@ -1595,6 +1626,13 @@ fn question_options_group_labels_with_descriptions_and_use_one_submit_button() {
     assert_eq!(app.settings.pending[0].body["answer"]["restart"], "Meine Variante\nZeile 2");
     assert!(app.settings.pending[0].body.get("expected_revision").is_none());
     let pending = app.settings.pending[0].clone();
+    let transfer = frame(&mut dialog, &mut app, click_events(submit.center()));
+    let overlay = transfer.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::Shape::Rect(rect) if rect.fill == egui::Color32::from_black_alpha(200) => Some(rect.rect),
+        _ => None,
+    }).expect("Answer sends with the same full-dialog overlay as an Intent");
+    assert!(overlay.contains_rect(first) && overlay.contains_rect(submit));
+    assert_eq!(app.settings.pending.len(), 1, "An in-flight answer cannot be sent twice");
     let mut closed = false;
     let mut render = |app: &mut App| {
         let _ = ctx.run(egui::RawInput::default(), |ctx| { closed = dialog.show(ctx, app); });
@@ -2858,15 +2896,21 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
 
 #[test]
 fn failed_intent_trash_is_left_of_view_and_opens_confirmation_without_sending() {
-    check_intent_trash(false);
+    check_intent_trash(CommandState::Failed);
 }
 
 #[test]
 fn blocked_publication_offers_delete_without_retry() {
-    check_intent_trash(true);
+    check_intent_trash(CommandState::Succeeded);
 }
 
-fn check_intent_trash(publication_blocked: bool) {
+#[test]
+fn waiting_input_offers_delete_without_an_answer() {
+    check_intent_trash(CommandState::Accepted);
+}
+
+fn check_intent_trash(state: CommandState) {
+    let publication_blocked = state == CommandState::Succeeded;
     let mut app = fixture();
     app.online = true;
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
@@ -2881,7 +2925,11 @@ fn check_intent_trash(publication_blocked: bool) {
         command.result = Some(CommandOutput::Agent { agent: agent.clone() });
         command.agent_progress = Some(agent);
     } else {
-        s.commands[0].state = CommandState::Failed;
+        s.commands[0].state = state;
+        if state == CommandState::Accepted {
+            s.server_capabilities.push(factory_protocol::DELETE_TASK_CAPABILITY.into());
+            s.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::WaitingInput;
+        }
     }
     s.tickets[0].status = TicketState::Blocked;
     s.tickets[0].execution_command = Some(s.commands[0].id);
@@ -3142,7 +3190,7 @@ fn prompt_summary_marks_truncated_prefixes_without_changing_original_content() {
 }
 
 #[test]
-fn intent_result_is_used_in_the_list_overview_and_dialog_without_replacing_the_prompt() {
+fn intent_result_stays_out_of_the_overview_and_intent_dialog() {
     let mut app = fixture();
     app.settings.page = Page::Tasks;
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
@@ -3187,11 +3235,17 @@ fn intent_result_is_used_in_the_list_overview_and_dialog_without_replacing_the_p
     app.query = "eindeutiges suchwort".into();
     assert!(draw(&mut app).iter().any(|text| text == "Ergebnis der Arbeit…"));
     app.settings.page = Page::Overview;
-    assert!(draw(&mut app).iter().any(|text| text == "Ergebnis der Arbeit…"));
+    let text = draw(&mut app);
+    assert!(text.iter().any(|text| text == "Originalauftrag…"));
+    assert!(!text.iter().any(|text| text.contains("Ergebnis der Arbeit")
+        || text.contains("Eindeutiges Suchwort")));
     app.view_task(id);
     let text = draw(&mut app);
-    assert!(text.iter().any(|text| text.contains("Eindeutiges Suchwort")));
     assert!(text.iter().any(|text| text.contains("Originalauftrag mit Details")));
+    assert!(!text.iter().any(|text| text == "Ergebnis"
+        || text.contains("Ergebnis der Arbeit")
+        || text.contains("Eindeutiges Suchwort")
+        || text.contains("[yoloforge:")));
 }
 
 #[test]

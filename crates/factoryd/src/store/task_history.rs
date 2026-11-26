@@ -17,7 +17,7 @@ impl Store {
                   AND r.rowid=(SELECT MIN(first.rowid) FROM scheduler_runs first WHERE first.prepare_id=r.prepare_id)
                 UNION SELECT agent_id FROM scheduler_runs WHERE ticket_id=?1 AND agent_id IS NOT NULL
                  UNION SELECT json_extract(data,'$.execution_command') FROM tickets WHERE id=?1
-                 UNION SELECT json_extract(payload,'$.previous_command') FROM events WHERE aggregate_id=?1 AND kind IN ('task.retried','task.session_recovered')
+                 UNION SELECT json_extract(payload,'$.previous_command') FROM events WHERE aggregate_id=?1 AND kind IN ('task.retried','task.session_recovered','task.merger_recovered')
                  UNION SELECT source_id FROM validations WHERE ticket_id=?1
              ), related(id) AS (
                 SELECT id FROM assigned_commands WHERE id IS NOT NULL
@@ -27,9 +27,9 @@ impl Store {
              SELECT sequence, kind, created_unix_ms, payload FROM events
              WHERE aggregate_id IN (SELECT id FROM related) AND sequence<?2
                AND kind IN ('ticket.created','ticket.updated','task.saved','task.edit_started',
-                    'task.routing','task.retried','task.session_recovered','scheduler.blocked','command.created','command.updated',
+                    'task.routing','task.retried','task.session_recovered','task.merger_recovered','scheduler.blocked','command.created','command.updated',
                     'question.created','question.updated','validation.rework_queued',
-                    'validation.failed','validation.uncertain','validation.limit')
+                    'validation.failed','validation.uncertain','validation.limit','publication.recovered')
              ORDER BY sequence DESC LIMIT 101",
         )?;
         let rows = statement.query_map(
@@ -66,6 +66,8 @@ fn summarize(kind: &str, data: &serde_json::Value) -> Option<(String, TaskHistor
         "task.saved" => line("Aufgabe eingereiht", Info),
         "task.retried" => line("Intent erneut eingereiht", Info),
         "task.session_recovered" => line("Factory setzt die gestoppte Session fort", Info),
+        "task.merger_recovered" => line("Factory reiht den Merger mit demselben Snapshot erneut ein", Info),
+        "publication.recovered" => line("Gesichertes Ergebnis auf dem Zielbranch bestätigt", Success),
         "task.edit_started" => line("Aufgabe zur Bearbeitung geöffnet", Info),
         "validation.rework_queued" => line("Reviewer hat Nacharbeit mit Vorrang eingereiht", Warning),
         "validation.failed" => line("Reviewer konnte kein gültiges Urteil abgeben", Error),

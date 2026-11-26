@@ -39,13 +39,31 @@ in den Projekt- und dann in den Factory-Einstellungen nachgeschlagen; ohne
 Rollenmodell gilt das Factory-Standardmodell. Laufende und abgeschlossene
 Versuche stehen unter **Merger** und **Archiv**.
 
-Der Merger soll die Auflösung testen und committen. Der Runner prüft, dass
-beide ursprünglichen Commits in der Historie liegen, und veröffentlicht nur
-gegen den unveränderten Zielstand. Ein schmutziger Zielordner löst keinen
-Merger aus. Schlägt die Auflösung oder Veröffentlichung fehl, bleibt der
-Intent offen; es startet keine automatische Wiederholung. Neue Intent-Arbeit
+Der Merger soll die Auflösung testen und committen. Lokale uncommittete
+Änderungen verhindern weder die Erkennung eines Konflikts zwischen Commits
+noch die Auflösung im separaten Worktree. Der Runner prüft, dass beide
+ursprünglichen Commits in der Historie liegen. Die automatische Übernahme
+gegen den unveränderten Zielcommit lässt unbeteiligte lokale Änderungen stehen.
+Wenn sich Dateien überschneiden, bleibt die fertige Auflösung erhalten und
+der Intent offen; die Factory überschreibt oder committet keine lokalen
+Änderungen. Ein schmutziger Zielordner allein löst keinen Merger aus.
+Meldet ein älterer Runner den bekannten Abbruch am schmutzigen Zielordner
+vor dem Merger-Start, reiht die Factory genau einen neuen Merger-Auftrag für
+denselben Snapshot ein. Der Auftrag wartet auf einen Runner mit der
+korrigierten Vorbereitung und führt den ursprünglichen Intent nicht erneut
+aus. Neue Intent-Arbeit
 nach einer Übernahme beginnt in einer neuen Session vom Zielbranch, nicht im
 alten Ausführungs-Worktree.
+
+Ein bereits vorbereiteter und archivierter Lauf kann seine Übernahme später
+automatisch abschließen. Die Factory reserviert dazu kurz das Projekt für den
+ursprünglichen Runner. Der Runner verwendet nur den bereits gesicherten
+Snapshot und den dazugehörigen, gepinnten Veröffentlichungscommit, nicht
+die aktuellen Dateien im Ausführungs-Worktree. Er wiederholt einen
+fehlgeschlagenen Versuch erst nach einer Änderung des Zielzustands und
+meldet die Übernahme nur, wenn der konfigurierte Zielbranch den Commit
+nachweislich enthält. Alte Läufe ohne diese Git-Nachweise werden nicht
+automatisch aus ihrem veränderlichen Arbeitsstand übernommen.
 
 Meldet OpenCode eine normale Intent-Session wiederholt als inaktiv, ohne
 Abschlussantwort und ohne ausstehende Eingaben, archiviert der Runner den

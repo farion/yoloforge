@@ -395,6 +395,14 @@ async fn commands(
                 return Ok(true);
             }
             let mut progress = agent::step(journal, &mut record, args, Some((client, registration))).await?;
+            // A stop can be requested while observing OpenCode. Process it
+            // before delivering answers or starting a new Git publication.
+            if termination::process(client, journal, &mut record, args, registration).await?
+                || client.runner_control(args.id, registration, record.command.id, record.command.ownership_epoch)
+                    .await?.is_some_and(|control| control.state != PauseState::Released)
+            {
+                return Ok(true);
+            }
             let allow_compaction = matches!(
                 progress.phase,
                 AgentPhase::Running | AgentPhase::WaitingInput
@@ -647,6 +655,17 @@ fn legacy_registration_capabilities(capabilities: &mut Vec<String>) {
     });
 }
 
+fn fit_registration_to_v018(capabilities: &mut Vec<String>) -> bool {
+    if capabilities.len() != 19 {
+        return false;
+    }
+    let Some(index) = capabilities.iter().position(|capability| capability == factory_protocol::directs::CAPABILITY) else {
+        return false;
+    };
+    capabilities.remove(index);
+    true
+}
+
 fn native_runner_boot(args: &Args) -> Option<NativeRunnerBoot> {
     #[cfg(target_os = "linux")]
     {
@@ -814,6 +833,8 @@ async fn run(mut args: Args) -> Result<()> {
     let mut waiting_for_registration = false;
     let mut next_command = 0;
     let mut next_cleanup = 0;
+    let mut next_publication_recovery = 0usize;
+    let mut next_publication_check = std::time::Instant::now();
     let mut next_heartbeat = std::time::Instant::now();
     let mut next_presence = std::time::Instant::now();
     let mut mcp_probe: Option<tokio::task::JoinHandle<()>> = None;
@@ -859,7 +880,19 @@ async fn run(mut args: Args) -> Result<()> {
                     opencode,
                 };
             input.capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
+            input.capabilities.push(MERGER_RECOVERY_CAPABILITY.into());
             let mut result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
+                input.capabilities.retain(|capability| capability != MERGER_RECOVERY_CAPABILITY);
+                result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            }
+            if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400)
+                && fit_registration_to_v018(&mut input.capabilities)
+            {
+                // 0.1.18 supports Merger and checkpoint handoff but caps the
+                // registration at 18 capabilities. Preserve both for recovery.
+                result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            }
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
                 // Older servers cap registration at 16 capability strings.
                 legacy_registration_capabilities(&mut input.capabilities);
@@ -905,6 +938,34 @@ async fn run(mut args: Args) -> Result<()> {
                     &mut next_cleanup,
                 )
                 .await;
+                if matches!(command_result, Ok(false)) && std::time::Instant::now() >= next_publication_check {
+                    next_publication_check = std::time::Instant::now() + Duration::from_secs(30);
+                    let position = next_publication_recovery;
+                    next_publication_recovery = next_publication_recovery.wrapping_add(1);
+                    let _ = tokio::time::timeout(Duration::from_secs(8), async {
+                        let Some(candidate) = tokio::task::block_in_place(|| publication::recovery_candidate(&journal, position))? else {
+                            return Ok::<_, anyhow::Error>(());
+                        };
+                        // Older factories lack this endpoint; absence is not a runner failure.
+                        let grant = RequestId::new();
+                        if !matches!(client.publication_recovery(args.id, current.registration_id, candidate, grant).await, Ok(true)) {
+                            return Ok(());
+                        }
+                        match tokio::task::block_in_place(|| publication::recover_prepared(&journal, candidate, grant)) {
+                            Ok(Some(proof)) => {
+                                client.report_recovered_publication(args.id, current.registration_id, candidate, &proof).await?;
+                                tokio::task::block_in_place(|| publication::acknowledge_recovery(&journal, candidate))?;
+                            }
+                            result => {
+                                client.release_publication_recovery(args.id, current.registration_id, candidate, grant).await?;
+                                result?;
+                            }
+                        }
+                        Ok(())
+                    }).await.map(|result| {
+                        if let Err(error) = result { eprintln!("Publication recovery deferred: {error}"); }
+                    });
+                }
                 registration = Some(current);
                 if let Err(error) = command_result {
                     match error.downcast_ref::<ClientError>() {
@@ -1034,6 +1095,17 @@ mod startup_identity_tests {
             assert!(!capabilities.iter().any(|cap| cap == factory_protocol::directs::CAPABILITY));
             assert!(!capabilities.iter().any(|cap| cap == AUTOMATIC_CHECKPOINT_CAPABILITY));
         }
+    }
+
+    #[test]
+    fn v018_registration_keeps_merger_and_checkpoint_handoff() {
+        let mut capabilities = registration_capabilities(true);
+        capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
+        assert!(fit_registration_to_v018(&mut capabilities));
+        assert_eq!(capabilities.len(), 18);
+        assert!(capabilities.iter().any(|c| c == MERGER_CAPABILITY));
+        assert!(capabilities.iter().any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY));
+        assert!(!fit_registration_to_v018(&mut capabilities));
     }
 
     #[test]

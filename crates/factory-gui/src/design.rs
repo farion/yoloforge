@@ -14,7 +14,7 @@ pub const HOVER_FILL: Color32 = Color32::from_rgb(54, 65, 81);
 pub const SELECTED_FILL: Color32 = Color32::from_rgb(30, 48, 69);
 /// Twice the main panel's RGB values: lighter, with the same blue-black hue.
 pub const SEPARATOR_COLOR: Color32 = Color32::from_rgb(44, 50, 62);
-pub const FLOW_CARD_SIZE: egui::Vec2 = egui::vec2(244.0, 106.0);
+pub const FLOW_CARD_SIZE: egui::Vec2 = egui::vec2(244.0, 124.0);
 pub const FLOW_MIN_CARD_WIDTH: f32 = 204.0;
 pub const FLOW_CARD_GAP: f32 = 14.0;
 pub const FLOW_COLUMN_GAP: f32 = 48.0;
@@ -843,7 +843,7 @@ pub fn navigation_row_with_icon(
 pub fn navigation_row_with_badges(
     ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool, counts: &[(usize, Color32)],
 ) -> egui::Response {
-    navigation_row_content(ui, icon, title, selected, counts, None)
+    navigation_row_content(ui, icon, title, selected, counts, None, None)
 }
 
 pub fn navigation_row_with_activity(
@@ -855,13 +855,35 @@ pub fn navigation_row_with_activity(
     } else {
         0.0
     };
-    navigation_row_content(ui, Some(icon), title, selected, &[], Some(angle))
+    navigation_row_content(ui, Some(icon), title, selected, &[], Some(angle), None)
         .on_hover_text(crate::tr!("Factory arbeitet"))
+}
+
+pub fn navigation_row_with_status_icon(
+    ui: &mut egui::Ui,
+    icon: &str,
+    title: &str,
+    selected: bool,
+    status_icon: &str,
+    status_color: Color32,
+    status_label: &str,
+) -> egui::Response {
+    navigation_row_content(
+        ui,
+        Some(icon),
+        title,
+        selected,
+        &[],
+        None,
+        Some((status_icon, status_color)),
+    )
+    .on_hover_text(status_label)
 }
 
 fn navigation_row_content(
     ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool,
     counts: &[(usize, Color32)], activity_angle: Option<f32>,
+    status_icon: Option<(&str, Color32)>,
 ) -> egui::Response {
     const BADGE_MIN_WIDTH: f32 = 24.0;
     let (rect, response) = ui.allocate_exact_size(
@@ -906,7 +928,7 @@ fn navigation_row_content(
         (text, size, color)
     }).collect();
     let badge_width = badges.iter().map(|(_, size, _)| size.x + 6.0).sum::<f32>()
-        + activity_angle.map_or(0.0, |_| BADGE_MIN_WIDTH + 6.0);
+        + activity_angle.or(status_icon.map(|_| 0.0)).map_or(0.0, |_| BADGE_MIN_WIDTH + 6.0);
     let icon_width = if icon.is_some() { 28.0 } else { 0.0 };
     if let Some(icon) = icon {
         ui.painter().text(
@@ -935,6 +957,14 @@ fn navigation_row_content(
     if let Some(angle) = activity_angle {
         paint_gear(ui, egui::pos2(right - BADGE_MIN_WIDTH / 2.0, rect.center().y),
             18.0, crate::app::GREEN, angle);
+    } else if let Some((icon, color)) = status_icon {
+        ui.painter().text(
+            egui::pos2(right - BADGE_MIN_WIDTH / 2.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            egui::FontId::proportional(20.0),
+            color,
+        );
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

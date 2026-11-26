@@ -96,6 +96,7 @@ pub fn router_with_shutdown(
         .route("/v1/events/{id}", get(desktop::event_payload))
         .route("/v1/tasks/{id}", get(desktop::task_payload).delete(desktop::delete_failed_task))
         .route("/v1/tasks/{id}/inactive", axum::routing::delete(desktop::delete_inactive_task))
+        .route("/v1/tasks/{id}/intent", axum::routing::delete(desktop::delete_task))
         .route("/v1/tasks/{id}/history", get(desktop::task_history))
         .route("/v1/tasks/{id}/models", get(model_routes::task))
         .route(
@@ -411,6 +412,12 @@ pub fn router_with_shutdown(
             "/v1/runners/{runner}/commands/{command}/result",
             post(command_result),
         )
+        .route(
+            "/v1/runners/{runner}/commands/{command}/publication-recovery",
+            axum::routing::put(work_routes::publication_recovery)
+                .post(work_routes::report_recovered_publication)
+                .delete(work_routes::release_publication_recovery),
+        )
         .route("/v1/events", get(events))
         .route("/v1/events/stream", get(event_stream))
         .route("/v1/runners/register", post(register))
@@ -628,7 +635,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 19
+        || body.capabilities.len() > 20
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(
@@ -813,7 +820,7 @@ async fn runner_snapshot(State(app): State<App>, Path(id): Path<RunnerId>) -> Re
             || p.runner_bindings.contains_key(&id) || p.setup.as_ref().is_some_and(|setup| setup.runner_id == id));
         Ok(serde_json::json!({
             "protocol_version": PROTOCOL_VERSION, "server_version": env!("CARGO_PKG_VERSION"),
-            "server_capabilities": [TARGET_GIT_CAPABILITY, RUNNER_RESTART_CAPABILITY, factory_protocol::directs::CAPABILITY, DELETE_FAILED_TASK_CAPABILITY, DELETE_INACTIVE_TASK_CAPABILITY],
+            "server_capabilities": [TARGET_GIT_CAPABILITY, RUNNER_RESTART_CAPABILITY, factory_protocol::directs::CAPABILITY, DELETE_FAILED_TASK_CAPABILITY, DELETE_INACTIVE_TASK_CAPABILITY, DELETE_TASK_CAPABILITY],
             "boot_id": boot, "revision": 0, "runners": [],
             "projects": snapshot.projects, "streams": snapshot.streams, "commands": snapshot.commands,
         }))
@@ -860,7 +867,7 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
     let registry = app.registry.read().await;
     Json(Snapshot {
         directs: durable.directs,
-        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into()],
+        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into(), DELETE_TASK_CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
         editable_tasks: durable.editable_tasks,

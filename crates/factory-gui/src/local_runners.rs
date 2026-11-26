@@ -49,7 +49,7 @@ pub enum Action {
     Add,
     Restore,
     Remove(RunnerId),
-    Restart(RunnerId),
+    Restart { id: RunnerId, recovery_start: bool },
 }
 pub struct Report {
     pub runners: Option<Vec<LocalRunner>>,
@@ -481,6 +481,27 @@ pub fn restart_blocked(snapshot: &Snapshot, id: RunnerId) -> bool {
             && snapshot.commands.iter().any(|c| c.id == r.command_id && c.runner_id == id))
 }
 
+pub fn recovery_start_available(snapshot: &Snapshot, id: RunnerId) -> bool {
+    snapshot.runners.iter().any(|runner| runner.id == id && runner.connection == ConnectionState::Unreachable)
+}
+
+fn runner_journal_available(root: &Path) -> Result<bool> {
+    if !root.join("runner.sqlite3").is_file() {
+        return Ok(false);
+    }
+    let lock = match fs::OpenOptions::new().read(true).write(true).open(root.join("runner.lock")) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if lock.try_lock().is_ok() {
+        lock.unlock()?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 async fn wait_for_journal_release(root: &Path) -> Result<()> {
     let path = root.join("runner.lock");
     for _ in 0..50 {
@@ -494,17 +515,24 @@ async fn wait_for_journal_release(root: &Path) -> Result<()> {
     bail!("{}", crate::tr!("Runner-Journal ist noch belegt; kein zweiter Runner gestartet"))
 }
 
-async fn restart(client: &FactoryClient, runner: &LocalRunner) -> Result<()> {
+async fn restart(client: &FactoryClient, runner: &LocalRunner, recovery_start: bool) -> Result<()> {
     ensure!(!runner.removing, crate::tr!("Dieser Runner wird gerade entfernt"));
-    let request = runner.restarting.context(crate::tr!("Neustartauftrag fehlt"))?;
     let root = runner.root()?;
     // Validate all local prerequisites before stopping an existing process.
     runner_executable()?;
     ensure!(root.join("runner.token").is_file(), crate::tr!("Gespeicherter Runner-Zugang fehlt"));
-    // This transaction fences new claims and rejects already accepted work.
-    // A snapshot alone would have a race with a runner accepting queued work.
-    client.hold_runner_restart(runner.id, request).await?;
-    stop(runner).await?;
+    if recovery_start {
+        client.runner_restart_status(runner.id).await?;
+        // With a stopped process there is nothing to interrupt. Never use
+        // this path to signal a process, even if the server calls it offline.
+        ensure!(find_process(runner, &root)?.is_none() && runner_journal_available(&root)?,
+            crate::tr!("Runner läuft lokal noch oder sein Journal ist nicht verfügbar. Kein Prozess wurde beendet."));
+    } else {
+        // Fence claims before stopping a process; a snapshot cannot do that.
+        let request = runner.restarting.context(crate::tr!("Neustartauftrag fehlt"))?;
+        client.hold_runner_restart(runner.id, request).await?;
+        stop(runner).await?;
+    }
     if root.join("runner.lock").exists() { wait_for_journal_release(&root).await?; }
     let instance = InstanceId::new();
     start_instance(runner, Some(instance))?;
@@ -516,10 +544,15 @@ async fn restart(client: &FactoryClient, runner: &LocalRunner) -> Result<()> {
         // The prior registration can remain online until its lease expires.
         // Only this exact newly spawned instance confirms a successful restart.
         if restart_confirmed(&status, instance) {
-            client.release_runner_restart(runner.id, request).await?;
+            if let Some(request) = runner.restarting {
+                client.release_runner_restart(runner.id, request).await?;
+            }
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    if recovery_start {
+        bail!("{}", crate::tr!("Runner-Start noch nicht bestätigt."));
     }
     bail!("{}", crate::tr!("Runner-Neustart noch nicht bestätigt. Neustartauftrag bleibt gespeichert."))
 }
@@ -585,7 +618,7 @@ async fn remove(
 }
 
 pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Report {
-    let starts_runner = matches!(&action, Action::Add | Action::Restore | Action::Restart(_));
+    let starts_runner = matches!(&action, Action::Add | Action::Restore | Action::Restart { .. });
     let result = async {
         let dir = config_dir()?;
         let _lock = lock(&dir)?;
@@ -628,14 +661,14 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
                         .into(),
                 )
             }
-            Action::Restart(id) => {
+            Action::Restart { id, recovery_start } => {
                 let index = runners.iter().position(|r| r.id == id && r.visible(server))
                     .context(crate::tr!("Dieser Runner wird nicht von der GUI verwaltet"))?;
-                if runners[index].restarting.is_none() {
+                if !recovery_start && runners[index].restarting.is_none() {
                     runners[index].restarting = Some(RequestId::new());
                     atomic_json(&catalog, &runners)?;
                 }
-                restart(client, &runners[index]).await?;
+                restart(client, &runners[index], recovery_start).await?;
                 runners[index].restarting = None;
                 atomic_json(&catalog, &runners)?;
                 Some(crate::tr!("Lokaler Runner neu gestartet und bestätigt.").into())
@@ -650,7 +683,7 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
                         if runners[index].removing {
                             remove(client, &mut runners, index, &catalog).await
                         } else if runners[index].restarting.is_some() {
-                            restart(client, &runners[index]).await?;
+                            restart(client, &runners[index], false).await?;
                             runners[index].restarting = None;
                             atomic_json(&catalog, &runners)
                         } else {
@@ -734,7 +767,7 @@ pub async fn ensure_builtin(client: &FactoryClient, server: &str, root: &Path) -
         crate::tr!("Entfernen des lokalen Runners zuerst abschließen")
     );
     if runners[index].restarting.is_some() {
-        restart(client, &runners[index]).await?;
+        restart(client, &runners[index], false).await?;
         runners[index].restarting = None;
         atomic_json(&dir.join("local-runners.json"), &runners)?;
         return Ok(());
@@ -763,6 +796,21 @@ pub(crate) fn fixture(id: RunnerId, server: &str) -> LocalRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_start_requires_an_existing_unlocked_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!runner_journal_available(dir.path()).unwrap());
+        let lock = fs::OpenOptions::new().read(true).write(true).create_new(true)
+            .open(dir.path().join("runner.lock")).unwrap();
+        assert!(!runner_journal_available(dir.path()).unwrap());
+        fs::File::create(dir.path().join("runner.sqlite3")).unwrap();
+        assert!(runner_journal_available(dir.path()).unwrap());
+        lock.try_lock().unwrap();
+        assert!(!runner_journal_available(dir.path()).unwrap());
+        lock.unlock().unwrap();
+        assert!(runner_journal_available(dir.path()).unwrap());
+    }
 
     #[test]
     fn restart_keeps_identity_and_journal_and_requires_the_new_instance() {

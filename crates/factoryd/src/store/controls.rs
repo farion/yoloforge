@@ -14,6 +14,18 @@ fn save(tx: &Transaction<'_>, control: &StreamControl) -> Result<()> {
     tx.execute("INSERT INTO controls(stream_id,data) VALUES(?1,?2) ON CONFLICT(stream_id) DO UPDATE SET data=excluded.data",params![control.stream_id.to_string(),serde_json::to_string(control)?])?;
     event(tx, "stream.control", control.stream_id.to_string(), control)
 }
+
+pub(super) fn hold_deleted_intent(tx: &Transaction<'_>, owner: &mut Workstream, command: CommandId) -> Result<()> {
+    if load(tx, owner.id)?.is_some_and(|c| c.state != PauseState::Released && c.command_id == Some(command)) {
+        return Ok(());
+    }
+    save(tx, &StreamControl {
+        retry: None, action: ControlAction::Pause, proof: None, stream_id: owner.id,
+        request_id: RequestId::new(), command_id: Some(command), state: PauseState::Requested,
+        summary: "Intent deleted; stop requested".into(), previous_status: owner.status,
+    })?;
+    super::work::save_stream(tx, owner, StreamState::Pausing)
+}
 pub(super) fn termination(tx: &Transaction<'_>, id: StreamId, stopped: bool) -> Result<()> {
     if let Some(mut c) = load(tx, id)? {
         c.state = if stopped {
@@ -219,6 +231,28 @@ impl Store {
             return Err(StoreError::WorkConflict);
         }
         line(&body.summary, 240)?;
+        if body.state == PauseState::HeldBeforeExecution
+            && super::tasks::deletion_stop_requested(&tx, id)?
+        {
+            // The owning runner confirmed it never submitted the prompt. Do
+            // not leave a cancelled accepted command reserving this stream.
+            let mut command = command;
+            let progress = AgentProgress {
+                session_id: command.session_id(), message_id: agent_message_id(id),
+                phase: AgentPhase::Failed, summary: "Intent deleted before prompt submission".into(),
+            };
+            command.state = CommandState::Failed;
+            command.agent_progress = Some(progress.clone());
+            command.result = Some(CommandOutput::Agent { agent: progress });
+            super::work::save_command(&tx, &command, "failed")?;
+            control.state = PauseState::Released;
+            control.summary = body.summary;
+            save(&tx, &control)?;
+            let mut owner = super::work::stream(&tx, command.stream_id)?;
+            super::work::save_stream(&tx, &mut owner, StreamState::Blocked)?;
+            tx.commit()?;
+            return Ok(control);
+        }
         if control.state != body.state
             || control.summary != body.summary
             || body

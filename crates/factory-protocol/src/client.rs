@@ -1337,6 +1337,28 @@ impl FactoryClient {
         )
         .await
     }
+    pub async fn publication_recovery(
+        &self, runner: RunnerId, registration: RegistrationId, id: CommandId, grant_id: RequestId,
+    ) -> Result<bool, ClientError> {
+        Self::decode(self.http.put(format!("{}/v1/runners/{runner}/commands/{id}/publication-recovery", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).json(&PublicationRecoveryClaim { grant_id }).send().await).await
+    }
+
+    pub async fn release_publication_recovery(
+        &self, runner: RunnerId, registration: RegistrationId, id: CommandId, grant_id: RequestId,
+    ) -> Result<(), ClientError> {
+        Self::decode(self.http.delete(format!("{}/v1/runners/{runner}/commands/{id}/publication-recovery", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).json(&PublicationRecoveryClaim { grant_id }).send().await).await
+    }
+
+    pub async fn report_recovered_publication(
+        &self, runner: RunnerId, registration: RegistrationId, id: CommandId,
+        body: &ReportRecoveredPublication,
+    ) -> Result<(), ClientError> {
+        Self::decode(self.http.post(format!("{}/v1/runners/{runner}/commands/{id}/publication-recovery", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).json(body).send().await).await
+    }
+
     pub fn from_env(url: &str) -> Result<Self> {
         let token = match (env::var("FACTORY_TOKEN"), env::var_os("FACTORY_TOKEN_FILE")) {
             (Ok(_), Some(_)) => anyhow::bail!("Set only FACTORY_TOKEN or FACTORY_TOKEN_FILE"),

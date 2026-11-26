@@ -421,6 +421,13 @@ pub fn session_stopped_without_result(result: &Option<CommandOutput>) -> bool {
 pub const MERGER_ROLE: &str = "merger";
 pub const MERGER_CAPABILITY: &str = "merger-v1";
 pub const MERGE_PARENT_PREFIX: &str = "factory_merge_parent=";
+pub const MERGER_RECOVERY_CAPABILITY: &str = "merger-recovery-v1";
+pub const MERGER_RECOVERY_PROMPT_MARKER: &str = "factory_merge_recovery=workspace-preflight";
+
+pub fn is_merger_recovery(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE
+        && spec.prompt.lines().nth(1) == Some(MERGER_RECOVERY_PROMPT_MARKER))
+}
 
 /// Legacy runners appended the publication error to an otherwise successful
 /// agent result. It still means the Intent did not land on its target branch.

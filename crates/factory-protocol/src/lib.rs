@@ -1,6 +1,31 @@
 //! Factory v1 wire contract, separate from the OpenCode API contract.
 use factory_core::*;
 pub mod directs;
+
+pub const DELETE_TASK_CAPABILITY: &str = "delete-intent-v2";
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteTask {
+    pub request_id: RequestId,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicationRecoveryClaim {
+    pub grant_id: RequestId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportRecoveredPublication {
+    pub request_id: RequestId,
+    pub grant_id: RequestId,
+    pub ownership_epoch: u64,
+    pub base_branch: String,
+    pub snapshot_commit: String,
+    pub target_commit: String,
+}
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;

@@ -325,6 +325,10 @@ pub fn task_text(snapshot: &Snapshot, ticket: &Ticket) -> String {
     if let Some(summary) = snapshot.task_result_summary(ticket) {
         return crate::design::elide_first_line(summary, 80);
     }
+    task_intent_text(ticket)
+}
+
+pub fn task_intent_text(ticket: &Ticket) -> String {
     let source = ticket.prompt.as_deref().unwrap_or(&ticket.description);
     if ticket.title.trim().is_empty() {
         return crate::design::elide_first_line(source, 80);
@@ -579,6 +583,28 @@ pub fn is_merger(command: &RunnerCommand) -> bool {
     command.agent_spec.as_ref().is_some_and(|a| a.role == MERGER_ROLE)
 }
 
+pub(crate) fn merger_pending_status(s: &Snapshot, c: &RunnerCommand) -> Option<&'static str> {
+    if !is_merger(c) || c.state != CommandState::Pending {
+        return None;
+    }
+    Some(match s.runners.iter().find(|r| r.id == c.runner_id) {
+        Some(r) if r.connection == ConnectionState::Online => {
+            if is_merger_recovery(c) && !r.capabilities.iter().any(|capability| capability == MERGER_RECOVERY_CAPABILITY) {
+                crate::tr!("Merger-Wiederaufnahme braucht einen neueren Runner")
+            } else if r.capabilities.iter().any(|capability| capability == MERGER_CAPABILITY) {
+                crate::tr!("Merger eingereiht")
+            } else {
+                crate::tr!("Runner unterstützt Merger nicht")
+            }
+        }
+        _ => crate::tr!("Merger wartet auf Runner"),
+    })
+}
+
+pub(crate) fn merger_ticket<'a>(s: &'a Snapshot, c: &RunnerCommand) -> Option<&'a Ticket> {
+    is_merger(c).then(|| s.tickets.iter().find(|t| t.execution_command == Some(c.id))).flatten()
+}
+
 pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<RunnerCommand> {
     if page == Page::Merger {
         return s.commands.iter().rev().filter(|c| is_merger(c) && command_project(s, c) == Some(project)).cloned().collect();
@@ -753,6 +779,10 @@ pub fn can_prompt_session(s: &Snapshot, project: ProjectId, root: CommandId) -> 
 }
 
 pub fn session_title(s: &Snapshot, c: &RunnerCommand) -> String {
+    if let Some(ticket) = merger_ticket(s, c) {
+        return if ticket.key.is_empty() { ticket.title.clone() }
+            else { format!("{} · {}", ticket.key, ticket.title) };
+    }
     if c.kind == CommandKind::PrepareWorkspace {
         return crate::tr!("Orchestrator-Vorbereitung").into();
     }

@@ -20,7 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
-pub const SCHEMA_VERSION: u32 = 45;
+pub const SCHEMA_VERSION: u32 = 46;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -221,6 +221,9 @@ impl Store {
         if version < 45 {
             tx.execute_batch(include_str!("../migrations/045_validation.sql"))?;
         }
+        if version < 46 {
+            tx.execute_batch(include_str!("../migrations/046_publication_recovery.sql"))?;
+        }
         tx.commit()?;
         // Connection-local view centralizes fencing of removed projects without
         // changing or discarding the historical rows or the database schema version.
@@ -368,6 +371,7 @@ impl Store {
             &format!("project.update/{id}"),
             &body,
             |tx| {
+                tasks::require_no_publication_recovery(tx, id)?;
                 let data: Option<String> = tx
                     .query_row(
                         "SELECT data FROM active_projects WHERE id=?1",
@@ -450,6 +454,7 @@ impl Store {
     }
     pub fn set_project_mirror(&self, id: ProjectId, body: SetProjectMirror) -> Result<Project> {
         self.mutate(body.request_id, &format!("project.mirror/{id}"), &body, |tx| {
+            tasks::require_no_publication_recovery(tx, id)?;
             let data: Option<String> = tx.query_row(
                 "SELECT data FROM active_projects WHERE id=?1",
                 [id.to_string()],

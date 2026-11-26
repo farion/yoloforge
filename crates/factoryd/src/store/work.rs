@@ -61,11 +61,13 @@ pub(super) fn save_command(tx: &Transaction<'_>, value: &RunnerCommand, state: &
 }
 
 impl Store {
-    pub(crate) fn require_merger_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool) -> Result<()> {
-        if supported { return Ok(()); }
+    pub(crate) fn require_merger_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool, recovery: bool) -> Result<()> {
+        if supported && recovery { return Ok(()); }
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction()?;
-        if command(&tx, id, runner, epoch)?.agent_spec.as_ref().is_some_and(|s| s.role == MERGER_ROLE) {
+        let command = command(&tx, id, runner, epoch)?;
+        if (!supported && command.agent_spec.as_ref().is_some_and(|s| s.role == MERGER_ROLE))
+            || (!recovery && is_merger_recovery(&command)) {
             return Err(StoreError::Invalid("Runner does not support the Merger"));
         }
         Ok(())
@@ -172,9 +174,13 @@ impl Store {
             return Err(StoreError::WorkConflict);
         }
         if body.progress.phase == AgentPhase::Starting && body.progress.summary == AGENT_START_GRANT
-            && value.agent_progress.is_none()
         {
-            super::checkpoints::pin_native_start(&tx, &value)?;
+            if super::tasks::deletion_stop_requested(&tx, id)? {
+                return Err(StoreError::WorkConflict);
+            }
+            if value.agent_progress.is_none() {
+                super::checkpoints::pin_native_start(&tx, &value)?;
+            }
         }
         if value.agent_progress.as_ref() != Some(&body.progress) {
             let status = match body.progress.phase {
@@ -405,6 +411,7 @@ impl Store {
         let direct = role == factory_protocol::directs::ROLE;
         let supervised = !role.is_empty() && !direct && role != MERGER_ROLE;
         let mut owner = stream(tx, id)?;
+        super::tasks::require_no_publication_recovery(tx, owner.project_id)?;
         if !direct && tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM directs WHERE stream_id=?1)",
             [id.to_string()], |row| row.get::<_, bool>(0),
@@ -530,7 +537,8 @@ impl Store {
                 "SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND json_extract(data,'$.agent_spec.role')=?2)",
                 params![id.to_string(), MERGER_ROLE], |row| row.get(0),
             )?;
-            if merged_stream {
+            if merged_stream && !(role == MERGER_ROLE && body.prompt.as_ref().is_some_and(|prompt|
+                prompt.lines().nth(1) == Some(MERGER_RECOVERY_PROMPT_MARKER))) {
                 return Err(StoreError::Invalid("Start a new session from the target branch after a Merger run"));
             }
             let prompt = body
@@ -762,6 +770,7 @@ impl Store {
             |tx| {
                 let mut value = command(tx, id, runner, body.ownership_epoch)?;
                 if value.state == CommandState::Pending {
+                    super::tasks::require_no_publication_recovery(tx, stream(tx, value.stream_id)?.project_id)?;
                     if let Some(setup) = value.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
                         .filter(|setup| setup.repository_source == CHECKPOINT_RETURN)
                     {

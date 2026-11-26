@@ -1241,13 +1241,18 @@ mod tests {
         snapshot.streams[0].status = StreamState::Queued;
         let mut dialog = crate::dialogs::Dialog::RestartLocalRunner { id, name: "Local".into() };
         let ctx = app.backend.context().clone();
-        for (online, admin, running, enabled) in [
-            (true, true, false, true), (true, true, true, false),
-            (false, true, false, false), (true, false, false, false),
+        for (online, admin, runner_connection, running, enabled) in [
+            (true, true, ConnectionState::Online, false, true),
+            (true, true, ConnectionState::Online, true, false),
+            (true, true, ConnectionState::Unreachable, true, true),
+            (false, true, ConnectionState::Unreachable, true, false),
+            (true, false, ConnectionState::Unreachable, true, false),
         ] {
             app.online = online;
             app.access.as_mut().unwrap().role = if admin { DeviceRole::Admin } else { DeviceRole::Operator };
-            Arc::make_mut(app.snapshot.as_mut().unwrap()).commands[0].state =
+            let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+            snapshot.runners[0].connection = runner_connection;
+            snapshot.commands[0].state =
                 if running { CommandState::Accepted } else { CommandState::Pending };
             for _ in 0..3 {
                 let _ = ctx.run(egui::RawInput {

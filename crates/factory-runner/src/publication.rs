@@ -31,6 +31,10 @@ struct Plan {
     snapshot: Option<String>,
     #[serde(default)]
     merger_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_failed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    recovery_reported: bool,
     stream: StreamId,
     epoch: u64,
     target: PathBuf,
@@ -72,7 +76,7 @@ fn prepare_merger(j: &Journal, record: &Record, source: CommandId) -> Result<()>
         git(&plan.repository, &["rev-parse", &format!("refs/heads/{}", plan.branch)])?
     } else {
         let current = git(&plan.target, &["rev-parse", "HEAD"])?;
-        unchanged_target(&plan.target, &plan.branch, &current)?;
+        target_at(&plan.target, &plan.branch, &current)?;
         git(&plan.repository, &["fetch", "--refmap=", "--no-tags", "--no-write-fetch-head", &git_path(&plan.target)?, &current])?;
         current
     };
@@ -143,7 +147,7 @@ fn check_merger_target(j: &Journal, r: &Record, current: &str, published: Option
     }
     Ok(())
 }
-fn unchanged_target(target: &Path, branch: &str, parent: &str) -> Result<()> {
+fn target_at(target: &Path, branch: &str, parent: &str) -> Result<()> {
     ensure!(
         git(target, &["symbolic-ref", "HEAD"])? == format!("refs/heads/{branch}"),
         "Projektordner steht auf einem anderen Branch; nichts ueberschrieben"
@@ -152,10 +156,38 @@ fn unchanged_target(target: &Path, branch: &str, parent: &str) -> Result<()> {
         git(target, &["rev-parse", "HEAD"])? == parent,
         "Projektstand wurde inzwischen geaendert; Ergebnis bleibt im Arbeitsbereich"
     );
+    Ok(())
+}
+
+fn unchanged_target(target: &Path, branch: &str, parent: &str) -> Result<()> {
+    target_at(target, branch, parent)?;
     ensure!(
         git(target, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
         "Projektordner enthaelt eigene Aenderungen; nichts ueberschrieben"
     );
+    Ok(())
+}
+
+fn protect_local_edits(target: &Path, parent: &str, commit: &str) -> Result<()> {
+    // NUL separators preserve whitespace and newlines in Git paths. Disable
+    // rename detection so both ends of a rename are protected.
+    let changed = git(target, &["diff", "--no-renames", "--name-only", "-z", parent, commit, "--"])?;
+    let changed: Vec<_> = changed.split_terminator('\0').map(str::to_lowercase).collect();
+    for args in [
+        &["diff", "--no-renames", "--name-only", "-z", "--"][..],
+        &["diff", "--cached", "--no-renames", "--name-only", "-z", "--"],
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    ] {
+        let local = git(target, args)?;
+        for local in local.split_terminator('\0').map(str::to_lowercase) {
+            ensure!(
+                !changed.iter().any(|result| *result == local
+                    || result.strip_prefix(&local).is_some_and(|rest| rest.starts_with('/'))
+                    || local.strip_prefix(result).is_some_and(|rest| rest.starts_with('/'))),
+                "Lokale Änderungen überschneiden sich mit dem Ergebnis; die Übernahme bleibt vorbereitet, nichts wurde überschrieben."
+            );
+        }
+    }
     Ok(())
 }
 fn safe_checkout_filters(target: &Path) -> Result<()> {
@@ -303,7 +335,8 @@ fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Resul
             "commit-tree", &tree, "-p", &snapshot_parent, "-m", &message,
         ])?;
         let plan = Plan {
-            snapshot: Some(snapshot.clone()), merger_target: None, stream: r.command.stream_id,
+            snapshot: Some(snapshot.clone()), merger_target: None, recovery_failed_at: None,
+            recovery_reported: false, stream: r.command.stream_id,
             epoch: r.command.ownership_epoch, target: work.clone(),
             repository: repository.clone(), branch: spec.base_branch.clone(),
             parent, commit: snapshot, published: false,
@@ -442,7 +475,10 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         let parent = if merger_parent(r)?.is_some() { current.clone() } else {
             previous.unwrap_or_else(|| workspace.base_commit.clone())
         };
-        unchanged_target(&target, &spec.base_branch, &current)?;
+        target_at(&target, &spec.base_branch, &current)?;
+        if spec.target_git.is_some() {
+            unchanged_target(&target, &spec.base_branch, &current)?;
+        }
         let work = Path::new(&workspace.path);
         ensure!(
             git(work, &["ls-files", "--unmerged"])?.is_empty(),
@@ -491,6 +527,8 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         let plan = Plan {
             snapshot: Some(commit.clone()),
             merger_target: None,
+            recovery_failed_at: None,
+            recovery_reported: false,
             stream: r.command.stream_id,
             epoch: r.command.ownership_epoch,
             target: target.clone(),
@@ -530,7 +568,7 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
                 plan.commit == *snapshot,
                 "Projektstand nach gepinnter Zusammenfuehrung geaendert; Ergebnis erhalten"
             );
-            unchanged_target(&target, &plan.branch, &current)?;
+            target_at(&target, &plan.branch, &current)?;
             git(
                 &repository,
                 &[
@@ -603,9 +641,16 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
     } else {
         ensure!(existing == plan.commit, "Publication ref changed");
     }
-    let target_head = git(&target, &["rev-parse", "HEAD"])?;
+    promote_local(&target, &repository, &plan, &reference, spec.target_git.is_some())?;
+    plan.published = true;
+    save(j, r.command.id, &plan)?;
+    Ok(Some(target))
+}
+
+fn promote_local(target: &Path, repository: &Path, plan: &Plan, reference: &str, explicit_git: bool) -> Result<()> {
+    let target_head = git(target, &["rev-parse", "HEAD"])?;
     if target_head != plan.commit {
-        unchanged_target(&target, &plan.branch, &plan.parent)?;
+        target_at(&target, &plan.branch, &plan.parent)?;
         git(
             &target,
             &[
@@ -619,12 +664,19 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
             ],
         )?;
         // Recheck after fetch. Git itself refuses overlapping dirty/untracked files at checkout.
-        unchanged_target(&target, &plan.branch, &plan.parent)?;
+        target_at(&target, &plan.branch, &plan.parent)?;
+        if explicit_git {
+            unchanged_target(&target, &plan.branch, &plan.parent)?;
+        } else {
+            protect_local_edits(&target, &plan.parent, &plan.commit)?;
+        }
         git(
             &target,
             &[
                 "-c",
                 "merge.autoStash=false",
+                "-c",
+                "submodule.recurse=false",
                 "merge",
                 "--ff-only",
                 "--no-overwrite-ignore",
@@ -654,9 +706,93 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         );
         git(&repository, &["update-ref", &base, &plan.commit, &current])?;
     }
-    plan.published = true;
-    save(j, r.command.id, &plan)?;
-    Ok(Some(target))
+    Ok(())
+}
+
+pub(crate) fn recovery_candidate(journal: &Journal, position: usize) -> Result<Option<CommandId>> {
+    let candidates: i64 = journal.db.query_row(
+        &format!("SELECT COUNT(*) {RECOVERY_CANDIDATES}"), [], |row| row.get(0),
+    )?;
+    if candidates == 0 { return Ok(None); }
+    let id: String = journal.db.query_row(
+        &format!("SELECT p.command_id {RECOVERY_CANDIDATES} ORDER BY p.rowid LIMIT 1 OFFSET ?1"),
+        [position as u64 % candidates as u64], |row| row.get(0),
+    )?;
+    Ok(Some(id.parse()?))
+}
+
+const RECOVERY_CANDIDATES: &str = "FROM publications p JOIN commands c ON c.id=p.command_id
+    WHERE json_extract(c.data,'$.reported')=1
+      AND COALESCE(json_extract(c.data,'$.recovery_required'),0)=0
+      AND COALESCE(json_extract(p.data,'$.recovery_reported'),0)=0
+      AND json_extract(c.data,'$.result.agent.phase')='succeeded'
+      AND json_extract(p.data,'$.snapshot') IS NOT NULL
+      AND (instr(json_extract(c.data,'$.result.agent.summary'),'[yoloforge:publication-blocked]')=1
+           OR instr(json_extract(c.data,'$.result.agent.summary'),
+              'Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:')>0)";
+
+pub(crate) fn acknowledge_recovery(journal: &Journal, id: CommandId) -> Result<()> {
+    journal.db.execute("UPDATE publications SET data=json_set(data,'$.recovery_reported',json('true'))
+        WHERE command_id=?1", [id.to_string()])?;
+    Ok(())
+}
+
+pub(crate) fn recover_prepared(
+    journal: &Journal, id: CommandId, grant_id: RequestId,
+) -> Result<Option<factory_protocol::ReportRecoveredPublication>> {
+    use sha2::{Digest, Sha256};
+    let Some(record) = journal.record(id)? else { return Ok(None); };
+    let Some(spec) = record.command.workspace_spec.as_ref() else { return Ok(None); };
+    let Some(setup) = spec.setup.as_ref() else { return Ok(None); };
+    if !record.reported || record.recovery_required || record.command.requires_target_git()
+        || !setup.repository_path.is_empty() || !Path::new(&setup.repository_source).is_absolute()
+        || !matches!(&record.result, Some(CommandOutput::Agent { agent })
+            if agent.phase == AgentPhase::Succeeded && publication_was_blocked(&agent.summary)
+                && !agent.summary.starts_with(PUBLICATION_CONFLICT_PREFIX))
+    {
+        return Ok(None);
+    }
+    let raw: Option<String> = journal.db.query_row("SELECT data FROM publications WHERE command_id=?1",
+        [id.to_string()], |row| row.get(0)).optional()?;
+    let Some(raw) = raw else { return Ok(None); };
+    let mut plan: Plan = serde_json::from_str(&raw)?;
+    let Some(snapshot) = plan.snapshot.clone() else { return Ok(None); };
+    ensure!(plan.stream == record.command.stream_id && plan.epoch == record.command.ownership_epoch
+        && plan.branch == spec.base_branch && fs::canonicalize(&setup.repository_source)? == plan.target,
+        "Recovery publication binding changed");
+    let reference = format!("refs/yoloforge/publications/{id}");
+    // Only finish a candidate that reached the durable publication ref.
+    // Never read or snapshot today's execution worktree during recovery.
+    if git(&plan.repository, &["for-each-ref", "--format=%(objectname)", &reference])? != plan.commit
+        || git(&plan.repository, &["for-each-ref", "--format=%(objectname)",
+            &format!("refs/yoloforge/publication-snapshots/{id}")])? != snapshot
+    {
+        return Ok(None);
+    }
+    git(&plan.repository, &["merge-base", "--is-ancestor", &snapshot, &plan.commit])?;
+    let branch = format!("refs/heads/{}", plan.branch);
+    let mut head = git(&plan.target, &["rev-parse", "--verify", &branch])?;
+    if git(&plan.target, &["merge-base", "--is-ancestor", &plan.commit, &head]).is_err() {
+        if plan.published || head != plan.parent { return Ok(None); }
+        target_at(&plan.target, &plan.branch, &plan.parent)?;
+        safe_checkout_filters(&plan.target)?;
+        let state = git(&plan.target, &["status", "--porcelain", "-z", "--untracked-files=all", "--ignored=matching"])?;
+        let fingerprint = format!("{head}:{:x}", Sha256::digest(state.as_bytes()));
+        if plan.recovery_failed_at.as_deref() == Some(&fingerprint) { return Ok(None); }
+        if let Err(error) = promote_local(&plan.target, &plan.repository, &plan, &reference, false) {
+            plan.recovery_failed_at = Some(fingerprint);
+            save(journal, id, &plan)?;
+            return Err(error);
+        }
+        plan.published = true;
+        save(journal, id, &plan)?;
+        head = git(&plan.target, &["rev-parse", "--verify", &branch])?;
+    }
+    git(&plan.target, &["merge-base", "--is-ancestor", &plan.commit, &head])?;
+    Ok(Some(factory_protocol::ReportRecoveredPublication {
+        request_id: RequestId::new(), grant_id, ownership_epoch: plan.epoch, base_branch: plan.branch,
+        snapshot_commit: snapshot, target_commit: head,
+    }))
 }
 
 pub(crate) fn published_commit(j: &Journal, id: CommandId) -> Result<String> {
@@ -786,6 +922,7 @@ mod tests {
     fn merger_command(source: &RunnerCommand) -> RunnerCommand {
         let mut command = source.clone();
         command.id = CommandId::new();
+        command.state = CommandState::Pending;
         command.agent_spec = Some(serde_json::from_value(serde_json::json!({
             "prompt": format!("{MERGE_PARENT_PREFIX}{}", source.id),
             "role": MERGER_ROLE,
@@ -1010,8 +1147,14 @@ mod tests {
         fs::write(original_work.join("result.txt"), "competing result").unwrap();
         publish(&f.journal, &f.record, &f.args).unwrap();
         let target = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(f.target.join(".gitignore"), "target/\n# local staged edit\n").unwrap();
+        git(&f.target, &["add", "--", ".gitignore"]).unwrap();
+        fs::write(f.target.join(".gitignore"), "target/\n# local unstaged edit\n").unwrap();
+        fs::write(f.target.join(" local notes"), "untracked user file").unwrap();
+        fs::write(f.target.join("result.txt"), "unpublished user changes").unwrap();
+        let staged = git(&f.target, &["diff", "--cached", "--", ".gitignore"]).unwrap();
         assert!(publish(&f.journal, &source, &f.args).unwrap_err().is::<PublicationConflict>());
-        let merger = f.journal.receive(merger_command(&source.command)).unwrap();
+        let mut merger = f.journal.receive(merger_command(&source.command)).unwrap();
         let workspace = execution_workspace(&f.journal, &merger, &f.args, true).unwrap();
         let work = Path::new(&workspace.path);
         assert_ne!(work, original_work);
@@ -1021,14 +1164,41 @@ mod tests {
         fs::write(work.join("result.txt"), "combined result").unwrap();
         git(work, &["add", "--", "result.txt"]).unwrap();
         managed_commit(work, &["commit", "-m", "resolve conflict"]).unwrap();
-        publish(&f.journal, &merger, &f.args).unwrap();
-        publish(&f.journal, &merger, &f.args).unwrap();
+        let error = publish(&f.journal, &merger, &f.args).unwrap_err();
+        assert!(error.to_string().contains("überschneiden"), "{error}");
+        assert_eq!(git(&f.target, &["rev-parse", "HEAD"]).unwrap(), target);
+        assert_eq!(fs::read_to_string(f.target.join("result.txt")).unwrap(), "unpublished user changes");
+        assert_eq!(git(&f.target, &["diff", "--cached", "--", ".gitignore"]).unwrap(), staged);
+        assert!(published_commit(&f.journal, merger.command.id).is_err());
+        merger.result = Some(CommandOutput::Agent { agent: AgentProgress {
+            session_id: merger.command.session_id(), message_id: agent_message_id(merger.command.id),
+            phase: AgentPhase::Succeeded, summary: format!("{PUBLICATION_BLOCKED_PREFIX}\n{error}"),
+        }});
+        merger.reported = true;
+        f.journal.save(&merger).unwrap();
+        assert_eq!(recovery_candidate(&f.journal, 0).unwrap(), Some(merger.command.id));
+        assert!(recover_prepared(&f.journal, merger.command.id, RequestId::new()).is_err());
+        assert!(recover_prepared(&f.journal, merger.command.id, RequestId::new()).unwrap().is_none());
+        fs::write(work.join("result.txt"), "later edit in merger worktree").unwrap();
+        // Simulate the user moving the overlapping edit out of the checkout.
+        git(&f.target, &["restore", "--", "result.txt"]).unwrap();
+        let proof = recover_prepared(&f.journal, merger.command.id, RequestId::new()).unwrap().unwrap();
+        let replay = recover_prepared(&f.journal, merger.command.id, RequestId::new()).unwrap().unwrap();
+        assert_eq!(proof.target_commit, replay.target_commit);
+        assert_eq!(proof.snapshot_commit, replay.snapshot_commit);
+        acknowledge_recovery(&f.journal, merger.command.id).unwrap();
+        assert!(recovery_candidate(&f.journal, 0).unwrap().is_none());
         let head = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(proof.target_commit, head);
         for commit in [&target, &workspace.base_commit] {
             git(&f.target, &["merge-base", "--is-ancestor", commit, &head]).unwrap();
         }
         assert_eq!(fs::read_to_string(f.target.join("result.txt")).unwrap(), "combined result");
         assert_eq!(fs::read_to_string(original_work.join("result.txt")).unwrap(), "competing result");
+        assert_eq!(fs::read_to_string(work.join("result.txt")).unwrap(), "later edit in merger worktree");
+        assert_eq!(git(&f.target, &["diff", "--cached", "--", ".gitignore"]).unwrap(), staged);
+        assert_eq!(fs::read_to_string(f.target.join(".gitignore")).unwrap(), "target/\n# local unstaged edit\n");
+        assert_eq!(fs::read_to_string(f.target.join(" local notes")).unwrap(), "untracked user file");
     }
 
     #[tokio::test(flavor = "multi_thread")]

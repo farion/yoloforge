@@ -63,6 +63,12 @@ pub(super) async fn delete_inactive_task(
     db_call(body.request_id, move || app.store.delete_inactive_task(id, body)).await
 }
 
+pub(super) async fn delete_task(
+    State(app): State<App>, Path(id): Path<TicketId>, Json(body): Json<DeleteTask>,
+) -> Response {
+    db_call(body.request_id, move || app.store.delete_task(id, body)).await
+}
+
 pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &HeaderMap, ip: Option<std::net::IpAddr>) {
     if principal.role == DeviceRole::Runner {
         return;

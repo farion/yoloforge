@@ -112,6 +112,9 @@ impl Store {
             params![id.to_string(), serde_json::to_string(&body)?],
         )?;
         event(&tx, "runtime.bound", id.to_string(), &body)?;
+        if super::tasks::deletion_stop_requested(&tx, id)? {
+            Self::terminate_deleted_runtime(&tx, &cmd)?;
+        }
         tx.commit()?;
         Ok(body)
     }
@@ -149,6 +152,30 @@ impl Store {
         body: &RequestTermination,
     ) -> Result<RuntimeTermination> {
         Self::request_termination_with_failover(tx, id, body, false)
+    }
+
+    pub(super) fn terminate_deleted_runtime(tx: &Transaction<'_>, cmd: &RunnerCommand) -> Result<bool> {
+        if load(tx, cmd.id)?.is_some() {
+            return Ok(true);
+        }
+        let runtime = if let Some(bound) = binding(tx, cmd.id)? {
+            bound.runtime
+        } else if let Some(proof) = super::controls::load(tx, cmd.stream_id)?
+            .filter(|control| control.command_id == Some(cmd.id)).and_then(|control| control.proof)
+        {
+            RuntimeRef { container_id: proof.container_id, started_at: proof.started_at }
+        } else {
+            return Ok(false);
+        };
+        let owner = super::work::stream(tx, cmd.stream_id)?;
+        match Self::request_termination_in(tx, cmd.id, &RequestTermination {
+            request_id: RequestId::new(), expected_stream_revision: owner.revision,
+            previous_request: None, runtime, reason: "Intent deleted".into(),
+        }) {
+            Ok(_) => Ok(true),
+            Err(StoreError::WorkConflict) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn request_termination_with_failover(

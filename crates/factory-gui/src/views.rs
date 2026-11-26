@@ -300,10 +300,13 @@ impl App {
                             }
                             ui.add_space(16.0);
                             ui.separator();
-                             ui.add_space(10.0);
-                             ui.colored_label(MUTED, "FACTORY");
-                             let working = self.online && snapshot.as_deref().is_some_and(crate::overview::factory_is_working);
-                             for page in [
+                              ui.add_space(10.0);
+                              ui.colored_label(MUTED, "FACTORY");
+                              let working = self.online && snapshot.as_deref().is_some_and(crate::overview::factory_is_working);
+                              let attention = self.online
+                                  .then(|| snapshot.as_deref().and_then(crate::overview::factory_attention))
+                                  .flatten();
+                              for page in [
                                 Page::Overview,
                                 Page::Notifications,
                                 Page::Infrastructure,
@@ -311,9 +314,27 @@ impl App {
                             ] {
                                  let row = ui.add_enabled_ui(self.online, |ui| {
                                      let selected = self.page() == page;
-                                     if page == Page::Overview && working {
-                                         design::navigation_row_with_activity(ui, page.icon(), page.title(), selected, self.factory_flow.motion)
-                                     } else {
+                                      if page == Page::Overview && working {
+                                          design::navigation_row_with_activity(ui, page.icon(), page.title(), selected, self.factory_flow.motion)
+                                      } else if page == Page::Overview {
+                                          match attention {
+                                              Some(crate::overview::FactoryAttention::Blocked) =>
+                                                  design::navigation_row_with_status_icon(
+                                                      ui, page.icon(), page.title(), selected,
+                                                      egui_phosphor::regular::WARNING, RED,
+                                                      crate::tr!("Blockierte Intents"),
+                                                  ),
+                                              Some(crate::overview::FactoryAttention::Waiting) =>
+                                                  design::navigation_row_with_status_icon(
+                                                      ui, page.icon(), page.title(), selected,
+                                                      egui_phosphor::regular::WARNING, AMBER,
+                                                      crate::tr!("Wartende Intents"),
+                                                  ),
+                                              None => design::navigation_row_with_icon(
+                                                  ui, Some(page.icon()), page.title(), selected, None,
+                                              ),
+                                          }
+                                      } else {
                                          let unread = (page == Page::Notifications).then(|| (
                                              usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
                                              AMBER,
@@ -799,8 +820,11 @@ impl App {
                                     vec![crate::tr!("Anzeigen")]
                                  };
                                   let retryable = retryable_task(&s, t);
+                                  let full_delete = s.server_capabilities.iter().any(|cap| cap == DELETE_TASK_CAPABILITY);
                                   let inactive_delete = s.server_capabilities.iter().any(|cap| cap == DELETE_INACTIVE_TASK_CAPABILITY);
-                                  let deletable = if inactive_delete {
+                                  let deletable = if full_delete {
+                                      true
+                                  } else if inactive_delete {
                                       task_command(&s, t).is_none_or(|c| matches!(c.state, CommandState::Succeeded | CommandState::Failed))
                                   } else {
                                       t.execution_command.is_some() && task_command(&s, t).is_some_and(|c|
@@ -931,7 +955,8 @@ impl App {
                                          if deletable {
                                              let retry_path = format!("/v1/tasks/{}/retry", t.id);
                                              let path = format!("/v1/tasks/{}", t.id);
-                                             let delete_path = if inactive_delete { format!("{path}/inactive") } else { path.clone() };
+                                             let delete_path = if full_delete { format!("{path}/intent") }
+                                                 else if inactive_delete { format!("{path}/inactive") } else { path.clone() };
                                              let busy = self.settings.pending.iter().any(|r| r.server == self.server && (r.path == retry_path || (r.method == "DELETE" && r.path == delete_path)));
                                              let delete = design::icon_button(ui, egui_phosphor::regular::TRASH, crate::tr!("Intent löschen"), self.online && !busy)
                                                  .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -939,14 +964,20 @@ impl App {
                                              ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-delete", t.id)), delete.rect));
                                              if delete.clicked() {
                                                  let request_id = RequestId::new();
-                                                 let body = if inactive_delete {
+                                                 let body = if full_delete {
+                                                     json!(DeleteTask { request_id })
+                                                 } else if inactive_delete {
                                                      json!(DeleteInactiveTask { request_id, expected_revision: t.revision, execution_command: t.execution_command })
                                                  } else {
                                                      json!(DeleteFailedTask { request_id, expected_revision: t.revision, failed_command: t.execution_command.expect("Legacy delete requires execution") })
                                                  };
                                                  self.dialog = Some(Dialog::form(
                                                      crate::tr!("Intent löschen"),
-                                                     &crate::tr!("Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t)),
+                                                     &if full_delete {
+                                                         crate::tr!("Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t))
+                                                     } else {
+                                                         crate::tr!("Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t))
+                                                     },
                                                      "DELETE", delete_path, body,
                                                  ));
                                              }
@@ -1230,6 +1261,7 @@ impl App {
                 archived(c) == self.sessions_closed
                     && (needle.is_empty()
                         || session_title(&s, c).to_lowercase().contains(&needle)
+                        || merger_ticket(&s, c).is_some_and(|t| t.key.to_lowercase().contains(&needle))
                         || c.session_id().to_lowercase().contains(&needle)
                         || c.runner_id.to_string().contains(&needle)
                         || s.runners
@@ -2211,6 +2243,9 @@ fn question_group_pill(total: usize, answered: usize) -> (&'static str, egui::Co
 }
 
 fn session_list_pill(s: &Snapshot, page: Page, c: &RunnerCommand) -> (&'static str, egui::Color32) {
+    if let Some(status) = merger_pending_status(s, c) {
+        return (status, AMBER);
+    }
     if page == Page::Merger && command_publication_blocked(c) {
         return (crate::tr!("Übernahme blockiert"), RED);
     }

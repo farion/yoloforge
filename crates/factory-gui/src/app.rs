@@ -408,7 +408,7 @@ impl App {
     pub fn manage_local_runners(&mut self, action: crate::local_runners::Action) {
         if self.local_runners_busy || !self.online || !self.backend.is_connected() { return; }
         self.local_runners_busy = true;
-        if let crate::local_runners::Action::Restart(id) = &action {
+        if let crate::local_runners::Action::Restart { id, .. } = &action {
             self.restarting_runner = Some(*id);
             self.notice(crate::tr!("Lokaler Runner wird neu gestartet …"));
             self.backend.context().request_repaint();
@@ -1637,7 +1637,7 @@ impl App {
                     }
                     if let Some(ticket_id) = self.settings.pending.iter().find(|r| r.id == id && r.method == "DELETE")
                         .and_then(|r| r.path.strip_prefix("/v1/tasks/"))
-                        .and_then(|raw| raw.strip_suffix("/inactive").unwrap_or(raw).parse::<TicketId>().ok())
+                        .and_then(|raw| raw.strip_suffix("/intent").or_else(|| raw.strip_suffix("/inactive")).unwrap_or(raw).parse::<TicketId>().ok())
                     {
                         if result.as_ref().is_ok_and(|value|
                             value["id"] == serde_json::json!(ticket_id) && value["status"] == "cancelled")

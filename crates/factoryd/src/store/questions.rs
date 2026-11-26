@@ -53,6 +53,9 @@ impl Store {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let command = super::work::command(&tx, id, runner, body.ownership_epoch)?;
+        if super::tasks::deletion_stop_requested(&tx, id)? {
+            return Ok(Vec::new());
+        }
         if command.kind != CommandKind::RunAgent || command.state != CommandState::Accepted {
             return Err(StoreError::WorkConflict);
         }
@@ -169,7 +172,7 @@ impl Store {
             |r| r.get(0),
         )?;
         let command: RunnerCommand = serde_json::from_str(&data)?;
-        if super::controls::load(tx, command.stream_id)?
+        if super::tasks::deletion_stop_requested(tx, command.id)? || super::controls::load(tx, command.stream_id)?
             .is_some_and(|c| c.state != PauseState::Released)
         {
             return Err(StoreError::WorkConflict);
@@ -228,6 +231,9 @@ impl Store {
             |tx| {
                 let mut value = load(tx, id)?;
                 super::work::command(tx, value.command_id, runner, body.ownership_epoch)?;
+                if super::tasks::deletion_stop_requested(tx, value.command_id)? {
+                    return Ok(value);
+                }
                 if value.answer_request != Some(body.answer_request)
                     || !matches!(
                         body.state,

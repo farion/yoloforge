@@ -230,7 +230,7 @@ fn git_status(
         text.len() <= 1_048_576,
         "Git output exceeds inspection limit"
     );
-    Ok((success, text.trim().to_string()))
+    Ok((success, if args.contains(&"-z") { text } else { text.trim().to_string() }))
 }
 
 pub(crate) fn common_dir(repository: &Path) -> Result<PathBuf> {

@@ -3,8 +3,8 @@ use crate::{
     app::{App, AMBER, BLUE, GREEN, MUTED, RED},
     design,
     model::{
-        command_project, needs_answer, session_title, task_bucket, task_command, task_status,
-        task_text, TaskBucket,
+        command_project, needs_answer, session_title, task_bucket, task_command, task_intent_text,
+        task_status, TaskBucket,
     },
 };
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -34,6 +34,27 @@ pub(crate) fn factory_is_working(s: &Snapshot) -> bool {
             && !s.controls.iter().any(|control| control.stream_id == c.stream_id && control.state != PauseState::Released)
             && !crate::model::command_waits_for_answer(s, c)
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FactoryAttention {
+    Waiting,
+    Blocked,
+}
+
+pub(crate) fn factory_attention(s: &Snapshot) -> Option<FactoryAttention> {
+    let mut waiting = false;
+    for ticket in s.tickets.iter().filter(|ticket| {
+        ticket.status != TicketState::Cancelled
+            && !ticket.draft
+            && task_bucket(s, ticket) != TaskBucket::Archive
+    }) {
+        if card(s, ticket).failed {
+            return Some(FactoryAttention::Blocked);
+        }
+        waiting = true;
+    }
+    waiting.then_some(FactoryAttention::Waiting)
 }
 
 pub struct FlowState {
@@ -155,6 +176,7 @@ enum Stage {
     Routing,
     Execution,
     Validation,
+    Merge,
     Result,
 }
 
@@ -188,6 +210,8 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     let success = task_bucket(s, ticket) == TaskBucket::Archive;
     let stage = if ticket.draft {
         Stage::Input
+    } else if !success && command.is_some_and(crate::model::is_merger) {
+        Stage::Merge
     } else if ticket.status == TicketState::Validating || crate::model::validation_blocked(ticket) {
         Stage::Validation
     } else if ticket.status == TicketState::ReworkQueued {
@@ -282,7 +306,7 @@ impl Card<'_> {
     }
 
     fn color(&self, s: &Snapshot) -> Color32 {
-        if self.waiting {
+        if self.waiting || self.command.and_then(|c| crate::model::merger_pending_status(s, c)).is_some() {
             AMBER
         } else if self.failed {
             RED
@@ -304,21 +328,10 @@ impl Card<'_> {
             }
         }
     }
-    fn icon(&self) -> &'static str {
-        if self.waiting {
-            icons::CHAT_CIRCLE_TEXT
-        } else if self.failed {
-            icons::WARNING_CIRCLE
-        } else if self.success {
-            icons::CHECK_CIRCLE
-        } else if self.active && !self.working_in_place() {
-            icons::GEAR_SIX
-        } else {
-            icons::CLIPBOARD_TEXT
-        }
-    }
     fn status(&self, s: &Snapshot) -> &'static str {
-        if self.waiting {
+        if let Some(status) = self.command.and_then(|c| crate::model::merger_pending_status(s, c)) {
+            status
+        } else if self.waiting {
             crate::tr!("Braucht Antwort")
         } else if self.failed {
             let status = task_status(s, self.ticket);
@@ -375,25 +388,11 @@ impl CardMotion {
 
 struct Lane<'a> {
     key: String,
+    icon: &'static str,
     title: String,
     subtitle: Option<&'static str>,
     column: usize,
     cards: Vec<Card<'a>>,
-    runner_busy: Option<bool>,
-}
-
-impl Lane<'_> {
-    fn subtitle(&self) -> Option<&'static str> {
-        match self.runner_busy {
-            Some(true) => Some(crate::tr!("Busy")),
-            Some(false) => Some(crate::tr!("Idle")),
-            None => self.subtitle,
-        }
-    }
-}
-
-fn runner_lane_key(id: RunnerId) -> String {
-    format!("runner:{id}")
 }
 
 const HEADER_HEIGHT: f32 = 54.0;
@@ -444,53 +443,53 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
     let mut result = vec![
         Lane {
             key: "input".into(),
+            icon: icons::ENVELOPE,
             title: crate::tr!("Eingang").into(),
             subtitle: Some(crate::tr!("Entwürfe & neue Aufgaben")),
             column: 0,
             cards: vec![],
-            runner_busy: None,
         },
         Lane {
             key: "routing".into(),
-            title: crate::tr!("Verteilung").into(),
+            icon: icons::ROBOT,
+            title: "Orchestrator".into(),
             subtitle: Some(crate::tr!("Orchestrierung & Start")),
             column: 1,
             cards: vec![],
-            runner_busy: None,
+        },
+        Lane {
+            key: "implementation".into(),
+            icon: icons::ROBOT,
+            title: "Implementer".into(),
+            subtitle: None,
+            column: 2,
+            cards: vec![],
         },
         Lane {
             key: "validation".into(),
+            icon: icons::ROBOT,
             title: "Reviewer".into(),
             subtitle: Some(crate::tr!("Textprüfung vor dem Ergebnis")),
             column: 3,
             cards: vec![],
-            runner_busy: None,
+        },
+        Lane {
+            key: "merge".into(),
+            icon: icons::ROBOT,
+            title: "Merger".into(),
+            subtitle: Some(crate::tr!("Git-Konflikte auflösen")),
+            column: 4,
+            cards: vec![],
         },
         Lane {
             key: "result".into(),
-            title: crate::tr!("Ergebnis").into(),
+            icon: icons::CHECK,
+            title: "Done".into(),
             subtitle: Some(crate::tr!("Erfolg bleibt 2 Minuten")),
-            column: 4,
+            column: 5,
             cards: vec![],
-            runner_busy: None,
         },
     ];
-    // Runner status is global even when the visible Intents are project-filtered.
-    let busy_runners: BTreeSet<_> = s.commands.iter().filter(|c| {
-        c.state == CommandState::Accepted && c.agent_progress.as_ref().is_none_or(|p|
-            !matches!(p.phase, AgentPhase::Succeeded | AgentPhase::Failed | AgentPhase::Interrupted))
-    }).map(|c| c.runner_id).collect();
-    let mut executions: BTreeMap<_, _> = s.runners.iter().map(|runner| {
-        let key = runner_lane_key(runner.id);
-        (key.clone(), Lane {
-            key,
-            title: runner.name.clone(),
-            subtitle: None,
-            column: 2,
-            cards: vec![],
-            runner_busy: Some(busy_runners.contains(&runner.id)),
-        })
-    }).collect();
     for ticket in s
         .tickets
         .iter()
@@ -507,42 +506,12 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
         match c.stage {
             Stage::Input => result[0].cards.push(c),
             Stage::Routing => result[1].cards.push(c),
-            Stage::Validation => result[2].cards.push(c),
-            Stage::Result => result[3].cards.push(c),
-            Stage::Execution => {
-                let key = c.command.map_or_else(
-                    || "unassigned".into(),
-                    |command| runner_lane_key(command.runner_id),
-                );
-                let lane = executions.entry(key.clone()).or_insert_with(|| {
-                    Lane {
-                        key,
-                        title: if c.command.is_some() { crate::tr!("Unbekannter Runner") }
-                            else { crate::tr!("Zuordnung unbekannt") }.into(),
-                        subtitle: None,
-                        column: 2,
-                        cards: vec![],
-                        runner_busy: c.command.map(|c| busy_runners.contains(&c.runner_id)),
-                    }
-                });
-                lane.cards.push(c);
-            }
+            Stage::Execution => result[2].cards.push(c),
+            Stage::Validation => result[3].cards.push(c),
+            Stage::Merge => result[4].cards.push(c),
+            Stage::Result => result[5].cards.push(c),
         }
     }
-    if executions.is_empty() {
-        executions.insert(
-            "idle".into(),
-            Lane {
-                key: "idle".into(),
-                title: crate::tr!("Ausführung").into(),
-                subtitle: Some(crate::tr!("Noch keine Aufgaben zugewiesen")),
-                column: 2,
-                cards: vec![],
-                runner_busy: None,
-            },
-        );
-    }
-    result.extend(executions.into_values());
     for lane in &mut result {
         lane.cards.sort_by_key(|c| {
             (
@@ -615,22 +584,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .id_salt("factory-flow")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let width = ui
+            let base_width = ui
                 .available_width()
                 .max(design::FLOW_MIN_CARD_WIDTH * 5.0 + design::FLOW_COLUMN_GAP * 4.0 + 32.0);
-            let card_width = ((width - 32.0 - design::FLOW_COLUMN_GAP * 4.0) / 5.0)
+            let card_width = ((base_width - 32.0 - design::FLOW_COLUMN_GAP * 4.0) / 5.0)
                 .min(design::FLOW_CARD_SIZE.x);
             let card_size = egui::vec2(card_width, design::FLOW_CARD_SIZE.y);
-            let stride = (width - 32.0 - card_width) / 4.0;
+            let stride = (base_width - 32.0 - card_width) / 4.0;
+            let width = base_width + stride;
             let layout = (project, width.round() as u32);
             if app.factory_flow.layout != Some(layout) {
                 app.factory_flow.positions.clear();
                 app.factory_flow.layout = Some(layout);
             }
             let lane_height = |lane: &Lane<'_>| {
-                if lane.runner_busy.is_some() && lane.cards.is_empty() {
-                    return HEADER_HEIGHT;
-                }
                 let count = if app.factory_flow.expanded.contains(&lane.key) {
                     lane.cards.len()
                 } else {
@@ -643,29 +610,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         0.0
                     }
             };
-            let execution_height: f32 = lanes
-                .iter()
-                .filter(|l| l.column == 2)
-                .map(|l| lane_height(l) + 20.0)
-                .sum();
             let height = lanes
                 .iter()
-                .filter(|l| l.column != 2)
                 .map(&lane_height)
-                .fold(execution_height, f32::max)
+                .fold(0.0, f32::max)
                 + CANVAS_TOP + 8.0;
             let (canvas, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-            let mut next_execution = CANVAS_TOP;
             let mut placements = Vec::new();
             for lane in &lanes {
-                let top = if lane.column == 2 {
-                    let top = next_execution;
-                    next_execution += lane_height(lane) + 20.0;
-                    top
-                } else {
-                    CANVAS_TOP
-                };
-                let origin = canvas.min + egui::vec2(16.0 + lane.column as f32 * stride, top);
+                let origin =
+                    canvas.min + egui::vec2(16.0 + lane.column as f32 * stride, CANVAS_TOP);
                 placements.push((lane, origin, lane_height(lane)));
             }
             let clock = app.factory_flow.clock;
@@ -675,7 +629,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let routing = placements.iter().find(|(l, _, _)| l.column == 1).unwrap().1;
             let input = placements.iter().find(|(l, _, _)| l.column == 0).unwrap().1;
             let validation = placements.iter().find(|(l, _, _)| l.column == 3).unwrap().1;
-            let output = placements.iter().find(|(l, _, _)| l.column == 4).unwrap().1;
+            let merger = placements.iter().find(|(l, _, _)| l.column == 4).unwrap().1;
+            let output = placements.iter().find(|(l, _, _)| l.column == 5).unwrap().1;
             edge(
                 ui,
                 input + egui::vec2(card_width, 26.0),
@@ -684,32 +639,32 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 animate && routing_active,
                 clock,
             );
-            for (lane, origin, _) in placements.iter().filter(|(l, _, _)| l.column == 2) {
-                let starting = lane.cards.iter().any(Card::starting_execution);
-                edge(
-                    ui,
-                    routing + egui::vec2(card_width, 26.0),
-                    *origin + egui::vec2(0.0, 26.0),
-                    BLUE,
-                    animate && starting,
-                    clock,
-                );
-                edge(
-                    ui,
-                    *origin + egui::vec2(card_width, 26.0),
-                    validation + egui::vec2(0.0, 26.0),
-                    BLUE,
-                    false,
-                    clock,
-                );
-            }
-            edge(ui, validation + egui::vec2(card_width, 26.0), output + egui::vec2(0.0, 26.0), GREEN, false, clock);
+            let implementation = placements.iter().find(|(l, _, _)| l.column == 2).unwrap();
+            let starting = implementation.0.cards.iter().any(Card::starting_execution);
+            edge(
+                ui,
+                routing + egui::vec2(card_width, 26.0),
+                implementation.1 + egui::vec2(0.0, 26.0),
+                BLUE,
+                animate && starting,
+                clock,
+            );
+            edge(
+                ui,
+                implementation.1 + egui::vec2(card_width, 26.0),
+                validation + egui::vec2(0.0, 26.0),
+                BLUE,
+                false,
+                clock,
+            );
+            edge(ui, validation + egui::vec2(card_width, 26.0), merger + egui::vec2(0.0, 26.0), BLUE, false, clock);
+            edge(ui, merger + egui::vec2(card_width, 26.0), output + egui::vec2(0.0, 26.0), GREEN, false, clock);
             for (lane, origin, height) in placements {
                 let header = Rect::from_min_size(origin, egui::vec2(card_width, HEADER_HEIGHT));
                 let active = if lane.column == 1 {
                     routing_active
                 } else {
-                    lane.runner_busy.unwrap_or_else(|| lane.cards.iter().any(|c| c.active))
+                    lane.cards.iter().any(|c| c.active)
                 };
                 ui.painter().rect_filled(
                     header,
@@ -723,34 +678,38 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     egui::StrokeKind::Inside,
                 );
                 let title = format!("{} ({})", lane.title, lane.cards.len());
-                let subtitle = lane.subtitle();
+                let subtitle = lane.subtitle;
                 text(
                     ui,
-                    header.min + egui::vec2(12.0, if subtitle.is_some() { 7.0 } else { 18.0 }),
+                    header.min + egui::vec2(12.0, if subtitle.is_some() { 7.0 } else { 17.0 }),
+                    lane.icon,
+                    17.0,
+                    ui.visuals().text_color(),
+                    20.0,
+                );
+                text(
+                    ui,
+                    header.min + egui::vec2(38.0, if subtitle.is_some() { 7.0 } else { 18.0 }),
                     &title,
                     14.0,
                     ui.visuals().text_color(),
-                    header.width() - 24.0,
+                    header.width() - 50.0,
                 );
                 if let Some(subtitle) = subtitle {
-                    text(ui, header.min + egui::vec2(12.0, 31.0), subtitle,
-                        11.0, MUTED, header.width() - 24.0);
+                    text(ui, header.min + egui::vec2(38.0, 31.0), subtitle,
+                        11.0, MUTED, header.width() - 50.0);
                 }
-                if lane.column == 2 {
-                    ui.interact(header, ui.id().with(("flow-runner", &lane.key)), Sense::hover())
-                        .on_hover_text(title);
-                    #[cfg(test)]
-                    ui.ctx().data_mut(|d| {
-                        d.insert_temp(egui::Id::new(("test-flow-runner", &lane.key)), header)
-                    });
-                }
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(("test-flow-lane", &lane.key)), header)
+                });
                 let expanded = app.factory_flow.expanded.contains(&lane.key);
                 let shown = if expanded {
                     lane.cards.len()
                 } else {
                     lane.cards.len().min(design::FLOW_VISIBLE_CARDS)
                 };
-                if lane.cards.is_empty() && lane.runner_busy.is_none() {
+                if lane.cards.is_empty() {
                     text(
                         ui,
                         origin + egui::vec2(12.0, 92.0),
@@ -844,7 +803,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(
                 if app.factory_flow.motion
-                    && (lanes.iter().any(|lane| !lane.cards.is_empty() || lane.runner_busy == Some(true))
+                    && (lanes.iter().any(|lane| !lane.cards.is_empty())
                         || orchestrating
                         || app
                             .factory_flow
@@ -861,12 +820,24 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 }
 
 fn text(ui: &egui::Ui, position: Pos2, value: &str, size: f32, color: Color32, width: f32) {
+    text_rows(ui, position, value, size, color, width, 1);
+}
+
+fn text_rows(
+    ui: &egui::Ui,
+    position: Pos2,
+    value: &str,
+    size: f32,
+    color: Color32,
+    width: f32,
+    rows: usize,
+) {
     let galley = ui.painter().layout_job(design::elided_text_job(
         value.to_owned(),
         FontId::proportional(size),
         color,
         width.max(1.0),
-        1,
+        rows,
     ));
     ui.painter().galley(position, galley, color);
 }
@@ -956,47 +927,63 @@ fn draw_card(
         2,
         design::FLOW_TASK_ACCENT,
     );
-    text(
-        ui,
-        at(12.0, 12.0),
-        c.icon(),
-        22.0,
-        color,
-        26.0,
-    );
     let reference = if c.ticket.key.is_empty() {
         c.ticket.id.to_string()
     } else {
         c.ticket.key.clone()
     };
+    let status = c.status(s);
+    let status_width = pill_width(ui, status, rect.width() * 0.54, c.status_gear_angle(animate, clock));
     pill(
         ui,
-        at(44.0, 12.0),
+        at(12.0, 12.0),
         &reference,
         design::FLOW_ID_TEXT,
         design::FLOW_ID_FILL,
-        rect.width() - 56.0,
+        (rect.width() - status_width - 36.0).max(48.0),
         None,
-    );
-    let title = task_text(s, c.ticket);
-    let result_summary = s.task_result_summary(c.ticket);
-    text(
-        ui,
-        at(12.0, 44.0),
-        &title,
-        14.0,
-        ui.visuals().text_color(),
-        rect.width() - 24.0,
     );
     pill(
         ui,
-        at(12.0, 70.0),
-        c.status(s),
+        at(rect.width() - status_width - 12.0, 12.0),
+        status,
         design::FLOW_STATUS_TEXT,
         color.gamma_multiply(0.45),
-        rect.width() - 24.0,
+        status_width,
         c.status_gear_angle(animate, clock),
     );
+    let title = task_intent_text(c.ticket);
+    text_rows(
+        ui,
+        at(12.0, 48.0),
+        &title,
+        12.0,
+        ui.visuals().text_color(),
+        rect.width() - 24.0,
+        3,
+    );
+    let actor = card_actor(s, c);
+    let profile = c.command
+        .or_else(|| c.ticket.requested_session.and_then(|id|
+            s.commands.iter().find(|command| command.id == id)))
+        .and_then(|command| command.agent_spec.as_ref().map(|agent| &agent.profile))
+        .or_else(|| s.projects.iter().find(|project| project.id == c.ticket.project_id)
+            .map(|project| &project.profile));
+    let metadata = profile
+        .filter(|profile| !profile.model_id.is_empty() || !profile.provider_id.is_empty())
+        .map_or_else(
+            || actor.clone(),
+            |profile| {
+                let model = match (profile.model_id.is_empty(), profile.provider_id.is_empty()) {
+                    (false, false) => format!("{} / {}", profile.model_id, profile.provider_id),
+                    (false, true) => profile.model_id.clone(),
+                    (true, false) => profile.provider_id.clone(),
+                    (true, true) => unreachable!(),
+                };
+                format!("{actor} · {model}")
+            },
+        );
+    text(ui, at(12.0, 101.0), &metadata, 10.5, MUTED, rect.width() - 24.0);
     let project = s
         .projects
         .iter()
@@ -1005,7 +992,7 @@ fn draw_card(
     let response = response.on_hover_ui(|ui| {
         ui.set_max_width(440.0);
         ui.strong(&reference);
-        ui.label(result_summary.unwrap_or(&title));
+        ui.label(&title);
         ui.colored_label(color, c.status(s));
         ui.label(project);
         if !c.ticket.routing_note.is_empty() {
@@ -1018,7 +1005,7 @@ fn draw_card(
             if let Some(progress) = &command.agent_progress {
                 if progress.phase == AgentPhase::Finalizing {
                     ui.label(crate::tr!("Ergebnis liegt vor. Der Session-Verlauf wird noch gespeichert."));
-                } else if result_summary.is_none() {
+                } else if progress.phase != AgentPhase::Succeeded {
                     ui.label(&progress.summary);
                 }
             }
@@ -1037,6 +1024,39 @@ fn draw_card(
     response
 }
 
+fn card_actor(s: &Snapshot, card: &Card<'_>) -> String {
+    let project = s.projects.iter().find(|project| project.id == card.ticket.project_id);
+    let runner_id = card.command
+        .map(|command| command.runner_id)
+        .or_else(|| card.ticket.requested_session.and_then(|id|
+            s.commands.iter().find(|command| command.id == id).map(|command| command.runner_id)))
+        .or_else(|| s.streams.iter().rev()
+            .find(|stream| stream.ticket_ids.contains(&card.ticket.id))
+            .map(|stream| stream.runner_id))
+        .or_else(|| project.and_then(|project| match project.runner_mapping {
+            Some(ProjectRunnerMapping::Runner(id)) => Some(id),
+            _ => project.setup.as_ref().map(|setup| setup.runner_id),
+        }))
+        .or_else(|| s.scheduler_policies.iter()
+            .find(|policy| policy.project_id == card.ticket.project_id)
+            .and_then(|policy| {
+                let [id] = policy.runner_ids.as_slice() else { return None };
+                Some(*id)
+            }));
+    if let Some(id) = runner_id {
+        return s.runners.iter()
+            .find(|runner| runner.id == id)
+            .map_or_else(|| crate::tr!("Unbekannter Runner").into(), |runner| runner.name.clone());
+    }
+    if s.scheduler_policies.iter().any(|policy|
+        policy.project_id == card.ticket.project_id && !policy.runner_ids.is_empty())
+    {
+        "Auto Runner".into()
+    } else {
+        "Factory".into()
+    }
+}
+
 fn pill(
     ui: &egui::Ui,
     position: Pos2,
@@ -1046,18 +1066,16 @@ fn pill(
     max_width: f32,
     gear_angle: Option<f32>,
 ) {
+    let width = pill_width(ui, value, max_width, gear_angle);
     let icon_space = if gear_angle.is_some() { 19.0 } else { 0.0 };
     let galley = ui.painter().layout_job(design::elided_text_job(
         value.to_owned(),
         FontId::proportional(12.0),
         color,
-        max_width - 16.0 - icon_space,
+        width - 16.0 - icon_space,
         1,
     ));
-    let rect = Rect::from_min_size(
-        position,
-        egui::vec2(galley.size().x + 16.0 + icon_space, 24.0),
-    );
+    let rect = Rect::from_min_size(position, egui::vec2(width, 24.0));
     ui.painter().rect_filled(rect, 6, fill);
     if let Some(angle) = gear_angle {
         design::paint_gear(ui, rect.left_center() + egui::vec2(15.0, 0.0), 14.0, color, angle);
@@ -1067,6 +1085,16 @@ fn pill(
         galley,
         color,
     );
+}
+
+fn pill_width(ui: &egui::Ui, value: &str, max_width: f32, gear_angle: Option<f32>) -> f32 {
+    let icon_space = if gear_angle.is_some() { 19.0 } else { 0.0 };
+    let text_width = ui.painter().layout_no_wrap(
+        value.to_owned(),
+        FontId::proportional(12.0),
+        Color32::WHITE,
+    ).size().x;
+    (text_width + 16.0 + icon_space).min(max_width.max(16.0))
 }
 
 #[cfg(test)]
@@ -1082,6 +1110,9 @@ mod tests {
         let mut snapshot = (**app.snapshot.as_ref().unwrap()).clone();
         snapshot.projects[0].name = "Project name only in tooltip".into();
         snapshot.tickets[0].key = "WOAI-7".into();
+        let profile = &mut snapshot.commands[0].agent_spec.as_mut().unwrap().profile;
+        profile.model_id = "gpt-5".into();
+        profile.provider_id = "openai".into();
         let ticket = &snapshot.tickets[0];
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -1095,8 +1126,19 @@ mod tests {
         }
         assert!(text.iter().any(|value| value == "WOAI-7"));
         assert!(text.iter().any(|value| value == card(&snapshot, ticket).status(&snapshot)));
+        assert!(text.iter().any(|value| value == "Test-Runner · gpt-5 / openai"));
         assert!(!text.iter().any(|value| value.contains("Project name only in tooltip")));
-        assert_eq!(design::FLOW_CARD_SIZE.y - (70.0 + 24.0), 12.0);
+        assert_eq!(design::FLOW_CARD_SIZE.y, 124.0);
+    }
+
+    #[test]
+    fn task_tile_uses_the_assigned_stream_runner_without_an_active_command() {
+        let mut snapshot = (*crate::tests::fixture().snapshot.unwrap()).clone();
+        let ticket = snapshot.tickets[0].id;
+        snapshot.commands.clear();
+        let tile = card(&snapshot, snapshot.tickets.iter().find(|task| task.id == ticket).unwrap());
+        assert!(tile.command.is_none());
+        assert_eq!(card_actor(&snapshot, &tile), "Test-Runner");
     }
 
     fn complete(s: &mut Snapshot) {
@@ -1113,7 +1155,6 @@ mod tests {
         let c = card(&s, &s.tickets[0]);
         assert_eq!(c.stage, Stage::Execution);
         assert!(c.waiting && !c.active);
-        assert_eq!(c.icon(), icons::CHAT_CIRCLE_TEXT);
         assert_eq!(c.status(&s), "Braucht Antwort");
         s.questions.clear();
         s.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Running;
@@ -1129,6 +1170,24 @@ mod tests {
         s.tickets[0].draft = true;
         assert_eq!(card(&s, &s.tickets[0]).stage, Stage::Input);
         assert!(!card(&s, &s.tickets[0]).active);
+    }
+
+    #[test]
+    fn pending_merger_has_its_own_lane_and_names_the_missing_runner_capability() {
+        let app = crate::tests::fixture();
+        let mut s = (*app.snapshot.unwrap()).clone();
+        s.questions.clear();
+        let c = &mut s.commands[0];
+        c.agent_spec.as_mut().unwrap().role = MERGER_ROLE.into();
+        c.state = CommandState::Pending;
+        s.tickets[0].execution_command = Some(c.id);
+        let flow = FlowState::default();
+        let lane = lanes(&s, &flow, None).into_iter().find(|lane| lane.key == "merge").unwrap();
+        assert_eq!(lane.cards.len(), 1);
+        assert_eq!(lane.cards[0].status(&s), crate::tr!("Runner unterstützt Merger nicht"));
+        drop(lane);
+        s.runners[0].capabilities.push(MERGER_CAPABILITY.into());
+        assert_eq!(card(&s, &s.tickets[0]).status(&s), crate::tr!("Merger eingereiht"));
     }
 
     #[test]
@@ -1315,8 +1374,8 @@ mod tests {
         let executing = scoped.iter().find(|l| l.column == 2).unwrap();
         assert_eq!(executing.cards.len(), 7);
         assert!(executing.cards[0].waiting);
-        assert_eq!(executing.key, runner_lane_key(s.commands[0].runner_id));
-        assert_eq!(executing.title, "Test-Runner");
+        assert_eq!(executing.key, "implementation");
+        assert_eq!(executing.title, "Implementer");
         let other = lanes(&s, &state, Some(second));
         assert_eq!(other.iter().map(|l| l.cards.len()).sum::<usize>(), 1);
     }
@@ -1353,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_stacks_multiple_sessions_under_one_runner_and_keeps_intents_clickable() {
+    fn overview_uses_one_implementation_lane_and_keeps_intents_clickable() {
         let mut app = crate::tests::fixture();
         app.settings.page = Page::Overview;
         app.factory_flow.motion = false;
@@ -1365,11 +1424,6 @@ mod tests {
         other.id = RunnerId::new();
         let other_runner = other.id;
         s.runners.push(other);
-        let mut idle = s.runners[0].clone();
-        idle.id = RunnerId::new();
-        idle.name = "Idle-Runner".into();
-        let idle_runner = idle.id;
-        s.runners.push(idle);
         let mut add_execution = |runner_id| {
             let mut t = s.tickets[0].clone();
             t.id = TicketId::new();
@@ -1396,19 +1450,27 @@ mod tests {
         let third_ticket = add_execution(other_runner);
         assert_ne!(s.commands[0].session_root(), s.commands[1].session_root());
         let lanes = lanes(s, &app.factory_flow, None);
+        assert_eq!(
+            lanes.iter().map(|lane| (lane.title.as_str(), lane.icon)).collect::<Vec<_>>(),
+            [
+                ("Eingang", icons::ENVELOPE),
+                ("Orchestrator", icons::ROBOT),
+                ("Implementer", icons::ROBOT),
+                ("Reviewer", icons::ROBOT),
+                ("Merger", icons::ROBOT),
+                ("Done", icons::CHECK),
+            ]
+        );
         let execution: Vec<_> = lanes.iter().filter(|lane| lane.column == 2).collect();
-        assert_eq!(execution.len(), 3, "One lane per runner ID, including idle runners");
-        let lane = |id| execution.iter().find(|lane| lane.key == runner_lane_key(id)).unwrap();
-        assert_eq!(lane(runner).cards.iter().map(|c| c.ticket.id).collect::<Vec<_>>(), [ticket, second_ticket]);
-        assert_eq!(lane(other_runner).cards[0].ticket.id, third_ticket);
-        assert_eq!(lane(runner).subtitle(), Some("Busy"));
-        assert_eq!(lane(other_runner).subtitle(), Some("Busy"));
-        assert_eq!(lane(idle_runner).subtitle(), Some("Idle"));
-        assert!(lane(idle_runner).cards.is_empty());
+        assert_eq!(execution.len(), 1);
+        assert_eq!(execution[0].key, "implementation");
+        assert_eq!(
+            execution[0].cards.iter().map(|c| c.ticket.id).collect::<BTreeSet<_>>(),
+            BTreeSet::from([ticket, second_ticket, third_ticket])
+        );
         let filtered = self::lanes(s, &app.factory_flow, Some(ProjectId::new()));
-        let filtered_runner = filtered.iter().find(|lane| lane.key == runner_lane_key(runner)).unwrap();
-        assert!(filtered_runner.cards.is_empty());
-        assert_eq!(filtered_runner.subtitle(), Some("Busy"));
+        let filtered_execution = filtered.iter().find(|lane| lane.column == 2).unwrap();
+        assert!(filtered_execution.cards.is_empty());
 
         for _ in 0..4 {
             frame(&mut app, size, vec![]);
@@ -1419,14 +1481,14 @@ mod tests {
             egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
             _ => None,
         }).collect();
-        for label in ["Eingang (0)", "Verteilung (0)", "Test-Runner (2)", "Idle-Runner (0)", "Ergebnis (0)", "Busy", "Idle"] {
+        for label in ["Eingang (0)", "Orchestrator (0)", "Implementer (3)", "Reviewer (0)", "Merger (0)", "Done (0)"] {
             assert!(labels.contains(&label), "Missing {label}: {labels:?}");
         }
-        for label in ["Eingang", "Verteilung", "Ausführung", "Ergebnis"] {
+        for label in ["Eingang", "Verteilung", "Ausführung", "Ergebnis", "Test-Runner (2)", "Idle-Runner (0)"] {
             assert!(!labels.contains(&label), "Redundant column heading: {label}");
         }
         let header = ctx.data_mut(|d| d.get_temp::<Rect>(egui::Id::new((
-            "test-flow-runner", runner_lane_key(runner),
+            "test-flow-lane", "implementation",
         )))).unwrap();
         let card = |id| ctx.data_mut(|d| d.get_temp::<Rect>(egui::Id::new(("test-flow-task", id)))).unwrap();
         let first = card(ticket);
@@ -1440,13 +1502,12 @@ mod tests {
             egui::Shape::Text(text) if header.contains(text.pos) => Some(text),
             _ => None,
         }).collect();
-        assert_eq!(header_text.len(), 2);
-        assert_eq!(header_text[0].pos.x, header_text[1].pos.x);
+        assert!(header_text.iter().any(|text| text.galley.job.text == "Implementer (3)"));
         assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
             egui::Shape::Circle(circle) if header.shrink(6.0).contains(circle.center))));
         assert!(second.right() < size.x && second.bottom() < size.y);
         click(&mut app, size, header);
-        assert!(app.tabs.is_empty(), "A runner heading has no single session target");
+        assert!(app.tabs.is_empty(), "A lane heading has no task target");
         click(&mut app, size, second);
         let Some(Dialog::Task(task)) = app.dialog.take() else {
             panic!("Task dialog missing")
@@ -1477,7 +1538,7 @@ mod tests {
             s.streams[0].ticket_ids.push(t.id);
             s.tickets.push(t);
         }
-        let key = runner_lane_key(s.commands[0].runner_id);
+        let key = "implementation".to_owned();
         let original = s.tickets.clone();
         let size = egui::vec2(1800.0, 1600.0);
         for _ in 0..4 {

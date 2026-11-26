@@ -349,12 +349,14 @@ pub(super) async fn pending_commands(
         let target_git = guard.entries[&id].input.capabilities.iter().any(|c| c == TARGET_GIT_CAPABILITY);
         let directs = guard.entries[&id].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
         let merger = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
+        let merger_recovery = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
             }
             store.pending_with_direct_support(id, directs).map(|mut commands| {
                 commands.retain(|c| merger || c.agent_spec.as_ref().is_none_or(|s| s.role != MERGER_ROLE));
+                commands.retain(|c| merger_recovery || !is_merger_recovery(c));
                 commands
                     .retain(|c| files || c.agent_spec.as_ref().is_none_or(|s| s.files.is_empty()));
                 commands.retain(|c| repo_skills || c.agent_spec.as_ref().is_none_or(|s| s.repo_skills.is_none()));
@@ -463,9 +465,10 @@ pub(super) async fn ack_command(
         .any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY);
     let directs = guard.entries[&runner].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
     let merger = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
+    let merger_recovery = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_direct_support(runner, id, body.ownership_epoch, directs)?;
-        store.require_merger_support(runner, id, body.ownership_epoch, merger)?;
+        store.require_merger_support(runner, id, body.ownership_epoch, merger, merger_recovery)?;
         store.require_context_planning_support(
             runner,
             id,
@@ -505,4 +508,46 @@ pub(super) async fn command_result(
     };
     let store = app.store.clone();
     db_call(body.request_id, move || store.complete(runner, id, body)).await
+}
+
+pub(super) async fn publication_recovery(
+    State(app): State<App>,
+    Path((runner, id)): Path<(RunnerId, CommandId)>,
+    headers: HeaderMap,
+    Json(body): Json<PublicationRecoveryClaim>,
+) -> Response {
+    let _guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    let store = app.store.clone();
+    db_call(body.grant_id, move || store.claim_publication_recovery(runner, id, body.grant_id)).await
+}
+
+pub(super) async fn release_publication_recovery(
+    State(app): State<App>,
+    Path((runner, id)): Path<(RunnerId, CommandId)>,
+    headers: HeaderMap,
+    Json(body): Json<PublicationRecoveryClaim>,
+) -> Response {
+    let _guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    let store = app.store.clone();
+    db_call(body.grant_id, move || store.release_publication_recovery(runner, id, body.grant_id)).await
+}
+
+pub(super) async fn report_recovered_publication(
+    State(app): State<App>,
+    Path((runner, id)): Path<(RunnerId, CommandId)>,
+    headers: HeaderMap,
+    Json(body): Json<ReportRecoveredPublication>,
+) -> Response {
+    let _guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    let store = app.store.clone();
+    db_call(body.request_id, move || store.report_recovered_publication(runner, id, body)).await
 }
