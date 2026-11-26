@@ -10,6 +10,7 @@ use crate::{
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use egui_phosphor::regular as icons;
 use factory_core::*;
+use factory_protocol::models::ModelAccess;
 use factory_protocol::Snapshot;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -714,7 +715,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         canvas.min + position,
                         egui::vec2(card_width, card_heights[&c.ticket.id]),
                     );
-                    if draw_card(ui, &s, c, rect, animate, clock).clicked() {
+                    let accesses = app.models.factory.value.as_ref().map_or(&[][..], |settings| settings.accesses.as_slice());
+                    if draw_card(ui, &s, c, accesses, rect, animate, clock).clicked() {
                         task = Some(c.ticket.id);
                     }
                 }
@@ -911,6 +913,7 @@ fn draw_card(
     ui: &mut egui::Ui,
     s: &Snapshot,
     c: &Card<'_>,
+    accesses: &[ModelAccess],
     layout_rect: Rect,
     animate: bool,
     clock: u64,
@@ -996,20 +999,8 @@ fn draw_card(
         .and_then(|command| command.agent_spec.as_ref().map(|agent| &agent.profile))
         .or_else(|| s.projects.iter().find(|project| project.id == c.ticket.project_id)
             .map(|project| &project.profile));
-    let metadata = profile
-        .filter(|profile| !profile.model_id.is_empty() || !profile.provider_id.is_empty())
-        .map_or_else(
-            || actor.clone(),
-            |profile| {
-                let model = match (profile.model_id.is_empty(), profile.provider_id.is_empty()) {
-                    (false, false) => format!("{} / {}", profile.model_id, profile.provider_id),
-                    (false, true) => profile.model_id.clone(),
-                    (true, false) => profile.provider_id.clone(),
-                    (true, true) => unreachable!(),
-                };
-                format!("{actor} · {model}")
-            },
-        );
+    let model = profile.and_then(|profile| card_model_label(profile, accesses));
+    let metadata = model.as_ref().map_or_else(|| actor.clone(), |model| format!("{actor} · {model}"));
     text(
         ui,
         at(12.0, rect.height() - 23.0),
@@ -1029,6 +1020,7 @@ fn draw_card(
         ui.label(&title);
         ui.colored_label(color, c.status(s));
         ui.label(project);
+        ui.label(&metadata);
         if !c.ticket.routing_note.is_empty() {
             let note = crate::model::task_runner_blocker(s, c.ticket).unwrap_or(&c.ticket.routing_note);
             ui.colored_label(crate::design::history_color(
@@ -1056,6 +1048,17 @@ fn draw_card(
     ui.ctx()
         .data_mut(|d| d.insert_temp(egui::Id::new(("test-flow-task", c.ticket.id)), rect));
     response
+}
+
+fn card_model_label(profile: &ExecutionProfile, accesses: &[ModelAccess]) -> Option<String> {
+    let id = profile.provider_id.as_str();
+    let provider = crate::model_settings::provider_name(accesses, id)
+        .or_else(|| (!id.is_empty() && !id.starts_with("factory-")).then_some(id));
+    match (profile.model_id.as_str(), provider) {
+        ("", provider) => provider.map(str::to_owned),
+        (model, Some(provider)) => Some(format!("{model} / {provider}")),
+        (model, None) => Some(model.to_owned()),
+    }
 }
 
 fn card_actor(s: &Snapshot, card: &Card<'_>) -> String {
@@ -1146,12 +1149,19 @@ mod tests {
         snapshot.tickets[0].key = "WOAI-7".into();
         let profile = &mut snapshot.commands[0].agent_spec.as_mut().unwrap().profile;
         profile.model_id = "gpt-5".into();
-        profile.provider_id = "openai".into();
+        profile.provider_id = "factory-openai-test".into();
+        let accesses = [ModelAccess {
+            id: profile.provider_id.clone(),
+            name: "OpenAI Sub".into(),
+            models: vec![profile.model_id.clone()],
+            transports: Default::default(),
+        }];
+        assert_eq!(card_model_label(profile, &[]).as_deref(), Some("gpt-5"));
         let ticket = &snapshot.tickets[0];
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let rect = Rect::from_min_size(ui.cursor().min, design::FLOW_CARD_SIZE);
-                draw_card(ui, &snapshot, &card(&snapshot, ticket), rect, false, 0);
+                draw_card(ui, &snapshot, &card(&snapshot, ticket), &accesses, rect, false, 0);
             });
         });
         let mut text = vec![];
@@ -1160,7 +1170,8 @@ mod tests {
         }
         assert!(text.iter().any(|value| value == "WOAI-7"));
         assert!(text.iter().any(|value| value == card(&snapshot, ticket).status(&snapshot)));
-        assert!(text.iter().any(|value| value == "Test-Runner · gpt-5 / openai"));
+        assert!(text.iter().any(|value| value.contains("gpt-5 / OpenAI Sub")));
+        assert!(!text.iter().any(|value| value.contains("factory-openai")));
         assert!(!text.iter().any(|value| value.contains("Project name only in tooltip")));
         assert_eq!(design::FLOW_CARD_SIZE.y, 124.0);
     }

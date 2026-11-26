@@ -64,9 +64,15 @@ pub(super) fn require_no_publication_recovery(tx: &Connection, project: ProjectI
     Ok(())
 }
 
-pub(super) fn block_unpublished_intents(tx: &Transaction<'_>, owner: &Workstream, command: CommandId) -> Result<()> {
-    set_publication_state(tx, owner, command, TicketState::Blocked,
-        "Automatische Übernahme blockiert; Änderungen liegen im Arbeitsbereich.")
+pub(super) fn block_unpublished_intents(
+    tx: &Transaction<'_>, owner: &Workstream, command: CommandId, review_snapshot: bool,
+) -> Result<()> {
+    let note = if review_snapshot {
+        SNAPSHOT_RETRY_NOTE
+    } else {
+        "Automatische Übernahme blockiert; Änderungen liegen im Arbeitsbereich."
+    };
+    set_publication_state(tx, owner, command, if review_snapshot { TicketState::InProgress } else { TicketState::Blocked }, note)
 }
 
 pub(super) fn set_publication_state(
@@ -90,25 +96,27 @@ pub(super) fn set_publication_state(
     Ok(())
 }
 
-fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId) -> Result<Option<(RunnerCommand, Workstream)>> {
+fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId, review_snapshot: bool) -> Result<Option<(RunnerCommand, Workstream)>> {
     let row: Option<(String, String, String)> = tx.query_row(
         "SELECT c.data,s.data,p.data FROM commands c JOIN streams s ON s.id=c.stream_id
          JOIN active_projects p ON p.id=s.project_id
          WHERE c.id=?1 AND c.runner_id=?2 AND c.state='succeeded'
             AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=s.id)
            AND COALESCE(json_extract(p.data,'$.paused'),0)=0
-           AND c.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
+            AND NOT EXISTS(SELECT 1 FROM commands n WHERE n.stream_id=c.stream_id AND n.rowid>c.rowid
+                AND (n.state IN ('pending','accepted') OR json_extract(n.data,'$.kind')='run_agent' OR ?4=0))
            AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=
                  CASE WHEN json_extract(c.data,'$.agent_spec.role')=?3
                       THEN json_extract(c.data,'$.agent_spec.prompt') ELSE c.id END
                  AND json_extract(a.data,'$.final_scan_complete')=1)
-           AND EXISTS(SELECT 1 FROM stream_tickets st JOIN tickets t ON t.id=st.ticket_id
+         AND EXISTS(SELECT 1 FROM stream_tickets st JOIN tickets t ON t.id=st.ticket_id
                 WHERE st.stream_id=c.stream_id AND json_extract(t.data,'$.execution_command')=c.id
                   AND json_extract(t.data,'$.status') IN ('in_progress','blocked')
                   AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id))
-           AND NOT EXISTS(SELECT 1 FROM commands n JOIN streams w ON w.id=n.stream_id
-                WHERE w.project_id=s.project_id AND n.state IN ('pending','accepted'))",
-         params![id.to_string(), runner.to_string(), APPROVED_PUBLICATION_ROLE],
+            AND NOT EXISTS(SELECT 1 FROM commands n JOIN streams w ON w.id=n.stream_id
+                 WHERE n.state IN ('pending','accepted')
+                   AND (n.stream_id=s.id OR (?4=0 AND w.project_id=s.project_id)))",
+         params![id.to_string(), runner.to_string(), APPROVED_PUBLICATION_ROLE, review_snapshot],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?;
     let Some((command, owner, project)) = row else { return Ok(None); };
@@ -118,18 +126,45 @@ fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId
     if command.kind != CommandKind::RunAgent || command.requires_target_git()
         || owner.runner_id != runner || owner.ownership_epoch != command.ownership_epoch
         || !matches!(owner.status, StreamState::Blocked | StreamState::Review)
-        || command.agent_spec.as_ref().is_none_or(|s| s.read_only || s.role == factory_protocol::directs::ROLE)
+        || command.agent_spec.as_ref().is_none_or(|s| s.read_only || (!review_snapshot && s.defer_publication)
+            || s.role == factory_protocol::directs::ROLE
+            || (review_snapshot && !s.role.is_empty()))
         || command.workspace_spec.as_ref().is_none_or(|w| w.project_id != project.id
             || w.base_branch != project.base_branch
             || w.setup.as_ref().is_none_or(|setup| setup.runner_id != runner
                 || !setup.repository_path.is_empty()
                 || setup.repository_source != project.repository
-                || !super::work::absolute_runner_path(&setup.repository_source)))
+                || !(super::work::absolute_runner_path(&setup.repository_source)
+                    || (review_snapshot && setup.repository_source == "factory:managed"))))
         || !matches!(&command.result, Some(CommandOutput::Agent { agent })
             if agent.phase == AgentPhase::Succeeded
                 && publication_was_blocked(&agent.summary)
                 && !publication_was_confirmed(&agent.summary)
-                && !agent.summary.starts_with(PUBLICATION_CONFLICT_PREFIX))
+                && (review_snapshot || !agent.summary.starts_with(PUBLICATION_CONFLICT_PREFIX)))
+    {
+        return Ok(None);
+    }
+    if review_snapshot && !tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM scheduler_runs r JOIN tickets t ON t.id=r.ticket_id
+         WHERE r.agent_id=?1 AND json_extract(t.data,'$.execution_command')=?1
+          AND json_extract(t.data,'$.status') IN ('blocked','in_progress')
+         AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+         AND NOT EXISTS(SELECT 1 FROM validations v WHERE v.source_id=?1 AND v.retired=0))",
+        [id.to_string()], |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(None);
+    }
+    if review_snapshot && (super::sessions::closed(tx, command.session_root())?
+        || super::termination::load(tx, command.id)?.is_some())
+    {
+        return Ok(None);
+    }
+    if !review_snapshot && command.agent_spec.as_ref().is_some_and(|s| s.role.is_empty())
+        && tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs WHERE agent_id=?1)",
+            [id.to_string()], |row| row.get::<_, bool>(0))?
+        && !tx.query_row("SELECT EXISTS(SELECT 1 FROM publication_recovery_holds
+                WHERE command_id=?1 AND expires_ms>?2)",
+            params![id.to_string(), super::super::unix_ms()], |row| row.get::<_, bool>(0))?
     {
         return Ok(None);
     }
@@ -170,9 +205,17 @@ impl Store {
     }
 
     pub fn claim_publication_recovery(&self, runner: RunnerId, id: CommandId, grant: RequestId) -> Result<bool> {
+        self.claim_result_recovery(runner, id, grant, false)
+    }
+
+    pub fn claim_review_snapshot_recovery(&self, runner: RunnerId, id: CommandId, grant: RequestId) -> Result<bool> {
+        self.claim_result_recovery(runner, id, grant, true)
+    }
+
+    fn claim_result_recovery(&self, runner: RunnerId, id: CommandId, grant: RequestId, review_snapshot: bool) -> Result<bool> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some((_, owner)) = recoverable_publication(&tx, runner, id)? else { return Ok(false); };
+        let Some((_, owner)) = recoverable_publication(&tx, runner, id, review_snapshot)? else { return Ok(false); };
         let now = super::super::unix_ms();
         if tx.query_row("SELECT EXISTS(SELECT 1 FROM runner_restart_holds WHERE runner_id=?1 AND expires_ms>?2)",
             params![runner.to_string(), now], |row| row.get::<_, bool>(0))? {
@@ -203,7 +246,7 @@ impl Store {
             return Err(StoreError::Invalid("Invalid Git commit IDs"));
         }
         self.mutate(body.request_id, &format!("publication.recover/{runner}/{id}"), &body, |tx| {
-            let (mut command, mut owner) = recoverable_publication(tx, runner, id)?
+            let (mut command, mut owner) = recoverable_publication(tx, runner, id, false)?
                 .ok_or(StoreError::WorkConflict)?;
             if command.ownership_epoch != body.ownership_epoch
                 || command.workspace_spec.as_ref().is_none_or(|s| s.base_branch != body.base_branch)
@@ -232,6 +275,44 @@ impl Store {
             event(tx, "publication.recovered", id.to_string(), &body)?;
             Ok(())
         })
+    }
+
+    pub fn report_recovered_review_snapshot(&self, runner: RunnerId, id: CommandId, body: ReportRecoveredReviewSnapshot) -> Result<()> {
+        if !matches!(body.snapshot_commit.len(), 40 | 64)
+            || !body.snapshot_commit.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(StoreError::Invalid("Invalid Git snapshot ID"));
+        }
+        self.mutate(body.request_id, &format!("review-snapshot.recover/{runner}/{id}"), &body, |tx| {
+            let (mut command, mut owner) = recoverable_publication(tx, runner, id, true)?
+                .ok_or(StoreError::WorkConflict)?;
+            if command.ownership_epoch != body.ownership_epoch
+                || tx.execute("DELETE FROM publication_recovery_holds
+                      WHERE command_id=?1 AND runner_id=?2 AND grant_id=?3 AND expires_ms>?4",
+                    params![id.to_string(), runner.to_string(), body.grant_id.to_string(), super::super::unix_ms()])? != 1
+            {
+                return Err(StoreError::WorkConflict);
+            }
+            let Some(CommandOutput::Agent { agent }) = &mut command.result else {
+                return Err(StoreError::WorkConflict);
+            };
+            let report = agent.summary.split_once("\n\nAgentenergebnis:\n")
+                .map_or(agent.summary.as_str(), |(_, report)| report);
+            let evidence = if body.unchanged_tree { format!("\n{NO_GIT_CHANGES_MARKER}") } else { String::new() };
+            agent.summary = format!("{PUBLICATION_PREPARED_PREFIX}{evidence}\nReview-Snapshot {} nachträglich gesichert.\n\nAgentenergebnis:\n{report}", body.snapshot_commit);
+            let mut end = agent.summary.len().min(32768);
+            while !agent.summary.is_char_boundary(end) { end -= 1; }
+            agent.summary.truncate(end);
+            command.agent_progress = Some(agent.clone());
+            command.agent_spec.as_mut().ok_or(StoreError::Internal)?.defer_publication = true;
+            super::work::save_command(tx, &command, "succeeded")?;
+            set_publication_state(tx, &owner, id, TicketState::Validating, "")?;
+            super::work::save_stream(tx, &mut owner, StreamState::Review)?;
+            event(tx, "validation.snapshot_recovered", id.to_string(), &body)?;
+            Ok(())
+        })?;
+        self.wake_scheduler();
+        Ok(())
     }
 
     pub fn reconcile_publication(&self, id: TicketId, body: ReconcilePublication) -> Result<Ticket> {

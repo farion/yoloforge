@@ -23,57 +23,19 @@ impl Store {
             .map(|s| serde_json::from_str(&s).map_err(Into::into))
             .transpose()
     }
-    pub fn create_enrollment(&self, body: CreateEnrollment) -> Result<Enrollment> {
-        if !(30..=900).contains(&body.ttl_seconds)
-            || (body.role == DeviceRole::Runner) != body.runner_id.is_some()
-        {
-            return Err(StoreError::Invalid(
-                "Enrollment role, runner or expiry invalid",
-            ));
-        }
-        let code = secret();
-        let now = super::super::unix_ms();
-        let expires_unix_ms = now + u64::from(body.ttl_seconds) * 1000;
-        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("DELETE FROM enrollments WHERE expires_unix_ms<=?1", [now])?;
-        tx.execute(
-            "INSERT INTO enrollments(code_hash,expires_unix_ms,data) VALUES(?1,?2,?3)",
-            params![
-                digest(&code),
-                expires_unix_ms,
-                serde_json::to_string(&body)?
-            ],
-        )?;
-        tx.commit()?;
-        Ok(Enrollment {
-            code,
-            expires_unix_ms,
-        })
-    }
-    pub fn redeem_enrollment(&self, body: RedeemEnrollment) -> Result<DeviceCredential> {
+    pub fn create_device(&self, body: CreateDevice) -> Result<DeviceCredential> {
         line(&body.name, 80)?;
-        if body.code.len() > 100 {
-            return Err(StoreError::NotFound);
+        if (body.role == DeviceRole::Runner) != body.runner_id.is_some() {
+            return Err(StoreError::Invalid("Invalid device role or runner binding"));
         }
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let hash = digest(&body.code);
-        let now = super::super::unix_ms();
-        let data: Option<String> = tx
-            .query_row(
-                "SELECT data FROM enrollments WHERE code_hash=?1 AND expires_unix_ms>?2",
-                params![hash, now],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let grant: CreateEnrollment = serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
         let device = Device {
             id: DeviceId::new(),
             name: body.name,
-            role: grant.role,
-            runner_id: grant.runner_id,
-            created_unix_ms: now,
+            role: body.role,
+            runner_id: body.runner_id,
+            created_unix_ms: super::super::unix_ms(),
             revoked: false,
         };
         let token = secret();
@@ -85,8 +47,7 @@ impl Store {
                 serde_json::to_string(&device)?
             ],
         )?;
-        tx.execute("DELETE FROM enrollments WHERE code_hash=?1", [hash])?;
-        event(&tx, "device.enrolled", device.id.to_string(), &device)?;
+        event(&tx, "device.created", device.id.to_string(), &device)?;
         tx.commit()?;
         Ok(DeviceCredential { device, token })
     }

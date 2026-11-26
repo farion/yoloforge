@@ -66,6 +66,204 @@ pub struct ProjectSettings {
     batch: Option<SaveBatch>,
     confirm_close: bool,
     language_draft: Option<crate::i18n::Language>,
+    android_push: AndroidPush,
+}
+
+const ANDROID_PUSH_PATH: &str = "/v1/android-push/settings";
+
+#[derive(Default)]
+struct AndroidPush {
+    attempted: bool,
+    request: Option<(u64, bool)>,
+    status: Option<Value>,
+    enabled: bool,
+    label: String,
+    app_json: String,
+    service_json: String,
+    picker: Option<(bool, std::sync::mpsc::Receiver<Result<Option<String>, ()>>)>,
+}
+
+impl AndroidPush {
+    fn pick(&mut self, ctx: &egui::Context, private: bool) {
+        let ctx = ctx.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        self.picker = Some((private, receive));
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let result = (|| {
+                let Some(path) = rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file() else {
+                    return Ok(None);
+                };
+                let mut content = String::new();
+                std::fs::File::open(path).map_err(|_| ())?.take(65_537).read_to_string(&mut content).map_err(|_| ())?;
+                if content.len() > 65_536 { return Err(()); }
+                Ok(Some(content))
+            })();
+            let _ = send.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    fn settle_picker(&mut self, app: &mut App) {
+        use std::sync::mpsc::TryRecvError;
+        let Some((private, receiver)) = &self.picker else { return };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(()),
+        };
+        let private = *private;
+        self.picker = None;
+        match result {
+            Ok(Some(text)) if private => self.service_json = text,
+            Ok(Some(text)) => self.app_json = text,
+            Ok(None) => {},
+            Err(()) => app.notice_error(crate::tr!("Firebase-Datei konnte nicht gelesen werden.")),
+        }
+    }
+
+    fn send(&mut self, app: &mut App, save: bool) {
+        let id = app.next_request;
+        app.next_request += 1;
+        app.in_flight.insert(id);
+        let body = if save {
+            json!({
+                "enabled":self.enabled, "label":self.label,
+                "app_json":(!self.app_json.trim().is_empty()).then_some(self.app_json.trim()),
+                "service_json":(!self.service_json.trim().is_empty()).then_some(self.service_json.trim()),
+            })
+        } else { Value::Null };
+        app.backend.request(id, if save { "PUT" } else { "GET" }.into(), ANDROID_PUSH_PATH.into(), body);
+        self.request = Some((id, save));
+    }
+
+    fn settle(&mut self, app: &mut App) {
+        let Some((id, save)) = self.request else { return };
+        let Some(response) = app.responses.remove(&id) else { return };
+        self.request = None;
+        match response {
+            Ok(status) => {
+                self.enabled = status["enabled"] == true;
+                self.label = status["label"].as_str().unwrap_or_default().into();
+                self.status = Some(status);
+                if save {
+                    self.app_json.clear();
+                    self.service_json.clear();
+                    app.notice_success(crate::tr!("Android-Push gespeichert."));
+                }
+            }
+            Err(error) => {
+                app.action_errors.push((crate::overview::now_ms(), error.message));
+                app.notice_error(if save { crate::tr!("Android-Push konnte nicht gespeichert werden. Prüfe die Firebase-Dateien.") }
+                    else { crate::tr!("Android-Push konnte nicht geladen werden.") });
+            }
+        }
+    }
+
+    fn can_save(&self, app: &App) -> bool {
+        app.online && app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin)
+            && self.request.is_none() && !self.label.trim().is_empty()
+            && self.status.as_ref().is_some_and(|s| {
+                let app_changed = !self.app_json.trim().is_empty();
+                let key_changed = !self.service_json.trim().is_empty();
+                if s["configured"] == true {
+                    self.enabled != (s["enabled"] == true) || s["label"] != self.label.trim() || app_changed || key_changed
+                } else { app_changed && key_changed }
+            })
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, app: &mut App) {
+        if !app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin) { return; }
+        ui.add_space(12.0);
+        ui.separator();
+        design::section_heading(ui, crate::tr!("Android-Push"));
+        let Some(status) = &self.status else {
+            if self.request.is_some() { ui.spinner(); }
+            else if ui.add_enabled(app.online, egui::Button::new(crate::tr!("Konfiguration laden"))).clicked() {
+                self.send(app, false);
+            }
+            return;
+        };
+        let configured = status["configured"] == true;
+        if let Some(project) = status["project_id"].as_str() {
+            ui.label(format!("Firebase: {project}"));
+        }
+        ui.add_space(design::SETTINGS_FIELD_GAP);
+        ui.add_enabled_ui(app.online, |ui| {
+            ui.checkbox(&mut self.enabled, crate::tr!("Android-Push aktivieren"));
+            ui.add_space(design::SETTINGS_FIELD_GAP);
+            design::settings_field(ui, crate::tr!("Factory-Name in der Benachrichtigung"), |ui| {
+                ui.add(design::singleline(&mut self.label).desired_width(f32::INFINITY)
+                    .hint_text(design::input_hint(crate::tr!("z. B. Büro-Factory"))));
+            });
+            let public_file = design::settings_field(ui, "google-services.json", |ui| {
+                ui.add(design::multiline(&mut self.app_json).desired_width(f32::INFINITY).desired_rows(3)
+                    .hint_text(design::input_hint(if configured { crate::tr!("Leer lassen, um die Datei zu behalten") }
+                        else { crate::tr!("JSON-Inhalt einfügen") })));
+                ui.add_enabled(self.picker.is_none(), egui::Button::new(crate::tr!("Firebase-App-Datei auswählen …"))).clicked()
+            });
+            let private_file = design::settings_field(ui, crate::tr!("Privater Firebase-Dienstkontoschlüssel (JSON)"), |ui| {
+                let mut output = design::multiline(&mut self.service_json).id_salt("android-push-private-key")
+                    .password(true).desired_width(f32::INFINITY).desired_rows(2)
+                    .hint_text(design::input_hint(if configured { crate::tr!("Leer lassen, um den Schlüssel zu behalten") }
+                        else { crate::tr!("JSON-Inhalt einfügen") })).show(ui);
+                output.state.clear_undoer();
+                output.state.store(ui.ctx(), output.response.id);
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test-android-push-key"), (output.response.rect, ui.clip_rect())));
+                ui.add_enabled(self.picker.is_none(), egui::Button::new(crate::tr!("Dienstkonto-Datei auswählen …"))).clicked()
+            });
+            if public_file || private_file { self.pick(ui.ctx(), private_file); }
+        });
+    }
+}
+
+#[cfg(test)]
+mod android_push_tests {
+    use super::*;
+
+    #[test]
+    fn android_push_key_remains_masked_and_settings_save_is_reachable() {
+        for size in [egui::vec2(780.0, 610.0), egui::vec2(1560.0, 1000.0)] {
+            let mut app = crate::tests::fixture();
+            app.online = true;
+            app.access = Some(AccessView { role: DeviceRole::Admin, device_id: None, runner_id: None });
+            let read = 900;
+            app.responses.insert(read, Ok(json!([])));
+            let mut settings = ProjectSettings::factory();
+            settings.selected = ProjectSection::Devices;
+            settings.panes.insert(ProjectSection::Devices, vec![Dialog::Read {
+                request: read, title: "Devices".into(), path: "/v1/devices".into(),
+            }]);
+            settings.android_push.status = Some(json!({"enabled":true,"configured":true,"label":"Factory"}));
+            settings.android_push.enabled = true;
+            settings.android_push.label = "Factory".into();
+            settings.android_push.service_json = "sensitive-fixture-do-not-display".into();
+            assert!(settings.android_push.can_save(&app));
+            app.factory_settings = Some(settings);
+            let ctx = app.backend.context().clone();
+            let mut dialog = Dialog::FactorySettings;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut output = None;
+            for _ in 0..2 {
+                output = Some(ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                    assert!(!dialog.show(ctx, &mut app));
+                }));
+            }
+            let (editor, clip): (egui::Rect, egui::Rect) =
+                ctx.data(|data| data.get_temp(egui::Id::new("test-android-push-key"))).unwrap();
+            let save: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new("test-settings-save"))).unwrap();
+            assert!(screen.contains_rect(save), "{size:?}: {save:?}");
+            assert!(clip.bottom() <= save.top(), "the form, not the footer, scrolls");
+            if size.x > 1000.0 {
+                assert!(clip.contains_rect(editor), "the key field is visible in the larger window");
+            }
+            let mut visible = vec![];
+            for shape in output.unwrap().shapes { crate::tests::shape_text(&shape.shape, &mut visible); }
+            assert!(!visible.iter().any(|text| text.contains("sensitive-fixture")));
+            assert!(app.settings.pending.is_empty());
+        }
+    }
 }
 
 struct Write {
@@ -92,6 +290,7 @@ impl ProjectSettings {
             batch: None,
             confirm_close: false,
             language_draft: None,
+            android_push: Default::default(),
         }
     }
     pub fn factory() -> Self {
@@ -102,6 +301,7 @@ impl ProjectSettings {
             batch: None,
             confirm_close: false,
             language_draft: None,
+            android_push: Default::default(),
         }
     }
     pub fn persist(&self, app: &mut App) {
@@ -154,9 +354,12 @@ impl ProjectSettings {
     }
 
     fn show_factory_dialog(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32) -> bool {
+        self.android_push.settle(app);
+        self.android_push.settle_picker(app);
         let bottom = ui.cursor().top() + height;
         let view_height = (height - design::SETTINGS_FOOTER_HEIGHT - 24.0).max(24.0);
-        let saving = app.language_save.is_some() || crate::model_settings::factory_defaults_saving(app);
+        let saving = app.language_save.is_some() || crate::model_settings::factory_defaults_saving(app)
+            || self.android_push.request.is_some_and(|(_, save)| save);
         let view_close = ui.add_enabled_ui(!saving, |ui| {
             ui.set_max_height(view_height);
             self.show_mode(ui, app, view_height, false)
@@ -167,7 +370,8 @@ impl ProjectSettings {
         let language = self.language_draft.filter(|language| *language != app.settings.language);
         let (save, cancel) = design::settings_footer(ui, bottom, |ui| {
             let save = design::settings_save_button(ui,
-                !saving && (language.is_some() || crate::model_settings::factory_defaults_can_save(app)));
+                !saving && (language.is_some() || crate::model_settings::factory_defaults_can_save(app)
+                    || self.android_push.can_save(app)));
             let cancel = ui.add_enabled(!saving, egui::Button::new(crate::tr!("Abbrechen")));
             #[cfg(test)]
             ui.ctx().data_mut(|data| {
@@ -177,6 +381,7 @@ impl ProjectSettings {
             (save.clicked(), cancel.clicked())
         });
         if save {
+            if self.android_push.can_save(app) { self.android_push.send(app, true); }
             crate::model_settings::save_factory_defaults(app);
             if let Some(language) = language {
                 let mut settings = app.settings.clone();
@@ -536,7 +741,14 @@ impl ProjectSettings {
                      design::section_heading(ui, self.selected.title());
                   }
                   if self.selected == ProjectSection::Devices {
-                      design::section_heading(ui, self.selected.title());
+                       design::section_heading(ui, self.selected.title());
+                       if app.online && app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin)
+                           && self.android_push.status.is_none() && self.android_push.request.is_none()
+                           && !self.android_push.attempted
+                       {
+                           self.android_push.attempted = true;
+                           self.android_push.send(app, false);
+                       }
                   }
                  let panes=self.panes.entry(self.selected).or_default();
                 if panes.is_empty() {
@@ -594,8 +806,11 @@ impl ProjectSettings {
                 let pane=panes.last_mut().expect("project pane initialized");
                 let pane_close=match pane {
                     Dialog::Form(form)=>form.show_in_settings(ui,app,pane_bottom,(remaining-145.0).max(40.0)),
-                    Dialog::Read {request,path,..}=>{
-                        egui::ScrollArea::both().id_salt((self.project,self.selected,"read")).max_height((remaining-50.0).max(40.0)).show(ui,|ui| {
+                     Dialog::Read {request,path,..}=>{
+                         let devices = self.selected == ProjectSection::Devices;
+                         let scroll = if devices { egui::ScrollArea::vertical().max_height((pane_bottom-ui.cursor().top()).max(0.0)) }
+                             else { egui::ScrollArea::both().max_height((remaining-50.0).max(40.0)) };
+                         scroll.id_salt((self.project,self.selected,"read")).show(ui,|ui| {
                             match app.responses.get(request).cloned() {
                                 Some(Ok(value))=>read_content(ui,app,&value,path),
                                 Some(Err(error))=>{
@@ -605,11 +820,12 @@ impl ProjectSettings {
                                             ui.ctx().data_mut(|d| d.insert_temp(shown, true));
                                             app.notice_error(crate::tr!("Gerätezugänge konnten nicht geladen werden."));
                                             app.action_errors.push((crate::overview::now_ms(), error.message));
-                                        }
-                                    } else { ui.colored_label(crate::app::RED,error.message); }
-                                }
-                                None=>{ui.spinner();ui.label(crate::tr!("Wird geladen …"));}
-                            }
+                                         }
+                                     } else { ui.colored_label(crate::app::RED,error.message); }
+                                 }
+                                 None=>{ui.spinner();ui.label(crate::tr!("Wird geladen …"));}
+                             }
+                             if devices { self.android_push.show(ui, app); }
                         });
                         if self.selected != ProjectSection::Devices {
                             if let Some(Ok(value))=app.responses.get(request) {if ui.button(crate::tr!("Exportieren …")).clicked() {app.backend.save_json("yoloforge-projekteinstellungen.json",value.clone());}}

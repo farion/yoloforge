@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Dedicated emulator UI: enrollment, image picker, SAF export, optional published APK upgrade.
+"""Dedicated emulator UI: key sign-in, image picker, SAF export, optional published APK upgrade.
 
 Resets only dev.yoloforge.mobile on the explicitly selected emulator. No model calls.
 """
-import argparse,base64,hashlib,json,os,re,secrets,select,struct,subprocess,tempfile,time,urllib.request,uuid,xml.etree.ElementTree as ET,zlib
+import argparse,base64,hashlib,json,os,re,secrets,struct,subprocess,tempfile,time,urllib.request,uuid,xml.etree.ElementTree as ET,zlib
 from pathlib import Path
 from cargo_paths import profile_dir
+from factory_smoke import listening_address, seed_android_fixture_model
 root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--serial',required=True)
@@ -44,8 +45,8 @@ env={**os.environ,'FACTORY_TOKEN':secrets.token_hex(32)};env.pop('FACTORY_TOKEN_
 server=subprocess.Popen([str(profile_dir(root=root)/'factoryd'),'--listen','127.0.0.1:0','--database',str(base/'db')],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
 port=None
 try:
-    assert select.select([server.stdout],[],[],10)[0]
-    url='http://'+server.stdout.readline().strip().split()[-1];port=url.rsplit(':',1)[1]
+    url='http://'+listening_address(server);port=url.rsplit(':',1)[1]
+    seed_android_fixture_model(base/'db')
     project=api('POST','/v1/projects',{'request_id':rid(),'name':'Device acceptance','repository':'/unused','base_branch':'main'})
     api('PATCH','/v1/projects/'+project['id']+'/profile',{'request_id':rid(),'expected_revision':1,'profile':{'provider_id':'test','model_id':'test','toolchain':'','start_command':'','test_command':''}})
     runner=rid();registration=api('POST','/v1/runners/register',{'id':runner,'instance_id':rid(),'name':'Device fixture','location':'local','version':'test','capabilities':[],'opencode':{'status':'not_configured'}})['registration_id']
@@ -66,14 +67,19 @@ try:
         for offset in range(0,len(large_data),1024*1024):
             receipt=api('PUT',prefix+command['id']+'/files',{'ownership_epoch':1,'chunk':{'file':blob,'offset':offset,'data':base64.b64encode(large_data[offset:offset+1024*1024]).decode()}},registration)
         assert receipt['complete']
-    code=api('POST','/v1/devices/enrollment',{'role':'operator','runner_id':None,'ttl_seconds':300})['code']
+    key=api('POST','/v1/devices',{'name':'Android device acceptance','role':'operator'})['token']
     shell('pm','clear','dev.yoloforge.mobile')
     shell('pm','grant','dev.yoloforge.mobile','android.permission.ACCESS_LOCAL_NETWORK')
     run(*adb,'reverse','tcp:'+port,'tcp:'+port)
     shell('am','start','-n','dev.yoloforge.mobile/.MainActivity')
     enter('Factory-Adresse (HTTPS)','http://127.0.0.1:'+port)
-    enter('Einmaliger Anmeldecode',code);tap('Anmelden')
-    node('App-Updates');tap('Device acceptance');tap('Neuer Prompt')
+    enter('Zugangsschlüssel',key);tap('Anmelden')
+    try: node('App-Einstellungen',4); desktop_navigation=True
+    except AssertionError: desktop_navigation=False
+    if desktop_navigation:
+        tap('Navigation öffnen');tap('Projekt auswählen');tap('Device acceptance');tap('Neuer Intent')
+    else:
+        tap('Device acceptance');tap('Neuer Prompt')
     enter('Was soll bearbeitet werden?','Device image acceptance')
     def chunk(kind,data):return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data))
     png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',32,32,8,2,0,0,0))+chunk(b'IDAT',zlib.compress((b'\0'+b'\xff\0\0'*32)*32))+chunk(b'IEND',b'')
@@ -85,7 +91,11 @@ try:
     snapshot=api('GET','/v1/snapshot');task=next(t for t in snapshot['tickets'] if t.get('prompt')=='Device image acceptance')
     assert len(task['images'])==1 and base64.b64decode(task['images'][0]['data'])==png
     print('PASS real Android image picker -> encrypted draft -> authenticated Rust task upload',flush=True)
-    session_label=next(n.get('text') for n in hierarchy().iter('node') if n.get('text','').startswith('SESSION: DEVICE ARCHIVE'))
+    if desktop_navigation:
+        tap('Navigation öffnen');tap('Sessions')
+        session_label='Device archive'
+    else:
+        session_label=next(n.get('text') for n in hierarchy().iter('node') if n.get('text','').casefold().startswith('session: device archive'))
     tap(session_label);tap('Vollstaendiges Archiv');tap('Anhang speichern: '+filename)
     tap('Save');node('Anhang gespeichert und SHA256 geprueft')
     exported=run(*adb,'exec-out','cat','/sdcard/Download/'+filename)
@@ -98,7 +108,13 @@ try:
         print('PASS Android chunked >4 MiB download, full SHA256 verification and SAF export',flush=True)
     if args.upgrade_to:
         before=shell('dumpsys','package','dev.yoloforge.mobile');assert 'versionName='+args.upgrade_to+'\n' not in before
-        tap('Zurueck');tap('Projekte');tap('App-Updates')
+        tap('Zurueck')
+        if desktop_navigation: tap('App-Einstellungen')
+        else:
+            tap('Projekte')
+            try: tap('Navigation öffnen',2)
+            except AssertionError: pass  # Released APKs before the flyout put App-Updates on the projects page.
+        tap('App-Updates')
         shell('appops','set','dev.yoloforge.mobile','REQUEST_INSTALL_PACKAGES','allow')
         tap('Update herunterladen und installieren',seconds=90)
         tap('Update',seconds=180)
@@ -114,10 +130,11 @@ try:
             time.sleep(1)
         else:raise AssertionError('Published APK installation did not complete')
         shell('am','start','-n','dev.yoloforge.mobile/.MainActivity')
-        node('Device acceptance',seconds=60)
+        try: node('App-Einstellungen',4)
+        except AssertionError: node('Device acceptance',seconds=60)
         after=shell('dumpsys','package','dev.yoloforge.mobile');assert 'versionName='+args.upgrade_to+'\n' in after
         assert int(re.search(r'versionCode=(\d+)',after)[1])>int(re.search(r'versionCode=(\d+)',before)[1])
-        print('PASS in-app published signed APK upgrade; enrolled Factory identity preserved',flush=True)
+        print('PASS in-app published signed APK upgrade; Factory identity preserved',flush=True)
     (base/'screen.xml').write_bytes(ET.tostring(hierarchy()))
     print('Evidence:',base,flush=True)
 finally:

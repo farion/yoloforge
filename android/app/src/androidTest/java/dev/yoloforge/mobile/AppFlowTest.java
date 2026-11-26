@@ -15,6 +15,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import static org.junit.Assert.*;
 import static org.junit.Assume.assumeNotNull;
+import static org.junit.Assume.assumeTrue;
 import org.json.JSONObject;
 
 /** Real Rust-server acceptance supplied by scripts/smoke-android.py; no model calls. */
@@ -34,11 +35,75 @@ public final class AppFlowTest {
         assertEquals("Original prompt", MainActivity.taskLabel(task, command));
     }
 
+    @Test public void nativePushOnlyDisplaysForTheCurrentFactoryLogin() throws Exception {
+        var context=instrument.getTargetContext();
+        assumeTrue(InboxPush.permitted(context));
+        Vault vault=new Vault(context);
+        JSONObject credentials=vault.get("credentials"), flag=vault.get("inbox-push-enabled"), binding=vault.get("inbox-push-binding");
+        String registration=java.util.UUID.randomUUID().toString(), item=java.util.UUID.randomUUID().toString();
+        var message=java.util.Map.of("registration",registration,"id",item,"kind","question","factory","Werkstatt");
+        var notifications=context.getSystemService(NotificationManager.class);
+        String tag="inbox-push:question/"+item;
+        try {
+            vault.put("credentials",new JSONObject().put("push_login","active"));
+            vault.put("inbox-push-enabled",new JSONObject().put("login","active"));
+            vault.put("inbox-push-binding",new JSONObject().put("login","active").put("id",registration));
+            assertTrue(InboxPush.accepts(context,registration));
+            InboxPush.show(context,message);
+            var first=waitForNotification(notifications,tag,true);
+            assertNotNull(first);
+            assertEquals("Werkstatt",first.getNotification().extras.getCharSequence(android.app.Notification.EXTRA_TITLE));
+            notifications.cancel(tag,1);
+            assertNull(waitForNotification(notifications,tag,false));
+            vault.put("credentials",new JSONObject().put("push_login","replacement"));
+            assertFalse(InboxPush.accepts(context,registration));
+            InboxPush.show(context,message);
+            assertFalse(java.util.Arrays.stream(notifications.getActiveNotifications()).anyMatch(n->tag.equals(n.getTag())));
+        } finally {
+            notifications.cancel(tag,1);
+            vault.put("credentials",credentials);vault.put("inbox-push-enabled",flag);vault.put("inbox-push-binding",binding);
+        }
+    }
+    private static android.service.notification.StatusBarNotification waitForNotification(NotificationManager manager,String tag,boolean expectPresent){
+        long deadline=android.os.SystemClock.elapsedRealtime()+3000;
+        android.service.notification.StatusBarNotification notification;
+        do {
+            notification=java.util.Arrays.stream(manager.getActiveNotifications()).filter(n->tag.equals(n.getTag())).findFirst().orElse(null);
+            if((notification!=null)==expectPresent)return notification;
+            android.os.SystemClock.sleep(25);
+        }while(android.os.SystemClock.elapsedRealtime()<deadline);
+        return notification;
+    }
+
     private Activity activity;
     private final android.app.Instrumentation instrument = InstrumentationRegistry.getInstrumentation();
+
+    @Test public void actionButtonsKeepAHitAreaTallerThanTheirBackground() {
+        instrument.runOnMainSync(()->{
+            var context=instrument.getTargetContext();
+            for(String label:new String[]{"Neuer Prompt","Inbox","Projekt pausieren"}){
+                Button button=FactoryStyle.button(context,label,label.equals("Neuer Prompt"));
+                int unspecified=View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED);
+                button.measure(unspecified,unspecified);
+                int width=button.getMeasuredWidth(), height=button.getMeasuredHeight();
+                button.layout(0,0,width,height);
+                var background=(android.graphics.drawable.InsetDrawable)button.getBackground();
+                background.setBounds(0,0,width,height);
+                var visible=background.getDrawable().getBounds();
+                assertTrue(height>=FactoryStyle.dp(context,44));
+                assertEquals(FactoryStyle.dp(context,6),visible.top);
+                assertEquals(visible.top,height-visible.bottom);
+                assertTrue((visible.height()-button.getLayout().getHeight())/2<button.getPaddingStart());
+            }
+        });
+    }
+
     private View find(View view, String text, boolean edit) {
+        if(!view.isShown())return null;
         if(edit && view instanceof EditText && text.contentEquals(((EditText)view).getHint()))return view;
-        if(!edit && view instanceof Button && ((Button)view).getText().toString().startsWith(text))return view;
+        if(!edit && view.isClickable() && (text.equals(view.getContentDescription())
+            || view instanceof TextView && !(view instanceof EditText) && text.contentEquals(((TextView)view).getText())
+            || view instanceof Button && ((Button)view).getText().toString().startsWith(text)))return view;
         if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++){View found=find(group.getChildAt(i),text,edit);if(found!=null)return found;}}
         return null;
     }
@@ -48,23 +113,129 @@ public final class AppFlowTest {
         throw new AssertionError("Missing UI control: "+text);
     }
     private void click(String label)throws Exception {View view=waitView(label,false);instrument.runOnMainSync(()->view.performClick());}
+    private boolean hasLabel(View view,String label){
+        if(!view.isShown())return false;
+        if(label.equals(view.getContentDescription())||view instanceof TextView&&label.contentEquals(((TextView)view).getText()))return true;
+        if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++)if(hasLabel(group.getChildAt(i),label))return true;}
+        return false;
+    }
+    private void assertLabel(String label){
+        instrument.runOnMainSync(()->assertTrue("Missing visible label: "+label,hasLabel(activity.getWindow().getDecorView(),label)));
+    }
+    private void waitLabel(String label)throws Exception{
+        long deadline=System.nanoTime()+20_000_000_000L;
+        while(System.nanoTime()<deadline){
+            boolean[] found={false};
+            instrument.runOnMainSync(()->found[0]=hasLabel(activity.getWindow().getDecorView(),label));
+            if(found[0])return;
+            Thread.sleep(50);
+        }
+        throw new AssertionError("Missing visible label: "+label);
+    }
     private void fill(String hint,String text)throws Exception {EditText view=(EditText)waitView(hint,true);instrument.runOnMainSync(()->view.setText(text));}
     private Spinner spinner(View view){if(view instanceof Spinner)return (Spinner)view;if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++){Spinner found=spinner(group.getChildAt(i));if(found!=null)return found;}}return null;}
-    @Test public void enrollmentNotificationQuestionAndPromptAgainstRustServer()throws Exception {
-        var arguments=InstrumentationRegistry.getArguments();String endpoint=arguments.getString("factoryEndpoint"),code=arguments.getString("enrollmentCode");assumeNotNull(endpoint,code);
+    private int screenY(View view){
+        int[] position=new int[2];instrument.runOnMainSync(()->view.getLocationOnScreen(position));return position[1];
+    }
+    private android.view.accessibility.AccessibilityNodeInfo dialogNode(String label)throws Exception{
+        var automation=instrument.getUiAutomation();
+        long deadline=System.nanoTime()+5_000_000_000L;
+        while(System.nanoTime()<deadline){
+            var root=automation.getRootInActiveWindow();
+            if(root!=null)for(var node:root.findAccessibilityNodeInfosByText(label)){
+                if(label.equalsIgnoreCase(String.valueOf(node.getText()))||label.contentEquals(node.getContentDescription()==null?"":node.getContentDescription()))return node;
+            }
+            Thread.sleep(50);
+        }
+        throw new AssertionError("Missing dialog control: "+label);
+    }
+    @Test public void projectOverlayAndManagementAgainstRustServer()throws Exception{
+        var arguments=InstrumentationRegistry.getArguments();String endpoint=arguments.getString("factoryEndpoint"),key=arguments.getString("factoryKey");assumeNotNull(endpoint,key);
+        var context=instrument.getTargetContext();Vault vault=new Vault(context);vault.put("credentials",null);vault.put("pending",null);
+        activity=instrument.startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        try{
+            fill("Factory-Adresse (HTTPS)",endpoint);fill("Zugangsschlüssel",key);click("Anmelden");
+            click("Navigation öffnen");
+            View shortcut=waitView("Neuer Intent",false);
+            int before=screenY(shortcut);
+            click("Projekt auswählen");View option=waitView("Android acceptance",false);
+            assertEquals(before,screenY(shortcut));
+            assertTrue("Dropdown must overlap the navigation",screenY(option)+option.getHeight()>before);
+            instrument.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK);
+            instrument.runOnMainSync(()->assertFalse(option.isAttachedToWindow()));
+
+            click("Projektmenü");click("Neues Projekt …");fill("Name des Projekts","Mobile project");
+            click("Schließen");click("Projektmenü");click("Neues Projekt …");
+            EditText draft=(EditText)waitView("Name des Projekts",true);
+            instrument.runOnMainSync(()->assertEquals("Mobile project",draft.getText().toString()));
+            click("Speichern");waitLabel("Factory  ›  Overview");
+            click("Navigation öffnen");click("Projektmenü");click("Projekt löschen …");
+            var delete=dialogNode("Löschen");
+            assertFalse(delete.isEnabled());
+            var buttonBounds=new android.graphics.Rect();delete.getBoundsInScreen(buttonBounds);
+            var titleBounds=new android.graphics.Rect();dialogNode("Projekt löschen").getBoundsInScreen(titleBounds);
+            var inputBounds=new android.graphics.Rect();dialogNode("Vollständiger Projektname").getBoundsInScreen(inputBounds);
+            assertTrue("Confirmation should be compact",buttonBounds.bottom-titleBounds.top<FactoryStyle.dp(context,360));
+            assertTrue("Actions should sit below the input",buttonBounds.top>=inputBounds.bottom
+                && buttonBounds.top-inputBounds.bottom<FactoryStyle.dp(context,64));
+            var value=new android.os.Bundle();value.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,"Mobile project");
+            assertTrue(dialogNode("Vollständiger Projektname").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,value));
+            assertTrue(dialogNode("Löschen").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK));
+            waitLabel("Factory  ›  Overview");click("Navigation öffnen");click("Projekt auswählen");waitView("Android acceptance",false);
+            JSONObject projects=new Api(endpoint,key).request("GET","/v1/snapshot",null);
+            assertEquals(1,projects.getJSONArray("projects").length());
+            assertNull(vault.get("pending"));
+        }finally{instrument.runOnMainSync(()->activity.finish());}
+    }
+    @Test public void validKeySignsInAndInvalidKeyIsNotSaved()throws Exception {
+        var arguments=InstrumentationRegistry.getArguments();String endpoint=arguments.getString("factoryEndpoint"),key=arguments.getString("factoryKey");assumeNotNull(endpoint,key);
         var context=instrument.getTargetContext();Vault vault=new Vault(context);vault.put("credentials",null);vault.put("pending",null);
         activity=instrument.startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         try {
-            fill("Factory-Adresse (HTTPS)",endpoint);fill("Einmaliger Anmeldecode",code);click("Anmelden");
-            click("Benachrichtigungen einschalten");
+            fill("Factory-Adresse (HTTPS)",endpoint);fill("Zugangsschlüssel","invalid-test-key");
+            View signIn=waitView("Anmelden",false);
+            instrument.runOnMainSync(()->{signIn.performClick();assertFalse(signIn.isEnabled());});
+            long rejectedBy=System.nanoTime()+20_000_000_000L;
+            boolean[] ready={false};
+            while(!ready[0]&&System.nanoTime()<rejectedBy){
+                instrument.runOnMainSync(()->ready[0]=signIn.isEnabled());
+                if(!ready[0])Thread.sleep(50);
+            }
+            assertTrue("An invalid key must allow another attempt",ready[0]);
+            assertNull("An invalid key must not be stored",vault.get("credentials"));
+            fill("Zugangsschlüssel",key);click("Anmelden");
+            waitView("Navigation öffnen",false);
+            click("Navigation öffnen");click("Projekt auswählen");waitView("Android acceptance",false);
+            assertTrue("The verified key must be stored in the vault",key.equals(vault.get("credentials").getString("token")));
+        } finally {instrument.runOnMainSync(()->activity.finish());}
+    }
+    @Test public void accessKeyNotificationQuestionAndPromptAgainstRustServer()throws Exception {
+        var arguments=InstrumentationRegistry.getArguments();String endpoint=arguments.getString("factoryEndpoint"),key=arguments.getString("factoryKey");assumeNotNull(endpoint,key);
+        var context=instrument.getTargetContext();Vault vault=new Vault(context);vault.put("credentials",null);vault.put("pending",null);
+        activity=instrument.startActivitySync(new Intent(context,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        try {
+            fill("Factory-Adresse (HTTPS)",endpoint);fill("Zugangsschlüssel",key);click("Anmelden");
+            click("Navigation öffnen");assertLabel("Factory  ›  Overview");
+            click("Projekt auswählen");assertLabel("Factory  ›  Overview");
+            click("Android acceptance");assertLabel("Factory  ›  Overview");assertLabel("Projektlogo");
+            click("Neuer Intent");waitView("Was soll bearbeitet werden?",true);click("Zurueck");
+            click("Navigation öffnen");click("Sessions");waitView("Android UI acceptance",false);
+            click("Navigation öffnen");click("Projektaktivität");assertLabel("Android acceptance  ›  Projektaktivität");
+            click("Navigation öffnen");click("Infrastructure");waitView("Android fixture",false);
+            click("Navigation öffnen");click("Diagnose");waitView("question.created",false);
+            click("Navigation öffnen");click("Benachrichtigungen");waitView("Antwort erforderlich",false);
+            click("Navigation öffnen");click("App-Einstellungen");click("Android-Benachrichtigungen");click("Benachrichtigungen einschalten");
             NotificationManager notifications=context.getSystemService(NotificationManager.class);
             long deadline=System.nanoTime()+20_000_000_000L;boolean questionNotice=false;
             while(System.nanoTime()<deadline){for(var notification:notifications.getActiveNotifications())if(notification.getTag()!=null)questionNotice=true;if(questionNotice)break;Thread.sleep(100);}
             assertTrue("SSE service must publish the pending question from its initial snapshot",questionNotice);
-            click("Android acceptance");click("Rueckfragen");click("Name eingeben");fill("name","Android UI proof");click("Antwort senden");
-            click("Neuer Prompt");fill("Was soll bearbeitet werden?","Prompt from Android UI");
+            click("Navigation öffnen");click("Inbox");assertLabel("Android acceptance  ›  Inbox");
+            click("Archiv (0)");click("Offen (1)");
+            fill("Inbox durchsuchen …","Name");click("Name eingeben");fill("name","Android UI proof");click("Antwort senden");
+            waitLabel("Android acceptance  ›  Inbox");
+            click("Navigation öffnen");click("Neuer Intent");fill("Was soll bearbeitet werden?","Prompt from Android UI");
             instrument.runOnMainSync(()->spinner(activity.getWindow().getDecorView()).setSelection(1));
-            click("Zurueck");click("Neuer Prompt");
+            click("Zurueck");click("Navigation öffnen");click("Neuer Intent");
             EditText restored=(EditText)waitView("Was soll bearbeitet werden?",true);
             instrument.runOnMainSync(()->{assertEquals("Prompt from Android UI",restored.getText().toString());assertEquals(1,spinner(activity.getWindow().getDecorView()).getSelectedItemPosition());});
             android.app.Instrumentation.ActivityMonitor monitor=instrument.addMonitor(MainActivity.class.getName(),null,false);
@@ -74,13 +245,13 @@ public final class AppFlowTest {
             EditText rotated=(EditText)waitView("Was soll bearbeitet werden?",true);
             instrument.runOnMainSync(()->{assertEquals("Prompt from Android UI",rotated.getText().toString());assertEquals(1,spinner(activity.getWindow().getDecorView()).getSelectedItemPosition());});
             click("Senden");
-            waitView("Neuer Prompt",false);
+            waitView("Queue",false);
             JSONObject credential=vault.get("credentials");Api api=new Api(credential.getString("base"),credential.getString("token"));JSONObject snapshot=api.request("GET","/v1/snapshot",null);
             boolean answered=false,created=false;
             for(int i=0;i<snapshot.getJSONArray("questions").length();i++){JSONObject q=snapshot.getJSONArray("questions").getJSONObject(i);if(q.optJSONObject("answer")!=null && "Android UI proof".equals(q.getJSONObject("answer").optString("name")))answered=true;}
             for(int i=0;i<snapshot.getJSONArray("tickets").length();i++){JSONObject t=snapshot.getJSONArray("tickets").getJSONObject(i);if("Prompt from Android UI".equals(t.optString("prompt"))){created=true;assertFalse("Fixed session must survive saved draft",t.isNull("requested_session"));}}
             assertTrue("Question answer must reach real Factory API",answered);assertTrue("Prompt must reach real Factory API",created);assertNull(vault.get("pending"));
-            click("Session: Android UI acceptance");click("Vollstaendiges Archiv");
+            click("Navigation öffnen");click("Sessions");click("Android UI acceptance");click("Vollstaendiges Archiv");
             waitView("Anhang speichern: proof.bin",false);click("Naechste Seite");waitView("Zum Anfang",false);click("Zum Anfang");waitView("Anhang speichern: proof.bin",false);
         } finally {context.stopService(new Intent(context,EventService.class));instrument.runOnMainSync(()->activity.finish());}
     }

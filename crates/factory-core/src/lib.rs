@@ -439,6 +439,19 @@ pub const MERGER_ROLE: &str = "merger";
 pub const MERGER_CAPABILITY: &str = "merger-v1";
 pub const MERGE_PARENT_PREFIX: &str = "factory_merge_parent=";
 pub const MERGER_RECOVERY_CAPABILITY: &str = "merger-recovery-v1";
+pub const REVIEWED_MERGER_CAPABILITY: &str = "reviewed-merger-v3";
+pub const REVIEWED_MERGER_POLICY: &str = "factory_merge_policy=reviewed-delivery-v3";
+pub const SNAPSHOT_RETRY_NOTE: &str = "Review-Snapshot wird automatisch erneut gesichert.";
+pub const INTEGRATION_RETRY_NOTE: &str = "Geprüftes Ergebnis wird automatisch erneut integriert.";
+pub fn delivery_retry_pending(ticket: &Ticket) -> bool {
+    ticket.status == TicketState::InProgress
+        && matches!(ticket.routing_note.as_str(), SNAPSHOT_RETRY_NOTE | INTEGRATION_RETRY_NOTE)
+}
+
+pub fn reviewed_merger(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE
+        && spec.prompt.lines().nth(2) == Some(REVIEWED_MERGER_POLICY))
+}
 pub const MERGER_RECOVERY_PROMPT_MARKER: &str = "factory_merge_recovery=workspace-preflight";
 
 pub fn is_merger_recovery(command: &RunnerCommand) -> bool {

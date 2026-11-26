@@ -14,7 +14,7 @@ in den technischen Detaildokumenten bleiben als historische Befunde erhalten.
 | 4 | SSE und Runner-Long-Poll | Implementiert. |
 | 5 | Deployment, Backup/Restore, Updates | Verpackung, Vorlagen, Sicherungs-/Wiederherstellungswege und Dokumentation vorhanden. Installation bleibt beim Betreiber. |
 | 6 | Laptop-/Server-Abnahme | Gestrichen; kein Software-Arbeitspaket. |
-| 7 | Gerätezugang, Rollen, Widerruf | API/CLI/TUI, Enrollment, Runner-Scope und Widerruf aktiver Verbindungen implementiert. |
+| 7 | Gerätezugang, Rollen, Widerruf | Direkt ausgestellte Zugangsschlüssel, Runner-Scope und Widerruf aktiver Verbindungen über API/CLI. |
 | 8 | Anbieter-/Hosting-Zugänge | Native OpenCode-Anmeldung, Statusanzeige, SSH-Profile und Bereitschaftshelfer implementiert. |
 | 9 | Clone/Fetch und Repository-Einrichtung | Projektassistent, verwaltete Repositories, Clone/Fetch, explizite Modellbindung, MCP-/Harness-Konfiguration und Runner-Pfade implementiert. Weitere Login-/Editor-Komfortfunktionen optional. |
 | 10 | Checkpoints und Host-Übergabe | Git-Snapshots, Kontextpakete, Bundle-Transport und revisionsgeschützter Ownership-Wechsel implementiert. |

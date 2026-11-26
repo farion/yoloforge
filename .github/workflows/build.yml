@@ -83,7 +83,7 @@ jobs:
       - name: Packaging regression tests
         run: python scripts/test-package-release.py
       - name: Native runner, protocol and headless GUI tests
-        run: cargo +stable test --locked --target "$BUILD_TARGET" -p factory-platform -p factory-core -p factory-protocol -p factory-opencode -p factory-runner -p factory-gui --all-targets
+        run: cargo +stable test --locked --target "$BUILD_TARGET" -p factory-platform -p factory-core -p factory-protocol -p factory-opencode -p factory-runner -p factory-gui -p factory-cli --all-targets
       - name: Server tests
         run: cargo +stable test --locked --target "$BUILD_TARGET" -p factoryd --all-targets
       - name: Build server and runner

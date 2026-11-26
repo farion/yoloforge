@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("Cannot read device registry"))?
                 .iter()
                 .any(|d| d.role == factory_core::DeviceRole::Admin && !d.revoked),
-            "An initial FACTORY_TOKEN_FILE or enrolled admin device is required"
+            "An initial FACTORY_TOKEN_FILE or active admin device is required"
         );
     }
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
@@ -102,6 +102,10 @@ async fn main() -> Result<()> {
         listener.local_addr()?
     );
     let stopping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let android_push = {
+        let (store, stopping, token) = (store.clone(), stopping.clone(), token.clone());
+        tokio::spawn(async move { factoryd::android_push::run(store, stopping, &token).await })
+    };
     let push = push_config
         .map(|config| tokio::spawn(factoryd::push::run(store.clone(), config, stopping.clone())));
     let supervisor_store = store.clone();
@@ -159,6 +163,7 @@ async fn main() -> Result<()> {
     };
     opencode.shutdown().await;
     supervisor.abort();
+    android_push.abort();
     if let Some(push) = push {
         push.abort();
     }

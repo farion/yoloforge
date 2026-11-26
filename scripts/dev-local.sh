@@ -4,9 +4,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mode="${1:-help}"
 case "$mode" in
-  server|gui|tui|runner|snapshot) shift ;;
-  *) echo "Usage: bash scripts/dev-local.sh {server|gui|tui|runner|snapshot} [extra arguments]"
-     echo "Start server in terminal 1, gui or tui in terminal 2, optionally runner in terminal 3."
+  server|gui|runner|snapshot) shift ;;
+  *) echo "Usage: bash scripts/dev-local.sh {server|gui|runner|snapshot} [extra arguments]"
+     echo "Start server in terminal 1, gui in terminal 2, optionally runner in terminal 3."
      exit 0 ;;
 esac
 data="$PWD/.factory-data/local-test"
@@ -35,7 +35,6 @@ url="http://127.0.0.1:17432"
 case "$mode" in
   server) exec cargo run --locked --bin factoryd -- --listen 127.0.0.1:17432 --database "$data/factory.sqlite3" "$@" ;;
   gui) exec cargo run --locked -p factory-gui --bin yoloforge-gui -- --server "$url" "$@" ;;
-  tui) exec cargo run --locked --bin factory -- --server "$url" "$@" ;;
   snapshot) exec cargo run --locked --bin factory -- --server "$url" --snapshot "$@" ;;
   runner)
     key="$data/factory.sqlite3.opencode/model.key"

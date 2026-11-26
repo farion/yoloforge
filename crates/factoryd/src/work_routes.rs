@@ -350,6 +350,7 @@ pub(super) async fn pending_commands(
         let directs = guard.entries[&id].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
         let merger = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
         let merger_recovery = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
+        let reviewed_merger_supported = guard.entries[&id].input.capabilities.iter().any(|c| c == REVIEWED_MERGER_CAPABILITY);
         let intent_recovery = guard.entries[&id].input.capabilities.iter().any(|c| c == INTENT_RECOVERY_CAPABILITY);
         let reviewed_publication = guard.entries[&id].input.capabilities.iter().any(|c| c == REVIEWED_PUBLICATION_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
@@ -359,6 +360,7 @@ pub(super) async fn pending_commands(
             store.pending_with_direct_support(id, directs).map(|mut commands| {
                 commands.retain(|c| merger || c.agent_spec.as_ref().is_none_or(|s| s.role != MERGER_ROLE));
                 commands.retain(|c| merger_recovery || !is_merger_recovery(c));
+                commands.retain(|c| reviewed_merger_supported || !reviewed_merger(c));
                 commands.retain(|c| intent_recovery || !is_intent_recovery(c));
                 commands.retain(|c| reviewed_publication || !requires_reviewed_publication(c));
                 commands
@@ -470,11 +472,15 @@ pub(super) async fn ack_command(
     let directs = guard.entries[&runner].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
     let merger = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
     let merger_recovery = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
+    let reviewed_merger_supported = guard.entries[&runner].input.capabilities.iter().any(|c| c == REVIEWED_MERGER_CAPABILITY);
     let intent_recovery = guard.entries[&runner].input.capabilities.iter().any(|c| c == INTENT_RECOVERY_CAPABILITY);
     let reviewed_publication = guard.entries[&runner].input.capabilities.iter().any(|c| c == REVIEWED_PUBLICATION_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_direct_support(runner, id, body.ownership_epoch, directs)?;
         store.require_merger_support(runner, id, body.ownership_epoch, merger, merger_recovery)?;
+        if !reviewed_merger_supported && reviewed_merger(&store.command_payload(id)?) {
+            return Err(StoreError::WorkConflict);
+        }
         store.require_intent_recovery_support(runner, id, body.ownership_epoch, intent_recovery)?;
         store.require_reviewed_publication_support(runner, id, body.ownership_epoch, reviewed_publication)?;
         store.require_context_planning_support(
@@ -530,6 +536,30 @@ pub(super) async fn publication_recovery(
     };
     let store = app.store.clone();
     db_call(body.grant_id, move || store.claim_publication_recovery(runner, id, body.grant_id)).await
+}
+
+pub(super) async fn claim_review_snapshot_recovery(
+    State(app): State<App>, Path((runner, id)): Path<(RunnerId, CommandId)>,
+    headers: HeaderMap, Json(body): Json<PublicationRecoveryClaim>,
+) -> Response {
+    let _guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    let store = app.store.clone();
+    db_call(body.grant_id, move || store.claim_review_snapshot_recovery(runner, id, body.grant_id)).await
+}
+
+pub(super) async fn report_recovered_review_snapshot(
+    State(app): State<App>, Path((runner, id)): Path<(RunnerId, CommandId)>,
+    headers: HeaderMap, Json(body): Json<ReportRecoveredReviewSnapshot>,
+) -> Response {
+    let _guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    let store = app.store.clone();
+    db_call(body.request_id, move || store.report_recovered_review_snapshot(runner, id, body)).await
 }
 
 pub(super) async fn pending_draft_reset(

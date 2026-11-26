@@ -1772,7 +1772,7 @@ fn accepted_draft_reset_moves_the_problem_to_archive_before_runner_confirmation(
 }
 
 #[test]
-fn task_and_session_lists_show_neutral_observed_token_badges() {
+fn session_lists_show_neutral_observed_token_badges_but_intents_do_not() {
     let mut app = fixture();
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
     let worker = snapshot.commands[0].clone();
@@ -1801,10 +1801,10 @@ fn task_and_session_lists_show_neutral_observed_token_badges() {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(820.0, 560.0))),
             ..Default::default()
         }, |ctx| app.draw_shell(ctx));
-        assert!(frame.shapes.iter().any(|shape| matches!(&shape.shape,
+        assert_eq!(frame.shapes.iter().any(|shape| matches!(&shape.shape,
             egui::epaint::Shape::Text(text) if text.galley.job.text == label
                 && text.galley.job.sections[0].format.color == crate::app::MUTED)),
-            "{page:?} must show {label} in a neutral color");
+            page != Page::Tasks, "Unexpected visibility of {label} on {page:?}");
     }
     assert_eq!(crate::design::token_label(None), "— Tks");
 }
@@ -2018,12 +2018,7 @@ fn ticket_numbers_are_neutral_pills_searchable_and_never_change_the_prompt() {
         }).expect("Expected a visible pill background")
     };
     let ticket_rect = pill_rect(egui::Color32::from_rgb(42, 47, 56));
-    let status = task_status(app.snapshot.as_ref().unwrap(), &original);
-    let status_rect = pill_rect(crate::views::status_color(status).gamma_multiply(0.15));
-    assert!(
-        (ticket_rect.height() - status_rect.height()).abs() <= 1.0,
-        "Ticket and status pills should match in height: {ticket_rect:?} vs {status_rect:?}"
-    );
+    assert!(ticket_rect.contains(number.pos));
     let title=ctx.data_mut(|d|d.get_temp::<egui::Rect>(
         egui::Id::new(("test-task-row-title",original.id)),
     )).unwrap();
@@ -2036,9 +2031,8 @@ fn ticket_numbers_are_neutral_pills_searchable_and_never_change_the_prompt() {
         _ => None,
     }).expect("Expected a visible task title");
     assert!(
-        (title_center - ticket_rect.center().y).abs() <= 1.0
-            && (title_center - status_rect.center().y).abs() <= 1.0,
-        "Title and both pills must be vertically centered: {title_center}, {ticket_rect:?}, {status_rect:?}"
+        (title_center - ticket_rect.center().y).abs() <= 1.0,
+        "Title and reference must be vertically centered: {title_center}, {ticket_rect:?}"
     );
     assert_eq!(app.snapshot.as_ref().unwrap().tickets[0].prompt,original.prompt);
     app.view_task(original.id);
@@ -3339,8 +3333,10 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     }
     assert!(text.iter().any(|s| s == "Aufgabe Grüße"));
     assert!(text.iter().any(|s| s == "OpenCode anzeigen"));
-    assert!(text.iter().any(|s| s == "0 Anhänge"));
     for removed in [
+        "0 Anhänge",
+        "Tks",
+        &timestamp(app.snapshot.as_ref().unwrap().tickets[0].created_unix_ms),
         "Details",
         "Zur Frage",
         "aktualisiert",
@@ -3359,33 +3355,12 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
             d.get_temp::<(egui::Rect, &'static str)>(egui::Id::new(("test-task-row-action", id)))
         })
         .unwrap();
-    let date = ctx
-        .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-task-row-date", id))))
-        .unwrap();
-    let (attachments, created) = ctx
-        .data_mut(|d| {
-            d.get_temp::<(egui::Rect, egui::Rect)>(egui::Id::new((
-                "test-task-row-metadata-lines",
-                id,
-            )))
-        })
-        .unwrap();
-    assert!(
-        (created.top() - attachments.bottom() - crate::design::TASK_METADATA_LINE_GAP).abs() < 1.0
-    );
     assert_eq!(label, "OpenCode anzeigen");
-    assert!(action.left() > date.right() && action.right() > 1300.0);
-    assert!(
-        (date.bottom() - action.bottom()).abs() < 1.0,
-        "Task action must align with the bottom of the metadata: {date:?} {action:?}"
-    );
     let title = ctx
         .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-task-row-title", id))))
         .unwrap();
-    assert!(
-        date.top() - title.bottom() <= 12.0,
-        "Date must sit close below the prompt summary: {title:?} {date:?}"
-    );
+    assert!(action.left() >= title.right() && action.right() > 1300.0);
+    assert!(title.y_range().intersects(action.y_range()), "{title:?} {action:?}");
     assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Rect(r) if r.rect==action && r.fill!=egui::Color32::TRANSPARENT)),"OpenCode action must be a real button, not a text link");
     let frame = crate::design::task_row_frame();
     assert_eq!(frame.stroke, egui::Stroke::NONE);
@@ -3408,25 +3383,15 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     for shape in &output.shapes {
         shape_text(&shape.shape, &mut text);
     }
-    assert!(text.iter().any(|s| s == crate::tr!("Entwurf")));
+    assert!(!text.iter().any(|s| s == crate::tr!("Entwurf")));
     assert!(text.iter().any(|s| s == "Bearbeiten"));
     let (action, _) = ctx
         .data_mut(|d| {
             d.get_temp::<(egui::Rect, &'static str)>(egui::Id::new(("test-task-row-action", id)))
         })
         .unwrap();
-    let (_, created) = ctx
-        .data_mut(|d| {
-            d.get_temp::<(egui::Rect, egui::Rect)>(egui::Id::new((
-                "test-task-row-metadata-lines",
-                id,
-            )))
-        })
-        .unwrap();
-    assert!(
-        (action.bottom() - created.bottom()).abs() < 1.0,
-        "Edit button must also sit at the bottom right"
-    );
+    let title: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new(("test-task-row-title", id)))).unwrap();
+    assert!(action.left() >= title.right() && title.y_range().intersects(action.y_range()));
     assert!(!text.iter().any(|s| s == "OpenCode anzeigen"));
     assert!(
         app.settings.pending.is_empty(),
@@ -3735,6 +3700,8 @@ fn prompt_summary_marks_truncated_prefixes_without_changing_original_content() {
     assert_eq!(task_summary(snapshot, &ticket), "Kurzer Auftrag");
     ticket.prompt = Some("Kurzer Auftrag\nWeitere Bedingungen".into());
     assert_eq!(task_summary(snapshot, &ticket), "Kurzer Auftrag…");
+    ticket.title.clear();
+    assert_eq!(task_intent_text(&ticket), "Kurzer Auftrag…");
 }
 
 #[test]
@@ -3781,7 +3748,28 @@ fn intent_result_stays_out_of_the_overview_and_is_short_in_the_intent_history() 
         text
     };
     app.query = "eindeutiges suchwort".into();
-    assert!(draw(&mut app).iter().any(|text| text == "Ergebnis der Arbeit…"));
+    assert!(!draw(&mut app).iter().any(|text| text.contains("Ergebnis der Arbeit") || text == "Originalauftrag…"));
+    app.query = "mit details".into();
+    let text = draw(&mut app);
+    assert!(text.iter().any(|text| text == "Originalauftrag…"));
+    assert!(!text.iter().any(|text| text.contains("Ergebnis der Arbeit")));
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let Some(CommandOutput::Agent { agent }) = &mut snapshot.commands[0].result else { unreachable!() };
+    let result_summary = std::mem::replace(&mut agent.summary, format!("{PUBLICATION_CONFIRMED_PREFIX}\nGit: interne Details"));
+    snapshot.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Succeeded;
+    let previous_status = std::mem::replace(&mut snapshot.tickets[0].status, TicketState::Done);
+    let questions = std::mem::take(&mut snapshot.questions);
+    app.task_filter = TaskBucket::Archive.index();
+    let text = draw(&mut app);
+    assert!(text.iter().any(|text| text == "Originalauftrag…"), "{text:?}");
+    assert!(!text.iter().any(|text| text.contains(PUBLICATION_CONFIRMED_PREFIX) || text.contains("interne Details")));
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let Some(CommandOutput::Agent { agent }) = &mut snapshot.commands[0].result else { unreachable!() };
+    agent.summary = result_summary;
+    snapshot.tickets[0].status = previous_status;
+    snapshot.questions = questions;
+    snapshot.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::WaitingInput;
+    app.query.clear();
     app.settings.page = Page::Overview;
     let text = draw(&mut app);
     assert!(text.iter().any(|text| text == "Originalauftrag…"));
@@ -4886,6 +4874,27 @@ pub(crate) fn shape_text(shape: &egui::epaint::Shape, text: &mut Vec<String>) {
 }
 
 #[test]
+fn diagnostics_keep_action_errors_visible_with_an_unrelated_event_filter() {
+    let mut app = fixture();
+    app.set_page(Page::Diagnostics);
+    app.query = "unrelated event query".into();
+    app.action_errors.push((1, "Runner confirmation timed out".into()));
+    let ctx = app.backend.context().clone();
+    let mut text = vec![];
+    for _ in 0..4 {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 760.0))),
+                ..Default::default()
+            },
+            |ctx| app.draw_shell(ctx),
+        );
+        for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+    }
+    assert!(text.iter().any(|line| line.contains("Runner confirmation timed out")));
+}
+
+#[test]
 fn diagnostics_use_flat_equal_width_rows_with_details_actions() {
     let mut app = fixture();
     app.set_page(Page::Diagnostics);
@@ -5568,7 +5577,7 @@ fn orchestrator_settings_live_in_project_settings_not_above_the_list() {
 }
 
 #[test]
-fn queued_intent_routing_note_has_clearance_below_the_previous_metadata_field() {
+fn queued_intent_list_keeps_routing_metadata_out_of_the_row() {
     let mut app = fixture();
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
     snapshot.commands.clear();
@@ -5578,22 +5587,18 @@ fn queued_intent_routing_note_has_clearance_below_the_previous_metadata_field() 
     ticket.execution_command = None;
     ticket.status = TicketState::Ready;
     ticket.routing_note = "Wartet auf verfügbaren Runner mit den freigegebenen MCPs".into();
-    let id = ticket.id;
     app.set_page(Page::Tasks);
     app.task_filter = 0;
     let ctx = app.backend.context().clone();
     for _ in 0..4 {
-        let _ = ctx.run(egui::RawInput {
+        let output = ctx.run(egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
             ..Default::default()
         }, |ctx| app.draw_shell(ctx));
+        let mut text = Vec::new();
+        for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+        assert!(!text.iter().any(|line| line.contains("freigegebenen MCPs")));
     }
-    let (_, previous): (egui::Rect, egui::Rect) = ctx.data_mut(|d| d.get_temp(
-        egui::Id::new(("test-task-row-metadata-lines", id)))).unwrap();
-    let note: egui::Rect = ctx.data_mut(|d| d.get_temp(
-        egui::Id::new(("test-task-row-routing-note", id)))).unwrap();
-    let gap = note.top() - previous.bottom();
-    assert!((gap - crate::design::TASK_ROUTING_NOTE_GAP).abs() <= 1.0, "{gap}");
     assert!(app.settings.pending.is_empty());
 }
 

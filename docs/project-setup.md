@@ -140,17 +140,9 @@ fehlen noch. OAuth-/Provider- und MCP-Anmeldung sind noch nicht integriert.
 **Service erreichbar bedeutet nicht, dass der Provider angemeldet oder jeder MCP
 verbunden ist.** Fetch im Assistenten und Container-Provisionierung bleiben offen.
 
-Geprüft mit `scripts/smoke-project-setup.py`: echte TUI, Factory, Runner und Git-
-Worktree; synthetischer OpenCode-Health-Endpunkt, kein Modellaufruf. Zusätzliche
-Tests prüfen atomaren Rollback, Request-Replay nach Neustart, alte Runner,
-Konfigurationsbindung und Schutz vorhandener Dateien/Symlinks. Der automatische
-native Servicestart ist über `scripts/smoke-project-setup.py --auto` mit einem
-kontrollierten Service-Executable geprüft, aber noch nicht mit einem echten
-OpenCode-Service als eigener Prozessfall abgenommen.
-`--empty` prüft die Projektanlage mit ausschließlich `2`, `n`, `Ctrl-S`, ohne
-Repository, Pfad, Modell oder Konfiguration. Der normale Test prüft zusätzlich
-den strukturierten MCP-Editor. Runner-Tests prüfen lokale Imports, verwaltete leere
-Projekte, Pfadkonflikte und die Modellbindung über Neustarts.
+Historisch mit der inzwischen entfernten TUI getestet. Runner-Tests prüfen
+weiterhin lokale Imports, verwaltete leere Projekte, Pfadkonflikte und die
+Modellbindung über Neustarts.
 ## Repository-Fetch aus der TUI
 
 In der Projektliste holt **f** die Origin-Referenzen für den zuletzt bestätigten

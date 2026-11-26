@@ -1012,20 +1012,10 @@ impl FactoryClient {
         }
         Self::decode(request.send().await).await
     }
-    pub async fn enrollment(&self, body: &CreateEnrollment) -> Result<Enrollment, ClientError> {
+    pub async fn create_device(&self, body: &CreateDevice) -> Result<DeviceCredential, ClientError> {
         Self::decode(
             self.http
-                .post(format!("{}/v1/devices/enrollment", self.base))
-                .json(body)
-                .send()
-                .await,
-        )
-        .await
-    }
-    pub async fn redeem(&self, body: &RedeemEnrollment) -> Result<DeviceCredential, ClientError> {
-        Self::decode(
-            self.http
-                .post(format!("{}/v1/enroll", self.base))
+                .post(format!("{}/v1/devices", self.base))
                 .json(body)
                 .send()
                 .await,
@@ -1342,6 +1332,21 @@ impl FactoryClient {
     ) -> Result<bool, ClientError> {
         Self::decode(self.http.put(format!("{}/v1/runners/{runner}/commands/{id}/publication-recovery", self.base))
             .header(RUNNER_HEADER, registration.to_string()).json(&PublicationRecoveryClaim { grant_id }).send().await).await
+    }
+
+    pub async fn review_snapshot_recovery(
+        &self, runner: RunnerId, registration: RegistrationId, id: CommandId, grant_id: RequestId,
+    ) -> Result<bool, ClientError> {
+        Self::decode(self.http.put(format!("{}/v1/runners/{runner}/commands/{id}/review-snapshot-recovery", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).json(&PublicationRecoveryClaim { grant_id }).send().await).await
+    }
+
+    pub async fn report_recovered_review_snapshot(
+        &self, runner: RunnerId, registration: RegistrationId, id: CommandId,
+        body: &ReportRecoveredReviewSnapshot,
+    ) -> Result<(), ClientError> {
+        Self::decode(self.http.post(format!("{}/v1/runners/{runner}/commands/{id}/review-snapshot-recovery", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).json(body).send().await).await
     }
 
     pub async fn pending_draft_reset(&self, runner: RunnerId, registration: RegistrationId) -> Result<Option<DraftReset>, ClientError> {

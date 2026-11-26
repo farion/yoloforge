@@ -3,6 +3,135 @@ use super::*;
 const MERGER_POLICY_MARKER: &str = "factory_merge_policy=pinned-target-v2";
 const OLD_MERGER_PREFLIGHT: &str = "Merger konnte nicht starten: Projektordner enthaelt eigene Aenderungen; nichts ueberschrieben";
 
+/// The Merger may only publish through this path if its parent is an approved
+/// publication command and the recorded Reviewer approved that exact source.
+pub(super) fn reviewed_source(tx: &Connection, command: &RunnerCommand) -> Result<Option<(RunnerCommand, RunnerCommand)>> {
+    let Some(spec) = command.agent_spec.as_ref() else { return Ok(None) };
+    let approval = if spec.role == APPROVED_PUBLICATION_ROLE {
+        command.clone()
+    } else if spec.role == MERGER_ROLE {
+        let Some(parent) = spec.prompt.lines().next().and_then(|line| line.strip_prefix(MERGE_PARENT_PREFIX))
+            .and_then(|id| id.parse::<CommandId>().ok()) else { return Ok(None) };
+        let raw: Option<String> = tx.query_row("SELECT data FROM commands WHERE id=?1 AND stream_id=?2
+                AND json_extract(data,'$.agent_spec.role')=?3",
+            params![parent.to_string(), command.stream_id.to_string(), APPROVED_PUBLICATION_ROLE], |r| r.get(0)).optional()?;
+        let Some(raw) = raw else { return Ok(None) };
+        serde_json::from_str(&raw)?
+    } else { return Ok(None) };
+    let Some(source) = approval.agent_spec.as_ref().and_then(|s| s.prompt.parse::<CommandId>().ok()) else {
+        return Ok(None);
+    };
+    let raw: Option<String> = tx.query_row("SELECT source.data FROM commands source
+        JOIN validations v ON v.source_id=source.id AND v.retired=0
+        JOIN commands reviewer ON reviewer.id=v.reviewer_id
+        WHERE source.id=?1 AND source.stream_id=?2 AND source.state='succeeded' AND reviewer.state='succeeded'
+          AND json_extract(CASE WHEN json_valid(json_extract(reviewer.data,'$.result.agent.summary'))
+              THEN json_extract(reviewer.data,'$.result.agent.summary') ELSE '{}' END,'$.action')='approve'",
+        params![source.to_string(), command.stream_id.to_string()], |r| r.get(0)).optional()?;
+    Ok(raw.map(|raw| serde_json::from_str(&raw).map(|s| (approval, s))).transpose()?)
+}
+
+fn reviewed_delivery(tx: &Transaction<'_>) -> Result<()> {
+    let rows = {
+        let mut stmt = tx.prepare("SELECT t.data,c.data FROM tickets t JOIN active_projects p ON p.id=t.project_id
+            JOIN commands c ON c.id=json_extract(t.data,'$.execution_command')
+            WHERE json_extract(t.data,'$.status') IN ('in_progress','blocked') AND c.state IN ('succeeded','failed')
+              AND COALESCE(json_extract(p.data,'$.paused'),0)=0 AND COALESCE(json_extract(t.data,'$.draft'),0)=0
+              AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+              AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=c.stream_id)
+              AND NOT EXISTS(SELECT 1 FROM commands n WHERE n.stream_id=c.stream_id AND n.rowid>c.rowid
+                  AND (n.state IN ('pending','accepted') OR json_extract(n.data,'$.kind')='run_agent'))
+            ORDER BY c.rowid")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (ticket, latest) in rows {
+        let mut ticket: Ticket = serde_json::from_str(&ticket)?;
+        let latest: RunnerCommand = serde_json::from_str(&latest)?;
+        let summary = match &latest.result { Some(CommandOutput::Agent { agent }) => agent.summary.as_str(), _ => "" };
+        if latest.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && spec.role.is_empty())
+            && !latest.requires_target_git() && latest.state == CommandState::Succeeded && publication_was_blocked(summary)
+            && tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs r WHERE r.ticket_id=?1 AND r.agent_id=?2)",
+                params![ticket.id.to_string(), latest.id.to_string()], |r| r.get::<_, bool>(0))?
+        {
+            let note = SNAPSHOT_RETRY_NOTE;
+            if ticket.status != TicketState::InProgress || ticket.routing_note != note {
+                ticket.status = TicketState::InProgress;
+                ticket.routing_note = note.into();
+                super::scheduler::save_ticket(tx, &mut ticket)?;
+            }
+            continue;
+        }
+        let Some((approval, source)) = reviewed_source(tx, &latest)? else { continue };
+        let owner = super::work::stream(tx, latest.stream_id)?;
+        if owner.runner_id != source.runner_id || owner.ownership_epoch != source.ownership_epoch
+            || owner.runner_id != latest.runner_id || owner.ownership_epoch != latest.ownership_epoch
+            || super::sessions::closed(tx, source.session_root())?
+        { continue; }
+        if publication_was_confirmed(summary) && latest.state == CommandState::Succeeded {
+            super::tasks::set_publication_state(tx, &owner, latest.id, TicketState::Done, "Ergebnis auf dem Zielbranch bestätigt.")?;
+            super::delivery::clear(tx, ticket.id, "integration")?;
+            continue;
+        }
+        let note = INTEGRATION_RETRY_NOTE;
+        if ticket.status != TicketState::InProgress || ticket.routing_note != note {
+            ticket.status = TicketState::InProgress;
+            ticket.routing_note = note.into();
+            super::scheduler::save_ticket(tx, &mut ticket)?;
+        }
+        if !super::delivery::ready(tx, ticket.id, "integration")? { continue; }
+        super::delivery::defer(tx, ticket.id, "integration")?;
+        let merge = summary.starts_with(PUBLICATION_CONFLICT_PREFIX)
+            || latest.agent_spec.as_ref().is_some_and(|s| s.role == MERGER_ROLE);
+        let (role, model, prompt) = if merge {
+            let model = match super::models::role_selection(tx, owner.project_id, MERGER_ROLE) {
+                Ok(model) => model,
+                Err(StoreError::Invalid(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            // Keep every attempt isolated; the Runner pins a new target ref for it.
+            let prompt = format!("{MERGE_PARENT_PREFIX}{}\n{MERGER_RECOVERY_PROMPT_MARKER}\n{REVIEWED_MERGER_POLICY}\n\
+                Resolve the reviewed change against the target pin provided in the workspace instructions. \
+                Preserve the reviewed snapshot and current target as ancestors. Merge non-conflicting changes; \
+                for overlap preserve current target behavior while applying the approved intent where possible. \
+                Read the conflicting files, adapt the patch and run the relevant tests. Commit a real resolution \
+                in the assigned worktree. Never edit the project checkout, push, discard the reviewed intent, \
+                or ask the operator to solve Git conflicts. Do not report completion until committed.", approval.id);
+            (MERGER_ROLE, model, prompt)
+        } else {
+            (APPROVED_PUBLICATION_ROLE, None, source.id.to_string())
+        };
+        tx.execute_batch("SAVEPOINT reviewed_delivery")?;
+        match Store::enqueue_with_pins(tx, owner.id, &EnqueueCommand {
+            request_id: RequestId::new(), expected_revision: owner.revision, kind: CommandKind::RunAgent, prompt: Some(prompt),
+        }, None, role, model.as_ref(), Some((&Default::default(), &McpProfile::default())), None, !merge) {
+            Ok(mut next) => {
+                if merge {
+                    next.agent_spec.as_mut().ok_or(StoreError::Internal)?.prompt.push_str(&format!(
+                        "\nReviewed snapshot: refs/yoloforge/publication-snapshots/{}\nTarget pin: refs/yoloforge/merger-targets/{}",
+                        approval.id, next.id));
+                }
+                next.workspace_spec = source.workspace_spec;
+                super::work::save_command(tx, &next, "pending")?;
+                tx.execute("UPDATE scheduler_runs SET agent_id=?1 WHERE ticket_id=?2 AND agent_id=?3",
+                    params![next.id.to_string(), ticket.id.to_string(), latest.id.to_string()])?;
+                ticket.execution_command = Some(next.id);
+                ticket.routing_note = if merge { "Merger gleicht den geprüften Stand mit dem Zielbranch ab." }
+                    else { "Übernahme des geprüften Stands eingereiht." }.into();
+                super::scheduler::save_ticket(tx, &mut ticket)?;
+                event(tx, "publication.retry_queued", ticket.id.to_string(), &serde_json::json!({
+                    "previous_command":latest.id, "command_id":next.id, "source_command_id":source.id, "merger":merge,
+                }))?;
+            }
+            Err(StoreError::WorkConflict | StoreError::RevisionConflict(_) | StoreError::Invalid(_)) =>
+                tx.execute_batch("ROLLBACK TO reviewed_delivery")?,
+            Err(error) => return Err(error),
+        }
+        tx.execute_batch("RELEASE reviewed_delivery")?;
+    }
+    Ok(())
+}
+
 fn uncommitted_result_prefix() -> String {
     format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: {MERGER_UNCOMMITTED_RESULT}\n")
 }
@@ -26,6 +155,9 @@ pub(super) fn can_recover(tx: &Transaction<'_>, command: &RunnerCommand) -> Resu
 }
 
 pub(super) fn publication_attention_reason(tx: &Transaction<'_>, command: &RunnerCommand) -> Result<Option<&'static str>> {
+    if command.agent_spec.as_ref().is_some_and(|s| s.defer_publication || s.role == APPROVED_PUBLICATION_ROLE)
+        || reviewed_source(tx, command)?.is_some()
+    { return Ok(None); }
     let Some(CommandOutput::Agent { agent }) = &command.result else { return Ok(None); };
     let merger = command.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
     if merger && !publication_was_confirmed(&agent.summary) {
@@ -88,6 +220,7 @@ pub(super) fn owns_conflict(original: &RunnerCommand, owner: &Workstream) -> boo
         && !original.requires_target_git()
         && original.agent_spec.as_ref().is_some_and(|spec| {
             !spec.read_only
+                && !spec.defer_publication
                 && spec.role != MERGER_ROLE
                 && spec.role != factory_protocol::directs::ROLE
         })
@@ -110,6 +243,7 @@ impl Store {
     pub fn merger_tick(&self) -> Result<()> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        reviewed_delivery(&tx)?;
         let rows = {
             let mut query = tx.prepare(
                 "SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id
@@ -145,6 +279,9 @@ impl Store {
         };
         for row in rows {
             let latest: RunnerCommand = serde_json::from_str(&row)?;
+            if reviewed_source(&tx, &latest)?.is_some() { continue; }
+            if tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs WHERE agent_id=?1)",
+                [latest.id.to_string()], |r| r.get::<_, bool>(0))? { continue; }
             let recovery = latest.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
             let original = if recovery {
                 if attempted_current_recovery(&latest) {

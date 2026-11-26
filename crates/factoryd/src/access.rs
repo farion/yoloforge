@@ -43,31 +43,23 @@ pub(super) async fn health(State(app): State<App>) -> Response {
         ),
     }
 }
-pub(super) async fn enrollment(
+pub(super) async fn issue_device(
     State(app): State<App>,
-    body: Result<Json<CreateEnrollment>, JsonRejection>,
+    body: Result<Json<CreateDevice>, JsonRejection>,
 ) -> Response {
     let Ok(Json(body)) = body else {
         return error(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
-            "Invalid enrollment request",
+            "Invalid device request",
         );
     };
-    db_call(RequestId::new(), move || app.store.create_enrollment(body)).await
-}
-pub(super) async fn redeem(
-    State(app): State<App>,
-    body: Result<Json<RedeemEnrollment>, JsonRejection>,
-) -> Response {
-    let Ok(Json(body)) = body else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            "Invalid enrollment request",
-        );
-    };
-    db_call(RequestId::new(), move || app.store.redeem_enrollment(body)).await
+    let mut response = db_call(RequestId::new(), move || app.store.create_device(body)).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 pub(super) async fn list_devices(State(app): State<App>) -> Response {
     db_call(RequestId::new(), move || app.store.devices()).await

@@ -1,5 +1,7 @@
 # Hintergrund-Push mit ntfy
 
+Für Android ohne Begleitapp siehe [nativer Google-Push](android.md#benachrichtigungen-und-grenzen).
+
 Factory kann offene Fragen ueber einen explizit konfigurierten ntfy-Server
 melden. Die ntfy-Android-App empfaengt und speichert die Benachrichtigung;
 YoloForge braucht dafuer keinen laufenden SSE-Service. Beim Antippen oeffnet
@@ -26,7 +28,7 @@ HTTPS ist vorgeschrieben, ausser fuer Loopback-Prozesstests. HTTP-Redirects werd
 nicht verfolgt. ntfy-URL/Token werden nicht in API-Events oder Fehlermeldungen ausgegeben.
 
 3. Factory mit `--push-config /etc/yoloforge/push.json` starten. Ohne diese Option
-   entstehen keine Push-Netzwerkzugriffe. Das Deployment bleibt beim Betreiber.
+   entstehen keine ntfy-Netzwerkzugriffe. Das Deployment bleibt beim Betreiber.
 4. Zum Abschalten die Option entfernen oder das Topic in ntfy abbestellen.
 
 ## Dauerhafte Zustellung

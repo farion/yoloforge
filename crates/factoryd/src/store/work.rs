@@ -447,7 +447,7 @@ impl Store {
             return Err(StoreError::WorkConflict);
         }
         if body.kind == CommandKind::RunAgent {
-            if !supervised && super::validation::awaiting(tx, id)? {
+            if !supervised && !publication && role != MERGER_ROLE && super::validation::awaiting(tx, id)? {
                 return Err(StoreError::WorkConflict);
             }
             if !publication {
@@ -620,8 +620,10 @@ impl Store {
                 }
                 super::models::apply(&mut project.profile, model);
             }
-            line(&project.profile.provider_id, 120)?;
-            line(&project.profile.model_id, 200)?;
+            if !publication {
+                line(&project.profile.provider_id, 120)?;
+                line(&project.profile.model_id, 200)?;
+            }
             let context = Self::select_knowledge(
                 tx,
                 owner.project_id,
@@ -1011,23 +1013,33 @@ impl Store {
                 let mut owner = stream(tx, value.stream_id)?;
                 let merger = value.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
                 let approved_publication = value.agent_spec.as_ref().is_some_and(|spec| spec.role == APPROVED_PUBLICATION_ROLE);
+                let snapshot_retry = ok && value.agent_spec.as_ref().is_some_and(|s| s.defer_publication)
+                    && !value.requires_target_git();
+                let reviewed_merge = merger && super::merger::reviewed_source(tx, &value)?.is_some();
                 let publication_blocked = command_publication_blocked(&value)
                     || ((merger || approved_publication) && (!ok || !matches!(&value.result, Some(CommandOutput::Agent { agent })
                         if publication_was_confirmed(&agent.summary))));
                 if merger || approved_publication {
                     let (state, note) = if publication_blocked {
-                        (TicketState::Blocked, "Übernahme nicht abgeschlossen; der geprüfte Stand bleibt erhalten.")
+                        if approved_publication || reviewed_merge {
+                            (TicketState::InProgress, INTEGRATION_RETRY_NOTE)
+                        } else {
+                            (TicketState::Blocked, "Übernahme nicht abgeschlossen; der geprüfte Stand bleibt erhalten.")
+                        }
                     } else {
                         (TicketState::Done, "Ergebnis auf dem Zielbranch bestätigt.")
                     };
                     super::tasks::set_publication_state(tx, &owner, value.id, state, note)?;
                 } else if publication_blocked {
-                    super::tasks::block_unpublished_intents(tx, &owner, value.id)?;
+                    super::tasks::block_unpublished_intents(
+                        tx, &owner, value.id,
+                        snapshot_retry,
+                    )?;
                 } else if session_stopped_without_result(&value.result) {
                     super::tasks::set_publication_state(tx, &owner, value.id, TicketState::Blocked,
                         "OpenCode-Session ohne Ergebnis gestoppt; Arbeitsstand bleibt erhalten.")?;
                 }
-                if publication_blocked {
+                if publication_blocked && !(snapshot_retry || approved_publication || reviewed_merge) {
                     if let Some(reason) = super::merger::publication_attention_reason(tx, &value)? {
                         super::desktop::require_execution_attention(tx, &owner, value.id, reason)?;
                     }
@@ -1040,7 +1052,7 @@ impl Store {
                     if exported_result {
                         // Export is maintenance on an already completed agent result.
                         StreamState::Review
-                    } else if publication_blocked {
+                    } else if publication_blocked && !(snapshot_retry || approved_publication || reviewed_merge) {
                         StreamState::Blocked
                     } else if ok {
                         if matches!(

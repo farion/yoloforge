@@ -181,18 +181,11 @@ async fn restart_api_requires_admin_and_reports_the_exact_startup_instance() {
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     let client = factory_protocol::client::FactoryClient::new(&url, token).unwrap();
     for role in [DeviceRole::Operator, DeviceRole::Runner] {
-        let enrollment = client
-            .enrollment(&CreateEnrollment {
+        let credential = client
+            .create_device(&CreateDevice {
+                name: "Non-admin".into(),
                 role,
                 runner_id: (role == DeviceRole::Runner).then_some(command.runner_id),
-                ttl_seconds: 60,
-            })
-            .await
-            .unwrap();
-        let credential = client
-            .redeem(&RedeemEnrollment {
-                code: enrollment.code,
-                name: "Non-admin".into(),
             })
             .await
             .unwrap();

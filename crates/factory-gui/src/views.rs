@@ -740,7 +740,7 @@ impl App {
                         || t.title.to_lowercase().contains(&needle)
                         || t.key.to_lowercase().contains(&needle)
                         || t.description.to_lowercase().contains(&needle)
-                        || task_preview_source(&s, t).to_lowercase().contains(&needle))
+                        || t.prompt.as_deref().is_some_and(|prompt| prompt.to_lowercase().contains(&needle)))
             })
             .collect::<Vec<_>>();
         tasks.sort_by_key(|t| (t.status != TicketState::ReworkQueued, std::cmp::Reverse(t.created_unix_ms)));
@@ -763,7 +763,7 @@ impl App {
             hash_of(
                 tasks
                     .iter()
-                    .map(|t| (t.id, &t.key, t.revision.0, task_display_status(&s, t)))
+                    .map(|t| (t.id, &t.key, t.revision.0, task_session_command(&s, t).map(|c| c.id), retryable_task(&s, t)))
                     .collect::<Vec<_>>(),
             ),
         );
@@ -777,39 +777,6 @@ impl App {
                         design::task_row_frame().show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = 4.0;
-                            ui.horizontal_top(|ui| {
-                                let status = task_display_status(&s, t);
-                                let tokens = task_tokens(&s, t);
-                                let badges_width = design::badge_width(ui, status)
-                                    + design::badge_width(ui, &design::token_label(tokens));
-                                let width = (ui.available_width() - badges_width.max(185.0)).max(1.0);
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(width, 0.0),
-                                    egui::Layout::top_down(egui::Align::LEFT),
-                                    |ui| {
-                                         let summary = task_text(&s, t);
-                                         let _title = design::ticket_title(ui,design::ListEntryKind::Intent,&t.key,&summary,
-                                            egui::FontId::proportional(18.0),width)
-                                             .on_hover_text(task_preview_source(&s, t));
-                                        #[cfg(test)]
-                                        ui.ctx().data_mut(|d| {
-                                            d.insert_temp(
-                                                egui::Id::new(("test-task-row-title", t.id)),
-                                                _title.rect,
-                                            )
-                                        });
-                                    },
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Min),
-                                    |ui| {
-                                        badge(ui, status, status_color(status));
-                                        design::token_pill(ui, tokens);
-                                    },
-                                );
-                            });
-                            ui.horizontal_top(|ui| {
-                                let attachments = t.images.len() + t.files.len();
                                 let session = task_session_command(&s, t);
                                 let editable = t.draft || s.editable_tasks.contains_key(&t.id);
                                  let mut labels = if session.is_some() {
@@ -854,58 +821,15 @@ impl App {
                                     + labels.len() as f32 * ui.spacing().item_spacing.x
                                      + (usize::from(show_delete) + usize::from(cancellable)) as f32
                                          * (design::ICON_BUTTON_SIZE + ui.spacing().item_spacing.x);
-                                let metadata_width = (ui.available_width() - reserved).max(100.0);
-                                let _date = ui
-                                    .allocate_ui_with_layout(
-                                        egui::vec2(metadata_width, 0.0),
-                                        egui::Layout::top_down(egui::Align::LEFT),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.y =
-                                                design::TASK_METADATA_LINE_GAP;
-                                            let _attachments = ui.colored_label(
-                                                MUTED,
-                                                format!(
-                                                    "{} {}",
-                                                    attachments,
-                                                    if attachments == 1 {
-                                                        crate::tr!("Anhang")
-                                                    } else {
-                                                        crate::tr!("Anhänge")
-                                                    }
-                                                ),
-                                            );
-                                             let _created = ui
-                                                 .colored_label(MUTED, timestamp(t.created_unix_ms));
-                                             if !t.draft && t.execution_command.is_none()
-                                                 && matches!(t.status, TicketState::Backlog | TicketState::Ready)
-                                                 && !t.routing_note.is_empty()
-                                             {
-                                                  let note = task_runner_blocker(&s, t).unwrap_or(&t.routing_note);
-                                                  design::routing_note_spacing(ui);
-                                                  let _note = ui.add(egui::Label::new(
-                                                      RichText::new(note).color(design::history_color(task_routing_level(&t.routing_note), MUTED))
-                                                  ).truncate()).on_hover_text(note);
-                                                  #[cfg(test)]
-                                                  ui.ctx().data_mut(|d| d.insert_temp(
-                                                      egui::Id::new(("test-task-row-routing-note", t.id)), _note.rect));
-                                             }
-                                            #[cfg(test)]
-                                            ui.ctx().data_mut(|d| {
-                                                d.insert_temp(
-                                                    egui::Id::new((
-                                                        "test-task-row-metadata-lines",
-                                                        t.id,
-                                                    )),
-                                                    (_attachments.rect, _created.rect),
-                                                )
-                                            });
-                                        },
-                                    )
-                                    .response;
-                                ui.allocate_ui_with_layout(
-                                    egui::vec2(ui.available_width(), _date.rect.height()),
-                                    egui::Layout::right_to_left(egui::Align::Max),
-                                     |ui| {
+                                let title = |ui: &mut egui::Ui, width| {
+                                    let summary = task_intent_text(t);
+                                    let _title = design::ticket_title(ui, design::ListEntryKind::Intent, &t.key, &summary,
+                                        egui::FontId::proportional(18.0), width)
+                                        .on_hover_text(task_intent_source(t));
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-title", t.id)), _title.rect));
+                                };
+                                let actions = |ui: &mut egui::Ui| {
                                          if retryable {
                                               let path = format!("/v1/tasks/{}/retry", t.id);
                                               let delete_path = format!("/v1/tasks/{}", t.id);
@@ -989,24 +913,28 @@ impl App {
                                                  self.dialog = Some(Dialog::form(
                                                      crate::tr!("Intent löschen"),
                                                      &if full_delete {
-                                                         crate::tr!("Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t))
+                                                         crate::tr!("Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", task_intent_text(t))
                                                      } else {
-                                                         crate::tr!("Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t))
+                                                         crate::tr!("Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_intent_text(t))
                                                      },
                                                      "DELETE", delete_path, body,
                                                  ));
                                              }
                                          }
-                                    },
-                                );
-                                #[cfg(test)]
-                                ui.ctx().data_mut(|d| {
-                                    d.insert_temp(
-                                        egui::Id::new(("test-task-row-date", t.id)),
-                                        _date.rect,
-                                    )
-                                });
-                            });
+                                };
+                                let available = ui.available_width();
+                                let width = available - reserved - ui.spacing().item_spacing.x;
+                                if width >= 160.0 {
+                                    ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(egui::vec2(width, design::ICON_BUTTON_SIZE),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| title(ui, width));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+                                    });
+                                } else {
+                                    title(ui, available);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+                                }
                         });
                     });
                     1
@@ -1780,8 +1708,6 @@ impl App {
                         .default_open(true)
                         .show(ui, |ui| {
                             for (time, error) in self.action_errors.iter().rev() {
-                                if !needle.is_empty() && !error.to_lowercase().contains(&needle)
-                                    && !crate::tr!("fehlgeschlagene aktionen").contains(&needle) { continue; }
                                 design::task_row_frame().show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     ui.strong(crate::tr!("Aktion fehlgeschlagen"));

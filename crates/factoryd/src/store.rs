@@ -20,7 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
-pub const SCHEMA_VERSION: u32 = 47;
+pub const SCHEMA_VERSION: u32 = 50;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -33,7 +33,7 @@ impl From<serde_json::Error> for StoreError {
 }
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>, Arc<tokio::sync::Notify>);
+pub struct Store(Arc<Mutex<Connection>>, Arc<tokio::sync::Notify>, Arc<std::path::PathBuf>);
 
 pub struct DurableSnapshot {
     pub draft_resets: Vec<DraftReset>,
@@ -230,6 +230,15 @@ impl Store {
         if version < 47 {
             tx.execute_batch(include_str!("../migrations/047_draft_resets.sql"))?;
         }
+        if version < 48 {
+            tx.execute_batch(include_str!("../migrations/048_remove_enrollment.sql"))?;
+        }
+        if version < 49 {
+            tx.execute_batch(include_str!("../migrations/049_android_push.sql"))?;
+        }
+        if version < 50 {
+            tx.execute_batch(include_str!("../migrations/050_delivery_retries.sql"))?;
+        }
         tx.commit()?;
         // Connection-local view centralizes fencing of removed projects without
         // changing or discarding the historical rows or the database schema version.
@@ -238,7 +247,9 @@ impl Store {
         db.execute_batch("CREATE TEMP TABLE live_automatic_runners(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL, local_source INTEGER NOT NULL, checkpoint INTEGER NOT NULL, server_runner INTEGER NOT NULL);")?;
         db.execute_batch("CREATE TEMP TABLE automatic_runner_contacts(runner_id TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL);")?;
         db.execute_batch("CREATE TEMP TABLE native_runner_boots(runner_id TEXT PRIMARY KEY, data TEXT NOT NULL);")?;
-        Ok(Self(Arc::new(Mutex::new(db)), Arc::new(tokio::sync::Notify::new())))
+        let mut push_path = path.as_os_str().to_os_string();
+        push_path.push(".android-push.json");
+        Ok(Self(Arc::new(Mutex::new(db)), Arc::new(tokio::sync::Notify::new()), Arc::new(push_path.into())))
     }
 
     fn mutate<T: Serialize + DeserializeOwned>(
@@ -758,6 +769,8 @@ mod excerpts;
 mod knowledge;
 mod memory;
 mod push;
+mod android_push;
+mod delivery;
 mod question_orchestrator;
 mod questions;
 mod reviews;

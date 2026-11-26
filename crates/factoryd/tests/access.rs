@@ -2,12 +2,11 @@ use factory_core::*;
 use factory_protocol::*;
 use factoryd::store::Store;
 use reqwest::{Client, Method, StatusCode};
-use serde_json::json;
 use std::time::Duration;
 const ROOT: &str = "admin-test-token-0123456789abcdef";
 
 #[tokio::test]
-async fn device_roles_one_use_enrollment_and_live_revocation() {
+async fn admin_issues_scoped_keys_and_can_revoke_them_live() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("db")).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -21,34 +20,34 @@ async fn device_roles_one_use_enrollment_and_live_revocation() {
             .bearer_auth(token)
             .header(VERSION_HEADER, "1")
     };
-    let grant = request(Method::POST, "/v1/devices/enrollment", ROOT)
-        .json(&CreateEnrollment {
-            role: DeviceRole::Operator,
-            runner_id: None,
-            ttl_seconds: 60,
-        })
-        .send()
-        .await
-        .unwrap()
-        .json::<Enrollment>()
-        .await
-        .unwrap();
-    let credential = request(Method::POST, "/v1/enroll", "")
-        .json(&json!({"code":grant.code,"name":"laptop"}))
-        .send()
-        .await
-        .unwrap()
-        .json::<DeviceCredential>()
-        .await
-        .unwrap();
+    let operator = CreateDevice {
+        name: "Android".into(),
+        role: DeviceRole::Operator,
+        runner_id: None,
+    };
     assert_eq!(
-        request(Method::POST, "/v1/enroll", "")
-            .json(&json!({"code":grant.code,"name":"replay"}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
+        request(Method::POST, "/v1/devices", "")
+            .json(&operator)
+            .send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = request(Method::POST, "/v1/devices", ROOT)
+        .json(&operator)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let credential = response.json::<DeviceCredential>().await.unwrap();
+    for path in ["/v1/enroll", "/v1/devices/enrollment"] {
+        assert_eq!(
+            request(Method::POST, path, ROOT).send().await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        request(Method::POST, "/v1/devices", &credential.token)
+            .json(&operator).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
     );
     assert_eq!(
         request(Method::GET, "/v1/snapshot", &credential.token)
@@ -76,7 +75,7 @@ async fn device_roles_one_use_enrollment_and_live_revocation() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(String::from_utf8_lossy(&first).contains("device.enrolled"));
+    assert!(String::from_utf8_lossy(&first).contains("device.created"));
     let revoke = format!("/v1/devices/{}/revoke", credential.device.id);
     assert_eq!(
         request(Method::POST, &revoke, ROOT)
@@ -100,17 +99,11 @@ async fn device_roles_one_use_enrollment_and_live_revocation() {
         StatusCode::UNAUTHORIZED
     );
     let runner = RunnerId::new();
-    let grant = store
-        .create_enrollment(CreateEnrollment {
+    let token = store
+        .create_device(CreateDevice {
+            name: "runner".into(),
             role: DeviceRole::Runner,
             runner_id: Some(runner),
-            ttl_seconds: 60,
-        })
-        .unwrap();
-    let token = store
-        .redeem_enrollment(RedeemEnrollment {
-            code: grant.code,
-            name: "runner".into(),
         })
         .unwrap()
         .token;
@@ -184,47 +177,35 @@ async fn device_roles_one_use_enrollment_and_live_revocation() {
 }
 
 #[test]
-fn device_secrets_are_hashed_and_survive_restart_codes_expire() {
+fn migration_removes_old_codes_without_invalidating_device_keys() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let store = Store::open(&path).unwrap();
-    let grant = store
-        .create_enrollment(CreateEnrollment {
+    let credential = store
+        .create_device(CreateDevice {
+            name: "admin".into(),
             role: DeviceRole::Admin,
             runner_id: None,
-            ttl_seconds: 60,
-        })
-        .unwrap();
-    let credential = store
-        .redeem_enrollment(RedeemEnrollment {
-            code: grant.code,
-            name: "admin".into(),
         })
         .unwrap();
     drop(store);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE enrollments (code_hash TEXT PRIMARY KEY, expires_unix_ms INTEGER, data TEXT);
+         INSERT INTO enrollments VALUES ('old-code-hash', 9999999999999, '{}');
+         PRAGMA user_version = 47;",
+    ).unwrap();
     let store = Store::open(&path).unwrap();
     assert_eq!(
         store.authenticate_device(&credential.token).unwrap(),
         Some(credential.device)
     );
-    let db = rusqlite::Connection::open(&path).unwrap();
     let stored: String = db
         .query_row("SELECT token_hash || data FROM devices", [], |r| r.get(0))
         .unwrap();
     assert!(!stored.contains(&credential.token));
-    let grant = store
-        .create_enrollment(CreateEnrollment {
-            role: DeviceRole::Operator,
-            runner_id: None,
-            ttl_seconds: 30,
-        })
-        .unwrap();
-    db.execute("UPDATE enrollments SET expires_unix_ms=0", [])
-        .unwrap();
-    assert!(store
-        .redeem_enrollment(RedeemEnrollment {
-            code: grant.code,
-            name: "expired".into()
-        })
-        .is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'enrollments'", [], |r| r.get::<_, u32>(0)).unwrap(),
+        0,
+    );
 }

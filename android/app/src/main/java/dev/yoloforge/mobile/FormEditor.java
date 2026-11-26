@@ -51,7 +51,7 @@ final class FormEditor {
             else if(type.equals("multiselect")){
                 HashSet<String> selected=new HashSet<>();if(initial instanceof JSONArray)for(int j=0;j<((JSONArray)initial).length();j++)selected.add(((JSONArray)initial).getString(j));
                 if(options!=null)for(int j=0;j<options.length();j++){JSONObject option=options.getJSONObject(j);CheckBox box=new CheckBox(context);box.setText(label(option));box.setChecked(selected.remove(option.getString("value")));box.setOnCheckedChangeListener((v,b)->visibility());group.addView(box);field.checks.add(box);}
-                if(schema.optBoolean("custom") || options==null || options.length()==0){EditText edit=edit(context,key,String.join("\n",selected),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);edit.setHint("Weitere Werte, einer je Zeile");group.addView(edit);field.input=edit;}
+                if(schema.optBoolean("custom") || options==null || options.length()==0){EditText edit=edit(context,key,String.join("\n",selected),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE);FactoryStyle.input(edit,"Weitere Werte, einer je Zeile");group.addView(edit);field.input=edit;}
             }else if(options!=null && options.length()>0 && !schema.optBoolean("custom")){
                 Spinner spinner=new Spinner(context);ArrayList<String> labels=new ArrayList<>();int selected=0;
                 for(int j=0;j<options.length();j++){JSONObject option=options.getJSONObject(j);labels.add(label(option));if(equal(initial,option.opt("value")))selected=j;}
@@ -66,7 +66,7 @@ final class FormEditor {
         }
         building=false;visibility();
     }
-    private EditText edit(Context context,String key,String initial,int type){EditText edit=new EditText(context);edit.setHint(key);edit.setContentDescription(key);edit.setInputType(type);edit.setText(initial);edit.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int st,int count,int after){}public void onTextChanged(CharSequence s,int st,int before,int count){visibility();}public void afterTextChanged(Editable s){}});return edit;}
+    private EditText edit(Context context,String key,String initial,int type){EditText edit=new EditText(context);edit.setContentDescription(key);edit.setInputType(type);edit.setText(initial);FactoryStyle.input(edit,key);edit.addTextChangedListener(new TextWatcher(){public void beforeTextChanged(CharSequence s,int st,int count,int after){}public void onTextChanged(CharSequence s,int st,int before,int count){visibility();}public void afterTextChanged(Editable s){}});return edit;}
     private static String label(JSONObject option){String label=option.optString("label",option.optString("value")),description=option.optString("description");return description.isEmpty()?label:label+" — "+description;}
     private static boolean equal(Object a,Object b){if(a instanceof Number && b instanceof Number)return Double.compare(((Number)a).doubleValue(),((Number)b).doubleValue())==0;return Objects.equals(a,b);}
     private boolean enabled(Field field){JSONArray when=field.schema.optJSONArray("when");if(when==null)return true;for(int i=0;i<when.length();i++){JSONObject condition=when.optJSONObject(i);if(condition==null)return false;Field source=fields.get(condition.optString("key"));Object value=null;try{if(source!=null)value=source.value(true);}catch(Exception ignored){}boolean matches=equal(value,condition.opt("value"));if(condition.optString("op").equals("eq")?!matches:matches)return false;}return true;}

@@ -376,7 +376,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
                     session_id: work.session_id(),
                     message_id: agent_message_id(work.id),
                     phase: AgentPhase::Succeeded,
-                    summary: "Implemented calculator; tests pass".into(),
+                     summary: format!("{PUBLICATION_PREPARED_PREFIX}\nImplemented calculator; tests pass"),
                 },
             },
         );
@@ -387,7 +387,8 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
         assert_eq!(review.agent_spec.as_ref().unwrap().role, "reviewer");
         agent_reply(&s, &review, r#"{"action":"approve"}"#);
         s.scheduler_tick().unwrap();
-        assert!(s.pending(runner).unwrap().is_empty(), "Memory must wait for final archive");
+        finish_publication(&s, runner);
+         assert!(s.pending(runner).unwrap().is_empty(), "Memory must wait for final archive");
         s.report_archive(
             runner,
             work.id,
@@ -459,7 +460,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
         } else {
             assert!(notes.is_empty());
         }
-        assert_eq!(s.snapshot().unwrap().commands.len(), 5);
+        assert_eq!(s.snapshot().unwrap().commands.len(), 6);
         if output.contains("calculator implementation") {
             let old = notes[0].clone();
             s.save_task(SaveTask {
@@ -489,8 +490,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
                         session_id: follow.session_id(),
                         message_id: agent_message_id(follow.id),
                         phase: AgentPhase::Succeeded,
-                        summary: "Earlier tests were incomplete; now added negative-number cases"
-                            .into(),
+                         summary: format!("{PUBLICATION_PREPARED_PREFIX}\nEarlier tests were incomplete; now added negative-number cases"),
                     },
                 },
             );
@@ -512,7 +512,9 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
             s.scheduler_tick().unwrap();
             let review = s.pending(runner).unwrap().pop().unwrap();
             assert_eq!(review.agent_spec.as_ref().unwrap().role, "reviewer");
-            agent_reply(&s, &review, r#"{"action":"approve"}"#);
+             agent_reply(&s, &review, r#"{"action":"approve"}"#);
+             s.scheduler_tick().unwrap();
+            finish_publication(&s, runner);
             s.scheduler_tick().unwrap();
             let evaluation = s
                 .pending(runner)
@@ -903,6 +905,106 @@ fn check_stop_with_open_question(keep_intent: bool) {
 }
 
 #[test]
+fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("factory.sqlite3");
+    let s = Store::open(&path).unwrap();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Snapshot recovery".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let intent = s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: "Work".into(),
+        description: "Implement a change".into(), acceptance_criteria: String::new(), priority: 1,
+    }).unwrap();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let run = s.pending(runner).unwrap().pop().unwrap();
+    assert!(run.agent_spec.as_ref().unwrap().defer_publication);
+    agent_reply(&s, &run, &format!("{PUBLICATION_BLOCKED_PREFIX}\nSnapshot failed\n\nAgentenergebnis:\nImplemented change"));
+    assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::InProgress);
+    let grant_id = RequestId::new();
+    assert!(!s.claim_review_snapshot_recovery(runner, run.id, grant_id).unwrap());
+    final_archive(&s, &run);
+    // Model the deployed legacy state and restart, as with WOAI-4.
+    drop(s);
+    rusqlite::Connection::open(&path).unwrap().execute(
+        "UPDATE tickets SET data=json_set(data,'$.status','blocked','$.routing_note','Automatische Übernahme blockiert; Änderungen liegen im Arbeitsbereich.') WHERE id=?1",
+        [intent.id.to_string()]).unwrap();
+    let s = Store::open(&path).unwrap();
+    s.merger_tick().unwrap();
+    assert_eq!(s.task_payload(intent.id).unwrap().routing_note, SNAPSHOT_RETRY_NOTE);
+    assert!(!s.claim_publication_recovery(runner, run.id, grant_id).unwrap());
+    assert!(!s.claim_review_snapshot_recovery(RunnerId::new(), run.id, grant_id).unwrap());
+    assert!(s.claim_review_snapshot_recovery(runner, run.id, grant_id).unwrap());
+    assert!(s.report_recovered_publication(runner, run.id, ReportRecoveredPublication {
+        request_id: RequestId::new(), grant_id, ownership_epoch: run.ownership_epoch,
+        base_branch: "main".into(), snapshot_commit: "a".repeat(40), target_commit: "b".repeat(40),
+    }).is_err(), "A snapshot grant cannot authorize publication");
+    let proof = ReportRecoveredReviewSnapshot {
+        request_id: RequestId::new(), grant_id, ownership_epoch: run.ownership_epoch,
+        snapshot_commit: "a".repeat(40), unchanged_tree: false,
+    };
+    s.report_recovered_review_snapshot(runner, run.id, proof.clone()).unwrap();
+    s.report_recovered_review_snapshot(runner, run.id, proof).unwrap();
+    assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::Validating);
+    assert_eq!(s.task_payload(intent.id).unwrap().execution_command, Some(run.id));
+    assert!(s.task_history(intent.id, None).unwrap().entries.iter().any(|entry|
+        entry.message == "Review-Snapshot nachträglich gesichert"));
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let pending = s.pending(runner).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].agent_spec.as_ref().unwrap().role, "reviewer");
+    approve_review(&s, runner);
+    let pending = s.pending(runner).unwrap();
+    assert_eq!(pending.len(), 1);
+    let publication = &pending[0];
+    assert_eq!(publication.agent_spec.as_ref().unwrap().role, APPROVED_PUBLICATION_ROLE);
+    assert_eq!(publication.agent_spec.as_ref().unwrap().prompt, run.id.to_string());
+
+    agent_reply(&s, publication, &format!("{PUBLICATION_BLOCKED_PREFIX}\nTarget checkout temporarily unavailable"));
+    s.merger_tick().unwrap();
+    let retry = s.pending(runner).unwrap().pop().unwrap();
+    assert_eq!(retry.agent_spec.as_ref().unwrap().prompt, run.id.to_string());
+    agent_reply(&s, &retry, &format!("{PUBLICATION_CONFLICT_PREFIX}\nBoth sides changed the same file"));
+    assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::InProgress);
+    s.merger_tick().unwrap();
+    assert!(s.pending(runner).unwrap().is_empty(), "Retries must respect durable pacing");
+    drop(s);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute("UPDATE delivery_retries SET next_ms=0", []).unwrap();
+    let s = Store::open(&path).unwrap();
+    s.merger_tick().unwrap();
+    s.merger_tick().unwrap();
+    let pending = s.pending(runner).unwrap();
+    assert_eq!(pending.len(), 1);
+    let merger = &pending[0];
+    assert!(reviewed_merger(merger));
+    assert!(merger.agent_spec.as_ref().unwrap().prompt.contains(&format!("refs/yoloforge/merger-targets/{}", merger.id)));
+    agent_reply(&s, merger, &format!("{PUBLICATION_BLOCKED_PREFIX}\nTarget changed during resolution"));
+    assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::InProgress);
+    db.execute("UPDATE delivery_retries SET next_ms=0", []).unwrap();
+    s.merger_tick().unwrap();
+    let newer = s.pending(runner).unwrap().pop().unwrap();
+    assert!(reviewed_merger(&newer));
+    assert_ne!(merger.id, newer.id);
+    assert_eq!(newer.agent_spec.as_ref().unwrap().prompt.lines().next(),
+        merger.agent_spec.as_ref().unwrap().prompt.lines().next());
+    agent_reply(&s, &newer, PUBLICATION_CONFIRMED_PREFIX);
+    assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::Done);
+    assert!(s.snapshot().unwrap().intent_problems.is_empty());
+    assert_eq!(s.snapshot().unwrap().commands.iter().filter(|c|
+        c.kind == CommandKind::RunAgent && c.stream_id == run.stream_id
+        && c.agent_spec.as_ref().is_some_and(|a| a.role.is_empty())).count(), 1);
+}
+
+#[test]
 fn saved_publication_requires_the_current_runner_grant_and_does_not_rerun_the_agent() {
     let dir = tempfile::tempdir().unwrap();
     let s = Store::open(&dir.path().join("db")).unwrap();
@@ -935,6 +1037,15 @@ fn saved_publication_requires_the_current_runner_grant_and_does_not_rerun_the_ag
     assert!(!s.claim_publication_recovery(runner, run.id, grant).unwrap(), "Require a final archive");
     final_archive(&s, &run);
     assert!(!s.claim_publication_recovery(RunnerId::new(), run.id, grant).unwrap());
+    assert!(!s.claim_publication_recovery(runner, run.id, grant).unwrap(),
+        "A pre-review snapshot failure must not authorize publication");
+    // The remainder exercises legacy recovery for a command that had
+    // already been allowed to publish, rather than a review-first command.
+    db.execute("UPDATE commands SET data=json_remove(data,'$.agent_spec.defer_publication') WHERE id=?1",
+        [run.id.to_string()]).unwrap();
+    assert!(!s.claim_publication_recovery(runner, run.id, grant).unwrap(),
+        "A scheduled legacy intent must recover through a review, not by publishing an unapproved result");
+    db.execute("DELETE FROM scheduler_runs WHERE agent_id=?1", [run.id.to_string()]).unwrap();
     assert!(s.claim_publication_recovery(runner, run.id, grant).unwrap());
     assert!(!s.claim_publication_recovery(runner, run.id, RequestId::new()).unwrap());
     let blocked = s.task_payload(intent.id).unwrap();
@@ -989,7 +1100,8 @@ fn inactive_delete_accepts_unstarted_and_publication_blocked_intents_but_not_act
     assert!(delete(&running).is_err());
     agent_reply(&s, &run, &format!("{PUBLICATION_BLOCKED_PREFIX}\nProject checkout dirty"));
     let blocked = s.task_payload(intent.id).unwrap();
-    assert_eq!(blocked.status, TicketState::Blocked);
+    assert_eq!(blocked.status, TicketState::InProgress);
+    assert_eq!(blocked.routing_note, SNAPSHOT_RETRY_NOTE);
     assert_eq!(delete(&blocked).unwrap().status, TicketState::Cancelled);
     assert!(s.task_payload(intent.id).is_err());
     assert!(command_publication_blocked(&s.command_payload(run.id).unwrap()));
@@ -1041,6 +1153,51 @@ fn stopped_intent_recovers_once_in_the_same_archived_session() {
     s.scheduler_tick().unwrap();
     assert!(s.pending(runner).unwrap().is_empty());
     assert_eq!(s.task_payload(intent.id).unwrap().execution_command, Some(next.id));
+}
+
+#[test]
+fn legacy_checkout_block_resumes_review_after_restart_without_reimplementing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let s = Store::open(&path).unwrap();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Existing project".into(), repository: "/source/project".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let ticket = s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: "Existing change".into(),
+        description: "Existing change".into(), acceptance_criteria: String::new(), priority: 1,
+    }).unwrap();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let implementation = s.pending(runner).unwrap().pop().unwrap();
+    rusqlite::Connection::open(&path).unwrap().execute(
+        "UPDATE commands SET data=json_remove(data,'$.agent_spec.defer_publication') WHERE id=?1",
+        [implementation.id.to_string()],
+    ).unwrap();
+    agent_reply(&s, &implementation, &format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: Lokale Änderungen überschneiden sich mit dem Ergebnis; die Übernahme bleibt vorbereitet, nichts wurde überschrieben.\n\nAgentenergebnis:\nExisting result"));
+    final_archive(&s, &implementation);
+    drop(s);
+
+    let s = Store::open(&path).unwrap();
+    let current = || s.snapshot().unwrap().tickets.into_iter().find(|t| t.id == ticket.id).unwrap();
+    assert_eq!(current().status, TicketState::Blocked);
+    assert!(!s.claim_publication_recovery(runner, implementation.id, RequestId::new()).unwrap());
+    s.scheduler_tick().unwrap();
+    assert_eq!(current().status, TicketState::Validating);
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    approve_review(&s, runner);
+    let [publication]: [RunnerCommand; 1] = s.pending(runner).unwrap().try_into().unwrap();
+    let agent = publication.agent_spec.as_ref().unwrap();
+    assert_eq!(agent.role, APPROVED_PUBLICATION_ROLE);
+    assert_eq!(agent.prompt, implementation.id.to_string());
+    agent_reply(&s, &publication, PUBLICATION_CONFIRMED_PREFIX);
+    assert_eq!(current().status, TicketState::Done);
 }
 
 #[test]
@@ -1114,13 +1271,11 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     assert!(prompt.contains("I implemented step one.") && prompt.contains("I implemented steps two and three."));
     agent_reply(&s, &reviewer, "Not a valid verdict");
     s.scheduler_tick().unwrap();
-    let blocked = current(&s, intent.id);
-    assert_eq!(blocked.status, TicketState::Blocked);
-    let retried = s.retry_task(intent.id, RetryTask {
-        request_id: RequestId::new(), expected_revision: blocked.revision, previous_command: rework.id,
-    }).unwrap();
+    let retried = current(&s, intent.id);
     assert_eq!(retried.status, TicketState::Validating);
     assert_eq!(retried.execution_command, Some(rework.id), "Retry only the Reviewer, not the Implementer");
+    rusqlite::Connection::open(&path).unwrap().execute(
+        "UPDATE delivery_retries SET next_ms=0 WHERE ticket_id=?1 AND step='review'", [intent.id.to_string()]).unwrap();
     s.scheduler_tick().unwrap();
     let new_review = s.pending(runner).unwrap().into_iter().find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
     assert_ne!(new_review.id, reviewer.id);
@@ -1193,6 +1348,14 @@ fn approve_review(s: &Store, runner: RunnerId) {
         .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
     agent_reply(s, &review, r#"{"action":"approve"}"#);
     s.scheduler_tick().unwrap();
+}
+
+fn finish_publication(s: &Store, runner: RunnerId) {
+    if let Some(publication) = s.pending(runner).unwrap().into_iter()
+        .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == APPROVED_PUBLICATION_ROLE))
+    {
+        agent_reply(s, &publication, PUBLICATION_CONFIRMED_PREFIX);
+    }
 }
 
 #[test]
@@ -1323,7 +1486,7 @@ fn archived_session_with_new_skill_grants_queues_and_sends_to_same_root() {
     assert!(original.agent_spec.as_ref().unwrap().repo_skills.is_none());
     complete(&store, &original, CommandOutput::Agent { agent: AgentProgress {
         session_id: original.session_id(), message_id: agent_message_id(original.id),
-        phase: AgentPhase::Succeeded, summary: "Done".into(),
+        phase: AgentPhase::Succeeded, summary: format!("{PUBLICATION_PREPARED_PREFIX}\nDone"),
     }});
     store.report_archive(runner, original.id, ReportArchive {
         ownership_epoch: original.ownership_epoch, batch: ArchiveBatch {
@@ -1332,6 +1495,7 @@ fn archived_session_with_new_skill_grants_queues_and_sends_to_same_root() {
         },
     }).unwrap();
     approve_review(&store, runner);
+    finish_publication(&store, runner);
     let owner = store.snapshot().unwrap().streams.into_iter()
         .find(|w| w.id == original.stream_id).unwrap();
     store.close_session(original.id, CloseSession {
@@ -1465,7 +1629,7 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
                 session_id: c.session_id(),
                 message_id: agent_message_id(c.id),
                 phase: AgentPhase::Succeeded,
-                summary: "Calculator done".into(),
+                summary: format!("{PUBLICATION_PREPARED_PREFIX}\nCalculator done"),
             },
         },
     );
@@ -1492,6 +1656,8 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
     )
     .unwrap();
     approve_review(&s, runner);
+    finish_publication(&s, runner);
+    s.scheduler_tick().unwrap();
     let continued = s
         .pending(runner)
         .unwrap()
@@ -1519,7 +1685,10 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
             .find(|t| t.id == first.id)
             .unwrap()
             .execution_command,
-        Some(c.id)
+        s.snapshot().unwrap().commands.iter()
+            .find(|cmd| cmd.agent_spec.as_ref().is_some_and(|a|
+                a.role == APPROVED_PUBLICATION_ROLE && a.prompt == c.id.to_string()))
+            .map(|cmd| cmd.id)
     );
     complete(
         &s,
@@ -1529,7 +1698,7 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
                 session_id: continued.session_id(),
                 message_id: agent_message_id(continued.id),
                 phase: AgentPhase::Succeeded,
-                summary: "Multiplication done".into(),
+                summary: format!("{PUBLICATION_PREPARED_PREFIX}\nMultiplication done"),
             },
         },
     );
@@ -1548,8 +1717,10 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
         },
     )
     .unwrap();
-    let automatic = s.save_task(task("Add division", None)).unwrap();
     approve_review(&s, runner);
+    finish_publication(&s, runner);
+    let automatic = s.save_task(task("Add division", None)).unwrap();
+    s.scheduler_tick().unwrap();
     let routing = s
         .pending(runner)
         .unwrap()
@@ -1749,7 +1920,10 @@ fn legacy_missing_folder_failure_gets_one_fenced_replacement_and_scheduler_conti
     s.complete(runner,old.id,CommandResult{request_id:RequestId::new(),ownership_epoch:1,result:CommandOutput::WorkspaceError{workspace_error:"Repository import failed; check runner Git access. Retry preparation after fixing access; no files deleted".into()}}).unwrap();
     drop(s);
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("DROP TABLE local_project_recovery; PRAGMA user_version=23;")
+    db.execute_batch("DROP TABLE local_project_recovery;
+        DROP TABLE IF EXISTS android_push_delivered;
+        DROP TABLE IF EXISTS android_push_devices;
+        PRAGMA user_version=23;")
         .unwrap();
     drop(db);
     let s = Store::open(&path).unwrap();

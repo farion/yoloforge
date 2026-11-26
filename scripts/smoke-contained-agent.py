@@ -150,8 +150,7 @@ def main():
         cli("project", "configure", project["id"], "--expected-revision", "1", "--provider", "openai", "--model", args.model)
         mapping = directory / "repositories.json"
         private_json(mapping, {project["id"]: str(repo)})
-        enrollment = api("POST", "/v1/devices/enrollment", {"role": "runner", "runner_id": runner, "ttl_seconds": 60})
-        runner_token = api("POST", "/v1/enroll", {"code": enrollment["code"], "name": "contained-acceptance"})["token"]
+        runner_token = api("POST", "/v1/devices", {"role": "runner", "runner_id": runner, "name": "contained-acceptance"})["token"]
         runner_env = {**env, "FACTORY_TOKEN": runner_token}
         runner_args = ["--server", endpoint, "--id", runner, "--name", "contained-acceptance", "--journal", str(directory / "runner.db"), "--repositories", str(mapping)]
         worker, _ = spawn("factory-runner", *runner_args, child_env=runner_env)

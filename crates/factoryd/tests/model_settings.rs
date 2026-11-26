@@ -215,7 +215,7 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
             session_id: work.session_id(),
             message_id: agent_message_id(work.id),
             phase: AgentPhase::Succeeded,
-            summary: "Work completed".into(),
+            summary: format!("{PUBLICATION_PREPARED_PREFIX}\nWork completed"),
         },
     });
     store.report_archive(runner, work.id, ReportArchive {
@@ -236,6 +236,13 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
     complete(&store, &reviewer, CommandOutput::Agent { agent: AgentProgress {
         session_id: reviewer.session_id(), message_id: agent_message_id(reviewer.id),
         phase: AgentPhase::Succeeded, summary: r#"{"action":"approve"}"#.into(),
+    }});
+    store.scheduler_tick().unwrap();
+    let publication = store.pending(runner).unwrap().pop().unwrap();
+    assert_eq!(publication.agent_spec.as_ref().unwrap().role, APPROVED_PUBLICATION_ROLE);
+    complete(&store, &publication, CommandOutput::Agent { agent: AgentProgress {
+        session_id: publication.session_id(), message_id: agent_message_id(publication.id),
+        phase: AgentPhase::Succeeded, summary: PUBLICATION_CONFIRMED_PREFIX.into(),
     }});
     store.scheduler_tick().unwrap();
     let pending = store.pending(runner).unwrap();

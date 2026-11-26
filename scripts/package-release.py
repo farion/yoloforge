@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kind", choices=["server", "tui", "runner", "gui"], required=True)
+    parser.add_argument("--kind", choices=["server", "runner", "gui"], required=True)
     parser.add_argument("--os", choices=["linux", "macos", "windows"], required=True)
     parser.add_argument("--arch", choices=["x86_64", "aarch64"], required=True)
     parser.add_argument("--version", required=True)
@@ -32,7 +32,7 @@ def main():
         parser.error("The server package requires Linux")
     if args.os == "windows" and args.arch != "x86_64":
         parser.error("Windows packages currently support x86_64")
-    binary = {"server": "factoryd", "tui": "yoloforge", "runner": "factory-runner", "gui": "yoloforge-gui"}[args.kind]
+    binary = {"server": "factoryd", "runner": "factory-runner", "gui": "yoloforge-gui"}[args.kind]
     if args.os == "windows":
         binary += ".exe"
     name = f"yoloforge-{args.kind}-{args.version}-{args.os}-{args.arch}"
@@ -75,8 +75,6 @@ def main():
                 "    docker compose -p yoloforge up -d --build\n\n"
                 "See docs/deployment.md for ownership, backup and upgrade instructions.\n",
                 encoding="utf-8")
-        elif args.kind == "tui":
-            shutil.copy2(ROOT / "docs/client-installation.md", package / "README.md")
         elif args.kind == "gui":
             shutil.copy2(ROOT / "deploy/OPENCODE-LICENSE", package / "OPENCODE-LICENSE")
             shutil.copy2(ROOT / "docs/gui.md", package / "README.md")

@@ -107,6 +107,7 @@ pub(super) async fn observe_client(app: &App, principal: &Principal, headers: &H
     }
     let name = match kind {
         "desktop" => "Desktop",
+        "android" => "Android",
         "tui" => "CLI / TUI",
         _ => "API-Client",
     };

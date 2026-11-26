@@ -264,11 +264,15 @@ pub fn effective_implementer(app: &App, project: ProjectId) -> Option<&ModelSele
         .or(models.default_model.as_ref())
 }
 
-pub fn label(catalog: &[ModelAccess], model: &ModelSelection) -> String {
-    let name = catalog
+pub(crate) fn provider_name<'a>(catalog: &'a [ModelAccess], access_id: &str) -> Option<&'a str> {
+    catalog
         .iter()
-        .find(|a| a.id == model.access_id)
-        .map_or(model.access_id.as_str(), |a| &a.name);
+        .find(|a| a.id == access_id)
+        .map(|a| a.name.as_str())
+}
+
+pub fn label(catalog: &[ModelAccess], model: &ModelSelection) -> String {
+    let name = provider_name(catalog, &model.access_id).unwrap_or(&model.access_id);
     format!("{} / {name}", model.model_id)
 }
 

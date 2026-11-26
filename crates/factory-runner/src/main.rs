@@ -474,6 +474,7 @@ async fn commands(
                     let review_first = !planned_git && record.command.agent_spec.as_ref().is_some_and(|s| s.defer_publication);
                     let publication = tokio::task::block_in_place(|| if review_first {
                         publication::prepare_for_review(journal, &record, args, &progress.summary)
+                            .and_then(|path| path.map(Some).ok_or_else(|| anyhow::anyhow!("Missing review snapshot destination")))
                     } else {
                         publication::publish_with_summary(journal, &record, args, &progress.summary)
                     });
@@ -524,7 +525,8 @@ async fn commands(
                                 while !progress.summary.is_char_boundary(end) {end-=1;}
                                 progress.summary.truncate(end);
                             },
-                            Err(e)=>progress.summary = format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: {e}\n\nAgentenergebnis:\n{}", progress.summary),
+                             Err(e) if review_first => progress.summary = format!("{PUBLICATION_BLOCKED_PREFIX}\nReview-Snapshot konnte nicht gesichert werden; keine Übernahme gestartet: {e:#}\n\nAgentenergebnis:\n{}", progress.summary),
+                             Err(e)=>progress.summary = format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: {e}\n\nAgentenergebnis:\n{}", progress.summary),
                         }
                         let mut end = progress.summary.len().min(32768);
                         while !progress.summary.is_char_boundary(end) { end -= 1; }
@@ -928,6 +930,7 @@ async fn run(mut args: Args) -> Result<()> {
                 };
             input.capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
             input.capabilities.push(MERGER_RECOVERY_CAPABILITY.into());
+            input.capabilities.push(REVIEWED_MERGER_CAPABILITY.into());
             input.capabilities.push(INTENT_RECOVERY_CAPABILITY.into());
             input.capabilities.push(REVIEWED_PUBLICATION_CAPABILITY.into());
             if args.managed_opencode.is_some() {
@@ -956,7 +959,8 @@ async fn run(mut args: Args) -> Result<()> {
                 result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
             }
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
-                input.capabilities.retain(|capability| capability != MERGER_RECOVERY_CAPABILITY);
+                 input.capabilities.retain(|capability| capability != MERGER_RECOVERY_CAPABILITY);
+                 input.capabilities.retain(|capability| capability != REVIEWED_MERGER_CAPABILITY);
                 result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
             }
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400)
@@ -1011,9 +1015,9 @@ async fn run(mut args: Args) -> Result<()> {
                     &mut next_cleanup,
                 )
                 .await;
-                if matches!(command_result, Ok(false)) && std::time::Instant::now() >= next_publication_check {
+                if command_result.is_ok() && std::time::Instant::now() >= next_publication_check {
                     next_publication_check = std::time::Instant::now() + Duration::from_secs(30);
-                    if args.managed_opencode.is_some() {
+                    if matches!(command_result, Ok(false)) && args.managed_opencode.is_some() {
                         if let Ok(Err(error)) = tokio::time::timeout(Duration::from_secs(8),
                             draft_reset::step(&client, &journal, &args, current.registration_id)).await
                         {
@@ -1022,6 +1026,29 @@ async fn run(mut args: Args) -> Result<()> {
                     }
                     let position = next_publication_recovery;
                     next_publication_recovery = next_publication_recovery.wrapping_add(1);
+                    let snapshot_recovery = async {
+                        let Some(candidate) = tokio::task::block_in_place(|| publication::review_snapshot_candidate(&journal, position))? else {
+                            return Ok::<_, anyhow::Error>(());
+                        };
+                        let grant = RequestId::new();
+                        if !matches!(client.review_snapshot_recovery(args.id, current.registration_id, candidate, grant).await, Ok(true)) {
+                            return Ok(());
+                        }
+                        match tokio::task::block_in_place(|| publication::recover_review_snapshot(&journal, candidate, grant, &args)) {
+                            Ok(proof) => {
+                                client.report_recovered_review_snapshot(args.id, current.registration_id, candidate, &proof).await?;
+                                tokio::task::block_in_place(|| publication::acknowledge_recovery(&journal, candidate))?;
+                            }
+                            Err(error) => {
+                                client.release_publication_recovery(args.id, current.registration_id, candidate, grant).await?;
+                                return Err(error);
+                            }
+                        }
+                        Ok(())
+                    };
+                    if let Ok(Err(error)) = tokio::time::timeout(Duration::from_secs(12), snapshot_recovery).await {
+                        eprintln!("Review snapshot recovery deferred: {error:#}");
+                    }
                     let _ = tokio::time::timeout(Duration::from_secs(8), async {
                         let Some(candidate) = tokio::task::block_in_place(|| publication::recovery_candidate(&journal, position))? else {
                             return Ok::<_, anyhow::Error>(());

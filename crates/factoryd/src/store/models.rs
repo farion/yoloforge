@@ -46,7 +46,9 @@ pub(super) fn for_command(db: &Connection, command: &RunnerCommand) -> Result<Op
         .query_row(
             "SELECT m.data FROM stream_tickets st JOIN tickets t ON t.id=st.ticket_id
          JOIN task_models m ON m.ticket_id=t.id WHERE st.stream_id=?1
-         AND json_extract(t.data,'$.execution_command')=?2 LIMIT 1",
+         AND (json_extract(t.data,'$.execution_command')=?2 OR EXISTS(
+             SELECT 1 FROM validations v WHERE v.ticket_id=t.id AND v.source_id=?2 AND v.retired=0))
+         LIMIT 1",
             params![command.stream_id.to_string(), command.id.to_string()],
             |r| r.get(0),
         )

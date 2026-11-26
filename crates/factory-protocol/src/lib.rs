@@ -26,6 +26,15 @@ pub struct ReportRecoveredPublication {
     pub snapshot_commit: String,
     pub target_commit: String,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportRecoveredReviewSnapshot {
+    pub request_id: RequestId,
+    pub grant_id: RequestId,
+    pub ownership_epoch: u64,
+    pub snapshot_commit: String,
+    pub unchanged_tree: bool,
+}
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -123,23 +132,12 @@ pub struct RetireKnowledge {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CreateEnrollment {
+pub struct CreateDevice {
+    pub name: String,
     pub role: DeviceRole,
     pub runner_id: Option<RunnerId>,
-    pub ttl_seconds: u32,
 }
 // Secret-bearing DTOs deliberately do not implement Debug.
-#[derive(Serialize, Deserialize)]
-pub struct Enrollment {
-    pub code: String,
-    pub expires_unix_ms: u64,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RedeemEnrollment {
-    pub code: String,
-    pub name: String,
-}
 #[derive(Serialize, Deserialize)]
 pub struct DeviceCredential {
     pub device: Device,

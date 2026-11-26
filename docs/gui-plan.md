@@ -71,7 +71,7 @@ Wiederverwenden:
 | HTTP-Client und SSE mit Cursor | `crates/factory-protocol` |
 | Persistenz, Gerätezugang, Routing, Supervisor | `crates/factoryd` |
 | OpenCode-Anbindung, Laufzeit und Archivübertragung | `crates/factory-runner`, `crates/factory-opencode` |
-| Projektassistent, Antwortzustellung, Verwaltungsabläufe | `crates/factory-tui/src` als funktionale Referenz |
+| Projektassistent, Antwortzustellung, Verwaltungsabläufe | Native Desktop-Oberfläche in `crates/factory-gui/src` |
 | Vollständiges Nachrichtenarchiv und Datei-Download | `docs/session-archive.md`, `docs/archive-files.md` |
 | Session-Live-Ansicht über Factory/Runner | `docs/session-view.md` |
 | Routing und Orchestrator-Fragen | `docs/task-routing.md`, `docs/question-orchestration.md` |

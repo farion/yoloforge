@@ -116,8 +116,10 @@ pub(super) fn tick(tx: &Transaction<'_>, p: &SchedulerPolicy) -> Result<()> {
         return Ok(());
     }
     let source:Option<String>=tx.query_row("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id JOIN archive_status a ON a.command_id=c.id LEFT JOIN memory_evaluations e ON e.source_command_id=c.id WHERE s.project_id=?1 AND c.state='succeeded' AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND json_extract(a.data,'$.final_scan_complete')=1 AND e.source_command_id IS NULL
-        AND NOT EXISTS(SELECT 1 FROM scheduler_runs r JOIN tickets t ON t.id=r.ticket_id WHERE r.agent_id=c.id AND json_extract(t.data,'$.status') IN ('validating','rework_queued','blocked','cancelled'))
-        AND NOT EXISTS(SELECT 1 FROM validations v WHERE v.source_id=c.id AND v.rework_id IS NOT NULL)
+         AND NOT EXISTS(SELECT 1 FROM scheduler_runs r JOIN tickets t ON t.id=r.ticket_id WHERE r.agent_id=c.id AND json_extract(t.data,'$.status') IN ('in_progress','validating','rework_queued','blocked','cancelled'))
+         AND NOT EXISTS(SELECT 1 FROM validations v WHERE v.source_id=c.id AND v.rework_id IS NOT NULL)
+         AND NOT EXISTS(SELECT 1 FROM validations v JOIN tickets t ON t.id=v.ticket_id
+             WHERE v.source_id=c.id AND v.retired=0 AND json_extract(t.data,'$.status')<>'done')
         AND NOT EXISTS(SELECT 1 FROM directs d WHERE d.stream_id=c.stream_id)
         ORDER BY c.rowid LIMIT 1",[p.project_id.to_string()],|r|r.get(0)).optional()?;
     let Some(raw) = source else {

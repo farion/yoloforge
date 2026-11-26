@@ -36,11 +36,6 @@ Sekunde. Es handelt sich nicht um direktes Token-Streaming. Gekürzte Ausgaben u
 ausgelassene ältere Nachrichten sind gekennzeichnet und über das Archiv erreichbar.
 Bei Verbindungsabbruch bleibt der letzte geladene Stand sichtbar.
 
-Geprüft: Unicode-/Tooldarstellung, Kennzeichnung von Kürzungen, automatischer
-Sessionwechsel, festgehaltene Historie und Zuordnung von Rückfragen. Der PTY-Test
-`uv run --with pyte python scripts/smoke-session-view.py` öffnet mit den üblichen
-Factory-Zugangsdaten eine bestehende Session und prüft Live-Ansicht, Steuerung und
-Rückkehr. Mit `--native` prüft er zusätzlich die originale OpenCode-TUI und die
-Rückkehr zu YoloForge; mit `--missing-cli` die Terminalwiederherstellung bei fehlendem
-Executable. Beide Prüfungen sind mit der lokalen Minesweeper-Session bestanden.
-Es werden keine Prompts gesendet; OpenCode kann die Session als angesehen markieren.
+Historisch in der inzwischen entfernten YoloForge-TUI geprüft: Unicode- und
+Tooldarstellung, Kennzeichnung von Kürzungen, automatischer Sessionwechsel,
+festgehaltene Historie und Zuordnung von Rückfragen.

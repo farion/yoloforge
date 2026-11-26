@@ -46,25 +46,18 @@ Host-Helper; der hierfür notwendige SSH-Befehl ist ausdrücklich zu konfigurier
 ### Erstes Gerät
 
 1. Ansible startet die Factory mit persistentem Zustand und Loopback-Portbindung.
-2. Über den administrativen Zugang erzeugt der Betreiber einen kurzlebigen
-   Bootstrap-Code. Ausgabe nur im expliziten Administrationsaufruf, nicht im Log.
-3. Die TUI prüft den SSH-Host und baut den Tunnel auf.
-4. Der Code wird einmalig und atomar gegen ein eigenes Geräte-Credential getauscht.
-5. Der Server speichert dessen Prüfwert, Rolle und Widerrufsstatus.
+2. Mit dem Bootstrap-Schlüssel oder einem vorhandenen Admin-Zugang stellt
+   der Betreiber einen rollenbeschränkten Geräteschlüssel direkt aus.
+3. Desktop und Android melden sich mit Serveradresse und Zugangsschlüssel an.
+4. Der Server speichert dessen Prüfwert, Rolle und Widerrufsstatus.
 
-Bootstrap funktioniert nur bei bewusst gestarteter Einrichtung, nicht automatisch
-nach Neustart. Codes haben Ablaufzeit, begrenzte Versuche und werden nicht in
-URLs oder Telemetrie übertragen. Die genaue Token-/Code-Länge wird bei Umsetzung
-festgelegt; Geräte-Token werden kryptographisch zufällig erzeugt.
+Zugangsschlüssel werden kryptographisch zufällig erzeugt und nicht in URLs,
+Logs oder Telemetrie übertragen. Siehe [Betriebsanleitung](deployment.md#zugangsschlüssel-und-rollen).
 
 ### Weitere Geräte und Runner
 
-Ein bereits berechtigter Client erzeugt einen kurzlebigen Enrollment-Code für eine
-konkrete Rolle. Der neue Client benötigt vorher seinen funktionierenden SSH-Zugang.
-Bei Android kann ein QR-Code Host, Port, Host-Fingerprint und Enrollment-Code
-übermitteln; SSH-Freischaltung bleibt eine Betreiberaufgabe.
-
-TUI, Android-App, lokaler Runner und Server-Runner erhalten getrennte Credentials.
+Desktop, Android-App, lokaler Runner und Server-Runner können getrennte
+Zugangsschlüssel erhalten.
 Runner dürfen nur ihre zugewiesenen Aufträge und Zustände verwalten. Der Server-
 Runner bekommt seine Dienstidentität bei der administrativen Einrichtung.
 
@@ -144,7 +137,7 @@ nicht verfügbare Ausführungsorte werden sichtbar blockiert.
 ## Integrationsprüfungen
 
 - Erfolgreicher SSH-Zugang ohne Factory-Credential gewährt keinen API-Zugriff.
-- Enrollment-Code lässt sich nur einmal und vor Ablauf verwenden.
+- Nur Admins dürfen neue Geräteschlüssel ausstellen.
 - Widerrufenes Credential verliert auch eine bestehende Ereignisverbindung.
 - Zwei Projekte verwenden dieselbe Verbindung ohne erneute Anmeldung.
 - Fehlender Server-Git-Zugang blockiert nur den betreffenden Ausführungsort.

@@ -218,6 +218,11 @@ pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
         _ => {}
     }
     let paused = s.projects.iter().any(|p| p.id == t.project_id && p.paused);
+    if delivery_retry_pending(t) {
+        return if paused { crate::tr!("Projekt pausiert") }
+            else if t.routing_note == SNAPSHOT_RETRY_NOTE { crate::tr!("Review-Snapshot wird erneut gesichert") }
+            else { crate::tr!("Integration wird erneut versucht") };
+    }
     if let Some(c) = task_command(s, t) {
         if c.state == CommandState::Pending && paused {
             return crate::tr!("Projekt pausiert");
@@ -393,7 +398,7 @@ pub fn task_text(snapshot: &Snapshot, ticket: &Ticket) -> String {
 }
 
 pub fn task_intent_text(ticket: &Ticket) -> String {
-    let source = ticket.prompt.as_deref().unwrap_or(&ticket.description);
+    let source = task_intent_source(ticket);
     if ticket.title.trim().is_empty() {
         return crate::design::elide_first_line(source, 80);
     }
@@ -406,6 +411,10 @@ pub fn task_intent_text(ticket: &Ticket) -> String {
         summary.push('…');
     }
     summary
+}
+
+pub fn task_intent_source(ticket: &Ticket) -> &str {
+    ticket.prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()).unwrap_or(&ticket.description)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -501,7 +510,8 @@ pub fn inbox_problems(s: &Snapshot, project: ProjectId) -> impl Iterator<Item = 
 pub fn inbox_problems_for_tab(s: &Snapshot, project: ProjectId, archived: bool) -> impl Iterator<Item = (&IntentProblem, &Ticket)> {
     s.intent_problems.iter().filter_map(move |problem| {
         let ticket = s.tickets.iter().find(|t| t.id == problem.ticket_id && t.project_id == project)?;
-        let active = !ticket.draft && !s.draft_resets.iter().any(|r| r.ticket_id == ticket.id && r.command_id == problem.command_id)
+        let active = !ticket.draft && !delivery_retry_pending(ticket)
+            && !s.draft_resets.iter().any(|r| r.ticket_id == ticket.id && r.command_id == problem.command_id)
             && (matches!(ticket.status, TicketState::Blocked | TicketState::InProgress)
                 && ticket.execution_command == Some(problem.command_id)
                 || problem.solution == Some(IntentSolution::ReassignSession)

@@ -712,10 +712,6 @@ impl App {
             .iter()
             .find(|r| r.id == id && r.server == self.server)
         {
-            if r.path == "/v1/devices/enrollment" {
-                self.notice(crate::tr!("Einladungserstellung hat keinen idempotenten Abgleich. Unklare Einladungen nicht erneut senden; Gültigkeit abwarten oder Gerätezugang prüfen."));
-                return;
-            }
             self.in_flight.insert(id);
             self.responses.remove(&id);
             self.backend

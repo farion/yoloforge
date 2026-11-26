@@ -5,6 +5,68 @@ use serde::Deserialize;
 
 const MAX_REWORKS: i64 = 3;
 
+pub(super) fn legacy_dirty_checkout(command: &RunnerCommand) -> bool {
+    command.kind == CommandKind::RunAgent
+        && !command.requires_target_git()
+        && command.agent_spec.as_ref().is_some_and(|spec| spec.role.is_empty() && !spec.read_only && !spec.defer_publication)
+        && command.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
+            .is_some_and(|setup| setup.repository_path.is_empty()
+                && super::work::absolute_runner_path(&setup.repository_source))
+        && response(command).is_some_and(|report| report.starts_with(PUBLICATION_BLOCKED_PREFIX)
+            && report.lines().nth(1).is_some_and(|line| line.starts_with(
+                "Ergebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: Lokale Änderungen überschneiden sich mit dem Ergebnis;")))
+}
+
+pub(super) fn resume_legacy_snapshots(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "SELECT t.data,c.data FROM scheduler_runs r JOIN tickets t ON t.id=r.ticket_id
+         JOIN commands c ON c.id=r.agent_id JOIN archive_status a ON a.command_id=c.id
+         WHERE t.project_id=?1 AND json_extract(t.data,'$.status')='blocked'
+           AND json_extract(t.data,'$.execution_command')=c.id AND c.state='succeeded'
+           AND json_extract(a.data,'$.final_scan_complete')=1
+           AND instr(json_extract(c.data,'$.result.agent.summary'),?2)=1
+           AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+           AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=c.stream_id)
+           AND NOT EXISTS(SELECT 1 FROM commands n WHERE n.stream_id=c.stream_id AND n.rowid>c.rowid)
+           AND NOT EXISTS(SELECT 1 FROM publication_recovery_holds h WHERE h.project_id=t.project_id
+                          AND h.expires_ms>?3)
+           AND NOT EXISTS(SELECT 1 FROM validations v WHERE v.source_id=c.id)",
+    )?;
+    let rows = stmt.query_map(params![project.to_string(), PUBLICATION_BLOCKED_PREFIX, super::super::unix_ms()],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (ticket, source) in rows {
+        let source: RunnerCommand = serde_json::from_str(&source)?;
+        if !legacy_dirty_checkout(&source) {
+            continue;
+        }
+        let mut ticket: Ticket = serde_json::from_str(&ticket)?;
+        let owner = super::work::stream(tx, source.stream_id)?;
+        if owner.runner_id == source.runner_id && owner.ownership_epoch == source.ownership_epoch
+            && !super::sessions::closed(tx, source.session_root())?
+        {
+            transition(tx, &mut ticket, TicketState::Validating, "validation.pending", None)?;
+        }
+    }
+    let blocked = {
+        let mut stmt = tx.prepare("SELECT t.data, v.reviewer_id FROM tickets t
+            JOIN validations v ON v.ticket_id=t.id AND v.source_id=json_extract(t.data,'$.execution_command')
+            JOIN commands r ON r.id=v.reviewer_id
+            WHERE t.project_id=?1 AND json_extract(t.data,'$.status')='blocked'
+              AND json_extract(t.data,'$.routing_note')='Reviewer: Validierung blockiert'
+              AND v.retired=0 AND v.rework_id IS NULL AND r.state IN ('succeeded','failed')
+              AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+              AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.ticket_id=t.id)")?;
+        let rows = stmt.query_map([project.to_string()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (ticket, reviewer) in blocked {
+        let mut ticket: Ticket = serde_json::from_str(&ticket)?;
+        retry_review(tx, &mut ticket, reviewer.parse().map_err(|_| StoreError::Internal)?)?;
+    }
+    Ok(())
+}
+
 pub(super) fn defer_publication(tx: &Transaction<'_>, command: &mut RunnerCommand) -> Result<()> {
     if command.kind == CommandKind::RunAgent && !command.requires_target_git() && command.workspace_spec.as_ref()
         .and_then(|w| w.setup.as_ref()).is_some_and(|setup| setup.repository_path.is_empty()
@@ -37,8 +99,9 @@ pub(super) fn awaiting(tx: &Transaction<'_>, stream: StreamId) -> Result<bool> {
     Ok(tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM scheduler_runs r JOIN tickets t ON t.id=r.ticket_id
          WHERE r.stream_id=?1 AND json_extract(t.data,'$.execution_command')=r.agent_id
-           AND json_extract(t.data,'$.status') IN ('validating','rework_queued'))",
-        [stream.to_string()], |r| r.get(0),
+           AND (json_extract(t.data,'$.status') IN ('validating','rework_queued')
+                OR (json_extract(t.data,'$.status')='in_progress' AND json_extract(t.data,'$.routing_note') IN (?2,?3))))",
+        params![stream.to_string(), SNAPSHOT_RETRY_NOTE, INTEGRATION_RETRY_NOTE], |r| r.get(0),
     )?)
 }
 
@@ -73,10 +136,17 @@ fn transition(tx: &Transaction<'_>, ticket: &mut Ticket, state: TicketState, kin
     }))
 }
 
+fn retry_review(tx: &Transaction<'_>, ticket: &mut Ticket, reviewer: CommandId) -> Result<()> {
+    super::delivery::defer(tx, ticket.id, "review")?;
+    tx.execute("UPDATE validations SET retired=1 WHERE reviewer_id=?1", [reviewer.to_string()])?;
+    transition(tx, ticket, TicketState::Validating, "validation.retry_queued", Some(reviewer))
+}
+
 pub(super) fn resolve(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
     let mut stmt = tx.prepare(
         "SELECT t.data,c.data,v.source_id,
-            EXISTS(SELECT 1 FROM questions q WHERE q.command_id=v.source_id AND json_extract(q.data,'$.state')<>'answered'),
+            EXISTS(SELECT 1 FROM questions q WHERE q.command_id=v.source_id
+                    AND json_extract(q.data,'$.state') IN ('pending','rejected')),
             json_extract(source.data,'$.result.agent.summary')
          FROM validations v JOIN tickets t ON t.id=v.ticket_id JOIN commands source ON source.id=v.source_id
          JOIN commands c ON c.id=v.reviewer_id WHERE t.project_id=?1 AND v.retired=0
@@ -92,18 +162,24 @@ pub(super) fn resolve(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
         let reviewer: RunnerCommand = serde_json::from_str(&reviewer)?;
         let decision = response(&reviewer).and_then(|text| serde_json::from_str::<Decision>(text.trim()).ok());
         match decision {
-            _ if unresolved => transition(tx, &mut ticket, TicketState::Blocked, "validation.uncertain", Some(reviewer.id))?,
+            _ if unresolved => retry_review(tx, &mut ticket, reviewer.id)?,
             Some(Decision::Approve) if !report.trim().is_empty() => {
-                if report.lines().next() == Some(PUBLICATION_PREPARED_PREFIX) {
-                    let original: String = tx.query_row("SELECT data FROM commands WHERE id=?1", [&source], |r| r.get(0))?;
-                    let original: RunnerCommand = serde_json::from_str(&original)?;
-                    if !original.agent_spec.as_ref().is_some_and(|s| s.defer_publication) {
-                        transition(tx, &mut ticket, TicketState::Blocked, "validation.uncertain", Some(reviewer.id))?;
+                let original: String = tx.query_row("SELECT data FROM commands WHERE id=?1", [&source], |r| r.get(0))?;
+                let original: RunnerCommand = serde_json::from_str(&original)?;
+                let legacy_snapshot = legacy_dirty_checkout(&original);
+                let deferred = original.agent_spec.as_ref().is_some_and(|s| s.defer_publication);
+                if deferred && report.lines().next() != Some(PUBLICATION_PREPARED_PREFIX) {
+                    retry_review(tx, &mut ticket, reviewer.id)?;
+                    continue;
+                }
+                if legacy_snapshot || report.lines().next() == Some(PUBLICATION_PREPARED_PREFIX) {
+                    if !legacy_snapshot && !deferred {
+                        retry_review(tx, &mut ticket, reviewer.id)?;
                         continue;
                     }
                     let owner = super::work::stream(tx, original.stream_id)?;
                     if owner.runner_id != original.runner_id || owner.ownership_epoch != original.ownership_epoch {
-                        transition(tx, &mut ticket, TicketState::Blocked, "validation.uncertain", Some(reviewer.id))?;
+                        retry_review(tx, &mut ticket, reviewer.id)?;
                         continue;
                     }
                     tx.execute_batch("SAVEPOINT approved_publication")?;
@@ -130,6 +206,8 @@ pub(super) fn resolve(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
                 } else {
                     transition(tx, &mut ticket, TicketState::Done, "validation.approved", Some(reviewer.id))?;
                 }
+                super::delivery::clear(tx, ticket.id, "review")?;
+                super::delivery::clear(tx, ticket.id, "rework")?;
             }
             Some(Decision::Rework { followup }) if valid_followup(&followup) => {
                 let rounds: i64 = tx.query_row(
@@ -137,16 +215,15 @@ pub(super) fn resolve(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
                     [ticket.id.to_string()], |r| r.get(0),
                 )?;
                 if rounds >= MAX_REWORKS {
-                    transition(tx, &mut ticket, TicketState::Blocked, "validation.limit", Some(reviewer.id))?;
-                } else {
-                    tx.execute("UPDATE validations SET followup=?1 WHERE source_id=?2 AND retired=0", params![followup.trim(), source])?;
-                    transition(tx, &mut ticket, TicketState::ReworkQueued, "validation.rework_queued", Some(reviewer.id))?;
+                    super::delivery::defer(tx, ticket.id, "rework")?;
                 }
+                tx.execute("UPDATE validations SET followup=?1 WHERE source_id=?2 AND retired=0", params![followup.trim(), source])?;
+                transition(tx, &mut ticket, TicketState::ReworkQueued, "validation.rework_queued", Some(reviewer.id))?;
             }
             Some(Decision::Uncertain | Decision::Approve) => {
-                transition(tx, &mut ticket, TicketState::Blocked, "validation.uncertain", Some(reviewer.id))?;
+                retry_review(tx, &mut ticket, reviewer.id)?;
             }
-            _ => transition(tx, &mut ticket, TicketState::Blocked, "validation.failed", Some(reviewer.id))?,
+            _ => retry_review(tx, &mut ticket, reviewer.id)?,
         }
     }
     Ok(())
@@ -155,15 +232,16 @@ pub(super) fn resolve(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
 pub(super) fn start(tx: &Transaction<'_>, policy: &SchedulerPolicy) -> Result<()> {
     let candidate: Option<(String, String)> = tx.query_row(
         "SELECT t.data,c.data FROM tickets t JOIN commands c ON c.id=json_extract(t.data,'$.execution_command')
-         WHERE t.project_id=?1 AND json_extract(t.data,'$.status')='validating'
+          WHERE t.project_id=?1 AND json_extract(t.data,'$.status')='validating'
+           AND NOT EXISTS(SELECT 1 FROM delivery_retries d WHERE d.ticket_id=t.id AND d.step='review' AND d.next_ms>?2)
            AND NOT EXISTS(SELECT 1 FROM validations v WHERE v.source_id=c.id AND v.retired=0)
          ORDER BY json_extract(t.data,'$.updated_unix_ms'), t.rowid LIMIT 1",
-        [policy.project_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+        params![policy.project_id.to_string(), super::super::unix_ms()], |r| Ok((r.get(0)?, r.get(1)?)),
     ).optional()?;
     let Some((ticket, source)) = candidate else { return Ok(()); };
     let ticket: Ticket = serde_json::from_str(&ticket)?;
     let source: RunnerCommand = serde_json::from_str(&source)?;
-    let Some(controller) = controller(tx, policy, &source)? else { return Ok(()); };
+    let Some(controller) = controller(tx, policy, &source, ticket.id)? else { return Ok(()); };
     let mut stmt = tx.prepare(
         "SELECT json_extract(c.data,'$.result.agent.summary'), v.followup FROM validations v
          JOIN commands c ON c.id=v.source_id WHERE v.ticket_id=?1 AND v.rework_id IS NOT NULL ORDER BY v.rowid",
@@ -194,14 +272,16 @@ pub(super) fn start(tx: &Transaction<'_>, policy: &SchedulerPolicy) -> Result<()
     Ok(())
 }
 
-fn controller(tx: &Transaction<'_>, policy: &SchedulerPolicy, source: &RunnerCommand) -> Result<Option<Workstream>> {
-    let shared_runner: Option<String> = tx.query_row(
-        "SELECT json_extract(s.data,'$.runner_id') FROM orchestrators o JOIN streams s ON s.id=o.stream_id WHERE o.project_id=?1",
-        [policy.project_id.to_string()], |r| r.get(0),
+fn controller(tx: &Transaction<'_>, policy: &SchedulerPolicy, source: &RunnerCommand, ticket: TicketId) -> Result<Option<Workstream>> {
+    let shared: Option<(String,bool)> = tx.query_row(
+        "SELECT json_extract(s.data,'$.runner_id'), EXISTS(SELECT 1 FROM commands c WHERE c.stream_id=s.id
+            AND json_extract(c.data,'$.kind')='prepare_workspace' AND c.state='failed')
+         FROM orchestrators o JOIN streams s ON s.id=o.stream_id WHERE o.project_id=?1",
+        [policy.project_id.to_string()], |r| Ok((r.get(0)?,r.get(1)?)),
     ).optional()?;
     let runner = source.runner_id.to_string();
-    if shared_runner.as_deref() == Some(runner.as_str())
-        || (shared_runner.is_none() && policy.runner_ids.first() == Some(&source.runner_id)
+    if shared.as_ref().is_some_and(|(r, failed)| r == &runner && !failed)
+        || (shared.is_none() && policy.runner_ids.first() == Some(&source.runner_id)
             && source.workspace_spec.as_ref().is_none_or(|spec| spec.checkpoint.is_none()))
     {
         return super::question_orchestrator::controller(tx, policy);
@@ -216,13 +296,16 @@ fn controller(tx: &Transaction<'_>, policy: &SchedulerPolicy, source: &RunnerCom
     ).optional()?;
     if let Some(id) = id {
         let owner = super::work::stream(tx, id.parse().map_err(|_| StoreError::Internal)?)?;
-        let ready: bool = tx.query_row(
+        let (prepared,busy): (bool,bool) = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state='succeeded'
-                AND json_extract(data,'$.kind')='prepare_workspace' AND json_extract(data,'$.ownership_epoch')=?2)
-              AND NOT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",
-            params![id, owner.ownership_epoch], |r| r.get(0),
+                AND json_extract(data,'$.kind')='prepare_workspace' AND json_extract(data,'$.ownership_epoch')=?2),
+              EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",
+            params![id, owner.ownership_epoch], |r| Ok((r.get(0)?,r.get(1)?)),
         )?;
-        return Ok(ready.then_some(owner));
+        if busy || prepared { return Ok((!busy && prepared).then_some(owner)); }
+        if !super::delivery::ready(tx, ticket, "review_workspace")? { return Ok(None); }
+        super::delivery::defer(tx, ticket, "review_workspace")?;
+        tx.execute("DELETE FROM validation_controllers WHERE stream_id=?1", [&id])?;
     }
     let mut owner = Store::create_stream_in(tx, &CreateStream {
         request_id: RequestId::new(), project_id: policy.project_id, runner_id: source.runner_id,
@@ -273,6 +356,7 @@ pub(super) fn dispatch(tx: &Transaction<'_>, project: ProjectId, slots: usize) -
     let mut started = 0;
     for (ticket, previous, followup) in rows {
         let mut ticket: Ticket = serde_json::from_str(&ticket)?;
+        if !super::delivery::ready(tx, ticket.id, "rework")? { continue; }
         let previous: RunnerCommand = serde_json::from_str(&previous)?;
         let owner = super::work::stream(tx, previous.stream_id)?;
         let pins = super::models::ticket(tx, ticket.id)?;

@@ -17,6 +17,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 pub mod push;
+pub mod android_push;
 pub mod store;
 use store::{Store, StoreError};
 mod access;
@@ -87,6 +88,9 @@ pub fn router_with_shutdown(
         mcp_probes: Default::default(),
     };
     Router::new()
+        .route("/v1/android-push/settings", get(android_push::settings).put(android_push::save))
+        .route("/v1/android-push/config", get(android_push::config))
+        .route("/v1/android-push/devices/{id}", axum::routing::put(android_push::register).delete(android_push::unregister))
         .route("/v1/instances", get(desktop::instances))
         .route("/v1/me", get(desktop::me))
         .route("/v1/desktop/snapshot", get(desktop_snapshot))
@@ -297,11 +301,11 @@ pub fn router_with_shutdown(
         .route("/v1/projects/{id}/context", get(knowledge_routes::context))
         .route("/healthz", get(health))
         .route(
-            "/v1/enroll",
-            post(redeem).layer(axum::extract::DefaultBodyLimit::max(4096)),
+            "/v1/devices",
+            post(issue_device)
+                .layer(axum::extract::DefaultBodyLimit::max(4096))
+                .get(list_devices),
         )
-        .route("/v1/devices", get(list_devices))
-        .route("/v1/devices/enrollment", post(enrollment))
         .route("/v1/devices/{id}/revoke", post(revoke))
         .route("/v1/snapshot", get(snapshot))
         .route("/v1/projects", post(create_project))
@@ -426,6 +430,11 @@ pub fn router_with_shutdown(
                 .post(work_routes::report_recovered_publication)
                 .delete(work_routes::release_publication_recovery),
         )
+        .route(
+            "/v1/runners/{runner}/commands/{command}/review-snapshot-recovery",
+            axum::routing::put(work_routes::claim_review_snapshot_recovery)
+                .post(work_routes::report_recovered_review_snapshot),
+        )
         .route("/v1/events", get(events))
         .route("/v1/events/stream", get(event_stream))
         .route("/v1/runners/register", post(register))
@@ -480,21 +489,6 @@ async fn authenticate(State(app): State<App>, mut request: Request, next: Next) 
         "/healthz" | "/mcp-oauth/callback" | "/mcp-oauth/client.json"
     ) || request.uri().path().starts_with("/mcp-runtime/")
     {
-        return next.run(request).await;
-    }
-    if request.uri().path() == "/v1/enroll" {
-        if request
-            .headers()
-            .get(VERSION_HEADER)
-            .and_then(|v| v.to_str().ok())
-            != Some("1")
-        {
-            return error(
-                StatusCode::UPGRADE_REQUIRED,
-                ErrorCode::ProtocolMismatch,
-                "Factory protocol 1 required",
-            );
-        }
         return next.run(request).await;
     }
     let token = request

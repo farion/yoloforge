@@ -33,9 +33,10 @@ automatisch rückwirkend aufgenommen.
 
 ## Gerätezugang und Projektgedächtnis
 
-Schema v6 (Release v0.1.1) ergänzt gehashte Geräte-Credentials und einmalige
-Enrollment-Codes. Rollen und Endpunkte sind in [deployment.md](deployment.md)
-dokumentiert; Protokollversion bleibt 1.
+Seit Schema v48 stellt `POST /v1/devices` Geräteschlüssel direkt aus. Die Migration
+entfernt die alte Einmalcode-Tabelle und lässt bestehende Schlüssel unverändert.
+Rollen und Endpunkte sind in [deployment.md](deployment.md) dokumentiert;
+die Protokollversion bleibt 1.
 
 Schema v7 (Entwicklungsstand v0.1.2-dev) ergänzt strukturierte Wissensnotizen.
 Anlegen und Stilllegen verwenden dieselbe transaktionale Request-Deduplizierung
@@ -225,7 +226,6 @@ Alle veränderlichen Aggregate erhalten ID, Revision und Zeitstempel.
 | Event | globale Sequenz, Typ, Aggregate-ID, Revision, Payload, Zeitpunkt |
 | Device | Name, Token-Hash, Widerrufsstatus |
 | DeviceCredential | Device-ID, Rolle, optional Runner-ID, Prüfwert, Ablauf, Widerruf |
-| Enrollment | Code-Prüfwert, erlaubte Rolle, Ablauf, Versuche, Einlösestatus |
 | Connection | Anbieter, Instanz-URL, Kontoanzeige, Fähigkeiten; keine Secrets |
 | ConnectionBinding | Connection-ID, Ausführungsort, externe Credential-Referenz, Prüfstatus |
 | ProjectConnection | Project-ID, Connection-ID, Zweck, benötigte Fähigkeiten |

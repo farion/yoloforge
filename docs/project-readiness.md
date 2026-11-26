@@ -19,6 +19,5 @@ eines zuvor geschlossenen Dialogs werden verworfen.
 Der Einstieg ist lokal. Remote-Anmeldung und -Bereitschaft ueber Factory sind noch
 nicht implementiert. Native SSH-Arbeitssessions siehe `ssh-sessions.md`.
 
-Abnahme: Adaptertest mit abgelaufenem Zugang und MCP-Anmeldebedarf; lesender PTY-Test
-`scripts/smoke-session-view.py --readiness` gegen den lokalen OpenCode-Service
-bestanden. Eine wirkliche OAuth-Anmeldung/Erneuerung wurde dabei nicht ausgefuehrt.
+Abnahme: Adaptertest mit abgelaufenem Zugang und MCP-Anmeldebedarf.
+Eine wirkliche OAuth-Anmeldung/Erneuerung wurde dabei nicht ausgefuehrt.

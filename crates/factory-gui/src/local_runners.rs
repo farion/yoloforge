@@ -57,6 +57,17 @@ pub struct Report {
     pub user_error: Option<String>,
 }
 
+#[derive(Debug)]
+struct ConfirmationPending(String);
+
+impl std::fmt::Display for ConfirmationPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConfirmationPending {}
+
 fn config_dir() -> Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("de", "yoloforge", "YoloForge")
         .context(crate::tr!("Kein Benutzerverzeichnis verfügbar"))?;
@@ -373,7 +384,9 @@ async fn start_and_confirm(client: &FactoryClient, runner: &LocalRunner) -> Resu
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    bail!("{}", crate::tr!("Runner läuft, aber die Factory hat die Anmeldung noch nicht bestätigt. Runner bleibt gespeichert.", ))
+    Err(ConfirmationPending(crate::tr!(
+        "Runner läuft, aber die Factory hat die Anmeldung noch nicht bestätigt. Runner bleibt gespeichert.",
+    ).into()).into())
 }
 
 fn startup_diagnostic(root: &Path, name: &str) -> String {
@@ -558,9 +571,11 @@ async fn restart(client: &FactoryClient, runner: &LocalRunner, recovery_start: b
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     if recovery_start {
-        bail!("{}", crate::tr!("Runner-Start noch nicht bestätigt."));
+        return Err(ConfirmationPending(crate::tr!("Runner-Start noch nicht bestätigt.").into()).into());
     }
-    bail!("{}", crate::tr!("Runner-Neustart noch nicht bestätigt. Neustartauftrag bleibt gespeichert."))
+    Err(ConfirmationPending(crate::tr!(
+        "Runner-Neustart noch nicht bestätigt. Neustartauftrag bleibt gespeichert."
+    ).into()).into())
 }
 
 fn restart_confirmed(status: &RunnerRestartStatus, expected: InstanceId) -> bool {
@@ -574,17 +589,11 @@ async fn create(client: &FactoryClient, runner: &mut LocalRunner) -> Result<()> 
     let credential: DeviceCredential = if credential_path.exists() {
         serde_json::from_slice(&fs::read(&credential_path)?)?
     } else {
-        let invitation = client
-            .enrollment(&CreateEnrollment {
+        let credential = client
+            .create_device(&CreateDevice {
+                name: runner.name.clone(),
                 role: DeviceRole::Runner,
                 runner_id: Some(runner.id),
-                ttl_seconds: 60,
-            })
-            .await?;
-        let credential = client
-            .redeem(&RedeemEnrollment {
-                code: invitation.code,
-                name: runner.name.clone(),
             })
             .await?;
         // Save identity and secret together so a crash cannot lose the revocation ID.
@@ -681,6 +690,7 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
             }
             Action::Restore => {
                 let mut errors = vec![];
+                let mut awaiting_confirmation = 0;
                 for index in 0..runners.len() {
                     if !runners[index].visible(server) {
                         continue;
@@ -700,8 +710,12 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
                     }
                     .await;
                     if let Err(error) = restored {
-                        errors.push(format!("{}: {error}", runners[index].name));
+                        awaiting_confirmation += usize::from(error.is::<ConfirmationPending>());
+                        errors.push(format!("{}: {error:#}", runners[index].name));
                     }
+                }
+                if !errors.is_empty() && awaiting_confirmation == errors.len() {
+                    return Err(ConfirmationPending(errors.join("\n")).into());
                 }
                 ensure!(errors.is_empty(), "{}", errors.join("\n"));
                 None
@@ -710,16 +724,21 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
         Ok::<_, anyhow::Error>(message)
     }
     .await;
-    let user_error = result.as_ref().err().and_then(|error| {
-        (starts_runner && incompatible_registration(error)).then(|| {
-            crate::tr!("Runner kann nicht gestartet werden: Serverversion inkompatibel.").into()
-        })
-    });
+    let user_error = result.as_ref().err().and_then(|error| runner_action_message(starts_runner, error));
     Report {
         runners: load().ok(),
-        result: result.map_err(|e| e.to_string()),
+        result: result.map_err(|e| format!("{e:#}")),
         user_error,
     }
+}
+
+fn runner_action_message(starts_runner: bool, error: &anyhow::Error) -> Option<String> {
+    if error.is::<ConfirmationPending>() {
+        return Some(crate::tr!("Die Factory hat den Runner-Start noch nicht bestätigt.").into());
+    }
+    (starts_runner && incompatible_registration(error)).then(|| {
+        crate::tr!("Runner kann nicht gestartet werden: Serverversion inkompatibel.").into()
+    })
 }
 
 fn incompatible_registration(error: &anyhow::Error) -> bool {

@@ -3260,7 +3260,6 @@ pub(crate) fn pending_requests(
                 ui.strong(&request.label);ui.label(&request.server);ui.monospace(&request.path);
                 ui.collapsing(crate::tr!("Unveränderte gespeicherte Anfrage"),|ui|json_read(ui,&request.body));
                 if request.server!=app.server {ui.label(crate::tr!("Zum zugehörigen Server verbinden, um abzugleichen."));} else {request_status(ui,app,request.id);}
-                if request.path=="/v1/devices/enrollment" && !app.in_flight.contains(&request.id) && ui.button(crate::tr!("Hinweis verwerfen · unbekannte Einladung bleibt bis Ablauf gültig")).clicked() {app.settings.pending.retain(|p|p.id!=request.id);app.settings_dirty=true;}
             });});
         }
     });
@@ -3268,15 +3267,6 @@ pub(crate) fn pending_requests(
 }
 
 pub fn request_status(ui: &mut egui::Ui, app: &mut App, id: u64) {
-    let replayable = app
-        .settings
-        .pending
-        .iter()
-        .find(|r| r.id == id)
-        .is_none_or(|r| r.path != "/v1/devices/enrollment");
-    if !replayable {
-        ui.colored_label(AMBER, crate::tr!("Einladungserstellung wird bei unklarem Ausgang nicht wiederholt. Unbekannter Code läuft gemäß Gültigkeit ab; gegebenenfalls Geräteverwaltung prüfen."));
-    }
     if app.in_flight.contains(&id) {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -3304,8 +3294,7 @@ pub fn request_status(ui: &mut egui::Ui, app: &mut App, id: u64) {
             }
         }
     }
-    if replayable
-        && app.settings.pending.iter().any(|r| r.id == id)
+    if app.settings.pending.iter().any(|r| r.id == id)
         && ui
             .add_enabled(
                 app.online && !app.in_flight.contains(&id),

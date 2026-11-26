@@ -8,18 +8,24 @@ final class Outbox {
     private final Vault vault;
     Outbox(Vault vault){this.vault=vault;}
     void prepare(Api api,String path,JSONObject body)throws Exception{
+        prepare(api,"POST",path,body);
+    }
+    void prepare(Api api,String method,String path,JSONObject body)throws Exception{
         synchronized(Vault.class){
             if(vault.get("pending")!=null)throw new Exception("Ein gespeicherter Auftrag muss zuerst zugestellt werden");
             body.getString("request_id");
-            vault.put("pending",new JSONObject().put("base",api.base).put("path",path).put("body",body));
+            vault.put("pending",new JSONObject().put("base",api.base).put("method",method).put("path",path).put("body",body));
         }
     }
-    void send(Api api)throws Exception{
+    JSONObject send(Api api)throws Exception{
         JSONObject pending;
         synchronized(Vault.class){pending=vault.get("pending");}
-        if(pending==null)return;
+        if(pending==null)return null;
         if(!api.base.equals(pending.getString("base")))throw new Exception("Auftrag gehoert zu einer anderen Factory");
-        try{api.request("POST",pending.getString("path"),pending.getJSONObject("body"));clear(pending,false);}
+        try{
+            JSONObject result=api.request(pending.optString("method","POST"),pending.getString("path"),pending.getJSONObject("body"));
+            clear(pending,false);return result;
+        }
         catch(Api.HttpFailure error){if(Arrays.asList(400,403,404,409,422).contains(error.status)){
             clear(pending,true);
         }throw error;}

@@ -21,8 +21,9 @@ bleiben kompatibel. Ab v0.1.1 sind die Komponenten getrennt:
 | `*.sha256` | Prüfsumme des jeweiligen Archivs |
 | `SHA256SUMS` | Gemeinsame Prüfsummenliste aller zehn Pakete |
 
-`ARCH` ist `x86_64` oder `aarch64`. Die neue CI baut ausschließlich GUI, Runner
-und Server. TUI-, Android- und GHCR-Image-Builds sind daraus entfernt.
+`ARCH` ist `x86_64` oder `aarch64`. GitHub-Releases enthalten GUI, Runner
+und Server. Die Android-Debug-APK ist separat als CI-Artefakt verfügbar.
+TUI und GHCR-Images werden nicht gebaut.
 Siehe [CI und Releases](ci.md) und [Runner-Installation](runner-installation.md).
 
 Ansible lädt das passende **Server-Paket** aus dem neuesten vollständigen Release,
@@ -40,7 +41,7 @@ Compose-Datei direkt neben dem Server-Binary.
 Implementiert: Factory-Container, Healthcheck, Geräte-/Runner-Credentials,
 SSE-Replay, Runner-Long-Poll, systemd-Vorlage, SSH-Launcher und SQLite-Backup/Restore.
 Abgenommen: lokales Ubuntu-24.04-Containerimage auf x86_64, echter Containerneustart,
-Geräte-Enrollment/Widerruf und Live-WAL-Sicherung. Ein separater Zielserver,
+Geräteschlüssel/Widerruf und Live-WAL-Sicherung. Ein separater Zielserver,
 systemd-Autostart am Laptop, ARM-Binaries und veröffentlichte GitHub-Releases
 sind noch nicht abgenommen. Gesamtstand: [implementation-status.md](implementation-status.md).
 
@@ -57,7 +58,7 @@ mit seinem eigenen Ansible. Factory benötigt keinen Docker-Socket.
 | Daten | Compose-Volume `factory-data`, im Container `/data`, UID/GID 10001, Verzeichnis 0700 |
 | Readiness | `GET /healthz`, 200 nach Initialisierung/Migration und erfolgreichem DB-Lesezugriff |
 | Shutdown | SIGTERM; SSE und Long-Polls werden beendet; laufende OpenCode-Agenten bleiben unabhängig |
-| Kompatibilität | Factory-Protokoll 1, DB-Schema 6, OpenCode 2.0.27 |
+| Kompatibilität | Factory-Protokoll 1, DB-Schema 48, OpenCode 2.0.27 |
 
 Bootstrap-Datei mit mindestens 32 zufälligen druckbaren ASCII-Zeichen erzeugen,
 z.B. mittels Ansible `password`-Lookup oder `secrets.token_hex(32)`. Keine Secrets
@@ -78,38 +79,55 @@ Loopback-Bindung Standard; eine andere Bindung verlangt ausdrücklich
 `--allow-container-network`. TLS am Factory-Prozess ist nicht implementiert;
 Remotezugriff läuft durch SSH.
 
-## Enrollment und Rollen
+## Zugangsschlüssel und Rollen
 
-`FACTORY_TOKEN_FILE` wird von Server, TUI und Runner unterstützt; alternativ
+`FACTORY_TOKEN_FILE` wird von Server, CLI und Runner unterstützt; alternativ
 `FACTORY_TOKEN`. Beide gleichzeitig werden abgewiesen. Token-Dateien dürfen am
 Ende einen Zeilenumbruch enthalten. Das Bootstrap-Token hat Adminrechte und ist
-nicht für den normalen Runnerbetrieb gedacht.
+nicht für den normalen Client- oder Runnerbetrieb gedacht. Desktop und Android
+melden sich mit Serveradresse und Zugangsschlüssel an. Bestehende Schlüssel
+bleiben gültig. Einmalcodes und ihre Einlöse-Endpunkte entfallen.
+Die Migration auf Schema 48 entfernt alte Einmalcodes; für einen Rollback
+auf eine ältere Serverversion ist eine dazu passende Datenbanksicherung nötig.
+
+Auf dem Server lässt sich mit der Bootstrap- oder einer Admin-Token-Datei ein
+separater Operator-Schlüssel für Android ausstellen. Dafür ist keine CLI nötig:
+
+```sh
+TOKEN_DATEI=/privat/bootstrap.token
+printf 'Authorization: Bearer %s\n' "$(cat "$TOKEN_DATEI")" |
+  curl --silent --show-error --fail-with-body \
+    --header @- --header 'X-Factory-Protocol: 1' \
+    --header 'Content-Type: application/json' \
+    --data '{"name":"Android","role":"operator"}' \
+    http://127.0.0.1:7432/v1/devices
+```
+
+Der Wert `token` aus der Antwort ist der Zugangsschlüssel. Er wird bei der
+Ausstellung einmal angezeigt und ist bis zum Widerruf gültig. Nicht in Logs,
+geteilte Terminals oder unverschlüsselte Nachrichten kopieren.
+
+Alternativ mit der eigenständigen CLI (`cargo build --locked -p factory-cli`):
 
 ```sh
 # Adminzugang zum Server, direkt oder über den SSH-Tunnel:
 export FACTORY_TOKEN_FILE=/privat/bootstrap.token
-factory device invite --role admin --output /privat/admin.enrollment
-factory device enroll --name laptop-admin --code-file /privat/admin.enrollment --output /privat/admin.token
+factory device create --role admin --name laptop-admin --output /privat/admin.token
 export FACTORY_TOKEN_FILE=/privat/admin.token
 
-factory device invite --role operator --output /privat/tui.enrollment
-factory device enroll --name laptop-tui --code-file /privat/tui.enrollment --output /privat/tui.token
+factory device create --role operator --name Android --output /privat/android.token
 
 # Den Runner vorher mit stabiler UUID benennen, dieselbe ID bei --id verwenden:
-factory device invite --role runner --runner RUNNER-UUID --output /privat/runner.enrollment
-factory device enroll --name laptop-runner --code-file /privat/runner.enrollment --output /privat/runner.token
+factory device create --role runner --runner RUNNER-UUID --name laptop-runner --output /privat/runner.token
 factory device list
 factory device revoke DEVICE-UUID
 ```
 
-Codes gelten standardmäßig 600 Sekunden, konfigurierbar von 30 bis 900 Sekunden
-über `--ttl-seconds`, und lassen sich genau einmal einlösen. Sie enthalten ca.
-244 Zufallsbits. Die DB enthält ausschließlich SHA-256-Prüfwerte von Codes und
-Tokens; das Eventlog enthält nur Geräte-Metadaten. CLI-Ausgabedateien werden mit
-0600 und `create_new` erstellt. Vorhandene Dateien werden nicht überschrieben.
-Bei einem Netzwerkfehler kann eine leere reservierte Ausgabedatei zurückbleiben;
-nur diese nach Prüfung entfernen. Nach verlorenem Enrollment-Ergebnis den
-gegebenenfalls angelegten Geräteeintrag widerrufen und einen neuen Code erzeugen.
+Die DB enthält ausschließlich SHA-256-Prüfwerte der Schlüssel; das Eventlog
+enthält nur Geräte-Metadaten. Die CLI erstellt neue Ausgabedateien unter Unix
+mit Modus 0600 und überschreibt keine vorhandenen Dateien. Bei einer
+unterbrochenen Ausstellung den Geräteeintrag prüfen und gegebenenfalls
+widerrufen, bevor ein neuer Schlüssel erstellt wird.
 
 - **Admin:** Verwaltung und Geräteverwaltung.
 - **Operator:** Projekte, Tickets, Streams, Fragen und Verlauf; keine Runner-Identität
@@ -121,7 +139,7 @@ Widerruf sperrt neue Aufrufe und beendet offene SSE-/Long-Poll-Verbindungen.
 Bereits laufende kurze Transaktionen können noch abschließen. Widerruf beendet
 keine unabhängigen OpenCode-Prozesse und ist kein Ownership-Transfer.
 
-Nach Enrollment eines Admin-Geräts kann der Server ohne Bootstrap-Umgebungsvariable
+Mit einem ausgestellten Admin-Geräteschlüssel kann der Server ohne Bootstrap-Umgebungsvariable
 gestartet werden. Er verlangt dann mindestens einen aktiven Admin in der DB.
 Für Compose den Bootstrap-Environment-/Secret-Eintrag aus der eigenen, von Ansible
 verwalteten Konfiguration entfernen, Datenvolume und Compose-Projektname beibehalten.
@@ -135,8 +153,8 @@ verwendet bestehende SSH-Konfiguration und Agent, `StrictHostKeyChecking=yes`,
 `BatchMode=yes` und `ExitOnForwardFailure=yes`:
 
 ```sh
-export FACTORY_TOKEN_FILE=/privat/tui.token
-python3 scripts/factory-connect.py --host factory-server --local-port 17432 -- factory
+export FACTORY_TOKEN_FILE=/privat/operator.token
+python3 scripts/factory-connect.py --host factory-server --local-port 17432 -- factory --snapshot
 ```
 
 Für die Desktop-GUI am Hetzner-Server den Tunnel ausdrücklich als
@@ -228,7 +246,6 @@ Lokale Abnahme:
 cargo build --workspace --locked
 cargo test --workspace --locked
 python3 -u scripts/smoke-foundation.py
-python3 -u scripts/smoke-tui-answers.py
 python3 -u scripts/smoke-backup.py
 python3 -u scripts/smoke-deployment.py --image yoloforge-server:development
 ```

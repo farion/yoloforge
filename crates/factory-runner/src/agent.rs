@@ -355,14 +355,16 @@ async fn advance(
     }
     let skill_names = spec.factory_skills.iter().map(FactorySkillRef::runtime_id).collect::<Vec<_>>();
     let mut permissions = factory_opencode::session_permissions(spec.read_only, spec.repo_skills.as_deref(), &skill_names, &mcp_names, args.managed_opencode.is_some());
-    if spec.role == factory_protocol::directs::ROLE {
+    if spec.role == factory_protocol::directs::ROLE || reviewed_merger(&command) {
         if permissions.is_none() {
             permissions = Some(serde_json::json!([]));
         }
         let rules = permissions.as_mut().and_then(|rules| rules.as_array_mut())
             .context("Session permissions must be an array")?;
         rules.push(serde_json::json!({"action":"question","resource":"*","effect":"deny"}));
-        rules.push(serde_json::json!({"action":factory_protocol::directs::INTENT_APPROVAL,"resource":"*","effect":"ask"}));
+        if spec.role == factory_protocol::directs::ROLE {
+            rules.push(serde_json::json!({"action":factory_protocol::directs::INTENT_APPROVAL,"resource":"*","effect":"ask"}));
+        }
     }
     if spec.profile.provider_id.trim().is_empty() || spec.profile.model_id.trim().is_empty() {
         return Ok(progress(&command, AgentPhase::Unknown, "Explicit project provider and model required; default model fallback is forbidden. No session or prompt sent."));

@@ -2,7 +2,8 @@
 
 Die Workflows folgen dem Aufbau von LAML: native Runner, schreibgeschützte
 Build-Jobs und eine getrennte Veröffentlichung des vollständigen Paketsets.
-Frühere TUI-, Android- und Container-Image-Builds sind ersetzt.
+TUI- und Container-Image-Builds sind nicht Teil der Workflows. Android wird
+separat als Entwicklungsartefakt gebaut, nicht als Release-Paket.
 
 | Plattform | Architektur | GUI | Runner | Separates Server-Paket |
 | --- | --- | --- | --- | --- |
@@ -19,6 +20,8 @@ Kein Paket enthält Laufzeitdaten, Tokens oder Journale.
 ## Workflows
 
 - `.github/workflows/ci.yml`: Push auf `main`, Pull Requests und manueller Start.
+  Der Android-Job baut und prüft die Debug-APK mit Gradle und stellt sie
+  sieben Tage als Actions-Artefakt `yoloforge-android-development` bereit.
 - `.github/workflows/build.yml`: gemeinsame native Build-Matrix für CI und Releases;
   Tests für Plattformcode, Protokoll, Runner, GUI und Server.
   GUI-Tests sind zustandslose egui-Tests ohne Benutzerfenster.

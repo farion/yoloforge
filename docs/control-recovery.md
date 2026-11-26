@@ -101,9 +101,6 @@ nicht wegen dieses erwartbaren Revisionsrennens.
 - HTTP-Test: Authentifizierung, API-Roundtrip und Deduplizierung.
 - TUI-Unit-Tests: unveränderlicher Replay nach Transportfehler/HTTP 408,
   explizites Rebase, verspätete Antworten, fehlende Evidenz, Unicode und Offline.
-- Echter PTY-/HTTP-Test (`scripts/smoke-tui-answers.py`): konkurrierender
-  Operator-Request, festgehaltener Nachweis, erhaltene Unicode-Begründung,
-  explizite Neubindung, gespeicherte Provenienz und Offline-Ansicht.
 - Runner-Test: Request wird während des Reports ersetzt, kein fataler Abbruch.
 - Reales Docker-Labor: persistierter, noch nicht ausgeführter Thaw-Intent bleibt
   zunächst unklar; ein expliziter neuer Request taut dieselbe Instanz auf und

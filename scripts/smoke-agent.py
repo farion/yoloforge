@@ -116,8 +116,7 @@ def inside(bin_dir, provider, model):
         runners = []
         for location in ["local", "server"]:
             runner = str(uuid.uuid4())
-            enrollment = api("POST", "/v1/devices/enrollment", {"role": "runner", "runner_id": runner, "ttl_seconds": 60})
-            runner_tokens[runner] = api("POST", "/v1/enroll", {"code": enrollment["code"], "name": location + "-runner"})["token"]
+            runner_tokens[runner] = api("POST", "/v1/devices", {"role": "runner", "runner_id": runner, "name": location + "-runner"})["token"]
             arguments = ("--server", endpoint, "--id", runner, "--name", location, "--location", location,
                          "--journal", str(directory / (location + ".db")), "--repositories", str(mapping), "--opencode-registration", str(reg))
             runners.append((spawn("factory-runner", *arguments), arguments))

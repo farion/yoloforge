@@ -57,9 +57,6 @@ Vor der ersten Agent-Session ist Remote-Projektbereitschaft noch nicht verfuegba
   Journalidentitaet, Shell-Quoting und ungueltige SSH-Ziele bestanden.
 - `scripts/smoke-runner-attach.py` hat die bestehende Minesweeper-Session lokal
   ohne Factory-Token mit erfolgreicher Rueckkehr geoeffnet.
-- `scripts/smoke-ssh-editor.py` prueft Paste, Speichern, Wiedereroeffnen und
-  Entfernen in einer isolierten Konfigurationsdatei per PTY. Konflikt-/Erhaltungstests
-  fuer mehrere Runner und begrenzte, bereinigte SSH-Ausgabe sind bestanden.
 - Der Bereitschaftshelfer wurde lokal gegen die echte OpenAI-Session ohne
   Factory-Token bei laufendem Runner geprueft.
 - Vor der ersten Agent-Session verwendet die TUI jetzt den bestaetigten

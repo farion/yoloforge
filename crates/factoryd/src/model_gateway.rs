@@ -1183,7 +1183,7 @@ mod tests {
     #[tokio::test]
     async fn runner_model_access_is_revocable_and_does_not_accept_control_credentials() {
         use factory_core::{DeviceRole, RunnerId};
-        use factory_protocol::{CreateEnrollment, RedeemEnrollment};
+        use factory_protocol::CreateDevice;
         let store = Store::open(std::path::Path::new(":memory:")).unwrap();
         let gateway = Gateway::managed("http://127.0.0.1:1".into(), "p".repeat(40), "k".repeat(40)).unwrap();
         let headers = |token: &str| {
@@ -1194,11 +1194,8 @@ mod tests {
         assert!(gateway.allows_runner(&headers(&"k".repeat(40)), &store).await);
         assert!(!gateway.allows_runner(&headers(&"x".repeat(40)), &store).await);
         for role in [DeviceRole::Admin, DeviceRole::Operator, DeviceRole::Runner] {
-            let invitation = store.create_enrollment(CreateEnrollment {
-                role, runner_id: (role == DeviceRole::Runner).then(RunnerId::new), ttl_seconds: 60,
-            }).unwrap();
-            let credential = store.redeem_enrollment(RedeemEnrollment {
-                code: invitation.code, name: "Test".into(),
+            let credential = store.create_device(CreateDevice {
+                name: "Test".into(), role, runner_id: (role == DeviceRole::Runner).then(RunnerId::new),
             }).unwrap();
             assert_eq!(gateway.allows_runner(&headers(&credential.token), &store).await, role == DeviceRole::Runner);
             store.revoke_device(credential.device.id).unwrap();

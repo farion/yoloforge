@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
-"""Real processes: two runners, two CLI clients, TUI PTY, and daemon restart."""
+"""Real processes: two runners, two CLI clients and daemon restart."""
 import argparse
-import fcntl
 import json
 import os
 from pathlib import Path
 from cargo_paths import profile_dir
-import pty
-import select
-import signal
+from factory_smoke import listening_address
 import subprocess
-import struct
-import termios
 import tempfile
 import time
 import urllib.error
@@ -51,66 +46,6 @@ def stop(process):
         process.stdout.close()
 
 
-def tui_check(url, env):
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.execve(str(profile_dir() / "factory"), ["factory", "--server", url], env)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120, 0, 0))
-    output = b""
-    exited = False
-    try:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if select.select([fd], [], [], 0.2)[0]:
-                output += os.read(fd, 65536)
-            if b"smoke-local" in output and b"smoke-server" in output:
-                break
-        check(b"smoke-local" in output and b"smoke-server" in output, "TUI did not render both live runners")
-        for key, expected in [(b"2", b"smoke-project"), (b"3", b"smoke-ticket"), (b"4", b"smoke-stream"), (b"5", b"CheckOpenCode"), (b"6", b"Fragen")]:
-            output = b""
-            for attempt in range(3):
-                # Resize may coincide with and swallow a key event in a PTY.
-                # Repeating a view-selection key is read-only and idempotent.
-                os.write(fd, key)
-                time.sleep(0.1)
-                # Full frames avoid matching only the changed suffix of a name.
-                fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 120 + int(key) + attempt, 0, 0))
-                deadline = time.monotonic() + 2
-                while time.monotonic() < deadline and expected not in output:
-                    if select.select([fd], [], [], 0.2)[0]:
-                        output += os.read(fd, 65536)
-                if expected in output:
-                    break
-            check(expected in output, "TUI did not render view " + key.decode() + ": " + expected.decode())
-        os.write(fd, b"q")
-        def finished():
-            nonlocal exited
-            # Drain terminal restoration/full-frame output so the child cannot
-            # block on the PTY buffer while exiting.
-            while select.select([fd], [], [], 0)[0]:
-                try:
-                    if not os.read(fd, 65536):
-                        break
-                except OSError:
-                    break
-            found, status = os.waitpid(pid, os.WNOHANG)
-            if found:
-                exited = True
-                check(os.waitstatus_to_exitcode(status) == 0, "TUI exited with error")
-            else:
-                # A resize can coincide with the first key event; send q again
-                # after draining the terminal instead of racing the redraw.
-                os.write(fd, b"q")
-            return found
-        wait_for(finished, timeout=5)
-        print("PASS Ratatui renders runners, projects, tickets, streams, commands, question view and exits on q")
-    finally:
-        if not exited:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-        os.close(fd)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode-registration", type=Path)
@@ -127,10 +62,7 @@ def main():
         return process
     def daemon(address):
         process = spawn("factoryd", "--listen", address, "--database", database)
-        check(select.select([process.stdout], [], [], 10)[0], "daemon did not announce readiness")
-        line = process.stdout.readline()
-        check("listening on" in line, "daemon startup failed")
-        return process, line.strip().split()[-1]
+        return process, listening_address(process)
     try:
         server, address = daemon("127.0.0.1:0")
         url = "http://" + address
@@ -209,8 +141,7 @@ def main():
             output, _ = client.communicate(timeout=10)
             check(client.returncode == 0 and len(json.loads(output)["runners"]) == 2, "CLI snapshot failed")
         print("PASS two independent clients see both runners")
-        tui_check(url, env)
-        check(local.poll() is None and remote.poll() is None, "closing TUI stopped a runner")
+        check(local.poll() is None and remote.poll() is None, "closing CLI clients stopped a runner")
         stop(server)
         _, same_address = daemon(address)
         check(same_address == address, "restart changed bind address")

@@ -1420,6 +1420,7 @@ impl Store {
                 continue;
             }
             super::tasks::recover_stopped(&tx, p.project_id)?;
+            super::validation::resume_legacy_snapshots(&tx, p.project_id)?;
             super::validation::resolve(&tx, p.project_id)?;
             tx.execute_batch("SAVEPOINT validation_start")?;
             match super::validation::start(&tx, &p) {

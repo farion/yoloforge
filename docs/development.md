@@ -8,7 +8,7 @@ Im Repository drei Terminals öffnen:
 # Terminal 1: Server laufen lassen
 bash scripts/dev-local.sh server
 
-# Terminal 2: Desktop-Oberfläche (alternativ: tui)
+# Terminal 2: Desktop-Oberfläche
 bash scripts/dev-local.sh gui
 
 # Terminal 3 (optional): lokalen Runner anzeigen
@@ -21,7 +21,6 @@ Zugangstoken und verwendet `127.0.0.1:17432`. Testdaten und Token liegen unter
 gesetzte `FACTORY_TOKEN`-/`FACTORY_TOKEN_FILE`-Werte werden für diesen isolierten
 Test überschrieben. Der bestehende Server auf Port 7432 wird nicht verwendet.
 
-`2` → `n` legt ein Projekt an, `3` → `n` ein Ticket, `Ctrl-S` speichert.
 Ein JSON-Verbindungstest ist `bash scripts/dev-local.sh snapshot`.
 `factoryd` startet immer ein separates OpenCode mit persistentem Zustand, auch
 beim Start über `dev-local.sh server`. `runner` startet sein eigenes
@@ -170,7 +169,7 @@ schreibende Agentenaufträge aus und übernimmt nach Runner-Neustart deren Ergeb
 | `factory-opencode` | HTTP-Adapter für Status, Sessions, Prompt und Verlauf mit nativer Service-Anmeldung |
 | `factoryd` | Axum, SQLite-Projekte/Tickets, Eventlog und Live-Runner-Registry |
 | `factory-runner` | Heartbeats, Journale, Git-Worktrees und OpenCode-Ausführung/Wiederabgleich |
-| `factory-tui` | Binary `factory`: Ratatui-Ansichten und Verwaltungsdialoge, CLI und JSON-Ausgabe |
+| `factory-cli` | Kommandozeilenprogramme `yoloforge` und `factory` für Automatisierung und JSON-Ausgabe |
 
 ## Build und Tests
 
@@ -180,23 +179,17 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 python3 -u scripts/smoke-foundation.py
-python3 -u scripts/smoke-tui-answers.py
 ```
 
 Der Prozess-Smoke-Test startet eigene Dienste auf einem freien Loopback-Port und
-räumt diese wieder auf. Er prüft zwei Runner, zwei unabhängige CLI-Clients, die
-echte Ratatui-Oberfläche über ein Pseudoterminal, das Beenden per `q` sowie die
-Runner-Wiederanmeldung nach Server-Neustart. Die HTTP-Integrationstests prüfen
+räumt diese wieder auf. Er prüft zwei Runner, zwei unabhängige CLI-Clients sowie
+die Runner-Wiederanmeldung nach Server-Neustart. Die HTTP-Integrationstests prüfen
 Authentifizierung, Versionskonflikte, JSON-Fehler, konkurrierende Runner-Instanzen
 und abgewiesene Heartbeats mit ungültiger Registrierungs-ID.
-Zusätzlich werden CLI-Mutationen, Wiederholungen nach Neustart, TUI-Projekt-/
-Ticketansichten, konkurrierende SQLite-Verbindungen, Migrationen und atomarer
+Zusätzlich werden CLI-Mutationen, Wiederholungen nach Neustart,
+konkurrierende SQLite-Verbindungen, Migrationen und atomarer
 Rollback bei einem absichtlich fehlschlagenden Event-Insert geprüft. Die
 Prozesstests verwenden eine eigene temporäre Datenbank.
-Der zusätzliche Antwortdialog-Test verwendet eine echte Ratatui-PTY und echte
-Factory-HTTP-/SQLite-Endpunkte mit synthetischen Fragen. Er prüft Unicode/Paste,
-Formularantworten, explizite Permission-Auswahl, konkurrierende Antworten und
-bedienbare Dialoge bei Serverausfall, ohne Modellaufrufe.
 
 Optional gegen das bereits angemeldete OpenCode-Labor:
 

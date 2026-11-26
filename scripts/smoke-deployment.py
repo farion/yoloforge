@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated Docker server, scoped CLI enrollment, restart and online backup."""
+"""Isolated Docker server, scoped device keys, restart and online backup."""
 import argparse
 import json
 import os
@@ -71,9 +71,8 @@ def main():
                 raise AssertionError("Unauthenticated snapshot accepted")
             except urllib.error.HTTPError as error:
                 assert error.code == 401
-            code, device_token = directory / "invite", directory / "device.token"
-            cli(secret, "device", "invite", "--role", "operator", "--output", str(code))
-            device = cli(secret, "device", "enroll", "--name", "docker-client", "--code-file", str(code), "--output", str(device_token))
+            device_token = directory / "device.token"
+            device = cli(secret, "device", "create", "--role", "operator", "--name", "docker-client", "--output", str(device_token))
             assert device_token.stat().st_mode & 0o077 == 0
             project = cli(device_token, "project", "create", "--name", "docker-persistent", "--repository", "/repo")
             backup = json.loads(docker("exec", name, "python3", "/usr/local/bin/factory-backup", "backup", "--source", "/data/factory.sqlite3", "--destination", "/data/backup.sqlite3"))
@@ -89,7 +88,7 @@ def main():
                 raise AssertionError("Revoked device accepted")
             except RuntimeError as error:
                 assert "401" in str(error)
-            print("PASS non-root read-only Docker server, loopback port, device enrollment, restart, revoke and WAL backup")
+            print("PASS non-root read-only Docker server, loopback port, device keys, restart, revoke and WAL backup")
         finally:
             subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(["docker", "volume", "rm", volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

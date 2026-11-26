@@ -13,7 +13,7 @@ Betreibers. Siehe [Deployment](docs/deployment.md).
 Persönliche Entwicklungs-Factory zur Verwaltung paralleler OpenCode-Arbeitsstreams.
 Ein zentraler Rust-Dienst verwaltet Projekte und Aufgaben; Agenten arbeiten auf
 dem Laptop oder Server. Die native [Rust-/egui-GUI](docs/gui.md), die
-Ratatui-Oberfläche und die Android-App bedienen denselben Zustand.
+Desktop-Oberfläche und die Android-App bedienen denselben Zustand.
 
 ## Native Desktop-GUI (Linux, macOS, Windows)
 
@@ -78,7 +78,7 @@ Supervisor samt autonomer Compaction/Sessionbeendigung, automatische Wissensextr
 Checkpoint-Transfer und Android folgen. Aktueller
 [Umsetzungsstand](docs/implementation-status.md).
 
-Server, Runner und Ratatui laufen; Projekte und Tickets werden mit SQLite persistiert:
+Server, Runner und Desktop-GUI laufen; Projekte und Tickets werden mit SQLite persistiert:
 [Build, Startanleitung und Tests](docs/development.md).
 
 ```sh
@@ -105,7 +105,7 @@ bleiben aber getrennte Prozesse. Pro Stream schreibt nur ein Runner.
 - [Repository klonen, registrieren und aktualisieren](docs/repositories.md)
 - [Projektgedächtnis und begrenzte Kontextauswahl](docs/knowledge.md)
 - [Nachrichtenarchiv und Export](docs/session-archive.md)
-- [Geräteverwaltung in der TUI](docs/device-tui.md)
+- [Geräteschlüssel und Rollen](docs/deployment.md#zugangsschlüssel-und-rollen)
 - [Autonomer Session-Supervisor](docs/supervisor.md)
 - [Server-Erstabnahme rs9tm](docs/server-acceptance.md)
 
@@ -115,10 +115,5 @@ Status: Rust-Verbindungsdurchstich (F-101), persistente Projekt-/Ticketverwaltun
 Ergebnisse lokal, legen isolierte Git-Worktrees an und führen dort OpenCode-Agenten
 mit Projektprofilen aus (F-105 / Teil F-106). Zwei parallele schreibende Agenten
 und Wiederanlauf während aktiver Tools sind im Labor geprüft. Agentenfragen und
-Permissions können über die CLI oder direkt in Ratatui beantwortet werden:
-`6` → Frage auswählen → `Enter` → `Ctrl-S`. In `2`/`3`/`4` legt `n` Projekte,
-Tickets und Streams an; `Enter` öffnet Profil-, Ticket- oder Streamdialoge.
-`e` in der Projektliste bearbeitet bestehende Metadaten.
-`5` → `Enter` zeigt Auftragsdetails, Prompt, Profil, Factory-Ereignisverlauf und
-gespeicherte Sessionauszüge mit Text-/Toolausgaben und sichtbaren Kürzungen.
+Permissions können über die CLI oder in der Desktop-Oberfläche beantwortet werden.
 Persistente Pausewünsche sind vorhanden; bestätigte Pause laufender Prozesse folgt.

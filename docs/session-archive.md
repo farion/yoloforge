@@ -51,10 +51,6 @@ Netzfehler und ungültige Cursor erhalten die letzte geladene Nachricht.
 Es gibt keinen automatischen Vollarchivdownload oder eine Textkürzung auf
 Auszugslänge. Binäre Anhänge werden dadurch weiterhin nicht separat geladen.
 
-Der PTY-Test `scripts/smoke-tui-answers.py` prüft große Unicode-Nachrichten über
-mehrere JSON-Teile, Vor-/Zurücknavigation, eingefrorene Revision, explizites
-Neuladen und die Anzeige nach Verbindungsverlust.
-
 ### CLI-Export
 
 ```sh

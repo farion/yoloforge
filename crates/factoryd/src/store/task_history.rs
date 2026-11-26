@@ -39,8 +39,9 @@ impl Store {
               )
                AND kind IN ('ticket.created','ticket.updated','task.saved','task.edit_started',
                     'task.routing','task.retried','task.session_recovered','task.merger_recovered','scheduler.blocked','command.created','command.updated',
-                     'question.created','question.updated','validation.rework_queued','validation.approved',
-                     'validation.failed','validation.uncertain','validation.limit','publication.recovered',
+                      'question.created','question.updated','validation.snapshot_recovered','validation.rework_queued','validation.approved',
+                      'validation.failed','validation.uncertain','validation.limit','validation.retry_queued',
+                      'publication.recovered','publication.retry_queued',
                       'supervisor.evaluation','memory.evaluation','intent.draft_reset_requested','intent.returned_to_draft')
              ORDER BY sequence DESC LIMIT 101",
         )?;
@@ -61,7 +62,8 @@ impl Store {
                     "command.created" | "command.updated" => payload["id"].as_str(),
                     "supervisor.evaluation" | "memory.evaluation" |
                     "validation.rework_queued" | "validation.approved" | "validation.failed" |
-                    "validation.uncertain" | "validation.limit" => payload["command_id"].as_str(),
+                     "validation.uncertain" | "validation.limit" | "validation.retry_queued" |
+                     "publication.retry_queued" => payload["command_id"].as_str(),
                     _ => None,
                 }.and_then(|id| id.parse().ok());
                 let dedup = command_id.map(|id| (id, message.clone(), level));
@@ -87,10 +89,15 @@ fn summarize(kind: &str, data: &serde_json::Value) -> Option<(String, TaskHistor
         "task.session_recovered" => line("Factory setzt die gestoppte Session fort", Info),
         "task.merger_recovered" => line("Factory reiht den Merger mit demselben Snapshot erneut ein", Info),
         "publication.recovered" => line("Gesichertes Ergebnis auf dem Zielbranch bestätigt", Success),
+        "publication.retry_queued" if data["merger"] == true =>
+            line("Factory reiht den Merger gegen den aktuellen Zielstand ein", Info),
+        "publication.retry_queued" => line("Factory versucht die Integration des geprüften Snapshots erneut", Info),
         "task.edit_started" => line("Aufgabe zur Bearbeitung geöffnet", Info),
         "intent.draft_reset_requested" => line("Wartet auf das Verwerfen von Session und Worktree", Warning),
         "intent.returned_to_draft" => line("Entwurf gespeichert", Info),
         "validation.rework_queued" => line("Reviewer hat Nacharbeit mit Vorrang eingereiht", Warning),
+        "validation.snapshot_recovered" => line("Review-Snapshot nachträglich gesichert", Success),
+        "validation.retry_queued" => line("Factory wiederholt den Review automatisch", Info),
         "validation.approved" => line("Reviewer hat die Erfüllung anhand des Textes bestätigt", Success),
         "validation.failed" => line("Reviewer konnte kein gültiges Urteil abgeben", Error),
         "validation.uncertain" => line("Reviewer konnte die Erfüllung anhand des Textes nicht beurteilen", Warning),
