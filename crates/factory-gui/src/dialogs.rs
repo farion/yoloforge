@@ -286,8 +286,10 @@ impl Dialog {
         if matches!(self, Self::Form(form) if form.is_project_editor()) {
             content_size.x = content_size.x.min(520.0);
         }
-        if matches!(self, Self::Form(form) if form.intent_confirmation().is_some()) {
-            content_size.x = content_size.x.min(520.0);
+        if let Self::Form(form) = self {
+            if form.intent_confirmation().is_some() {
+                content_size.x = content_size.x.min(if form.method == "DELETE" { 440.0 } else { 520.0 });
+            }
         }
         if matches!(self, Self::Read { path, .. } if is_project_usage(path)) {
             content_size.x = content_size.x.min(460.0);
@@ -496,13 +498,26 @@ impl Dialog {
                          close = true;
                          return;
                      }
-                     egui::ScrollArea::vertical().id_salt((modal_id, "body"))
-                         .max_height((body_height - design::SETTINGS_FOOTER_HEIGHT).max(0.0))
-                         .auto_shrink([false, true])
-                         .show(ui, |ui| { ui.label(&form.help); });
-                     ui.add_space(12.0);
-                     ui.separator();
-                     ui.add_space(12.0);
+                      const DIVIDER_HEIGHT: f32 = 6.0;
+                      let text_limit = (body_height - design::SETTINGS_FOOTER_HEIGHT
+                          - DIVIDER_HEIGHT - 2.0 * ui.spacing().item_spacing.y).max(0.0);
+                      let text = egui::WidgetText::from(form.help.as_str()).into_galley(
+                          ui, Some(egui::TextWrapMode::Wrap), ui.available_width(), egui::TextStyle::Body,
+                      );
+                      // A short confirmation is just text and actions. Only give
+                      // the message a scroll viewport when it would crowd out the footer.
+                      if text.size().y <= text_limit {
+                          let _label = ui.label(text);
+                          #[cfg(test)]
+                          ui.ctx().data_mut(|d| d.insert_temp(modal_id.with("test-confirmation-body"), (_label.rect, false)));
+                      } else {
+                          let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body"))
+                              .max_height(text_limit).min_scrolled_height(0.0).auto_shrink([false, true])
+                              .show(ui, |ui| { ui.label(&form.help); });
+                          #[cfg(test)]
+                          ui.ctx().data_mut(|d| d.insert_temp(modal_id.with("test-confirmation-body"), (_body.inner_rect, true)));
+                      }
+                      ui.add(egui::Separator::default().spacing(DIVIDER_HEIGHT));
                      close = form.show_intent_confirmation(ui, app, action, color, test_id);
                      return;
                  }
@@ -3006,9 +3021,6 @@ impl FormDialog {
     }
 
     fn show_intent_confirmation(&mut self, ui: &mut egui::Ui, app: &mut App, action: &str, color: egui::Color32, _test_id: &str) -> bool {
-        if self.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)) {
-            return true;
-        }
         // Do not silently retarget the confirmation if the Intent changed.
         let rejected = self.request.is_some_and(|id| app.responses.get(&id)
             .is_some_and(|r| r.as_ref().is_err_and(|error| !error.uncertain)));
@@ -3018,11 +3030,7 @@ impl FormDialog {
             else { Some(DELETE_FAILED_TASK_CAPABILITY) };
         let incompatible = capability.is_some_and(|cap| app.snapshot.as_deref()
             .is_some_and(|s| !server_supports(s, cap)));
-        let row_height = ui.spacing().interact_size.y.max(
-            ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
-        );
-        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), row_height),
-            egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        design::dialog_footer(ui, |ui| {
             let confirm = design::server_compatibility_tooltip(
                 design::accent_button(ui, egui::Button::new(action),
                     !incompatible && app.online && self.request.is_none(), color.gamma_multiply(0.7)),
@@ -3044,7 +3052,7 @@ impl FormDialog {
                 }
             }
             close
-        }).inner
+        })
     }
 
     fn show_device_revoke(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {

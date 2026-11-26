@@ -54,6 +54,15 @@ Models, Provider, Skills, Sessions und Tools bleiben englisch.
   Lange Inhalte scrollen innerhalb des
   verfügbaren Raums; Kopfzeile und Schließen bleiben sichtbar. X/Escape darf
   keine Arbeit beenden oder Entwürfe verwerfen.
+- **Kurze Bestätigungen:** Für „Intent löschen“ höchstens 440 pt Inhaltsbreite
+  (zuzüglich Innenabstand). Umgebrochener Text bestimmt die Höhe; keine feste
+  oder minimale Dialoghöhe aus der Fensterhöhe ableiten. Die Aktionszeile
+  rechtsbündig mit `design::dialog_footer` direkt hinter Text und Trennlinie
+  platzieren, nicht über einen Füllabstand am unteren Fensterrand. Nur bei
+  Überlauf den Text vertikal scrollen; Kopf und Aktionen bleiben außerhalb.
+  Geometrietests prüfen ab dem ersten sichtbaren Frame die tatsächliche
+  Dialoggröße und den Abstand Text–Buttons auf kleinem und großem Fenster,
+  nicht nur, ob die Buttons sichtbar sind.
 - **Aufgabendialog:** nur ein Scrollbereich für den gesamten Inhalt, kein
   verschachtelter Aufgaben- oder Prompt-Scrollbereich. Historie bestehender
   Aufgaben direkt unter dem Prompt mit Zeitstempeln anzeigen; Fehler rot,

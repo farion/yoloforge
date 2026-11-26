@@ -5298,31 +5298,51 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
 }
 
 #[test]
-fn intent_delete_dialog_keeps_the_footer_close_to_the_text() {
+fn intent_delete_dialog_fits_its_content_and_only_scrolls_on_overflow() {
     let mut app = fixture();
     let ctx = app.backend.context().clone();
     let ticket = app.snapshot.as_ref().unwrap().tickets[0].id;
-    let mut dialog = Dialog::form(
-        crate::tr!("Intent löschen"),
-        &crate::tr!("Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", "Fehlgeschlagene Orchestrator-Läufe archivieren"),
-        "DELETE", format!("/v1/tasks/{ticket}/intent"),
-        json!(DeleteTask { request_id: RequestId::new() }),
-    );
-    let Dialog::Form(form) = &dialog else { unreachable!() };
-    let modal_id = egui::Id::new(("factory-form", form.id));
-    for size in [egui::vec2(889.0, 1047.0), egui::vec2(420.0, 330.0)] {
-        for _ in 0..4 {
+    let active_help = crate::tr!("Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", "Fehlgeschlagene Orchestrator-Läufe archivieren");
+    let inactive_help = crate::tr!("Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", "fehlgeschlagene Orchestrator-Läufe nach einiger Zeit ins Archiv verschie…");
+    let long_help = inactive_help.repeat(10);
+    let render = |app: &mut App, suffix: &str, help: &str, size: egui::Vec2, scrolls: bool| {
+        let mut dialog = Dialog::form(crate::tr!("Intent löschen"), help, "DELETE",
+            format!("/v1/tasks/{ticket}{suffix}"), json!(DeleteTask { request_id: RequestId::new() }));
+        let Dialog::Form(form) = &dialog else { unreachable!() };
+        let modal_id = egui::Id::new(("factory-form", form.id));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let mut modal = egui::Rect::NOTHING;
+        for pass in 0..4 {
             let _ = ctx.run(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                screen_rect: Some(screen),
                 ..Default::default()
-            }, |ctx| { assert!(!dialog.show(ctx, &mut app)); });
+            }, |ctx| { assert!(!dialog.show(ctx, app)); });
+            modal = ctx.memory(|m| m.area_rect(modal_id)).unwrap();
+            let (body, did_scroll): (egui::Rect, bool) = ctx.data(|d|
+                d.get_temp(modal_id.with("test-confirmation-body"))).unwrap();
+            let button: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-task-delete-confirm"))).unwrap();
+            let close: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-dialog-close-rect"))).unwrap();
+            assert_eq!(did_scroll, scrolls, "{modal:?} {body:?}");
+            assert!(modal.width() <= 490.0 && modal.contains_rect(button), "{modal:?} {button:?}");
+            assert!(modal.contains_rect(close) && close.bottom() < body.top(), "{modal:?} {close:?} {body:?}");
+            assert!((12.0..=44.0).contains(&(button.top() - body.bottom())), "{body:?} {button:?}");
+            assert!((20.0..=36.0).contains(&(modal.bottom() - button.bottom())), "{modal:?} {button:?}");
+            if !scrolls {
+                assert!(modal.height() < if size.x > 500.0 { 265.0 } else { 300.0 }, "{suffix} pass {pass}: {modal:?} {body:?} {button:?}");
+            }
         }
-        let modal = ctx.memory(|m| m.area_rect(modal_id)).unwrap();
-        let button: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-task-delete-confirm"))).unwrap();
-        assert!(modal.height() < if size.x > 500.0 { 300.0 } else { size.y - 16.0 }, "{modal:?} {button:?}");
-        assert!(modal.bottom() <= size.y && modal.contains_rect(button));
-        assert!(modal.bottom() - button.bottom() <= 36.0);
+        assert!(screen.shrink(crate::design::DIALOG_OUTER_GAP - 2.0).contains_rect(modal), "{screen:?} {modal:?}");
+        modal.height()
+    };
+    let desktop = egui::vec2(889.0, 1047.0);
+    let small = egui::vec2(420.0, 360.0);
+    for (suffix, help) in [("/intent", &active_help), ("/inactive", &inactive_help), ("", &inactive_help)] {
+        let height = render(&mut app, suffix, help, desktop, false);
+        let taller = render(&mut app, suffix, help, desktop + egui::vec2(0.0, 350.0), false);
+        assert!((taller - height).abs() <= 1.0, "{height} vs {taller}");
+        render(&mut app, suffix, help, small, false);
     }
+    render(&mut app, "/inactive", &long_help, small, true);
     assert!(app.settings.pending.is_empty());
 }
 

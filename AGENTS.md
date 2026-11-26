@@ -14,6 +14,12 @@ Diese Designregeln des Nutzers gelten bei UI-Arbeiten in diesem Repository:
 - Dialogfenster haben einen angenehmen Abstand zum Fensterrand und ausreichenden
   umlaufenden Innenabstand. Oben rechts steht typischerweise ein Schließen-X;
   beim Scrollen bleibt es erreichbar. Schließen verwirft keine Entwürfe.
+- Kurze Bestätigungsdialoge (z. B. „Intent löschen“) bleiben in Breite und
+  Höhe kompakt: kein Leerraum bis zum Fensterrand, die Buttons stehen direkt
+  unter dem Inhalt. Die Fensterhöhe ist nur eine Obergrenze. Erst bei Überlauf
+  scrollt der Inhalt; Titel, Schließen-X und Aktionen bleiben sichtbar. Bei
+  neuen oder geänderten Dialogen die tatsächliche Größe in einem kleinen und
+  einem großen Fenster per UI-Test prüfen.
 - Benötigte Icons mit Phosphor einbinden, nicht durch Emoji oder beliebige
   Unicode-Symbole ersetzen. Icon-Aktionen erhalten verständliche Namen/Tooltips.
 - Fehler aus Serveranfragen, Anmeldungen und anderen fehlgeschlagenen Aktionen
