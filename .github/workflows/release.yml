@@ -46,8 +46,60 @@ jobs:
       ref: refs/tags/${{ inputs.tag || github.ref_name }}
       release_tag: ${{ inputs.tag || github.ref_name }}
 
+  android:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify preinstalled Android SDK packages
+        run: |
+          test -f "${ANDROID_HOME:?Android SDK not found}/platforms/android-36/android.jar"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+      - name: Build and verify signed release APK and Play bundle
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess, tempfile
+          from pathlib import Path
+
+          for key in ("KEYSTORE_BASE64", "STORE_PASSWORD", "KEY_ALIAS"):
+              if not os.environ.get(key):
+                  raise SystemExit(f"Missing Android signing secret for {key}")
+          os.umask(0o077)
+          with tempfile.TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as temp:
+              directory = Path(temp)
+              (directory / "release.p12").write_bytes(base64.b64decode(os.environ.pop("KEYSTORE_BASE64"), validate=True))
+              (directory / "password").write_text(os.environ.pop("STORE_PASSWORD"))
+              (directory / "signing.json").write_text(json.dumps({
+                  "alias": os.environ.pop("KEY_ALIAS"),
+                  "keystore": "release.p12",
+                  "password_file": "password",
+              }))
+              subprocess.run(["python3", "scripts/android-release.py", "--signing-dir", temp], check=True)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages-android
+          path: |
+            dist/*.apk
+            dist/*.apk.sha256
+            dist/*.aab
+            dist/*.aab.sha256
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

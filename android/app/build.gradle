@@ -7,7 +7,7 @@ android {
     namespace 'dev.yoloforge.mobile'
     compileSdk 36
     defaultConfig {
-        applicationId 'dev.yoloforge.mobile'
+        applicationId 'com.trigonmedia.yoloforge'
         minSdk 26
         targetSdk 36
         versionCode androidVersionCode

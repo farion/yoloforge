@@ -15,6 +15,15 @@ import org.json.JSONObject;
 
 @RunWith(AndroidJUnit4.class)
 public final class ContractTest {
+    @Test public void intentDetailsPreserveOriginalPromptAndFormatModel()throws Exception {
+        JSONObject intent=new JSONObject().put("title","Kurztitel").put("description","Alter Prompt")
+            .put("prompt","Erste Zeile\n\n  Zweite Zeile");
+        assertEquals("Erste Zeile\n\n  Zweite Zeile",MainActivity.intentPrompt(intent));
+        intent.put("prompt",JSONObject.NULL);
+        assertEquals("Alter Prompt",MainActivity.intentPrompt(intent));
+        assertEquals("Model / Provider",MainActivity.intentModel(
+            new JSONObject().put("model_id","Model").put("provider_id","Provider"),"provider_id"));
+    }
     @Test public void updateTransportAndChecksumRejectForeignAssets()throws Exception {
         String hash=Updates.digest(new byte[]{0,1,2});assertEquals(hash,Updates.checksum(hash+"  yoloforge.apk\n","yoloforge.apk"));
         try{Updates.checksum(hash+"  other.apk","yoloforge.apk");fail("Foreign checksum filename");}catch(Exception expected){}

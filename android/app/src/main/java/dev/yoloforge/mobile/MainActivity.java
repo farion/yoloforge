@@ -706,7 +706,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
             button("Update herunterladen und installieren",()->{
                 if(!getPackageManager().canRequestPackageInstalls()){startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,android.net.Uri.parse("package:"+getPackageName())));message("Installation erlauben und danach erneut waehlen");return;}
                 loading(true);background(()->{java.io.File file=Updates.fetch(this,release);ui(()->{if(generation!=started)return;loading(false);try{
-                    Updates.verify(this,file);android.net.Uri uri=android.net.Uri.parse("content://dev.yoloforge.mobile.updates/release-update.apk");startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(uri,"application/vnd.android.package-archive").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
+                    Updates.verify(this,file);android.net.Uri uri=android.net.Uri.parse("content://"+BuildConfig.APPLICATION_ID+".updates/release-update.apk");startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(uri,"application/vnd.android.package-archive").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
                 }catch(Exception e){message(e.getMessage());}});});
             });
         });});
@@ -750,8 +750,98 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         });
     }
     private void intentDetails(JSONObject ticket,JSONObject command,String detail){
-        screen("Intent");button("Zurueck",this::showSection);text(ticket.optString("key"));
-        text(taskLabel(ticket,command));text(detail);
+        screen("Intent");button("Zurück",this::showSection);text(ticket.optString("key"));
+        sectionLabel(page,"Prompt");
+        String original=intentPrompt(ticket);
+        TextView promptView=label(this,original.isBlank()?"Kein Prompt hinterlegt.":original,15,original.isBlank()?MUTED:TEXT);
+        promptView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        promptView.setTextIsSelectable(true);promptView.setPadding(dp(12),dp(10),dp(12),dp(10));
+        promptView.setBackground(fill(this,CELL,4));addControl(page,promptView,true);
+        JSONObject assigned=command==null?find("commands",ticket.optString("requested_session","")):command;
+        JSONObject spec=assigned==null?null:assigned.optJSONObject("agent_spec");
+        String model=intentModel(spec==null?null:spec.optJSONObject("profile"),"provider_id");
+        TextView modelLabel=label(this,"Modell: "+(model.isEmpty()?"Default":model),15,TEXT);
+        page.addView(modelLabel);
+        JSONObject runner=assigned==null?null:find("runners",assigned.optString("runner_id"));
+        text("Runner: "+(assigned==null?"Auto Runner":runner==null?"Nicht verfügbar":runner.optString("name","Runner")));
+        text(detail);
+        Runnable back=()->intentDetails(ticket,command,detail);
+        Set<String> linked=new HashSet<>();
+        if(isAgentRun(assigned)){
+            linked.add(assigned.optString("id"));
+            button("OpenCode anzeigen",()->session(assigned,back));
+        }
+        sectionLabel(page,"Verlauf");
+        LinearLayout timeline=new LinearLayout(this);timeline.setOrientation(LinearLayout.VERTICAL);page.addView(timeline);
+        String id=ticket.optString("id");
+        loadIntentHistory(id,0,timeline,back,linked);
+        if(online&&command==null){
+            int started=generation;
+            worker.execute(()->{
+                try{
+                    JSONObject models=api().optionalObject("/v1/tasks/"+id+"/models");
+                    String selection=intentModel(models==null?null:models.optJSONObject("implementer"),"access_id");
+                    if(!selection.isEmpty())ui(()->{if(generation==started)modelLabel.setText("Modell: "+selection);});
+                }catch(Exception failure){
+                    android.util.Log.w("YoloForge","Intent model read failed",failure);
+                }
+            });
+        }
+    }
+    static String intentPrompt(JSONObject ticket){
+        String prompt=ticket.isNull("prompt")?"":ticket.optString("prompt","");
+        if(!prompt.isBlank())return prompt;
+        String description=ticket.optString("description","");
+        return description.isBlank()?ticket.optString("title",""):description;
+    }
+    static String intentModel(JSONObject selection,String providerKey){
+        if(selection==null)return "";
+        String model=selection.optString("model_id",""),provider=selection.optString(providerKey,"");
+        return model.isEmpty()||provider.isEmpty()?model:model+" / "+provider;
+    }
+    private static boolean isAgentRun(JSONObject command){
+        return command!=null&&"run_agent".equals(command.optString("kind"));
+    }
+    private void loadIntentHistory(String id,long before,LinearLayout timeline,Runnable back,Set<String> linked){
+        Button more=FactoryStyle.button(this,before==0?"Verlauf laden":"Ältere Einträge laden",false);
+        addControl(timeline,more,false);
+        more.setOnClickListener(v->{
+            more.setEnabled(false);
+            int started=generation;
+            worker.execute(()->{
+                try{
+                    JSONObject result=api().request("GET","/v1/tasks/"+id+"/history"+(before==0?"":"?before="+before),null);
+                    List<JSONObject> entries=records(result.getJSONArray("entries"));
+                    long next=result.optLong("next_before");
+                    ui(()->{
+                        if(generation!=started)return;
+                        timeline.removeView(more);
+                        if(before==0&&entries.isEmpty())emptyList(timeline,"Noch keine Einträge.");
+                        for(JSONObject entry:entries){
+                            timeline.addView(label(this,date(entry.optLong("created_unix_ms")),12,MUTED));
+                            int color=switch(entry.optString("level")){
+                                case "error" -> RED;
+                                case "warning" -> AMBER;
+                                case "success" -> GREEN;
+                                default -> TEXT;
+                            };
+                            TextView message=label(this,entry.optString("message"),15,color);
+                            message.setTextIsSelectable(true);message.setPadding(0,0,0,dp(8));timeline.addView(message);
+                            JSONObject run=find("commands",entry.optString("command_id",""));
+                            if(isAgentRun(run)&&linked.add(run.optString("id"))){
+                                Button open=FactoryStyle.button(this,"OpenCode anzeigen",false);
+                                addControl(timeline,open,false);open.setOnClickListener(link->session(run,back));
+                            }
+                        }
+                        if(next>0&&(before==0||next<before))loadIntentHistory(id,next,timeline,back,linked);
+                    });
+                }catch(Exception failure){
+                    android.util.Log.w("YoloForge","Intent history read failed",failure);
+                    ui(()->{if(generation==started){more.setEnabled(true);toast("Verlauf konnte nicht geladen werden.");}});
+                }
+            });
+        });
+        if(before==0&&online)more.performClick();
     }
     private static String role(JSONObject command){
         JSONObject spec=command==null?null:command.optJSONObject("agent_spec");
@@ -1060,10 +1150,13 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         more.setOnClickListener(v->{page.removeView(more);load.accept(before);});
     }
     private void loadPage(String endpoint,String name,java.util.function.Consumer<JSONObject> ready){
+        loadPage(endpoint,name,false,ready);
+    }
+    private void loadPage(String endpoint,String name,boolean optional,java.util.function.Consumer<JSONObject> ready){
         int started=generation;
         loading(true);
         worker.execute(()->{
-            try{JSONObject result=api().request("GET",endpoint,null);ui(()->{if(generation==started){loading(false);ready.accept(result);}});}
+            try{JSONObject result=optional?api().optionalObject(endpoint):api().request("GET",endpoint,null);ui(()->{if(generation==started){loading(false);ready.accept(result);}});}
             catch(Exception failure){
                 android.util.Log.w("YoloForge","Factory data read failed: "+failure.getClass().getSimpleName());
                 ui(()->{if(generation==started){loading(false);toast(name+" konnten nicht geladen werden.");}});
@@ -1135,11 +1228,23 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         }catch(Exception e){message(e.getMessage());}
     }
     private void session(JSONObject latest) {
-        screen("Session");button("Zurueck",this::showSection);
+        session(latest,this::showSection);
+    }
+    private void session(JSONObject latest,Runnable back) {
+        screen("OpenCode");button("Zurück",back);
         text(sessionTitle(latest));
-        text(latest.optString("state"));JSONObject result=latest.optJSONObject("result");if(result!=null)text(result.toString());
-        String id=latest.optString("id");int started=generation;background(()->{JSONObject excerpt=api().request("GET","/v1/commands/"+id+"/excerpt",null);String rendered=excerpt.toString(2);ui(()->{if(generation==started)text(rendered);});});
-        button("Vollstaendiges Archiv",()->archive(id,0,null));
+        String id=latest.optString("id");
+        button("Vollständiges Archiv",()->archive(id,0,null));
+        loadPage("/v1/commands/"+id+"/excerpt","OpenCode-Nachrichten",true,excerpt->{
+            List<JSONObject> messages=records(excerpt==null?null:excerpt.optJSONArray("messages"));
+            if(messages.isEmpty())text("Noch keine OpenCode-Nachrichten verfügbar.");
+            if(excerpt!=null&&excerpt.optBoolean("older_omitted"))text("Ältere Nachrichten findest du im vollständigen Archiv.");
+            for(JSONObject message:messages){
+                sectionLabel(page,message.optString("kind"));
+                String body=message.optString("text");
+                text(body+(message.optBoolean("truncated")&&!body.endsWith("…")?"…":""));
+            }
+        });
     }
     private void archive(String id,long after,Long revision) {
         screen("Archiv");archiveCommand=id;archiveAfter=after;archiveRevision=revision;

@@ -1172,6 +1172,59 @@ fn stopped_intent_recovers_once_in_the_same_archived_session() {
 }
 
 #[test]
+fn recovery_answer_restarts_diagnosis_but_does_not_authorize_a_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(&dir.path().join("db")).unwrap();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Recovery question".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let ticket = s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: "Finish the work".into(),
+        description: "Keep existing work".into(), acceptance_criteria: String::new(), priority: 1,
+    }).unwrap();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let failed = s.pending(runner).unwrap().pop().unwrap();
+    complete(&s, &failed, CommandOutput::Agent { agent: AgentProgress {
+        session_id: failed.session_id(), message_id: agent_message_id(failed.id),
+        phase: AgentPhase::Failed, summary: "The destination was not specified".into(),
+    }});
+    final_archive(&s, &failed);
+    s.scheduler_tick().unwrap();
+    let diagnosis = s.pending(runner).unwrap().pop().unwrap();
+    let diagnosis = if diagnosis.kind == CommandKind::PrepareWorkspace {
+        prepare(&s, &diagnosis);
+        s.scheduler_tick().unwrap();
+        s.pending(runner).unwrap().pop().unwrap()
+    } else {
+        diagnosis
+    };
+    assert!(diagnosis.agent_spec.as_ref().unwrap().read_only);
+    agent_reply(&s, &diagnosis, r#"{"action":"clarify","question":"Which destination is intended?"}"#);
+    s.scheduler_tick().unwrap();
+    assert!(s.pending(runner).unwrap().is_empty());
+    let [question]: [Question; 1] = s.snapshot().unwrap().questions.try_into().unwrap();
+    assert_eq!(s.task_payload(ticket.id).unwrap().status, TicketState::Blocked);
+    s.answer_question(question.id, AnswerQuestion {
+        request_id: RequestId::new(), legacy_revision: None,
+        answer: serde_json::json!({"response":"Use the existing destination."}),
+    }).unwrap();
+    s.scheduler_tick().unwrap();
+    let reassessment = s.pending(runner).unwrap().pop().unwrap();
+    let spec = reassessment.agent_spec.as_ref().unwrap();
+    assert!(spec.read_only && spec.prompt.contains("Use the existing destination."));
+    agent_reply(&s, &reassessment, r#"{"action":"continue","reason":"The user supplied the destination"}"#);
+    s.scheduler_tick().unwrap();
+    assert!(s.pending(runner).unwrap().is_empty());
+    assert_eq!(s.task_payload(ticket.id).unwrap().execution_command, Some(failed.id));
+}
+
+#[test]
 fn legacy_checkout_block_resumes_review_after_restart_without_reimplementing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
@@ -1256,7 +1309,22 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     assert!(spec.prompt.contains("Implement all three steps"));
     assert!(spec.prompt.contains("I implemented step one."));
     assert!(spec.prompt.contains("\"runner_reports_unchanged_git_tree\":true"));
-    agent_reply(&s, &review, r#"{"action":"rework","followup":"Implement steps two and three."}"#);
+    agent_reply(&s, &review, r#"{"action":"clarify","question":"Are steps two and three required?"}"#);
+    s.scheduler_tick().unwrap();
+    assert_eq!(current(&s, intent.id).status, TicketState::Blocked);
+    let [question]: [Question; 1] = s.snapshot().unwrap().questions.try_into().unwrap();
+    assert_eq!(question.state, QuestionState::Pending);
+    assert!(s.pending(runner).unwrap().is_empty());
+    s.answer_question(question.id, AnswerQuestion {
+        request_id: RequestId::new(), legacy_revision: None,
+        answer: serde_json::json!({"response":"Both remaining steps are required."}),
+    }).unwrap();
+    s.scheduler_tick().unwrap();
+    let clarified_review = s.pending(runner).unwrap().pop().unwrap();
+    assert_ne!(clarified_review.id, review.id);
+    assert_eq!(clarified_review.agent_spec.as_ref().unwrap().role, "reviewer");
+    assert!(clarified_review.agent_spec.as_ref().unwrap().prompt.contains("Both remaining steps are required."));
+    agent_reply(&s, &clarified_review, r#"{"action":"rework","followup":"Implement steps two and three."}"#);
     s.scheduler_tick().unwrap();
     assert_eq!(current(&s, intent.id).status, TicketState::ReworkQueued);
     assert!(s.pending(runner).unwrap().is_empty(), "Do not resume before the final archive");
@@ -1831,6 +1899,8 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
 fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
     for answer in [
         r#"{"action":"wait","reason":"Need a related result"}"#,
+        r#"{"action":"wait","reason":"Start source missing","question":"Start main or a session?"}"#,
+        r#"{"action":"defer","reason":"Unsupported target operation"}"#,
         r#"{"action":"discard","reason":"Repeated text without an intent"}"#,
         r#"{"action":"session","session_id":"00000000-0000-0000-0000-000000000000","reason":"invalid candidate"}"#,
         "not JSON",
@@ -1874,7 +1944,7 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
         let db = rusqlite::Connection::open(&path).unwrap();
         // Simulate the old retry timer expiring, also for malformed replies
         // after they have reached the bounded attempt limit.
-        let terminal = answer.contains("\"wait\"") || answer.contains("\"discard\"");
+        let terminal = ["\"wait\"", "\"defer\"", "\"discard\""].iter().any(|action| answer.contains(*action));
         if !terminal {
             let count: u32 = db.query_row("SELECT json_extract(data,'$.attempts') FROM task_routing WHERE ticket_id=?1",
                 [t.id.to_string()], |r| r.get(0)).unwrap();
@@ -1901,6 +1971,28 @@ fn orchestrator_wait_and_invalid_decisions_do_not_start_work_or_loop() {
             assert!(s.task_history(t.id,None).unwrap().entries.iter().any(|e| e.message.contains("Intent verworfen")));
         } else {
             assert_eq!(snap.tickets[0].status, TicketState::Backlog);
+        }
+        if answer.contains("\"wait\"") {
+            let [question] = snap.questions.as_slice() else { panic!("Expected exactly one durable clarification") };
+            let expected = if answer.contains("\"question\"") { "Start main or a session?" } else { "Need a related result" };
+            assert_eq!(question.external.payload["fields"][0]["title"], expected);
+            assert_eq!(question.state, QuestionState::Pending);
+            assert!(s.answer_question(question.id, AnswerQuestion {
+                request_id: RequestId::new(), legacy_revision: None, answer: serde_json::json!({"response":" "}),
+            }).is_err());
+            let receipt = s.answer_question(question.id, AnswerQuestion {
+                request_id: RequestId::new(), legacy_revision: None, answer: serde_json::json!({"response":"Start main on the local runner."}),
+            }).unwrap();
+            assert_eq!(receipt.state, QuestionState::Answered);
+            s.scheduler_tick().unwrap();
+            let next = s.pending(runner).unwrap().pop().unwrap();
+            assert_ne!(next.id, c.id);
+            assert!(next.agent_spec.unwrap().prompt.contains("Start main on the local runner."));
+            let snap = s.snapshot().unwrap();
+            assert_eq!(snap.tickets.len(), 1);
+            assert_eq!(snap.tickets[0].id, t.id);
+        } else {
+            assert!(snap.questions.is_empty());
         }
     }
 }

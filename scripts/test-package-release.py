@@ -89,6 +89,13 @@ class Packages(unittest.TestCase):
                         self.assertTrue(Path(call.args[0][0]).is_absolute())
                         self.assertTrue(call.kwargs["check"])
                         self.assertEqual(call.kwargs["timeout"], 30 if index == 0 else 90)
+            with self.assertRaisesRegex(ValueError, "missing=.*android.*aab"):
+                VERIFY.verify(output, VERSION)
+            for ext in ("apk", "aab"):
+                name = f"yoloforge-android-{VERSION}.{ext}"
+                data = b"Android release test fixture"
+                (output / name).write_bytes(data)
+                (output / f"{name}.sha256").write_text(f"{VERIFY.hashlib.sha256(data).hexdigest()}  {name}\n")
             VERIFY.verify(output, VERSION)
             (output / "SHA256SUMS").unlink()
             for kind in ("gui", "runner"):

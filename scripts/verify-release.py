@@ -16,7 +16,7 @@ def expected_assets(version):
         f"yoloforge-{kind}-{version}-{os}-{arch}" + (".zip" if os == "windows" else ".tar.gz")
         for os, arch in PLATFORMS
         for kind in (["gui", "runner", "server"] if os == "linux" else ["gui", "runner"])
-    }
+    } | {f"yoloforge-android-{version}.{ext}" for ext in ("apk", "aab")}
 
 
 def verify(directory, version):
@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args()
     verify(args.directory, args.version)
-    print(f"Verified all {len(expected_assets(args.version))} GUI, runner and server packages.")
+    print(f"Verified all {len(expected_assets(args.version))} release packages.")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,11 @@ enum Decision {
     },
     Wait {
         reason: String,
+        #[serde(default)]
+        question: Option<String>,
+    },
+    Defer {
+        reason: String,
     },
     Discard {
         reason: String,
@@ -33,6 +38,8 @@ struct Evaluation {
     resolved: bool,
     after_ms: u64,
     attempts: u32,
+    #[serde(default)]
+    question_id: Option<QuestionId>,
 }
 pub(super) enum Route {
     New,
@@ -73,6 +80,53 @@ pub(super) fn note(tx: &Transaction<'_>, t: &mut Ticket, text: &str) -> Result<(
 fn save(tx: &Transaction<'_>, id: TicketId, e: &Evaluation) -> Result<()> {
     tx.execute("INSERT INTO task_routing(ticket_id,data) VALUES(?1,?2) ON CONFLICT(ticket_id) DO UPDATE SET data=excluded.data",params![id.to_string(),serde_json::to_string(e)?])?;
     Ok(())
+}
+
+pub(super) fn close_clarification(tx: &Transaction<'_>, ticket: TicketId) -> Result<()> {
+    let raw: Option<String> = tx.query_row("SELECT data FROM task_routing WHERE ticket_id=?1",
+        [ticket.to_string()], |r| r.get(0)).optional()?;
+    if let Some(id) = raw.map(|s| serde_json::from_str::<Evaluation>(&s)).transpose()?.and_then(|e| e.question_id) {
+        let mut question = super::questions::load(tx, id)?;
+        if question.state == QuestionState::Pending {
+            question.state = QuestionState::Unknown;
+            super::questions::save(tx, &mut question)?;
+        }
+        tx.execute("DELETE FROM task_routing WHERE ticket_id=?1", [ticket.to_string()])?;
+    }
+    Ok(())
+}
+
+pub(super) fn answer_clarification(
+    tx: &Transaction<'_>, value: &mut Question, body: &AnswerQuestion,
+) -> Result<bool> {
+    let raw: Option<String> = tx.query_row(
+        "SELECT t.data FROM task_routing r JOIN tickets t ON t.id=r.ticket_id
+         JOIN active_projects p ON p.id=t.project_id
+         WHERE json_extract(r.data,'$.question_id')=?1 AND json_extract(r.data,'$.command')=?2
+         AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)",
+        params![value.id.to_string(), value.command_id.to_string()], |r| r.get(0),
+    ).optional()?;
+    let Some(raw) = raw else { return Ok(false); };
+    let mut ticket: Ticket = serde_json::from_str(&raw)?;
+    if value.state != QuestionState::Pending || ticket.draft || ticket.execution_command.is_some()
+        || ticket.requested_session.is_some()
+        || !matches!(ticket.status, TicketState::Backlog | TicketState::Ready)
+    {
+        return Err(StoreError::WorkConflict);
+    }
+    let answer = super::questions::clarification_text(body)?;
+    let prompt = ticket.prompt.as_mut().ok_or(StoreError::WorkConflict)?;
+    *prompt = format!("{prompt}\n\nRückfrage: {}\nAntwort des Auftraggebers: {answer}",
+        value.external.payload["fields"][0]["title"].as_str().unwrap_or("Was soll ausgeführt werden?"));
+    ticket.description.clone_from(prompt);
+    ticket.routing_note = "Rückfrage beantwortet — wartet auf Orchestrator".into();
+    super::scheduler::save_ticket(tx, &mut ticket)?;
+    tx.execute("DELETE FROM task_routing WHERE ticket_id=?1", [ticket.id.to_string()])?;
+    value.answer = Some(body.answer.clone());
+    value.answer_request = Some(body.request_id);
+    value.state = QuestionState::Answered;
+    super::questions::save(tx, value)?;
+    Ok(true)
 }
 fn candidates(tx: &Transaction<'_>, project: ProjectId) -> Result<Vec<RunnerCommand>> {
     let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND c.rowid=(SELECT MAX(c2.rowid) FROM commands c2 WHERE c2.stream_id=c.stream_id AND json_extract(c2.data,'$.kind')='run_agent'
@@ -208,8 +262,11 @@ pub(super) fn route(
         .optional()?;
     let mut previous = raw
         .map(|s| serde_json::from_str::<Evaluation>(&s))
-        .transpose()?
-        .filter(|e| e.input == input);
+        .transpose()?;
+    if previous.as_ref().is_some_and(|e| e.input != input) {
+        close_clarification(tx, t.id)?;
+        previous = None;
+    }
     if let Some(e) = &mut previous {
         let data: String = tx.query_row(
             "SELECT data FROM commands WHERE id=?1",
@@ -260,7 +317,35 @@ pub(super) fn route(
                 )?;
                 return Ok(Route::Session(*session_id));
             }
-            Some(Decision::Wait { reason }) => {
+            Some(Decision::Wait { reason, question }) => {
+                note(tx, t, &format!("Orchestrator wartet auf Antwort: {reason}"))?;
+                if e.question_id.is_none() {
+                    let text = [question.as_deref(), Some(reason.as_str())].into_iter().flatten()
+                        .map(str::trim).find(|text| !text.is_empty() && !text.chars().any(char::is_control))
+                        .unwrap_or("Was soll konkret ausgeführt werden?");
+                    let id = QuestionId::new();
+                    let value = Question {
+                        id, command_id: c.id, session_id: c.session_id(), update_seq: Revision(1),
+                        external: ExternalQuestion {
+                            external_id: format!("routing-clarification-{id}"),
+                            kind: QuestionKind::Form,
+                            payload: serde_json::json!({
+                                "title": format!("{} · Rückfrage zum Auftrag", t.key),
+                                "fields": [{"key":"response","title":clip(text,1024),"type":"string","required":true}]
+                            }),
+                        },
+                        state: QuestionState::Pending, answer: None, answer_request: None,
+                        orchestration_note: String::new(),
+                    };
+                    tx.execute("INSERT INTO questions(id,command_id,kind,external_id,data) VALUES(?1,?2,'form',?3,?4)",
+                        params![id.to_string(), c.id.to_string(), value.external.external_id, serde_json::to_string(&value)?])?;
+                    event(tx, "question.created", id.to_string(), &value)?;
+                    e.question_id = Some(id);
+                    save(tx, t.id, e)?;
+                }
+                return Ok(Route::Pending);
+            }
+            Some(Decision::Defer { reason }) => {
                 note(tx, t, &format!("Orchestrator wartet: {reason}"))?;
                 return Ok(Route::Pending);
             }
@@ -412,6 +497,11 @@ pub(super) fn route(
     )?;
     let spec = c.agent_spec.as_mut().ok_or(StoreError::Internal)?;
     spec.role = "orchestrator".into();
+    spec.prompt.push_str("\nRouting decision rules: If safe routing requires the user's input, return \
+        {\"action\":\"wait\",\"reason\":\"what is missing\",\"question\":\"one concrete question in the user's language\"}. \
+        The server will show it to the user and evaluate the same intent again with their answer. \
+        If waiting on a technical prerequisite that does not need a user decision, or the requested operation \
+        cannot be safely supported, return {\"action\":\"defer\",\"reason\":\"specific blocker\"} instead.");
     spec.images = t.images.clone();
     // Routing needs attachment names, not arbitrary binary data for a read-only model.
     if !t.files.is_empty() {
@@ -437,6 +527,7 @@ pub(super) fn route(
             resolved: false,
             after_ms: 0,
             attempts: previous.map_or(1, |e| e.attempts.saturating_add(1)),
+            question_id: None,
         },
     )?;
     event(tx, "task.routing_run", t.id.to_string(), &serde_json::json!({"command_id": c.id}))?;

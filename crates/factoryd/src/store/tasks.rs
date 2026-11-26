@@ -8,6 +8,8 @@ fn delete_intent_in(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<()> {
 
 fn tombstone_intent(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<()> {
     super::draft_resets::require_not_resetting(tx, ticket.id)?;
+    super::routing::close_clarification(tx, ticket.id)?;
+    super::questions::close_intent_clarifications(tx, ticket.id)?;
     let id = ticket.id.to_string();
     ticket.status = TicketState::Cancelled;
     ticket.routing_note = "Intent gelöscht".into();

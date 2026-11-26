@@ -7,7 +7,7 @@ Platzmangel scrollt nur der Inhalt. „Speichern“ bleibt unten rechts.
 Zwischen einer Trennlinie und den Buttons der Einstellungs-Fußzeile liegen
 mindestens 12 pt Abstand; den Platz zentral über `design::settings_footer` reservieren.
 Factory-Settings enthalten Model Provider, Default Models, Skills,
-MCPs, Geräte/Zugänge und eine lokale Sprachansicht. Keine separaten Einladungs-, Widerruf-, Desktop-Meldungs-
+MCPs, Geräte/Zugänge, Android-Push und eine lokale Sprachansicht. Keine separaten Einladungs-, Widerruf-, Desktop-Meldungs-
 oder Zustellungsbereiche. Geräte zeigen aktive Zugänge ohne technische Rohdaten;
 Widerrufen erfolgt am Eintrag mit Bestätigung. Der technische Zustellungsabgleich
 bleibt in der Diagnose erreichbar.

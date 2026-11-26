@@ -107,14 +107,16 @@ Abschlüsse lösen keine Android-Push-Meldung aus.
 **Google-Push ohne Zusatz-App einrichten:**
 
 1. In der [Firebase-Konsole](https://console.firebase.google.com/) ein Projekt
-   erstellen und darin eine Android-App mit Paketname `dev.yoloforge.mobile`
-   registrieren. `google-services.json` herunterladen.
+   erstellen und darin eine Android-App mit Paketname `com.trigonmedia.yoloforge`
+   registrieren. `google-services.json` unter **Projekteinstellungen → Meine Apps**
+   bei dieser Android-App herunterladen. Die Datei ist nicht der private
+   Dienstkontoschlüssel und kann daraus nicht erzeugt werden.
 2. Die Firebase Cloud Messaging API (HTTP v1) aktivieren. Ein Dienstkonto im
    selben Projekt mit Sendeberechtigung (`cloudmessaging.messages.create`,
    z. B. über `roles/firebasecloudmessaging.admin`) einrichten und einen
    Schlüssel im JSON-Format erstellen.
-3. Am Desktop als Factory-Admin **Factory-Einstellungen → Geräte und Zugänge →
-   Android-Push** öffnen. Beide JSON-Dateien auswählen oder ihren Inhalt einfügen, den Anzeigenamen der
+3. Am Desktop als Factory-Admin **Factory-Einstellungen → Android-Push**
+   öffnen. Beide JSON-Dateien auswählen oder ihren Inhalt einfügen, den Anzeigenamen der
    Factory festlegen, aktivieren und **Speichern**. Zum Ersetzen des Schlüssels
    nur die neue Dienstkonto-JSON einfügen; leere Felder behalten ihren Wert.
 4. Auf einem Android-Gerät mit Google Play-Diensten anmelden und im Flyout
@@ -167,25 +169,17 @@ der öffentliche Zertifikatsfingerprint in `android/release-certificate.sha256`.
 python3 scripts/android-release.py
 ```
 
-Der Helfer baut mit JDK 17, führt Release-Lint und `apksigner verify` aus und
-vergleicht den Signer mit dem gepinnten Fingerprint. Ausgabe:
-`dist/yoloforge-android-vVERSION.apk` plus SHA256-Datei. Version und monotoner
+Der Helfer baut mit JDK 17, führt Release-Lint aus und prüft beide Signaturen
+gegen den gepinnten Fingerprint. Ausgabe: `dist/yoloforge-android-vVERSION.aab`
+für die Google Play Console und `dist/yoloforge-android-vVERSION.apk` für die
+direkte Installation, jeweils mit SHA-256-Datei. Version und
 Android-VersionCode werden aus der Cargo-Workspace-Version abgeleitet.
 Vorhandene abweichende Ausgabeartefakte werden nicht überschrieben.
 `--init-signing` ist nur für die einmalige Einrichtung eines bislang nicht
 vorhandenen Schlüsselverzeichnisses gedacht; es ersetzt niemals einen Schlüssel.
-Der Release-Workflow besitzt einen opt-in Android-Signierjob: Repositoryvariable
-`ANDROID_RELEASE_SIGNING=enabled` sowie Secrets `ANDROID_KEYSTORE_BASE64`,
-`ANDROID_STORE_PASSWORD` und `ANDROID_KEY_ALIAS` (PKCS12, gleicher Key-/Store-Passwortwert).
-Er prueft den gepinnten Zertifikatsfingerprint, laedt ausschliesslich APK/Pruefsumme
-als Release-Artefakte hoch und entfernt die temporaeren Schluesseldateien.
-Bei aktiviertem Job blockiert ein Signierfehler die Gesamtveroeffentlichung.
-Secrets und Variable wurden nach ausdruecklicher Freigabe fuer
-`farion/yoloforge` eingerichtet; der lokale Schluessel bleibt fuer Sicherung und
-lokale Builds erhalten. Der eigenstaendige CI-Signierlauf
-`45036459858` hat den signierten Entwicklungsbuild erfolgreich erzeugt.
-Der versionierte Releasepfad wurde mit v0.1.2 geprueft (CI `45042304226`):
-veroeffentlichtes APK heruntergeladen, SHA256 mit Release-Pruefsumme verglichen
-und Signatur mit `apksigner verify --print-certs` bestaetigt. Der Signer entspricht
-weiterhin `android/release-certificate.sha256`.
-Ohne Aktivierung bleiben die anderen Release-Ziele nutzbar.
+Der Release-Workflow benötigt `ANDROID_KEYSTORE_BASE64`, `ANDROID_STORE_PASSWORD`
+und `ANDROID_KEY_ALIAS` (PKCS12, gleicher Key-/Store-Passwortwert). Ein
+Signierfehler blockiert die Veröffentlichung. Die Play Console muss das
+Zertifikat dieses Schlüssels als Upload-Zertifikat akzeptieren. Bei einer
+bestehenden Play-App muss außerdem der `versionCode` höher als der zuletzt
+hochgeladene sein.

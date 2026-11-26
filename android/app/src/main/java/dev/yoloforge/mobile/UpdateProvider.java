@@ -10,7 +10,7 @@ import java.io.*;
 
 /** One read-only APK, accessible only via an explicit Android URI grant. */
 public final class UpdateProvider extends ContentProvider {
-    private File file(Uri uri)throws FileNotFoundException {if(!"dev.yoloforge.mobile.updates".equals(uri.getAuthority()) || !"/release-update.apk".equals(uri.getPath()) || uri.getQuery()!=null)throw new FileNotFoundException();return new File(getContext().getCacheDir(),"release-update.apk");}
+    private File file(Uri uri)throws FileNotFoundException {if(!(BuildConfig.APPLICATION_ID+".updates").equals(uri.getAuthority()) || !"/release-update.apk".equals(uri.getPath()) || uri.getQuery()!=null)throw new FileNotFoundException();return new File(getContext().getCacheDir(),"release-update.apk");}
     @Override public boolean onCreate(){return true;}
     @Override public String getType(Uri uri){return "application/vnd.android.package-archive";}
     @Override public ParcelFileDescriptor openFile(Uri uri,String mode)throws FileNotFoundException {if(!"r".equals(mode))throw new FileNotFoundException("Read only");return ParcelFileDescriptor.open(file(uri),ParcelFileDescriptor.MODE_READ_ONLY);}

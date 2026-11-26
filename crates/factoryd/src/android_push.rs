@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-const PACKAGE: &str = "dev.yoloforge.mobile";
+const PACKAGE: &str = "com.trigonmedia.yoloforge";
 const OAUTH_URL: &str = "https://oauth2.googleapis.com/token";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -51,7 +51,11 @@ pub(crate) struct SettingsUpdate {
 }
 
 fn invalid() -> StoreError {
-    StoreError::Invalid("Invalid or mismatched Firebase configuration")
+    StoreError::Invalid("Firebase Android app configuration invalid")
+}
+
+fn invalid_account() -> StoreError {
+    StoreError::Invalid("Firebase service account key invalid")
 }
 
 fn public_config(raw: &str) -> store_result::Result<PublicConfig> {
@@ -160,18 +164,20 @@ impl SettingsUpdate {
         };
         let account: ServiceAccount = match self.service_json {
             Some(raw) if raw.len() <= 65_536 => {
-                serde_json::from_str(&raw).map_err(|_| invalid())?
+                serde_json::from_str(&raw).map_err(|_| invalid_account())?
             }
-            Some(_) => return Err(invalid()),
-            None => old_account.ok_or_else(invalid)?,
+            Some(_) => return Err(invalid_account()),
+            None => old_account.ok_or_else(invalid_account)?,
         };
         if account.kind != "service_account"
-            || account.project_id != public.project_id
             || !valid_text(&account.client_email, 320)
             || !account.client_email.ends_with(".gserviceaccount.com")
             || account.signing_key().is_none()
         {
-            return Err(invalid());
+            return Err(invalid_account());
+        }
+        if account.project_id != public.project_id {
+            return Err(StoreError::Invalid("Firebase project IDs do not match"));
         }
         Ok(Config {
             enabled: self.enabled,

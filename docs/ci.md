@@ -2,8 +2,9 @@
 
 Die Workflows folgen dem Aufbau von LAML: native Runner, schreibgeschützte
 Build-Jobs und eine getrennte Veröffentlichung des vollständigen Paketsets.
-TUI- und Container-Image-Builds sind nicht Teil der Workflows. Android wird
-separat als Entwicklungsartefakt gebaut, nicht als Release-Paket.
+TUI- und Container-Image-Builds sind nicht Teil der Workflows. Android-Releases
+enthalten ein signiertes App Bundle für Google Play und eine signierte APK
+für die direkte Installation.
 
 | Plattform | Architektur | GUI | Runner | Separates Server-Paket |
 | --- | --- | --- | --- | --- |
@@ -35,7 +36,7 @@ Kein Paket enthält Laufzeitdaten, Tokens oder Journale.
   vorhandenen Tag. Tag und Workspace-Version müssen übereinstimmen. Der
   Release-Workflow führt die native Build- und Testmatrix selbst aus; ein
   vorheriger `CI`-Lauf auf `main` ist keine Voraussetzung. Alle Release-Builds
-  müssen erfolgreich sein, alle zehn Pakete und ihre SHA-256-Prüfsummen müssen
+  müssen erfolgreich sein, die zehn nativen Pakete, beide Android-Dateien und ihre SHA-256-Prüfsummen müssen
   vorliegen. Erst dann wird das Draft-Release veröffentlicht.
 
 Beispiel bei Workspace-Version `1.2.3`: Nach dem Commit mit der neuen Version
@@ -49,8 +50,8 @@ git push origin v1.2.3
 Tags mit Vorabkennung, z.B. `v1.2.3-rc.1`, werden als GitHub-Prerelease ohne
 `latest` veröffentlicht. Ein fehlgeschlagenes Draft-Release kann erneut befüllt
 werden; ein bereits veröffentlichtes Release wird nicht überschrieben.
-GitHub-Releases brauchen keine zusätzlichen Secrets, nur das automatisch
-bereitgestellte `GITHUB_TOKEN` mit `contents: write` im Publish-Job.
+Der Publish-Job nutzt `GITHUB_TOKEN` mit `contents: write`. Der Android-Build
+benötigt die [Signing-Secrets](android.md#stabile-release-signierung).
 Es erfolgt kein Deployment auf Betreiber-Server.
 
 ## Lokale Checks

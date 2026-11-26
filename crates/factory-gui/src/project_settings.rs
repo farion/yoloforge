@@ -21,6 +21,7 @@ pub enum ProjectSection {
     Limits,
     Supervisor,
     Devices,
+    AndroidPush,
     Language,
 }
 impl ProjectSection {
@@ -34,12 +35,13 @@ impl ProjectSection {
         Self::Limits,
         Self::Supervisor,
     ];
-    pub const FACTORY: [Self; 6] = [
+    pub const FACTORY: [Self; 7] = [
         Self::Models,
         Self::DefaultModels,
         Self::Skills,
         Self::Mcps,
         Self::Devices,
+        Self::AndroidPush,
         Self::Language,
     ];
     pub fn title(self) -> &'static str {
@@ -54,6 +56,7 @@ impl ProjectSection {
             Self::Limits => "Limits",
             Self::Supervisor => "Supervisor",
             Self::Devices => crate::tr!("Geräte und Zugänge"),
+            Self::AndroidPush => crate::tr!("Android-Push"),
             Self::Language => if crate::i18n::is_german() { "Sprache" } else { crate::tr!("Language") },
         }
     }
@@ -153,9 +156,19 @@ impl AndroidPush {
                 }
             }
             Err(error) => {
+                let notice = if !save {
+                    crate::tr!("Android-Push konnte nicht geladen werden.")
+                } else if error.message.starts_with("Firebase Android app configuration invalid") {
+                    crate::tr!("Prüfe die google-services.json für com.trigonmedia.yoloforge.")
+                } else if error.message.starts_with("Firebase service account key invalid") {
+                    crate::tr!("Prüfe den privaten Firebase-Dienstkontoschlüssel.")
+                } else if error.message.starts_with("Firebase project IDs do not match") {
+                    crate::tr!("Beide Firebase-Dateien müssen aus demselben Projekt stammen.")
+                } else {
+                    crate::tr!("Android-Push konnte nicht gespeichert werden. Details stehen in der Diagnose.")
+                };
                 app.action_errors.push((crate::overview::now_ms(), error.message));
-                app.notice_error(if save { crate::tr!("Android-Push konnte nicht gespeichert werden. Prüfe die Firebase-Dateien.") }
-                    else { crate::tr!("Android-Push konnte nicht geladen werden.") });
+                app.notice_error(notice);
             }
         }
     }
@@ -173,10 +186,10 @@ impl AndroidPush {
     }
 
     fn show(&mut self, ui: &mut egui::Ui, app: &mut App) {
-        if !app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin) { return; }
-        ui.add_space(12.0);
-        ui.separator();
-        design::section_heading(ui, crate::tr!("Android-Push"));
+        if !app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin) {
+            ui.label(crate::tr!("Nur Factory-Admins können Android-Push einrichten."));
+            return;
+        }
         let Some(status) = &self.status else {
             if self.request.is_some() { ui.spinner(); }
             else if ui.add_enabled(app.online, egui::Button::new(crate::tr!("Konfiguration laden"))).clicked() {
@@ -187,6 +200,9 @@ impl AndroidPush {
         let configured = status["configured"] == true;
         if let Some(project) = status["project_id"].as_str() {
             ui.label(format!("Firebase: {project}"));
+        }
+        if !configured {
+            ui.label(crate::tr!("Für die Ersteinrichtung brauchst du zwei Dateien aus demselben Firebase-Projekt. Lade google-services.json in den Projekteinstellungen unter „Meine Apps“ für com.trigonmedia.yoloforge herunter. Den privaten JSON-Schlüssel findest du unter „Dienstkonten“ oder erstellst ihn dort neu."));
         }
         ui.add_space(design::SETTINGS_FIELD_GAP);
         ui.add_enabled_ui(app.online, |ui| {
@@ -228,13 +244,8 @@ mod android_push_tests {
             let mut app = crate::tests::fixture();
             app.online = true;
             app.access = Some(AccessView { role: DeviceRole::Admin, device_id: None, runner_id: None });
-            let read = 900;
-            app.responses.insert(read, Ok(json!([])));
             let mut settings = ProjectSettings::factory();
-            settings.selected = ProjectSection::Devices;
-            settings.panes.insert(ProjectSection::Devices, vec![Dialog::Read {
-                request: read, title: "Devices".into(), path: "/v1/devices".into(),
-            }]);
+            settings.selected = ProjectSection::AndroidPush;
             settings.android_push.status = Some(json!({"enabled":true,"configured":true,"label":"Factory"}));
             settings.android_push.enabled = true;
             settings.android_push.label = "Factory".into();
@@ -740,15 +751,22 @@ impl ProjectSettings {
                   ) {
                      design::section_heading(ui, self.selected.title());
                   }
-                  if self.selected == ProjectSection::Devices {
-                       design::section_heading(ui, self.selected.title());
+                   if self.selected == ProjectSection::AndroidPush {
+                        design::section_heading(ui, self.selected.title());
                        if app.online && app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin)
                            && self.android_push.status.is_none() && self.android_push.request.is_none()
                            && !self.android_push.attempted
                        {
                            self.android_push.attempted = true;
-                           self.android_push.send(app, false);
-                       }
+                            self.android_push.send(app, false);
+                        }
+                        egui::ScrollArea::vertical().id_salt("android-push-settings")
+                            .max_height((pane_bottom - ui.cursor().top()).max(0.0))
+                            .show(ui, |ui| self.android_push.show(ui, app));
+                        return;
+                   }
+                   if self.selected == ProjectSection::Devices {
+                        design::section_heading(ui, self.selected.title());
                   }
                  let panes=self.panes.entry(self.selected).or_default();
                 if panes.is_empty() {
@@ -825,7 +843,6 @@ impl ProjectSettings {
                                  }
                                  None=>{ui.spinner();ui.label(crate::tr!("Wird geladen …"));}
                              }
-                             if devices { self.android_push.show(ui, app); }
                         });
                         if self.selected != ProjectSection::Devices {
                             if let Some(Ok(value))=app.responses.get(request) {if ui.button(crate::tr!("Exportieren …")).clicked() {app.backend.save_json("yoloforge-projekteinstellungen.json",value.clone());}}
@@ -917,7 +934,8 @@ fn send_write(app: &mut App, write: &Write) -> u64 {
 fn content(app: &mut App, id: Option<ProjectId>, section: ProjectSection) -> Option<Dialog> {
     if id.is_none() {
         let mut result=match section {
-            ProjectSection::Devices=>{app.read(crate::tr!("Geräte und Zugänge"),"/v1/devices".into());app.dialog.take()},
+             ProjectSection::Devices=>{app.read(crate::tr!("Geräte und Zugänge"),"/v1/devices".into());app.dialog.take()},
+             ProjectSection::AndroidPush=>None,
             _=>None,
         };
         restore_form(app, &mut result);

@@ -35,6 +35,10 @@ final class Api {
     JSONObject request(String method, String path, JSONObject body) throws Exception {
         return (JSONObject) requestJson(method,path,body);
     }
+    JSONObject optionalObject(String path) throws Exception {
+        Object result=requestJson("GET",path,null);
+        return result==JSONObject.NULL?null:(JSONObject)result;
+    }
     boolean healthy() throws Exception {
         int status=healthStatus("/v1/health");
         if(status==404 || status==405){
