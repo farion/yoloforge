@@ -871,6 +871,32 @@ mod tests {
         assert_eq!(git(&f.target, &["tag", "--list"]).unwrap(), "v0.1.0");
     }
     #[tokio::test(flavor = "multi_thread")]
+    async fn split_git_tags_the_published_commit_and_does_not_replay_after_interruption() {
+        let mut f = fixture().await;
+        f.record.command.workspace_spec.as_mut().unwrap().target_git = Some(TargetGitPlan {
+            commit: true,
+            commit_message: Some("User-selected subject".into()),
+            tag: Some(TargetTag::Patch),
+            ..Default::default()
+        });
+        let before = git(&f.work, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(f.target.join("dirty"), "user file").unwrap();
+        assert!(publish(&f.journal, &f.record, &f.args).is_err());
+        assert!(published_commit(&f.journal, f.record.command.id).is_err());
+        assert_eq!(git(&f.target, &["tag", "--list"]).unwrap(), "");
+        fs::remove_file(f.target.join("dirty")).unwrap();
+        publish(&f.journal, &f.record, &f.args).unwrap();
+        let commit = published_commit(&f.journal, f.record.command.id).unwrap();
+        assert_eq!(git(&f.target, &["log", "-1", "--format=%s"]).unwrap(), "User-selected subject");
+        assert_eq!(git(&f.work, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_ne!(before, commit);
+        assert!(crate::target_git::execute(&f.journal, &mut f.record, Some(&commit)).0);
+        assert_eq!(git(&f.target, &["rev-parse", "v0.1.0"]).unwrap(), commit);
+        let mut replay = f.journal.receive(f.record.command.clone()).unwrap();
+        assert!(!crate::target_git::execute(&f.journal, &mut replay, Some(&commit)).0);
+        assert_eq!(git(&f.target, &["tag", "--list"]).unwrap(), "v0.1.0");
+    }
+    #[tokio::test(flavor = "multi_thread")]
     async fn parallel_disjoint_results_combine_and_continuations_do_not_erase_other_work() {
         let f = fixture().await;
         let (mut second, work) = parallel(&f);

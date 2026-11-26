@@ -252,6 +252,13 @@ pub(super) fn route(
             {
                 return Ok(Route::TargetGit { worktree_prompt: worktree_prompt.clone(), git: git.clone() });
             }
+            Some(Decision::TargetGit { worktree_prompt, git, .. })
+                if git.valid() && worktree_prompt.as_ref().is_none_or(|prompt|
+                    !prompt.trim().is_empty() && prompt.len() <= 15900
+                        && !prompt.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))) =>
+            {
+                return Ok(Route::TargetGit { worktree_prompt: worktree_prompt.clone(), git: git.clone() });
+            }
             _ => {
                 note(tx,t,"Orchestrator: Lauf fehlgeschlagen oder ungueltige Entscheidung; siehe Diagnose")?;
             }
