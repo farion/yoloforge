@@ -313,6 +313,24 @@ async fn publish_pull(
     store(path, receipt)?;
     Ok(url)
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ReviewEvidence {
+    job: ReviewJob,
+    repository: PathBuf,
+    exit: Option<i32>,
+    removed: Option<RemovalProof>,
+}
+
+impl ReviewEvidence {
+    fn hosting_source(&self) -> Result<(PathBuf, String)> {
+        ensure!(self.removed.is_some() && self.exit == Some(0), "Review tests not confirmed");
+        let ReviewJob::Review { target_branch, .. } = &self.job else {
+            anyhow::bail!("Not a review candidate");
+        };
+        Ok((self.repository.clone(), target_branch.clone()))
+    }
+}
+
 pub async fn publish(args: &Args, client: &FactoryClient, id: CommandId) -> Result<()> {
     publish_pinned(args, client, id, None).await
 }

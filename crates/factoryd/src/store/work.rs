@@ -427,9 +427,19 @@ impl Store {
         intent_recovery: bool,
     ) -> Result<RunnerCommand> {
         let direct = role == factory_protocol::directs::ROLE;
-        let publication = role == APPROVED_PUBLICATION_ROLE;
+        let publication = role == MERGER_ROLE
+            && body.prompt.as_deref().is_some_and(|prompt| prompt.starts_with(DIRECT_MERGE_PREFIX));
         let supervised = !role.is_empty() && !direct && role != MERGER_ROLE && !publication;
         let mut owner = stream(tx, id)?;
+        if role == MERGER_ROLE && tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id
+             WHERE s.project_id=?1 AND c.state IN ('pending','accepted')
+                AND json_extract(c.data,'$.agent_spec.role') IN (?2,?3))",
+            params![owner.project_id.to_string(), MERGER_ROLE, APPROVED_PUBLICATION_ROLE],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(StoreError::WorkConflict);
+        }
         if super::draft_resets::retired(tx, owner.id)? {
             return Err(StoreError::WorkConflict);
         }
@@ -558,11 +568,12 @@ impl Store {
         }
         let agent_spec = if body.kind == CommandKind::RunAgent {
             let merged_stream: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND json_extract(data,'$.agent_spec.role')=?2)",
-                params![id.to_string(), MERGER_ROLE], |row| row.get(0),
+                "SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND json_extract(data,'$.agent_spec.role')=?2
+                 AND COALESCE(instr(json_extract(data,'$.agent_spec.prompt'),?3),0)<>1)",
+                params![id.to_string(), MERGER_ROLE, DIRECT_MERGE_PREFIX], |row| row.get(0),
             )?;
             if merged_stream && !(role == MERGER_ROLE && body.prompt.as_ref().is_some_and(|prompt|
-                prompt.lines().nth(1) == Some(MERGER_RECOVERY_PROMPT_MARKER))) {
+                prompt.starts_with(DIRECT_MERGE_PREFIX) || prompt.lines().nth(1) == Some(MERGER_RECOVERY_PROMPT_MARKER))) {
                 return Err(StoreError::Invalid("Start a new session from the target branch after a Merger run"));
             }
             let prompt = body
@@ -639,9 +650,10 @@ impl Store {
             };
             let continuation = if let Some(previous) = previous {
                 let data:Option<String>=tx.query_row("SELECT data FROM commands WHERE stream_id=?1 AND json_extract(data,'$.kind')='run_agent'
-                    AND NOT (COALESCE(json_extract(data,'$.agent_spec.role'),'')=?2 AND state='succeeded'
+                    AND NOT ((COALESCE(json_extract(data,'$.agent_spec.role'),'')=?2
+                         OR COALESCE(instr(json_extract(data,'$.agent_spec.prompt'),?4),0)=1) AND state='succeeded'
                              AND COALESCE(instr(json_extract(data,'$.result.agent.summary'),?3),0)=1)
-                    ORDER BY rowid DESC LIMIT 1",params![id.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX],|r|r.get(0)).optional()?;
+                    ORDER BY rowid DESC LIMIT 1",params![id.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX, DIRECT_MERGE_PREFIX],|r|r.get(0)).optional()?;
                 let parent: RunnerCommand =
                     serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
                 if super::sessions::closed(tx, parent.session_root())? {
@@ -1014,9 +1026,11 @@ impl Store {
                 let mut owner = stream(tx, value.stream_id)?;
                 let merger = value.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
                 let approved_publication = value.agent_spec.as_ref().is_some_and(|spec| spec.role == APPROVED_PUBLICATION_ROLE);
-                let snapshot_retry = ok && implementer_needs_review_snapshot(&value)
-                    && !super::validation::legacy_dirty_checkout(&value);
-                let reviewed_merge = merger && super::merger::reviewed_source(tx, &value)?.is_some();
+                 let snapshot_retry = ok && implementer_needs_review_snapshot(&value)
+                    && !super::validation::legacy_dirty_checkout(&value)
+                    && tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs WHERE agent_id=?1)",
+                        [value.id.to_string()], |r| r.get::<_, bool>(0))?;
+                 let reviewed_merge = merger && super::merger::reviewed_source(tx, &value)?.is_some();
                 let publication_blocked = command_publication_blocked(&value)
                     || ((merger || approved_publication) && (!ok || !matches!(&value.result, Some(CommandOutput::Agent { agent })
                         if publication_was_confirmed(&agent.summary))));
@@ -1040,8 +1054,8 @@ impl Store {
                     super::tasks::set_publication_state(tx, &owner, value.id, TicketState::Blocked,
                         "OpenCode-Session ohne Ergebnis gestoppt; Arbeitsstand bleibt erhalten.")?;
                 }
-                if publication_blocked && !(snapshot_retry || approved_publication || reviewed_merge) {
-                    if let Some(reason) = super::merger::publication_attention_reason(tx, &value)? {
+                 if publication_blocked && !(snapshot_retry || approved_publication || reviewed_merge) {
+                     if let Some(reason) = super::merger::publication_attention_reason(tx, &value)? {
                         super::desktop::require_execution_attention(tx, &owner, value.id, reason)?;
                     }
                 }

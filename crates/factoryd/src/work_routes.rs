@@ -358,9 +358,12 @@ pub(super) async fn pending_commands(
                 return Err(StoreError::NotFound);
             }
             store.pending_with_direct_support(id, directs).map(|mut commands| {
+                commands.retain(|c| c.agent_spec.as_ref().is_none_or(|s| s.role != APPROVED_PUBLICATION_ROLE)
+                    && !matches!(c.kind, CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview));
                 commands.retain(|c| merger || c.agent_spec.as_ref().is_none_or(|s| s.role != MERGER_ROLE));
                 commands.retain(|c| merger_recovery || !is_merger_recovery(c));
-                commands.retain(|c| reviewed_merger_supported || !reviewed_merger(c));
+                commands.retain(|c| reviewed_merger_supported
+                    || (!reviewed_merger(c) && direct_merge_source(c).is_none()));
                 commands.retain(|c| intent_recovery || !is_intent_recovery(c));
                 commands.retain(|c| reviewed_publication || !requires_reviewed_publication(c));
                 commands
@@ -478,7 +481,8 @@ pub(super) async fn ack_command(
     db_call(body.request_id, move || {
         store.require_direct_support(runner, id, body.ownership_epoch, directs)?;
         store.require_merger_support(runner, id, body.ownership_epoch, merger, merger_recovery)?;
-        if !reviewed_merger_supported && reviewed_merger(&store.command_payload(id)?) {
+        let payload = store.command_payload(id)?;
+        if !reviewed_merger_supported && (reviewed_merger(&payload) || direct_merge_source(&payload).is_some()) {
             return Err(StoreError::WorkConflict);
         }
         store.require_intent_recovery_support(runner, id, body.ownership_epoch, intent_recovery)?;

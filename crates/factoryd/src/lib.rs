@@ -367,13 +367,6 @@ pub fn router_with_shutdown(
             "/v1/tickets/{id}/dependencies",
             post(scheduler_routes::dependencies),
         )
-        .route("/v1/streams/{id}/review", post(review_routes::review))
-        .route("/v1/streams/{id}/integrate", post(review_routes::integrate))
-        .route("/v1/commands/{id}/review", get(review_routes::read))
-        .route(
-            "/v1/runners/{runner}/commands/{command}/review",
-            get(review_routes::runner_read),
-        )
         .route(
             "/v1/runners/{runner}/runtime-cleanups",
             get(termination_routes::pending),

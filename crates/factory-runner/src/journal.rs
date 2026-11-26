@@ -32,7 +32,7 @@ pub struct Record {
     #[serde(default)]
     pub repository: Option<crate::managed::Plan>,
     #[serde(default)]
-    pub review: Option<crate::review::Plan>,
+    pub review: Option<crate::hosting::ReviewEvidence>,
     #[serde(default)]
     pub checkpoint: Option<crate::checkpoint::Plan>,
     #[serde(default)]

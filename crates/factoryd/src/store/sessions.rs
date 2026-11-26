@@ -57,10 +57,11 @@ impl Store {
         let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",[owner.id.to_string()],|r|r.get(0))?;
         let latest:String=tx.query_row(
             "SELECT id FROM commands WHERE stream_id=?1 AND json_extract(data,'$.kind')='run_agent'
-             AND NOT (COALESCE(json_extract(data,'$.agent_spec.role'),'')=?2 AND state='succeeded'
+             AND NOT ((COALESCE(json_extract(data,'$.agent_spec.role'),'')=?2
+                 OR COALESCE(instr(json_extract(data,'$.agent_spec.prompt'),?4),0)=1) AND state='succeeded'
                  AND COALESCE(instr(json_extract(data,'$.result.agent.summary'),?3),0)=1)
              ORDER BY rowid DESC LIMIT 1",
-            params![owner.id.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX], |r|r.get(0))?;
+             params![owner.id.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX, DIRECT_MERGE_PREFIX], |r|r.get(0))?;
         let archived:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1 AND json_extract(data,'$.final_scan_complete')=1)",[id.to_string()],|r|r.get(0))?;
         if latest != id.to_string()
             || busy

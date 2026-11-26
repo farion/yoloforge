@@ -203,8 +203,8 @@ pub(super) fn resolve(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
                     transition(tx, &mut ticket, TicketState::InProgress, "validation.approved", Some(reviewer.id))?;
                     let queued = Store::enqueue_with_pins(tx, owner.id, &EnqueueCommand {
                         request_id: RequestId::new(), expected_revision: owner.revision,
-                        kind: CommandKind::RunAgent, prompt: Some(source.clone()),
-                    }, None, APPROVED_PUBLICATION_ROLE, None, Some((&Default::default(), &McpProfile::default())), None, true);
+                         kind: CommandKind::RunAgent, prompt: Some(format!("{DIRECT_MERGE_PREFIX}{source}")),
+                     }, None, MERGER_ROLE, None, Some((&Default::default(), &McpProfile::default())), None, true);
                     let mut command = match queued {
                         Ok(command) => command,
                         Err(StoreError::WorkConflict | StoreError::RevisionConflict(_) | StoreError::Invalid(_)) => {

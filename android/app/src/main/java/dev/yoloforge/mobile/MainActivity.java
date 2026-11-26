@@ -658,6 +658,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         navigationRow(page,R.drawable.ic_bell,"Android-Benachrichtigungen",false,0,this::notificationSettings);
         navigationRow(page,R.drawable.ic_download_simple,"App-Updates",false,0,this::updates);
         navigationRow(page,R.drawable.ic_sign_out,"Anmeldung wechseln",false,0,this::login);
+        text("Installierte Version: "+BuildConfig.VERSION_NAME);
     }
     private void notificationSettings(){
         screen("Android-Benachrichtigungen");button("Zurueck",this::appSettings);

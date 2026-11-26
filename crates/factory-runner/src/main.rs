@@ -28,7 +28,6 @@ mod presence;
 mod publication;
 mod questions;
 mod recovery;
-mod review;
 mod setup;
 mod termination;
 mod target_git;
@@ -179,6 +178,13 @@ async fn report(
         return Ok(());
     }
     sync_excerpt(client, registration, &record).await?;
+    if matches!(&record.result, Some(CommandOutput::Agent { agent })
+        if publication_was_confirmed(&agent.summary))
+    {
+        if let Err(error) = tokio::task::block_in_place(|| publication::cleanup_merged_worktree(journal, &record, args)) {
+            eprintln!("Merged worktree retained for {}: {error:#}", record.command.id);
+        }
+    }
     let result = record
         .result
         .clone()
@@ -293,6 +299,8 @@ async fn commands(
             command.runner_id == args.id,
             "server returned a different runner's command"
         );
+        anyhow::ensure!(command.agent_spec.as_ref().is_none_or(|spec| spec.role != APPROVED_PUBLICATION_ROLE),
+            "Separate publication commands were removed; use the Merger");
         let mut record = tokio::task::block_in_place(|| journal.receive(command))?;
         let effective = setup::effective(args, &record.command)?;
         let args = &effective;
@@ -568,39 +576,7 @@ async fn commands(
                 record.command.kind,
                 CommandKind::ReviewCheckpoint | CommandKind::IntegrateReview
             ) {
-                let job = client
-                    .runner_review_job(
-                        args.id,
-                        registration,
-                        record.command.id,
-                        record.command.ownership_epoch,
-                    )
-                    .await?;
-                if let ReviewJob::Review { checkpoint, .. } = &job {
-                    let bytes = client
-                        .download_checkpoint_bundle(
-                            args.id,
-                            registration,
-                            record.command.id,
-                            record.command.ownership_epoch,
-                        )
-                        .await?;
-                    tokio::task::block_in_place(|| {
-                        checkpoint::install_bundle(
-                            args.workspace_root
-                                .as_deref()
-                                .expect("workspace root initialized"),
-                            checkpoint,
-                            &bytes,
-                        )
-                    })?;
-                }
-                if let Some(output) = review::step(journal, &mut record, args, &job).await? {
-                    record.result = Some(output);
-                    tokio::task::block_in_place(|| journal.save(&record))?;
-                    report(client, journal, registration, record, args).await?;
-                }
-                return Ok(true);
+                anyhow::bail!("Separate checkpoint review and integration were removed");
             }
             if record.command.kind == CommandKind::PrepareWorkspace {
                 if let Some(import) = record

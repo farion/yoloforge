@@ -130,9 +130,10 @@ pub(super) fn answer_clarification(
 }
 fn candidates(tx: &Transaction<'_>, project: ProjectId) -> Result<Vec<RunnerCommand>> {
     let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND c.rowid=(SELECT MAX(c2.rowid) FROM commands c2 WHERE c2.stream_id=c.stream_id AND json_extract(c2.data,'$.kind')='run_agent'
-        AND NOT (COALESCE(json_extract(c2.data,'$.agent_spec.role'),'')=?2 AND c2.state='succeeded'
+        AND NOT ((COALESCE(json_extract(c2.data,'$.agent_spec.role'),'')=?2
+            OR COALESCE(instr(json_extract(c2.data,'$.agent_spec.prompt'),?4),0)=1) AND c2.state='succeeded'
                  AND COALESCE(instr(json_extract(c2.data,'$.result.agent.summary'),?3),0)=1)) ORDER BY c.rowid DESC")?;
-    let rows = stmt.query_map(params![project.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX], |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map(params![project.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX, DIRECT_MERGE_PREFIX], |r| r.get::<_, String>(0))?;
     rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
 }
 

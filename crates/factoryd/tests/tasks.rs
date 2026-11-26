@@ -958,6 +958,14 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
         "Neither the current unreviewed snapshot nor older results may enter publication recovery");
     assert!(s.pending_review_snapshot_recoveries(RunnerId::new()).unwrap().is_empty());
     db.execute("DELETE FROM commands WHERE rowid BETWEEN -31 AND -1", []).unwrap();
+    db.execute("UPDATE tickets SET data=json_set(data,'$.updated_unix_ms',0) WHERE id=?1",
+        [intent.id.to_string()]).unwrap();
+    s.merger_tick().unwrap();
+    assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::Blocked);
+    assert!(s.desktop_snapshot().unwrap().intent_problems.iter().any(|problem|
+        problem.ticket_id == intent.id && problem.command_id == run.id && problem.reason.contains("Lösung:")));
+    assert_eq!(s.pending_review_snapshot_recoveries(runner).unwrap(), vec![run.id],
+        "Inbox escalation must not prevent safe automatic recovery");
     assert!(!s.claim_publication_recovery(runner, run.id, grant_id).unwrap());
     assert!(!s.claim_review_snapshot_recovery(RunnerId::new(), run.id, grant_id).unwrap());
     assert!(s.claim_review_snapshot_recovery(runner, run.id, grant_id).unwrap());
@@ -986,13 +994,19 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
     let pending = s.pending(runner).unwrap();
     assert_eq!(pending.len(), 1);
     let publication = &pending[0];
-    assert_eq!(publication.agent_spec.as_ref().unwrap().role, APPROVED_PUBLICATION_ROLE);
-    assert_eq!(publication.agent_spec.as_ref().unwrap().prompt, run.id.to_string());
+    assert_eq!(direct_merge_source(publication), Some(run.id));
+    db.execute("UPDATE commands SET data=json_set(data,'$.agent_spec.role',?1,'$.agent_spec.prompt',?2) WHERE id=?3",
+        rusqlite::params![APPROVED_PUBLICATION_ROLE, run.id.to_string(), publication.id.to_string()]).unwrap();
+    s.merger_tick().unwrap();
+    assert_eq!(s.command_payload(publication.id).unwrap().state, CommandState::Failed);
+    let publication = s.pending(runner).unwrap().pop().unwrap();
+    assert_eq!(direct_merge_source(&publication), Some(run.id));
 
-    agent_reply(&s, publication, &format!("{PUBLICATION_BLOCKED_PREFIX}\nTarget checkout temporarily unavailable"));
+    agent_reply(&s, &publication, &format!("{PUBLICATION_BLOCKED_PREFIX}\nTarget checkout temporarily unavailable"));
+    db.execute("UPDATE delivery_retries SET next_ms=0", []).unwrap();
     s.merger_tick().unwrap();
     let retry = s.pending(runner).unwrap().pop().unwrap();
-    assert_eq!(retry.agent_spec.as_ref().unwrap().prompt, run.id.to_string());
+    assert_eq!(direct_merge_source(&retry), Some(run.id));
     agent_reply(&s, &retry, &format!("{PUBLICATION_CONFLICT_PREFIX}\nBoth sides changed the same file"));
     assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::InProgress);
     s.merger_tick().unwrap();
@@ -1019,7 +1033,9 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
         merger.agent_spec.as_ref().unwrap().prompt.lines().next());
     agent_reply(&s, &newer, PUBLICATION_CONFIRMED_PREFIX);
     assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::Done);
-    assert!(s.snapshot().unwrap().intent_problems.is_empty());
+    assert!(s.snapshot().unwrap().intent_problems.iter().all(|problem|
+        problem.ticket_id == intent.id && problem.command_id == run.id),
+        "Only the historical snapshot escalation may remain");
     assert_eq!(s.snapshot().unwrap().commands.iter().filter(|c|
         c.kind == CommandKind::RunAgent && c.stream_id == run.stream_id
         && c.agent_spec.as_ref().is_some_and(|a| a.role.is_empty())).count(), 1);
@@ -1268,8 +1284,8 @@ fn legacy_checkout_block_resumes_review_after_restart_without_reimplementing() {
     approve_review(&s, runner);
     let [publication]: [RunnerCommand; 1] = s.pending(runner).unwrap().try_into().unwrap();
     let agent = publication.agent_spec.as_ref().unwrap();
-    assert_eq!(agent.role, APPROVED_PUBLICATION_ROLE);
-    assert_eq!(agent.prompt, implementation.id.to_string());
+    assert_eq!(agent.role, MERGER_ROLE);
+    assert_eq!(agent.prompt, format!("{DIRECT_MERGE_PREFIX}{}", implementation.id));
     agent_reply(&s, &publication, PUBLICATION_CONFIRMED_PREFIX);
     assert_eq!(current().status, TicketState::Done);
 }
@@ -1383,8 +1399,8 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     agent_reply(&s, &new_review, r#"{"action":"approve"}"#);
     s.scheduler_tick().unwrap();
     let publication = s.pending(runner).unwrap().into_iter()
-        .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == APPROVED_PUBLICATION_ROLE)).unwrap();
-    assert_eq!(publication.agent_spec.as_ref().unwrap().prompt, rework.id.to_string());
+        .find(|c| direct_merge_source(c).is_some()).unwrap();
+    assert_eq!(direct_merge_source(&publication), Some(rework.id));
     assert_eq!(publication.workspace_spec, rework.workspace_spec);
     assert_eq!(current(&s, intent.id).status, TicketState::InProgress);
     agent_reply(&s, &publication, PUBLICATION_CONFIRMED_PREFIX);
@@ -1452,7 +1468,7 @@ fn approve_review(s: &Store, runner: RunnerId) {
 
 fn finish_publication(s: &Store, runner: RunnerId) {
     if let Some(publication) = s.pending(runner).unwrap().into_iter()
-        .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == APPROVED_PUBLICATION_ROLE))
+        .find(|c| direct_merge_source(c).is_some())
     {
         agent_reply(s, &publication, PUBLICATION_CONFIRMED_PREFIX);
     }
@@ -1787,7 +1803,7 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
             .execution_command,
         s.snapshot().unwrap().commands.iter()
             .find(|cmd| cmd.agent_spec.as_ref().is_some_and(|a|
-                a.role == APPROVED_PUBLICATION_ROLE && a.prompt == c.id.to_string()))
+                a.role == MERGER_ROLE && a.prompt == format!("{DIRECT_MERGE_PREFIX}{}", c.id)))
             .map(|cmd| cmd.id)
     );
     complete(

@@ -1,0 +1,59 @@
+// Ist-Ablauf; ergänzende Statusregeln in intent-lifecycle.md.
+settings {
+    type: bpmn
+    direction: left-to-right
+}
+layout {
+    Wait above Routing
+}
+semantics {
+    startEvent Start("Intent angelegt")
+    endEvent Archived("Im Intent-Archiv\nKriterien erfüllt")
+    endEvent Recovery("Fortsetzung, Archiv (Cancelled)\noder aus Listen entfernt")
+    endEvent RunAgain("Lauf fortsetzen")
+    endEvent ReworkRun("Nacharbeit starten: InProgress")
+    endEvent Submitted("Weiter bei „Einreihen“")
+    endEvent ReviewArchive("Done; Archivkriterien prüfen")
+    endEvent MergeArchive("Im Archiv: Done")
+    endEvent ReviewProblem("Weiter bei „Inbox: Problem klären“")
+    endEvent MergeProblem("Weiter bei „Inbox: Problem klären“")
+    endEvent ResetToDraft("Wieder im Entwurf")
+    userTask Draft("Entwurf speichern\nBacklog + draft")
+    Queue("Einreihen\nBacklog / Ready")
+    serviceTask Routing("Zuteilung und Vorbereitung prüfen")
+    Wait("Auf Scheduler-Tick\noder Wecksignal warten")
+    Run("Auftrag ausführen\nInProgress")
+    Answer("Frage oder Berechtigung klären,\ndann Lauf fortsetzen\nUI: Braucht Antwort")
+    serviceTask Validate("Ergebnis validieren\nValidating")
+    Rework("Nacharbeit einreihen\nReworkQueued")
+    Integrate("Geprüften Stand übernehmen\nBei Bedarf erneut versuchen")
+    Done("Abschluss oder Erfolg nachweisen\nDone nicht immer erforderlich")
+    userTask ResolveOther("Inbox: Problem klären\nLösung, Abbruch oder Löschen")
+    ArchivedReset("Auf Antrag: zulässigen Reset ausführen\nBlocked → Backlog + draft")
+
+    Start <X>@Create Draft: Entwurf ; Queue: direkt einreihen
+    Draft --> Submitted : absenden
+    Queue --> Routing
+    Routing <X>@Dispatch Run: ausführbar ; Wait: noch nicht ausführbar
+    Wait --> Routing
+    Run --> <X>@RunResult
+    RunResult --> ResolveOther : Fehler / Stopp
+    RunResult --> Answer
+    RunResult --> Validate
+    RunResult --> Done
+    Answer --> RunAgain
+    Validate --> <X>@ReviewResult
+    ReviewResult --> Rework
+    ReviewResult --> Integrate
+    ReviewResult --> ReviewArchive
+    ReviewResult --> ReviewProblem : blockiert
+    Rework --> ReworkRun
+    Integrate --> <X>@IntegrationResult
+    IntegrationResult --> MergeArchive
+    IntegrationResult --> MergeProblem
+    Done --> <X>@AfterDone
+    AfterDone --> Archived
+    AfterDone --> ArchivedReset
+    ResolveOther --> Recovery
+    ArchivedReset --> ResetToDraft : Runner bestätigt Reset
+}

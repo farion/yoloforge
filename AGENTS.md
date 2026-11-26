@@ -1,4 +1,12 @@
-# Dauerhafte Nutzerregeln für Oberflächen
+# Dauerhafte Nutzerregeln
+
+- Intents dürfen nicht still stehen bleiben: Entweder es gibt einen
+  tatsächlichen Weg zur Weiterverarbeitung oder die Inbox nennt den Blocker
+  und mindestens eine konkrete Lösung. Ein bloßer Wartestatus ist keine Lösung.
+- Implementer liefern den Arbeitsstand für den Review. Sie mergen nicht und
+  schreiben nicht in den Zielbranch. Ein Merge ist Aufgabe des Mergers.
+
+## Oberflächen
 
 Diese Designregeln des Nutzers gelten bei UI-Arbeiten in diesem Repository:
 

@@ -265,18 +265,6 @@ pub(crate) fn has_plan(journal: &Journal, command: &RunnerCommand) -> Result<boo
         [key(command)], |row| row.get(0))?)
 }
 
-pub(crate) fn draft_reset_repository(journal: &Journal, command: &RunnerCommand, workspace: &Workspace, root: &Path) -> Result<PathBuf> {
-    let raw: String = journal.db.query_row("SELECT data FROM workspaces WHERE stream_id=?1",
-        [key(command)], |row| row.get(0)).context("No journaled worktree")?;
-    let plan: Plan = serde_json::from_str(&raw)?;
-    ensure!(plan.ready && (plan.path == root.join(path_key(command)) || plan.path == root.join(key(command)))
-        && git_path(&plan.path)? == git_path(Path::new(&workspace.path))?
-        && plan.spec.branch == workspace.branch && plan.path != plan.repository
-        && fs::canonicalize(&plan.repository)? == plan.repository
-        && common_dir(&plan.repository)? == plan.common_dir, "Draft reset worktree binding changed");
-    Ok(plan.repository)
-}
-
 /// Only an explicit draft reset reaches here. Bind the removal to the recorded
 /// linked worktree, never the user's checkout, a reused path or a symlink.
 pub(crate) fn discard(
@@ -327,7 +315,7 @@ pub fn prepare(
     mapping: Option<&Path>,
     root: &Path,
 ) -> CommandOutput {
-    match prepare_inner(journal, command, mapping, root) {
+    match prepare_inner(journal, command, mapping, root, false) {
         Ok(workspace) => CommandOutput::Workspace { workspace },
         // Errors here are ours, never Git stderr (which could contain credentials).
         Err(error) => {
@@ -347,6 +335,7 @@ fn prepare_inner(
     command: &RunnerCommand,
     mapping: Option<&Path>,
     root: &Path,
+    snapshot_only: bool,
 ) -> Result<Workspace> {
     let mut spec = command
         .workspace_spec
@@ -382,6 +371,9 @@ fn prepare_inner(
     let previous: Option<Plan> = previous
         .map(|value| serde_json::from_str(&value))
         .transpose()?;
+    if snapshot_only {
+        ensure!(previous.as_ref().is_some_and(|plan| plan.ready), "Workspace preparation is not confirmed");
+    }
     let new_path = root.join(path_key(command));
     let legacy_path = root.join(key(command));
     let path = previous
@@ -450,15 +442,25 @@ fn prepare_inner(
             "Workspace path is a symlink"
         );
         ensure!(
-            path.join(".git").is_file(),
+            fs::symlink_metadata(path.join(".git")).is_ok_and(|meta| meta.file_type().is_file()),
             "Existing path is not the planned worktree; inspect manually"
         );
         ensure!(
             fs::canonicalize(git(&path, &["rev-parse", "--show-toplevel"])?)? == path
-                && common_dir(&path)? == plan.common_dir
-                && git(&path, &["symbolic-ref", "HEAD"])? == reference,
+                && common_dir(&path)? == plan.common_dir,
             "Existing worktree identity differs from plan"
         );
+        let head = git(&path, &["rev-parse", "--symbolic-full-name", "HEAD"])?;
+        if snapshot_only && head == "HEAD" {
+            let registered = git(&repository, &["worktree", "list", "--porcelain", "-z"])?;
+            let path = git_path(&path)?;
+            ensure!(registered.split('\0').any(|line| line.strip_prefix("worktree ") == Some(path.as_ref())),
+                "Detached snapshot worktree is not registered in the planned repository");
+            git(&plan.path, &["merge-base", "--is-ancestor", &plan.commit, "HEAD"])
+                .context("Detached snapshot HEAD does not descend from the prepared commit")?;
+        } else {
+            ensure!(head == reference, "Existing worktree branch differs from plan");
+        }
         if !plan.ready {
             ensure!(
                 git(&path, &["rev-parse", "HEAD"])? == plan.commit
@@ -504,8 +506,10 @@ fn prepare_inner(
         )
         .context("Cannot create the linked Git worktree")?;
     }
-    plan.ready = true;
-    save(journal, key(command), &plan)?;
+    if !snapshot_only {
+        plan.ready = true;
+        save(journal, key(command), &plan)?;
+    }
     Ok(Workspace {
         path: path.to_str().context("Non-UTF8 workspace path")?.into(),
         branch: spec.branch.clone(),
@@ -554,7 +558,13 @@ pub fn existing(
     let plan: Plan =
         serde_json::from_str(&data.context("Prepare workspace on this runner first")?)?;
     ensure!(plan.ready, "Workspace preparation is not confirmed");
-    prepare_inner(journal, command, mapping, root)
+    prepare_inner(journal, command, mapping, root, false)
+}
+
+pub(crate) fn existing_for_snapshot(
+    journal: &Journal, command: &RunnerCommand, mapping: Option<&Path>, root: &Path,
+) -> Result<Workspace> {
+    prepare_inner(journal, command, mapping, root, true)
 }
 
 #[cfg(test)]
@@ -645,7 +655,7 @@ mod tests {
             }
         }
         fn prepare(&self, command: &RunnerCommand) -> Result<Workspace> {
-            prepare_inner(&self.journal, command, Some(&self.mapping), &self.root)
+            prepare_inner(&self.journal, command, Some(&self.mapping), &self.root, false)
         }
         fn plan(&self, command: &RunnerCommand) -> Plan {
             let data: String = self

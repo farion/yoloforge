@@ -422,7 +422,8 @@ pub const APPROVED_PUBLICATION_ROLE: &str = "approved-publication";
 pub const REVIEWED_PUBLICATION_CAPABILITY: &str = "reviewed-publication-v1";
 
 pub fn requires_reviewed_publication(command: &RunnerCommand) -> bool {
-    command.agent_spec.as_ref().is_some_and(|s| s.defer_publication || s.role == APPROVED_PUBLICATION_ROLE)
+    direct_merge_source(command).is_some()
+        || command.agent_spec.as_ref().is_some_and(|s| s.defer_publication || s.role == APPROVED_PUBLICATION_ROLE)
 }
 pub const NO_GIT_CHANGES_MARKER: &str = "[yoloforge:no-git-changes]";
 pub const SESSION_STOPPED_PREFIX: &str = "[yoloforge:session-stopped]";
@@ -439,8 +440,13 @@ pub const MERGER_ROLE: &str = "merger";
 pub const MERGER_CAPABILITY: &str = "merger-v1";
 pub const MERGE_PARENT_PREFIX: &str = "factory_merge_parent=";
 pub const MERGER_RECOVERY_CAPABILITY: &str = "merger-recovery-v1";
-pub const REVIEWED_MERGER_CAPABILITY: &str = "reviewed-merger-v3";
+pub const REVIEWED_MERGER_CAPABILITY: &str = "reviewed-merger-v4";
 pub const REVIEWED_MERGER_POLICY: &str = "factory_merge_policy=reviewed-delivery-v3";
+pub const DIRECT_MERGE_PREFIX: &str = "factory_direct_merge=";
+pub fn direct_merge_source(command: &RunnerCommand) -> Option<CommandId> {
+    command.agent_spec.as_ref().filter(|spec| spec.role == MERGER_ROLE)?
+        .prompt.strip_prefix(DIRECT_MERGE_PREFIX)?.parse().ok()
+}
 pub const SNAPSHOT_RETRY_NOTE: &str = "Review-Snapshot wird automatisch erneut gesichert.";
 pub const INTEGRATION_RETRY_NOTE: &str = "Geprüftes Ergebnis wird automatisch erneut integriert.";
 pub fn delivery_retry_pending(ticket: &Ticket) -> bool {
