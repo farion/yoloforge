@@ -487,19 +487,14 @@ fn edge_route(a: Rect, b: Rect, server_on_left: bool, row: usize, rows: usize) -
     [start, Pos2::new(elbow, start.y), Pos2::new(elbow, end.y), end]
 }
 
-fn local_runner_route(server: Rect, runner: Rect, row: usize, rows: usize) -> [Pos2; 6] {
+fn local_runner_route(server: Rect, runner: Rect, row: usize, rows: usize) -> [Pos2; 4] {
     let depth = row as f32 / rows.saturating_sub(1).max(1) as f32;
     let end = runner.right_center();
     let gap = server.left() - end.x;
-    // Use the lower right ports, inside the remote bends, then pass through
-    // the gap after the last client card before returning down the left lane.
+    // Clear the server card, then return directly into the runner's right port.
     let start = server.right_bottom() - Vec2::new(0.0, 10.0 + 10.0 * depth);
-    let right = start.x + gap * (0.15 + 0.2 * depth);
-    let left = end.x + gap * (0.4 + 0.2 * depth);
-    let turn_y = runner.top() - row as f32 * ROW_HEIGHT
-        - (ROW_HEIGHT - NODE_HEIGHT) * 0.5 + 6.0 * depth;
-    [start, Pos2::new(right, start.y), Pos2::new(right, turn_y),
-        Pos2::new(left, turn_y), Pos2::new(left, end.y), end]
+    let right = start.x + gap * (0.34 + 0.10 * depth);
+    [start, Pos2::new(right, start.y), Pos2::new(right, end.y), end]
 }
 
 fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)], restarting: Option<&str>) -> Option<RunnerNodeAction> {
@@ -556,7 +551,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             let (route, center) = if from_server && *dest_col == 0 {
                 let route = local_runner_route(*a, *b, *dest_row - client_rows,
                     graph.columns[0].1.len() - client_rows);
-                (route.to_vec(), route[3].lerp(route[4], 0.5))
+                (route.to_vec(), route[1].lerp(route[2], 0.5))
             } else {
                 let (row, rows) = if from_server {
                     (*dest_row, graph.columns[*dest_col].1.len())
@@ -925,15 +920,15 @@ mod tests {
         assert!(local_route[0].y > remote[0].y);
         assert!(local_route[1].x > server.right() && local_route[1].x < remote[1].x);
         assert!(local_route[2].y > server.bottom());
-        assert!(local_route[4].x > local.right());
-        assert_eq!(local_route[5], local.right_center());
-        assert_eq!(route(&pending_key)[5], card(&pending_key).right_center());
+        assert_eq!(local_route[2].y, local.right_center().y);
+        assert_eq!(local_route[3], local.right_center());
+        assert_eq!(route(&pending_key)[3], card(&pending_key).right_center());
         let globe = |key: &String| ctx.data_mut(|d| d.get_temp::<Pos2>(
             egui::Id::new(("test-infrastructure-internet-edge", "server", key)),
         ));
         assert_eq!(globe(&hosted_key), None);
         assert_eq!(globe(&remote_key), None);
-        assert_eq!(globe(&desktop_key), Some(local_route[3].lerp(local_route[4], 0.5)));
+        assert_eq!(globe(&desktop_key), Some(local_route[1].lerp(local_route[2], 0.5)));
     }
 
     #[test]
@@ -969,6 +964,11 @@ mod tests {
             egui::Id::new(("test-infrastructure-edge-route", "server", &local_key)),
         )).unwrap();
         assert_eq!(route[0].x, server.right());
+        assert_eq!(route.len(), 4);
+        assert!(route[1].x > route[0].x);
+        assert_eq!(route[1].y, route[0].y);
+        assert_eq!(route[1].x, route[2].x);
+        assert_eq!(route[2].y, local_card.center().y);
         assert_eq!(route.last(), Some(&local_card.right_center()));
         assert!(ctx.data_mut(|d| d.get_temp::<Rect>(
             egui::Id::new(("test-local-runner-remove", local)),
@@ -992,8 +992,9 @@ mod tests {
             let a = local_runner_route(card(240.0, 0), card(0.0, row + 2), row, 6);
             let b = local_runner_route(card(240.0, 0), card(0.0, row + 3), row + 1, 6);
             assert!(b[0].y < a[0].y && b[1].x > a[1].x && b[2].y > a[2].y);
-            assert!(b[3].x > a[3].x && b[4].y > a[4].y);
-            assert!(a[2].y > card(0.0, 1).bottom() && b[2].y < card(0.0, 2).top());
+            assert_eq!(a[2].y, a[3].y);
+            assert_eq!(b[2].y, b[3].y);
+            assert!(b[3].y > a[3].y);
         }
     }
 
