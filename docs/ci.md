@@ -29,14 +29,18 @@ Kein Paket enthält Laufzeitdaten, Tokens oder Journale.
   Pakete stehen als `packages-OS-ARCH` sieben Tage
   als Actions-Artefakte bereit.
 - `.github/workflows/release.yml`: Tag-Push `v*` oder manueller Start mit einem
-  vorhandenen Tag. Tag und Workspace-Version müssen übereinstimmen. Alle Builds
+  vorhandenen Tag. Tag und Workspace-Version müssen übereinstimmen. Der exakte
+  Tag-Commit muss zuvor den vollständigen `CI`-Workflow auf `main` bestanden
+  haben, einschließlich des nativen Windows-Jobs. Alle Release-Builds
   müssen erfolgreich sein, alle zehn Pakete und ihre SHA-256-Prüfsummen müssen
   vorliegen. Erst dann wird das Draft-Release veröffentlicht.
 
-Beispiel bei Workspace-Version `1.2.3`:
+Beispiel bei Workspace-Version `1.2.3`: Zuerst den Commit mit der neuen
+Version auf `main` pushen und auf einen grünen `CI`-Lauf für genau diesen
+Commit warten. Erst danach den Tag auf diesen Commit setzen:
 
 ```sh
-git tag v1.2.3
+git tag -a v1.2.3 <geprüfter-commit> -m "Release v1.2.3"
 git push origin v1.2.3
 ```
 

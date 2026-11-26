@@ -264,8 +264,13 @@ fn clipboard_file_paths(text: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 #[test]
 fn clipboard_file_list_decodes_local_paths_only() {
-    assert_eq!(clipboard_file_paths("copy\r\n# comment\r\nfile:///tmp/zwei%20Worte.txt\r\nhttps://example.org/file\r\n"),
-        [PathBuf::from("/tmp/zwei Worte.txt")]);
+    #[cfg(windows)]
+    let (uri, path) = ("file:///C:/Temp/zwei%20Worte.txt", r"C:\Temp\zwei Worte.txt");
+    #[cfg(not(windows))]
+    let (uri, path) = ("file:///tmp/zwei%20Worte.txt", "/tmp/zwei Worte.txt");
+
+    let clipboard = format!("copy\r\n# comment\r\n{uri}\r\nhttps://example.org/file\r\n");
+    assert_eq!(clipboard_file_paths(&clipboard), [PathBuf::from(path)]);
 }
 
 fn clipboard_files() -> Option<Vec<PathBuf>> {
