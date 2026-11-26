@@ -98,15 +98,17 @@ fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId
             AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=s.id)
            AND COALESCE(json_extract(p.data,'$.paused'),0)=0
            AND c.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
-           AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=c.id
-                AND json_extract(a.data,'$.final_scan_complete')=1)
+           AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=
+                 CASE WHEN json_extract(c.data,'$.agent_spec.role')=?3
+                      THEN json_extract(c.data,'$.agent_spec.prompt') ELSE c.id END
+                 AND json_extract(a.data,'$.final_scan_complete')=1)
            AND EXISTS(SELECT 1 FROM stream_tickets st JOIN tickets t ON t.id=st.ticket_id
                 WHERE st.stream_id=c.stream_id AND json_extract(t.data,'$.execution_command')=c.id
                   AND json_extract(t.data,'$.status') IN ('in_progress','blocked')
                   AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id))
            AND NOT EXISTS(SELECT 1 FROM commands n JOIN streams w ON w.id=n.stream_id
                 WHERE w.project_id=s.project_id AND n.state IN ('pending','accepted'))",
-        params![id.to_string(), runner.to_string()],
+         params![id.to_string(), runner.to_string(), APPROVED_PUBLICATION_ROLE],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional()?;
     let Some((command, owner, project)) = row else { return Ok(None); };
@@ -696,13 +698,14 @@ pub(super) fn continue_failed_agent(tx: &Transaction<'_>, ticket: &mut Ticket, f
     let pins = super::models::ticket(tx, ticket.id)?;
     let skills = super::skills::for_ticket(tx, ticket.id, ticket.project_id)?;
     let mcps = super::mcp::for_ticket(tx, ticket.id, ticket.project_id)?;
-    let next = Store::enqueue_intent_recovery(tx, owner.id, &EnqueueCommand {
+    let mut next = Store::enqueue_intent_recovery(tx, owner.id, &EnqueueCommand {
         request_id: RequestId::new(), expected_revision: owner.revision, kind: CommandKind::RunAgent,
         prompt: Some(INTENT_RECOVERY_PROMPT.into()),
     }, failed.id, pins.as_ref().and_then(|m| m.implementer.as_ref()), (&skills, &mcps))?;
     if next.workspace_spec != failed.workspace_spec {
         return Err(StoreError::WorkConflict);
     }
+    super::validation::defer_publication(tx, &mut next)?;
     tx.execute("UPDATE scheduler_runs SET agent_id=?1 WHERE ticket_id=?2 AND agent_id=?3",
         params![next.id.to_string(), ticket.id.to_string(), failed.id.to_string()])?;
     ticket.execution_command = Some(next.id);
@@ -756,7 +759,7 @@ fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, auto
         return Err(StoreError::WorkConflict);
     }
     if let Some(plan) = &mut git { plan.resume = true; }
-    let next = Store::enqueue_with_pins(tx, owner.id, &EnqueueCommand {
+    let mut next = Store::enqueue_with_pins(tx, owner.id, &EnqueueCommand {
         request_id: body.request_id, expected_revision: owner.revision, kind: failed.kind,
         prompt: (failed.kind == CommandKind::RunAgent).then(|| {
             if continue_session {
@@ -781,6 +784,7 @@ fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, auto
             return Err(StoreError::Invalid("Ausführungsprofil geändert; Wiederholung nicht sicher"));
         }
     }
+    super::validation::defer_publication(tx, &mut next)?;
     if failed.kind == CommandKind::PrepareWorkspace {
         tx.execute("UPDATE scheduler_runs SET prepare_id=?1 WHERE ticket_id=?2 AND prepare_id=?3 AND agent_id IS NULL",
             params![next.id.to_string(),id.to_string(),failed.id.to_string()])?;

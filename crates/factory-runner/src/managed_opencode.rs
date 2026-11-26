@@ -11,6 +11,12 @@ use std::{
     time::Duration,
 };
 
+fn check_loopback_port(port: u16) -> Result<()> {
+    std::net::TcpListener::bind(("127.0.0.1", port))
+        .with_context(|| format!("Factory-OpenCode kann 127.0.0.1:{port} nicht öffnen (Port belegt oder reserviert)"))?;
+    Ok(())
+}
+
 const CONFIGS: &[&str] = &[
     "opencode.json",
     "opencode.jsonc",
@@ -110,6 +116,7 @@ pub(crate) async fn start(
         port != 0,
         "Verwaltetes OpenCode braucht einen festen Loopback-Port"
     );
+    check_loopback_port(port)?;
     ensure!(
         !exists(Path::new("/etc/opencode"))?,
         "System-Konfiguration /etc/opencode ist sichtbar; Runner isoliert starten"
@@ -176,6 +183,10 @@ pub(crate) async fn start(
             && std::str::from_utf8(&reported.stdout)?.trim() == format!("opencode v{VERSION}"),
         "Managed OpenCode requires version {VERSION}"
     );
+    let stderr_path = root.join("opencode-startup.log");
+    let stderr = tempfile::NamedTempFile::new_in(&root)?;
+    factory_platform::private_file(stderr.path())?;
+    let stderr = stderr.persist(&stderr_path)?;
     let mut child = command()
         .args([
             "serve",
@@ -184,6 +195,7 @@ pub(crate) async fn start(
             "--port",
             &port.to_string(),
         ])
+        .stderr(Stdio::from(stderr))
         .spawn()
         .context("Factory-OpenCode konnte nicht gestartet werden")?;
     let probe = tempfile::NamedTempFile::new_in(&root)?;
@@ -191,10 +203,9 @@ pub(crate) async fn start(
     fs::write(probe.path(), &descriptor)?;
     let client = factory_opencode::OpenCodeClient::from_registration(probe.path())?;
     for _ in 0..60 {
-        ensure!(
-            child.try_wait()?.is_none(),
-            "Factory-OpenCode wurde beim Start beendet"
-        );
+        if let Some(status) = child.try_wait()? {
+            bail!("Factory-OpenCode wurde beim Start beendet ({status}, 127.0.0.1:{port}). Diagnose: {}", stderr_path.display());
+        }
         if let OpenCodeStatus::Ready { version } = client.status().await {
             ensure!(version == VERSION, "Unerwartete Factory-OpenCode-Version");
             replace_private(registration, &descriptor)?;
@@ -202,7 +213,7 @@ pub(crate) async fn start(
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    bail!("Factory-OpenCode ist nicht erreichbar")
+    bail!("Factory-OpenCode ist auf 127.0.0.1:{port} nicht erreichbar. Diagnose: {}", stderr_path.display())
 }
 
 pub(crate) async fn refresh(settings: &Path, registration: &Path, factory_url: &str) -> Result<()> {
@@ -616,6 +627,14 @@ fn cargo_build_env(target: Option<std::ffi::OsString>) -> Vec<(std::ffi::OsStrin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn occupied_opencode_port_reports_the_address() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let error = super::check_loopback_port(port).unwrap_err().to_string();
+        assert!(error.contains(&format!("127.0.0.1:{port}")), "{error}");
+    }
+
     use super::*;
     #[test]
     fn runner_builds_disable_debug_symbols_and_incremental_state() {

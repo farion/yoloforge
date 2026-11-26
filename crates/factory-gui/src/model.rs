@@ -1,5 +1,5 @@
 use factory_core::*;
-use factory_protocol::{IntentProblem, IntentSolution, Snapshot, DISCARDED_SESSION_REASON};
+use factory_protocol::{IntentProblem, IntentSolution, Snapshot, TaskHistoryEntry, TaskHistoryLevel, DISCARDED_SESSION_REASON};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -750,6 +750,71 @@ pub(crate) fn intent_run_role(c: &RunnerCommand) -> &'static str {
         _ if c.kind == CommandKind::TargetGit => "Git",
         _ => crate::tr!("Arbeitsbereich"),
     }
+}
+
+pub(crate) fn intent_run_summary(
+    command: &RunnerCommand,
+    entry: Option<&TaskHistoryEntry>,
+) -> (String, Option<TaskHistoryLevel>) {
+    use TaskHistoryLevel::*;
+    let status = || (command_status(command).into(), None);
+    if command_publication_blocked(command) || command_publication_unconfirmed(command) {
+        return status();
+    }
+    let role = intent_run_role(command);
+    let result = match &command.result {
+        Some(CommandOutput::Agent { agent })
+            if command.state == CommandState::Succeeded && agent.phase == AgentPhase::Succeeded => {
+            Some(agent.summary.trim())
+        }
+        _ => None,
+    };
+    if role == "Memorizer" {
+        // A successful model response alone doesn't prove the notes were saved.
+        let Some(entry) = entry else { return status() };
+        return match entry.message.as_str() {
+            "Memorizer hat Wissen für den Branch gespeichert" => {
+                let observation = result
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                    .and_then(|value| {
+                        ["summary", "memory"].iter().find_map(|field| {
+                            value[*field].as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)
+                        })
+                    })
+                    .unwrap_or_else(|| crate::tr!("Branch-Wissen gespeichert.").into());
+                (observation, Some(Success))
+            }
+            "Memorizer-Auswertung abgeschlossen" => (crate::tr!("Auswertung abgeschlossen.").into(), Some(Info)),
+            "Memorizer prüft den abgeschlossenen Lauf" => (crate::tr!("Prüft den Lauf.").into(), Some(Info)),
+            _ => status(),
+        };
+    }
+    if let Some(result) = result {
+        if role == "Merger" && publication_was_confirmed(result) {
+            return (crate::tr!("Merge erfolgreich durchgeführt.").into(), Some(Success));
+        }
+        if role == "Implementer" {
+            let detail = result.split_once("\nAgentenergebnis:\n").map(|(_, text)| text.trim())
+                .unwrap_or(result);
+            if !detail.is_empty() && !detail.starts_with("[yoloforge:") {
+                return (detail.into(), Some(Success));
+            }
+        }
+    }
+    if let Some(entry) = entry {
+        let summary = match (role, entry.message.as_str()) {
+            ("Supervisor", "Supervisor-Auswertung abgeschlossen") => crate::tr!("Auswertung abgeschlossen."),
+            ("Supervisor", "Supervisor prüft die Session") => crate::tr!("Prüft den Lauf."),
+            ("Reviewer", "Reviewer hat die Erfüllung anhand des Textes bestätigt") => crate::tr!("Ergebnis per Textprüfung bestätigt."),
+            ("Reviewer", "Reviewer hat Nacharbeit mit Vorrang eingereiht") => crate::tr!("Nacharbeit eingereiht."),
+            ("Reviewer", "Reviewer konnte die Erfüllung anhand des Textes nicht beurteilen") => crate::tr!("Ergebnis nicht beurteilbar."),
+            ("Reviewer", "Reviewer konnte kein gültiges Urteil abgeben") => crate::tr!("Kein gültiges Urteil."),
+            ("Reviewer", "Limit für automatische Nacharbeit erreicht") => crate::tr!("Limit für automatische Nacharbeit erreicht"),
+            _ => return status(),
+        };
+        return (summary.into(), Some(entry.level));
+    }
+    status()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

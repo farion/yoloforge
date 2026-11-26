@@ -258,7 +258,10 @@ fn start(runner: &LocalRunner) -> Result<()> {
 fn start_instance(runner: &LocalRunner, instance: Option<InstanceId>) -> Result<()> {
     let root = runner.root()?;
     private_dir(&root)?;
-    if find_process(runner, &root)?.is_some() {
+    let owned_factory = runner.server == crate::persistence::LOCAL_FACTORY_URL;
+    if let Some(process) = find_process(runner, &root)? {
+        ensure!(!owned_factory || crate::persistence::owns_local_runner(runner.id, process.pid),
+            "Älterer lokaler Runner läuft noch. Bitte gezielt beenden; fremde Prozesse werden nicht verändert.");
         ensure!(instance.is_none(), crate::tr!("Runner wurde noch nicht vollständig beendet"));
         return Ok(());
     }
@@ -322,7 +325,10 @@ fn start_instance(runner: &LocalRunner, instance: Option<InstanceId>) -> Result<
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     }
-    let mut child = command.spawn()?;
+    if owned_factory {
+        return crate::persistence::spawn_owned(runner.id.to_string(), &mut command);
+    }
+    let mut child = command.env_remove(factory_platform::GUI_LIFETIME_PIPE).spawn()?;
     // Reap eventual exits but keep the runner independent of GUI lifetime.
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -338,7 +344,7 @@ async fn start_and_confirm(client: &FactoryClient, runner: &LocalRunner) -> Resu
             let managed = bytes
                 .split(|b| *b == 0)
                 .any(|arg| arg == b"--managed-opencode");
-            if !managed {
+            if !managed && runner.server != crate::persistence::LOCAL_FACTORY_URL {
                 ensure!(!busy(&client.desktop_snapshot().await?, runner.id),
                 crate::tr!("Runner hat laufende oder ungeklärte Aufträge; automatische OpenCode-Einrichtung wartet bis zum nächsten Verbinden."));
                 stop(runner).await?;

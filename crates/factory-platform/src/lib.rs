@@ -3,6 +3,20 @@ use anyhow::{ensure, Result};
 use std::{fs, path::Path};
 pub mod runner_control;
 
+pub const GUI_LIFETIME_PIPE: &str = "YOLOFORGE_GUI_LIFETIME_PIPE";
+
+/// Only GUI-owned services use stdin as a lifetime pipe. A plain thread lets
+/// independent shutdown paths exit without joining a blocked async stdin read.
+pub fn watch_gui_lifetime(on_close: impl FnOnce() + Send + 'static) -> Result<()> {
+    if std::env::var_os(GUI_LIFETIME_PIPE).as_deref() == Some(std::ffi::OsStr::new("1")) {
+        std::thread::Builder::new().name("gui-lifetime".into()).spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+            on_close();
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 mod windows;
 

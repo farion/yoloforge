@@ -839,6 +839,7 @@ mod tests {
     #[test]
     fn archived_continuation_can_narrow_known_legacy_skill_permissions_only() {
         let mut spec = AgentSpec {
+            defer_publication: false,
             repo_skills: Some(vec![]), factory_skills: vec![], local_mcps: vec![], remote_mcps: vec![],
             files: vec![], images: vec![], role: String::new(), review_of: None, read_only: false,
             continuation: Some(SessionContinuation {
@@ -935,6 +936,7 @@ mod tests {
                 base_branch: "main".into(),
             }),
             agent_spec: Some(AgentSpec {
+                defer_publication: false,
                 repo_skills: None,
                 factory_skills: Vec::new(),
                 local_mcps: Vec::new(),

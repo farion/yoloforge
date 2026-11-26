@@ -351,6 +351,7 @@ pub(super) async fn pending_commands(
         let merger = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
         let merger_recovery = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
         let intent_recovery = guard.entries[&id].input.capabilities.iter().any(|c| c == INTENT_RECOVERY_CAPABILITY);
+        let reviewed_publication = guard.entries[&id].input.capabilities.iter().any(|c| c == REVIEWED_PUBLICATION_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
@@ -359,6 +360,7 @@ pub(super) async fn pending_commands(
                 commands.retain(|c| merger || c.agent_spec.as_ref().is_none_or(|s| s.role != MERGER_ROLE));
                 commands.retain(|c| merger_recovery || !is_merger_recovery(c));
                 commands.retain(|c| intent_recovery || !is_intent_recovery(c));
+                commands.retain(|c| reviewed_publication || !requires_reviewed_publication(c));
                 commands
                     .retain(|c| files || c.agent_spec.as_ref().is_none_or(|s| s.files.is_empty()));
                 commands.retain(|c| repo_skills || c.agent_spec.as_ref().is_none_or(|s| s.repo_skills.is_none()));
@@ -469,10 +471,12 @@ pub(super) async fn ack_command(
     let merger = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
     let merger_recovery = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
     let intent_recovery = guard.entries[&runner].input.capabilities.iter().any(|c| c == INTENT_RECOVERY_CAPABILITY);
+    let reviewed_publication = guard.entries[&runner].input.capabilities.iter().any(|c| c == REVIEWED_PUBLICATION_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_direct_support(runner, id, body.ownership_epoch, directs)?;
         store.require_merger_support(runner, id, body.ownership_epoch, merger, merger_recovery)?;
         store.require_intent_recovery_support(runner, id, body.ownership_epoch, intent_recovery)?;
+        store.require_reviewed_publication_support(runner, id, body.ownership_epoch, reviewed_publication)?;
         store.require_context_planning_support(
             runner,
             id,

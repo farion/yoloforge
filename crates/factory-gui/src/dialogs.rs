@@ -76,7 +76,7 @@ pub enum Dialog {
         request: u64,
     },
     Questions(QuestionDialog),
-    QuestionView(Vec<Question>),
+    QuestionView { questions: Vec<Question>, page: usize },
     Form(FormDialog),
     ProjectSettings(Box<crate::project_settings::ProjectSettings>),
     FactorySettings,
@@ -322,7 +322,7 @@ impl Dialog {
             } else {
                 crate::tr!("Fragen und Antworten")
             }.into(),
-            Self::QuestionView(_) => crate::tr!("Fragen und Antworten").into(),
+            Self::QuestionView { .. } => crate::tr!("Fragen und Antworten").into(),
             Self::Form(form) => crate::i18n::label(&form.title).into(),
             Self::ProjectSettings(settings) => settings.title(app),
             Self::ConnectionInfo => crate::tr!("Verbindungsübersicht").into(),
@@ -369,10 +369,14 @@ impl Dialog {
                 header_close = design::dialog_header(ui, &title).clicked();
                  ui.separator();
                  let body_height = (content_size.y - (ui.cursor().top() - header_top)).max(40.0);
-                 if let Self::Questions(group) = self {
-                     close = group.show(ui, app, body_height);
-                     return;
-                 }
+                  if let Self::Questions(group) = self {
+                      close = group.show(ui, app, body_height);
+                      return;
+                  }
+                  if let Self::QuestionView { questions, page } = self {
+                      show_question_pages(ui, app, questions.iter(), page, body_height);
+                      return;
+                  }
                 if let Self::Task(task) = self {
                     close = task.show_layout(ui,app,body_height,modal_id);
                     return;
@@ -576,17 +580,7 @@ impl Dialog {
                     close = ui.button(crate::tr!("Schließen")).clicked();
                 }
                  Self::Questions(_) => unreachable!("Questions use a fixed footer"),
-                 Self::QuestionView(questions) => {
-                     if let Some((id, key)) = app.snapshot.as_deref().and_then(|snapshot| {
-                         let mut intents = questions.iter().map(|q| question_intent(snapshot, q));
-                         let first = intents.next().flatten()?;
-                         intents.all(|intent| intent.is_some_and(|t| t.id == first.id))
-                             .then(|| (first.id, first.key.clone()))
-                     }) {
-                         question_intent_link(ui, app, id, &key);
-                     }
-                     question_answers(ui, questions);
-                 }
+                  Self::QuestionView { .. } => unreachable!("Question views use a fixed footer"),
                 Self::Form(form) => close = form.show(ui, app, if form.is_project_editor() { body_height } else { height }),
                 Self::Read { request, path, .. } if is_project_usage(path) => {
                     match app.responses.get(request) {
@@ -759,6 +753,13 @@ fn german_count(value: u128) -> String {
         formatted.push(char::from(digit));
     }
     formatted
+}
+
+fn history_line(ui: &mut egui::Ui, at: u64, message: impl Into<egui::RichText>, color: egui::Color32) {
+    ui.horizontal_top(|ui| {
+        ui.colored_label(MUTED, timestamp(at));
+        ui.add(egui::Label::new(message.into().color(color)).wrap());
+    });
 }
 
 impl TaskDialog {
@@ -974,30 +975,41 @@ impl TaskDialog {
         }
         ui.add_space(8.0);
         ui.separator();
-        ui.strong(crate::tr!("Verlauf"));
+        design::section_heading(ui, crate::tr!("Verlauf"));
+        ui.scope(|ui| {
+            let mut font = egui::TextStyle::Body.resolve(ui.style());
+            font.size += 1.0;
+            ui.style_mut().text_styles.insert(egui::TextStyle::Body, font);
+            self.show_history_entries(ui, app, ticket)
+        }).inner
+    }
+
+    fn show_history_entries(&mut self, ui: &mut egui::Ui, app: &mut App, ticket: TicketId) -> bool {
         let snapshot = app.snapshot.clone();
         let intent = snapshot.as_ref().and_then(|s| s.tickets.iter().find(|t| t.id == ticket));
         let mut linked = std::collections::BTreeSet::new();
         if let Some((s, intent)) = snapshot.as_deref().zip(intent) {
-            if self.read_only {
+            if self.read_only && intent.execution_command.is_none() {
                 let status = task_display_status(s, intent);
-                app::badge(ui, status, crate::views::status_color(status));
+                history_line(ui, intent.updated_unix_ms, status, crate::views::status_color(status));
             }
             if let Some(reason) = task_runner_blocker(s, intent) {
                 design::routing_note_spacing(ui);
-                ui.colored_label(AMBER, reason);
+                history_line(ui, intent.updated_unix_ms, reason, AMBER);
             }
             // The current execution and queued/running review should be reachable
             // even before the paginated journal has returned.
-            if self.read_only && app.online {
+            if self.read_only {
                 for c in s.commands.iter().rev().filter(|c| {
                     Some(c.id) == intent.execution_command
                         || (matches!(c.state, CommandState::Pending | CommandState::Accepted)
                             && c.agent_spec.as_ref().is_some_and(|a| a.review_of == Some(ticket)))
                 }) {
+                    if self.history.entries.iter().any(|entry| entry.command_id == Some(c.id)) {
+                        continue;
+                    }
                     linked.insert(c.id);
-                    let open_in_footer = task_session_command(s, intent).is_some_and(|current| current.id == c.id);
-                    if self.show_intent_run(ui, app, c, !open_in_footer) {
+                    if self.show_intent_run(ui, app, c, None) {
                         return true;
                     }
                 }
@@ -1005,26 +1017,20 @@ impl TaskDialog {
         }
         for entry in &self.history.entries {
             let open = ui.push_id(entry.sequence, |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.colored_label(MUTED, timestamp(entry.created_unix_ms));
-                    let level = if entry.level == TaskHistoryLevel::Info {
-                        task_routing_level(&entry.message)
-                    } else {
-                        entry.level
-                    };
-                    ui.add(egui::Label::new(egui::RichText::new(crate::i18n::label(&entry.message))
-                        .color(design::history_color(level, ui.visuals().text_color()))).wrap());
-                });
-                if self.read_only && app.online {
-                    if let Some(id) = entry.command_id.filter(|id| linked.insert(*id)) {
-                        if let Some(c) = snapshot.as_ref().and_then(|s| s.commands.iter().find(|c| c.id == id)) {
-                            return self.show_intent_run(ui, app, c, true);
-                        }
-                        if ui.button(crate::tr!("Laufdetails …")).clicked() {
-                            app.read(crate::tr!("Laufdetails …"), format!("/v1/commands/{id}"));
-                        }
+                if self.read_only {
+                    if let Some(c) = entry.command_id.filter(|id| linked.insert(*id))
+                        .and_then(|id| snapshot.as_ref()?.commands.iter().find(|c| c.id == id))
+                    {
+                        return self.show_intent_run(ui, app, c, Some(entry));
                     }
                 }
+                let level = if entry.level == TaskHistoryLevel::Info {
+                    task_routing_level(&entry.message)
+                } else {
+                    entry.level
+                };
+                history_line(ui, entry.created_unix_ms, crate::i18n::label(&entry.message),
+                    design::history_color(level, ui.visuals().text_color()));
                 false
             });
             if open.inner { return true; }
@@ -1034,9 +1040,8 @@ impl TaskDialog {
                 .filter(|t| !t.routing_note.is_empty())
             {
                 design::routing_note_spacing(ui);
-                ui.colored_label(
+                history_line(ui, ticket.updated_unix_ms, &ticket.routing_note,
                     design::history_color(task_routing_level(&ticket.routing_note), ui.visuals().text_color()),
-                    format!("{} · {}", timestamp(ticket.updated_unix_ms), ticket.routing_note),
                 );
             } else if app.online && !self.history.loading && self.history.error.is_none() {
                 ui.colored_label(MUTED, crate::tr!("Noch keine Einträge."));
@@ -1061,14 +1066,30 @@ impl TaskDialog {
         false
     }
 
-    fn show_intent_run(&self, ui: &mut egui::Ui, app: &mut App, c: &RunnerCommand, show_open: bool) -> bool {
+    fn show_intent_run(&self, ui: &mut egui::Ui, app: &mut App, c: &RunnerCommand, entry: Option<&TaskHistoryEntry>) -> bool {
         ui.push_id(c.id, |ui| {
-            ui.horizontal_wrapped(|ui| {
+            ui.horizontal_top(|ui| {
+                ui.colored_label(MUTED, timestamp(entry.map_or(c.created_unix_ms, |entry| entry.created_unix_ms)));
                 ui.strong(intent_run_role(c));
                 let status = command_status(c);
-                app::badge(ui, status, crate::views::status_color(status));
-                if show_open && c.kind == CommandKind::RunAgent {
-                    let open = ui.button(crate::tr!("OpenCode anzeigen"));
+                let (summary, level) = intent_run_summary(c, entry);
+                let color = level.map_or_else(|| crate::views::status_color(status),
+                    |level| design::history_color(level, ui.visuals().text_color()));
+                let link = (app.online && c.kind == CommandKind::RunAgent)
+                    .then(|| crate::tr!("OpenCode anzeigen"));
+                let font = egui::TextStyle::Body.resolve(ui.style());
+                let link_space = link.map_or(0.0, |text| {
+                    ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.into(), font.clone(), color).size().x)
+                        + ui.spacing().item_spacing.x
+                });
+                let job = design::elided_text_job(
+                    design::elide_first_line(&summary, 88),
+                    font, color, (ui.available_width() - link_space).max(0.0), 1,
+                );
+                let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+                ui.label(galley).on_hover_text(summary);
+                if let Some(link) = link {
+                    let open = ui.link(link);
                     #[cfg(test)]
                     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-intent-run-open", c.id)), open.rect));
                     if open.clicked() {
@@ -1076,13 +1097,6 @@ impl TaskDialog {
                         return true;
                     }
                 }
-                ui.menu_button(crate::tr!("Verwaltung …"), |ui| {
-                    if ui.button(crate::tr!("Laufdetails …")).clicked() {
-                        app.inspect(crate::tr!("Laufdetails …"), json!(c));
-                        ui.close();
-                    }
-                    app.command_menu(ui, c);
-                });
                 false
             }).inner
         }).inner
@@ -1164,7 +1178,44 @@ impl TaskDialog {
             });
         }
         design::task_prompt_read_only(ui, &self.draft.prompt, 3);
+        self.show_run_assignment(ui, app);
         self.show_history(ui, app)
+    }
+
+    fn show_run_assignment(&mut self, ui: &mut egui::Ui, app: &mut App) {
+        let Some(id) = self.draft.ticket else { return };
+        if app.models.managed() && app.online && self.draft.server == app.server {
+            self.model.load(app, &format!("/v1/tasks/{id}/models"));
+        }
+        let snapshot = app.snapshot.as_deref();
+        let ticket = snapshot.and_then(|s| s.tickets.iter().find(|t| t.id == id));
+        let command = snapshot.zip(ticket).and_then(|(s, t)| task_command(s, t));
+        let model = self.model.value.as_ref().and_then(Option::as_ref)
+            .and_then(|models| models.implementer.clone())
+            .or_else(|| {
+                let profile = &command?.agent_spec.as_ref()?.profile;
+                (!profile.model_id.is_empty()).then(|| factory_protocol::models::ModelSelection {
+                    access_id: profile.provider_id.clone(),
+                    model_id: profile.model_id.clone(),
+                })
+            });
+        if let Some(model) = model {
+            let accesses = app.models.factory.value.as_ref().map_or(&[][..], |catalog| catalog.accesses.as_slice());
+            let text = crate::tr!("Modell: {}", crate::model_settings::label(accesses, &model));
+            ui.add(egui::Label::new(&text).truncate()).on_hover_text(text);
+        }
+        let assigned = command.or_else(|| {
+            let root = ticket?.requested_session?;
+            snapshot?.commands.iter().find(|c| c.id == root)
+        });
+        let runner = assigned.map_or("Auto Runner", |c| {
+            snapshot.and_then(|s| s.runners.iter().find(|r| r.id == c.runner_id))
+                .map_or(crate::tr!("Runner nicht verfügbar"), |r| r.name.as_str())
+        });
+        let text = crate::tr!("Zuordnung: {title}", title = runner);
+        let detail = snapshot.zip(assigned)
+            .map_or_else(|| text.clone(), |(s, c)| format!("{text}\n{}", session_title(s, c)));
+        ui.add(egui::Label::new(text).truncate()).on_hover_text(detail);
     }
 
     fn show_layout(
@@ -1260,18 +1311,6 @@ impl TaskDialog {
             self.load_model(app);
         }
         if self.read_only {
-            if app.models.managed() {
-                if let Some(ticket) = self.draft.ticket {
-                    self.model.load(app, &format!("/v1/tasks/{ticket}/models"));
-                    if let Some((models, catalog)) = self.model.value.as_ref().and_then(Option::as_ref)
-                        .zip(app.models.factory.value.as_ref())
-                    {
-                        if let Some(model) = &models.implementer {
-                            ui.label(format!("Implementer: {}", crate::model_settings::label(&catalog.accesses, model)));
-                        }
-                    }
-                }
-            }
             return self.show_read_only_body(ui, app);
         }
         if self.draft.edit_token.is_some() && self.request.is_none() {
@@ -1516,21 +1555,6 @@ impl TaskDialog {
                             close = true;
                         }
                     }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        let title = app
-                            .snapshot
-                            .as_ref()
-                            .and_then(|s| {
-                                s.tickets
-                                    .iter()
-                                    .find(|t| Some(t.id) == self.draft.ticket)
-                                    .and_then(|t| task_command(s, t))
-                                    .map(|c| session_title(s, c))
-                            })
-                            .unwrap_or_else(|| "Auto Runner".into());
-                        ui.add(egui::Label::new(crate::tr!("Zuordnung: {title}", title = title)).truncate())
-                            .on_hover_text(title);
-                    });
                     close
                 })
                 .inner;
@@ -1720,54 +1744,98 @@ fn permission_details(ui: &mut egui::Ui, question: &Question) {
     }
 }
 
-/// Human-readable question/answer pairs only: no raw payloads or export controls.
-fn question_answers(ui: &mut egui::Ui, questions: &[Question]) {
-    let mut first = true;
-    for question in questions {
-        let title = question.external.payload["title"].as_str().unwrap_or(
-            if question.external.kind == QuestionKind::Permission { crate::tr!("Berechtigung") } else { crate::tr!("Rückfrage") },
-        );
-        let fields: Vec<_> = question.external.payload["fields"].as_array()
-            .into_iter().flatten().filter(|field| field["hidden"] != true).collect();
-        let pairs: Vec<Option<&Value>> = if fields.is_empty() { vec![None] } else {
-            fields.into_iter().map(Some).collect()
-        };
-        for field in pairs {
-            if !first {
-                ui.add_space(8.0);
-                let _separator = ui.separator();
+fn question_pairs(question: &Question) -> impl Iterator<Item = (&Question, Option<&Value>)> {
+    let fields: Vec<_> = question.external.payload["fields"].as_array().into_iter().flatten()
+        .filter(|field| field["hidden"] != true).map(Some).collect();
+    let fields = if fields.is_empty() { vec![None] } else { fields };
+    fields.into_iter().map(move |field| (question, field))
+}
+
+/// Human-readable question and answer only: no raw payloads or export controls.
+fn question_pair(ui: &mut egui::Ui, question: &Question, field: Option<&Value>) {
+    let title = question.external.payload["title"].as_str().unwrap_or(
+        if question.external.kind == QuestionKind::Permission { crate::tr!("Berechtigung") } else { crate::tr!("Rückfrage") },
+    );
+    design::question_heading(ui, crate::tr!("Frage"));
+    // Prefer the actual field question over generic container titles such as "Questions".
+    if !generic_question_title(title) {
+        read_text(ui, title, false);
+    }
+    if let Some(description) = question.external.payload["description"].as_str() {
+        read_text(ui, description, false);
+    }
+    permission_details(ui, question);
+    if let Some(field) = field {
+        if let Some(label) = field["title"].as_str().filter(|label| *label != title) {
+            read_text(ui, label, false);
+        }
+        if let Some(description) = field["description"].as_str() {
+            read_text(ui, description, false);
+        }
+    }
+    ui.add_space(8.0);
+    design::question_heading(ui, crate::tr!("Antwort"));
+    let text = question_answer_text(question, field);
+    read_text(ui, &text, false);
+}
+
+fn show_question_pages<'a>(
+    ui: &mut egui::Ui, app: &mut App, questions: impl Iterator<Item = &'a Question>,
+    page: &mut usize, height: f32,
+) {
+    let pairs: Vec<_> = questions.flat_map(question_pairs).collect();
+    *page = (*page).min(pairs.len().saturating_sub(1));
+    let Some(&(question, field)) = pairs.get(*page) else { return };
+    let multiple = pairs.len() > 1;
+    let intent = app.snapshot.as_deref().and_then(|s| question_intent(s, question))
+        .map(|intent| (intent.id, intent.key.clone(), task_intent_text(intent)));
+    let has_footer = multiple || intent.is_some();
+    let content_height = if has_footer {
+        (height - design::SETTINGS_FOOTER_HEIGHT - 24.0).max(20.0)
+    } else {
+        height
+    };
+    egui::ScrollArea::vertical()
+        .id_salt(("question-view-page", question.id, *page))
+        .max_height(if multiple { content_height.min(480.0) } else { content_height })
+        .auto_shrink([false, !multiple])
+        .show(ui, |ui| {
+            if let Some((_, _, summary)) = &intent {
+                if !summary.trim().is_empty() {
+                    ui.add(egui::Label::new(egui::RichText::new(summary)
+                        .color(MUTED)).truncate()).on_hover_text(summary);
+                    ui.add_space(8.0);
+                }
+            }
+            question_pair(ui, question, field);
+        });
+    if has_footer {
+        ui.add_space(8.0);
+        ui.separator();
+        design::dialog_footer(ui, |ui| {
+            if multiple {
+                let next = ui.add_enabled(*page + 1 < pairs.len(), egui::Button::new(crate::tr!("Weiter")));
+                let back = ui.add_enabled(*page > 0, egui::Button::new(crate::tr!("Zurück")));
+                ui.colored_label(MUTED, crate::tr!("Frage {current} von {total}", current = *page + 1, total = pairs.len()));
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| {
-                    let id = egui::Id::new("test-question-pair-separators");
-                    let count = d.get_temp::<usize>(id).unwrap_or(0);
-                    d.insert_temp(id, count + 1);
+                    d.insert_temp(egui::Id::new("test-question-view-next"), next.rect);
+                    d.insert_temp(egui::Id::new("test-question-view-back"), back.rect);
                 });
-                ui.add_space(8.0);
-            }
-            first = false;
-            design::question_heading(ui, crate::tr!("Frage"));
-            // Native forms may have a generic container title ("Questions").
-            // Prefer the actual field question instead of repeating that wrapper.
-            if !generic_question_title(title) {
-                read_text(ui, title, false);
-            }
-            if let Some(description) = question.external.payload["description"].as_str() {
-                read_text(ui, description, false);
-            }
-            permission_details(ui, question);
-            if let Some(field) = field {
-                if let Some(label) = field["title"].as_str().filter(|label| *label != title) {
-                    read_text(ui, label, false);
-                }
-                if let Some(description) = field["description"].as_str() {
-                    read_text(ui, description, false);
+                if next.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    *page += 1;
+                } else if back.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    *page -= 1;
                 }
             }
-            ui.add_space(8.0);
-            design::question_heading(ui, crate::tr!("Antwort"));
-            let text = question_answer_text(question, field);
-            read_text(ui, &text, false);
-        }
+            if let Some((id, key, _)) = intent {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    question_intent_link(ui, app, id, &key);
+                });
+            }
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-question-view-footer"), ui.max_rect()));
+        });
     }
 }
 
@@ -1780,7 +1848,6 @@ fn question_intent_link(ui: &mut egui::Ui, app: &mut App, id: TicketId, key: &st
     if button.clicked() {
         app.view_task(id);
     }
-    ui.add_space(8.0);
 }
 
 impl QuestionDialog {
@@ -1835,9 +1902,7 @@ impl QuestionDialog {
             {
                 return true;
             }
-            let questions: Vec<_> = self.questions.iter().map(|entry| entry.question.clone()).collect();
-            egui::ScrollArea::vertical().max_height(height).auto_shrink([false, true])
-                .show(ui, |ui| question_answers(ui, &questions));
+            show_question_pages(ui, app, self.questions.iter().map(|entry| &entry.question), &mut self.step, height);
             return false;
         }
         for entry in &mut self.questions {
@@ -1860,8 +1925,9 @@ impl QuestionDialog {
             .and_then(|snapshot| question_intent(snapshot, &entry.question))
             .map(|intent| (intent.id, intent.key.clone()))
         {
-            let top = ui.cursor().top();
-            question_intent_link(ui, app, id, &key);
+             let top = ui.cursor().top();
+             question_intent_link(ui, app, id, &key);
+             ui.add_space(8.0);
             height - (ui.cursor().top() - top)
         } else { height };
         let mut submit_from_editor = false;
@@ -3827,7 +3893,10 @@ pub(crate) fn read_content(ui: &mut egui::Ui, app: &mut App, value: &Value, path
             ));
         }
     } else if let Ok(question) = serde_json::from_value::<Question>(value.clone()) {
-        question_answers(ui, &[question]);
+        for (index, (question, field)) in question_pairs(&question).enumerate() {
+            if index > 0 { ui.separator(); }
+            question_pair(ui, question, field);
+        }
         return;
     } else if let Ok(snapshot) = serde_json::from_value::<Snapshot>(value.clone()) {
         let selected_project = app.settings.project;

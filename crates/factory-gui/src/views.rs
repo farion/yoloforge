@@ -788,7 +788,7 @@ impl App {
                                     egui::Layout::top_down(egui::Align::LEFT),
                                     |ui| {
                                          let summary = task_text(&s, t);
-                                        let _title = design::ticket_title(ui,&t.key,&summary,
+                                         let _title = design::ticket_title(ui,design::ListEntryKind::Intent,&t.key,&summary,
                                             egui::FontId::proportional(18.0),width)
                                              .on_hover_text(task_preview_source(&s, t));
                                         #[cfg(test)]
@@ -956,7 +956,7 @@ impl App {
                                           if view.clicked() {
                                               self.view_task(t.id);
                                           }
-                                          if cancellable && design::icon_button(ui, egui_phosphor::regular::STOP,
+                                          if cancellable && design::icon_button(ui, egui_phosphor::regular::X_CIRCLE,
                                               crate::tr!("Intent abbrechen"), self.online
                                                   && !s.draft_resets.iter().any(|r| r.ticket_id == t.id)
                                                   && !self.settings.pending.iter().any(|r| r.server == self.server
@@ -1237,7 +1237,7 @@ impl App {
                                 let title = ui.allocate_ui_with_layout(egui::vec2(width,0.0),
                                     egui::Layout::top_down(egui::Align::LEFT), |ui| {
                                     let full = crate::tr!("Fragen zu: {}", group.task);
-                                    design::ticket_title(ui,&group.ticket_key,&full,
+                                     design::ticket_title(ui,design::ListEntryKind::Question,&group.ticket_key,&full,
                                         egui::FontId::proportional(18.0),width).on_hover_text(full);
                                 }).response;
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -1260,7 +1260,7 @@ impl App {
                                 if button.clicked() {
                                     self.dialog = Some(if action == crate::tr!("Beantworten") {
                                         Dialog::questions(group.questions.clone())
-                                    } else { Dialog::QuestionView(group.questions.clone()) });
+                                     } else { Dialog::QuestionView { questions: group.questions.clone(), page: 0 } });
                                 }
                             });
                         });
@@ -1280,7 +1280,7 @@ impl App {
                 ui.push_id((ticket.id, problem.command_id), |ui| {
                     design::task_row_frame().show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        design::ticket_title(ui, &ticket.key, &ticket.title,
+                         design::ticket_title(ui, design::ListEntryKind::Problem, &ticket.key, &ticket.title,
                             egui::FontId::proportional(18.0), ui.available_width())
                             .on_hover_text(&ticket.title);
                         ui.label(RichText::new(&problem.reason).color(MUTED));
@@ -1337,7 +1337,7 @@ impl App {
                                 }
                             }
                             if server_supports(s, CANCEL_INTENT_CAPABILITY)
-                                && design::icon_button(ui, egui_phosphor::regular::STOP,
+                                && design::icon_button(ui, egui_phosphor::regular::X_CIRCLE,
                                     crate::tr!("Intent abbrechen"), self.online && !busy).clicked()
                             {
                                 self.confirm_intent_state(ticket, TicketState::Cancelled);
@@ -1602,9 +1602,14 @@ impl App {
                                 let badges_width=design::badge_width(ui,status)+design::badge_width(ui,&design::token_label(tokens));
                                 let width=(ui.available_width()-badges_width.max(185.0)).max(1.0);
                                 ui.allocate_ui_with_layout(egui::vec2(width,0.0),egui::Layout::top_down(egui::Align::LEFT),|ui| {
-                                    let title=session_title(&s,&c);
-                                    let job=design::elided_text_job(title.clone(),egui::FontId::proportional(18.0),ui.visuals().text_color(),width,1);
-                                    let _title=ui.add(egui::Label::new(job)).on_hover_text(title);
+                                     let title=session_title(&s,&c);
+                                     let kind = match c.agent_spec.as_ref().map(|spec| spec.role.as_str()) {
+                                         Some("memorizer" | "orchestrator-memory") => design::ListEntryKind::Memorizer,
+                                         Some("supervisor") => design::ListEntryKind::Supervisor,
+                                         _ => design::ListEntryKind::Session,
+                                     };
+                                     let _title = design::ticket_title(ui, kind, "", &title,
+                                         egui::FontId::proportional(18.0), width).on_hover_text(title);
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-title",c.session_root())),_title.rect));
                                 });
@@ -1683,10 +1688,9 @@ impl App {
                 let badges = design::badge_width(ui, status) + design::badge_width(ui, &design::token_label(tokens));
                 let width = (ui.available_width() - badges.max(185.0)).max(1.0);
                 let title = crate::directs::title(s, direct);
-                let job = design::elided_text_job(title.clone(), egui::FontId::proportional(18.0),
-                    ui.visuals().text_color(), width, 1);
                 ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                    ui.add(egui::Label::new(job)).on_hover_text(title);
+                    design::ticket_title(ui, design::ListEntryKind::Session, "", &title,
+                        egui::FontId::proportional(18.0), width).on_hover_text(title);
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     badge(ui, status, color);
@@ -1942,7 +1946,18 @@ impl App {
                                     task_routing_level(title)
                                 };
                                 ui.visuals_mut().override_text_color = Some(design::history_color(level, ui.visuals().text_color()));
-                                design::ticket_title(ui, key, title, egui::FontId::proportional(18.0), width)
+                                 let kind = if n.question_id.is_some() {
+                                     Some(design::ListEntryKind::Question)
+                                 } else if n.kind == INTENT_ATTENTION_EVENT || n.kind == "scheduler.blocked"
+                                     || publication == Some(crate::tr!("Übernahme blockiert"))
+                                 {
+                                     Some(design::ListEntryKind::Problem)
+                                 } else if n.ticket_id.is_some() || !key.is_empty() {
+                                     Some(design::ListEntryKind::Intent)
+                                 } else {
+                                     None
+                                 };
+                                 design::ticket_title(ui, kind, key, title, egui::FontId::proportional(18.0), width)
                                     .on_hover_text(title);
                             });
                             if !read {
@@ -2066,7 +2081,11 @@ impl App {
                                         SessionActivity::Task(task) => task_preview_source(&snapshot, task),
                                         SessionActivity::Question(_) => &title,
                                     };
-                                    design::ticket_title(ui,ticket_key,&title,
+                                     let entry_kind = match activity {
+                                         SessionActivity::Task(_) => design::ListEntryKind::Intent,
+                                         SessionActivity::Question(_) => design::ListEntryKind::Question,
+                                     };
+                                     design::ticket_title(ui,entry_kind,ticket_key,&title,
                                         egui::FontId::proportional(16.0),width).on_hover_text(full_title);
                                 });
                                 let row = row.response.on_hover_text(action);
@@ -2083,7 +2102,7 @@ impl App {
                                             self.dialog = Some(Dialog::questions(vec![(**q).clone()]));
                                         }
                                         SessionActivity::Question(q) => {
-                                            self.dialog = Some(Dialog::QuestionView(vec![(**q).clone()]));
+                                            self.dialog = Some(Dialog::QuestionView { questions: vec![(**q).clone()], page: 0 });
                                         }
                                     }
                                 }

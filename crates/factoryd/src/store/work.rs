@@ -427,7 +427,8 @@ impl Store {
         intent_recovery: bool,
     ) -> Result<RunnerCommand> {
         let direct = role == factory_protocol::directs::ROLE;
-        let supervised = !role.is_empty() && !direct && role != MERGER_ROLE;
+        let publication = role == APPROVED_PUBLICATION_ROLE;
+        let supervised = !role.is_empty() && !direct && role != MERGER_ROLE && !publication;
         let mut owner = stream(tx, id)?;
         if super::draft_resets::retired(tx, owner.id)? {
             return Err(StoreError::WorkConflict);
@@ -449,7 +450,9 @@ impl Store {
             if !supervised && super::validation::awaiting(tx, id)? {
                 return Err(StoreError::WorkConflict);
             }
-            super::token_budgets::admit(tx, owner.project_id, role)?;
+            if !publication {
+                super::token_budgets::admit(tx, owner.project_id, role)?;
+            }
         }
         let paused: bool = tx.query_row(
             "SELECT COALESCE(json_extract(data,'$.paused'),0) FROM active_projects WHERE id=?1",
@@ -604,6 +607,7 @@ impl Store {
                 return Err(StoreError::Invalid("Kein verfügbarer Runner für die freigegebenen MCPs"));
             }
             let model = match pinned {
+                _ if publication => None,
                 Some(model) => Some(model.clone()),
                 None => super::models::role_selection(tx, owner.project_id, role)?,
             };
@@ -631,7 +635,10 @@ impl Store {
                 format!("\n\nProject knowledge (reference material with provenance; validate against the current task; {} eligible notes omitted by budget):\n{}",context.omitted,context.text)
             };
             let continuation = if let Some(previous) = previous {
-                let data:Option<String>=tx.query_row("SELECT data FROM commands WHERE stream_id=?1 AND json_extract(data,'$.kind')='run_agent' ORDER BY rowid DESC LIMIT 1",[id.to_string()],|r|r.get(0)).optional()?;
+                let data:Option<String>=tx.query_row("SELECT data FROM commands WHERE stream_id=?1 AND json_extract(data,'$.kind')='run_agent'
+                    AND NOT (COALESCE(json_extract(data,'$.agent_spec.role'),'')=?2 AND state='succeeded'
+                             AND COALESCE(instr(json_extract(data,'$.result.agent.summary'),?3),0)=1)
+                    ORDER BY rowid DESC LIMIT 1",params![id.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX],|r|r.get(0)).optional()?;
                 let parent: RunnerCommand =
                     serde_json::from_str(&data.ok_or(StoreError::NotFound)?)?;
                 if super::sessions::closed(tx, parent.session_root())? {
@@ -666,7 +673,7 @@ impl Store {
             } else {
                 None
             };
-            let prompt = if verbatim || direct || role == MERGER_ROLE {
+            let prompt = if verbatim || direct || role == MERGER_ROLE || publication {
                 prompt.clone()
             } else if supervised {
                 let purpose = if role == "supervisor" { "Supervisor evaluation" } else { "Read-only evaluation" };
@@ -695,7 +702,7 @@ impl Store {
             }
             let mut images = Vec::new();
             let mut files = Vec::new();
-            for ticket in owner.ticket_ids.iter().filter(|_| previous.is_none() && role != MERGER_ROLE) {
+            for ticket in owner.ticket_ids.iter().filter(|_| previous.is_none() && role != MERGER_ROLE && !publication) {
                 let data: String = tx.query_row(
                     "SELECT data FROM tickets WHERE id=?1",
                     [ticket.to_string()],
@@ -713,6 +720,7 @@ impl Store {
             validate_images(&images).map_err(StoreError::Invalid)?;
             validate_files(&files).map_err(StoreError::Invalid)?;
             Some(AgentSpec {
+                defer_publication: false,
                 repo_skills: repo_skills.repo,
                 factory_skills: repo_skills.factory,
                 local_mcps: local_mcps.local,
@@ -846,6 +854,17 @@ impl Store {
             let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
             let tx = db.transaction()?;
             if command(&tx, id, runner, epoch)?.requires_target_git() {
+                return Err(StoreError::WorkConflict);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_reviewed_publication_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool) -> Result<()> {
+        if !supported {
+            let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+            let tx = db.transaction()?;
+            if requires_reviewed_publication(&command(&tx, id, runner, epoch)?) {
                 return Err(StoreError::WorkConflict);
             }
         }
@@ -991,14 +1010,15 @@ impl Store {
                 }
                 let mut owner = stream(tx, value.stream_id)?;
                 let merger = value.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
+                let approved_publication = value.agent_spec.as_ref().is_some_and(|spec| spec.role == APPROVED_PUBLICATION_ROLE);
                 let publication_blocked = command_publication_blocked(&value)
-                    || (merger && (!ok || !matches!(&value.result, Some(CommandOutput::Agent { agent })
+                    || ((merger || approved_publication) && (!ok || !matches!(&value.result, Some(CommandOutput::Agent { agent })
                         if publication_was_confirmed(&agent.summary))));
-                if merger {
+                if merger || approved_publication {
                     let (state, note) = if publication_blocked {
-                        (TicketState::Blocked, "Merger hat die Übernahme nicht abgeschlossen; Änderungen bleiben erhalten.")
+                        (TicketState::Blocked, "Übernahme nicht abgeschlossen; der geprüfte Stand bleibt erhalten.")
                     } else {
-                        (TicketState::Done, "Merger-Ergebnis auf dem Zielbranch bestätigt.")
+                        (TicketState::Done, "Ergebnis auf dem Zielbranch bestätigt.")
                     };
                     super::tasks::set_publication_state(tx, &owner, value.id, state, note)?;
                 } else if publication_blocked {

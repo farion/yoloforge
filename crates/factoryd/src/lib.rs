@@ -643,7 +643,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 23
+        || body.capabilities.len() > 24
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(

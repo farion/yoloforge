@@ -34,16 +34,22 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(version, about = "YoloForge Desktop — native Factory interface")]
 struct Args {
-    #[arg(long, default_value = "http://127.0.0.1:7432")]
-    server: String,
+    #[arg(long)]
+    server: Option<String>,
     /// Save this window only, for repeatable visual smoke tests.
     #[arg(long, hide = true)]
     screenshot: Option<std::path::PathBuf>,
     #[arg(long, hide = true)]
     exit_after_ms: Option<u64>,
+    #[arg(long, hide = true)]
+    verify_local_runtime: Option<std::path::PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    native::run(args.server, args.screenshot, args.exit_after_ms)
+    if let Some(path) = args.verify_local_runtime {
+        return persistence::verify_local_runtime(&path);
+    }
+    let _local_services = persistence::LocalServicesGuard;
+    native::run(args.server.unwrap_or_default(), args.screenshot, args.exit_after_ms)
 }

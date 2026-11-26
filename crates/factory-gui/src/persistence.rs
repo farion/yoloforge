@@ -60,7 +60,7 @@ fn retired_sidebar_pages_restore_to_their_replacements() {
 }
 impl Settings {
     pub fn startup_server(&self, requested: String) -> String {
-        if requested == "http://127.0.0.1:7432" && !self.server.is_empty() {
+        if requested.is_empty() {
             self.server.clone()
         } else {
             requested
@@ -178,7 +178,7 @@ fn remembered_connection_survives_unrelated_settings_writes_and_bad_desktop_json
         fs::write(&desktop, content).unwrap();
         let mut settings: Settings = serde_json::from_slice(&fs::read(&desktop).unwrap()).unwrap_or_default();
         settings.apply_remembered_factory(read_remembered_factory(directory.path()).unwrap().unwrap());
-        let url = settings.startup_server("http://127.0.0.1:7432".into());
+        let url = settings.startup_server(String::new());
         assert_eq!(url, profile.server);
         assert_eq!(settings.credential_for(&url), Some(&profile.credential_file));
         assert!(settings.credential_for("https://old.example").is_none());
@@ -361,8 +361,62 @@ pub struct LocalConnection {
     pub credential_file: PathBuf,
 }
 
+pub const LOCAL_FACTORY_URL: &str = "http://127.0.0.1:17433";
+include!(concat!(env!("OUT_DIR"), "/factory_runtime.rs"));
+
+fn unpack_runtime(runtime: &[(&str, &[u8])], cache: &Path) -> Result<PathBuf> {
+    let entries: Vec<_> = runtime.iter().map(|(name, payload)| (*name, *payload, Sha256::digest(payload))).collect();
+    let mut fingerprint = Sha256::new();
+    for (_, _, digest) in &entries { fingerprint.update(digest); }
+    factory_platform::private_dir(cache)?;
+    let destination = cache.join(format!("{:x}", fingerprint.finalize()));
+    factory_platform::private_dir(&destination)?;
+    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .open(destination.join("extract.lock"))?;
+    lock.lock()?;
+    for (name, payload, digest) in entries {
+        let size = payload.len() as u64;
+        let path = destination.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        if factory_platform::is_executable(&path) && factory_platform::ensure_private(&path).is_ok() {
+            let mut existing = fs::File::open(&path)?;
+            let mut hash = Sha256::new();
+            if existing.metadata()?.len() == size && std::io::copy(&mut existing, &mut hash)? == size
+                && hash.finalize() == digest
+            {
+                continue;
+            }
+        }
+        let mut file = tempfile::NamedTempFile::new_in(&destination)?;
+        file.write_all(payload)?;
+        file.as_file().sync_all()?;
+        factory_platform::set_private_executable(file.path())?;
+        file.persist(&path)?;
+    }
+    Ok(destination)
+}
+
+pub(crate) fn verify_local_runtime(cache: &Path) -> Result<()> {
+    ensure!(EMBEDDED_RUNTIME.len() == 3, "Keine eingebettete Factory-Laufzeit");
+    let directory = unpack_runtime(EMBEDDED_RUNTIME, cache)?;
+    for (name, _) in EMBEDDED_RUNTIME {
+        ensure!(std::process::Command::new(directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+            .arg("--version").status()?.success(), "{name} --version fehlgeschlagen");
+    }
+    Ok(())
+}
+
 pub(crate) fn companion_binary(name: &str) -> Result<PathBuf> {
+    static RUNTIME: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
     let gui = std::env::current_exe()?;
+    if !EMBEDDED_RUNTIME.is_empty() {
+        let mut cached = RUNTIME.lock().unwrap_or_else(|p| p.into_inner());
+        if cached.is_none() {
+            *cached = Some(unpack_runtime(EMBEDDED_RUNTIME, &data_dir()?.join("runtime"))?);
+        }
+        let directory = cached.as_ref().expect("initialized runtime path");
+        return Ok(directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)));
+    }
+    // Unpackaged Cargo development builds may use binaries from their target directory.
     let directory = gui.parent().context(crate::tr!("Programmverzeichnis fehlt"))?;
     Ok(directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
 }
@@ -377,29 +431,93 @@ pub(crate) fn configure_bundled_opencode(command: &mut std::process::Command) ->
     Ok(())
 }
 
-/// Dedicated user-owned processes. Dropping the GUI never signals these children.
+type OwnedChildren = std::collections::BTreeMap<String, std::process::Child>;
+static LOCAL_CHILDREN: std::sync::Mutex<Option<OwnedChildren>> =
+    std::sync::Mutex::new(Some(std::collections::BTreeMap::new()));
+
+pub(crate) struct LocalServicesGuard;
+impl Drop for LocalServicesGuard {
+    fn drop(&mut self) {
+        let children = LOCAL_CHILDREN.lock().unwrap_or_else(|p| p.into_inner()).take();
+        stop_owned(children.unwrap_or_default());
+    }
+}
+
+fn stop_owned(mut children: OwnedChildren) {
+    for child in children.values_mut() { drop(child.stdin.take()); }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !children.is_empty() && std::time::Instant::now() < deadline {
+        children.retain(|_, child| !matches!(child.try_wait(), Ok(Some(_))));
+        if !children.is_empty() { std::thread::sleep(std::time::Duration::from_millis(25)); }
+    }
+    for mut child in children.into_values() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+pub(crate) fn spawn_owned(name: String, command: &mut std::process::Command) -> Result<()> {
+    let mut local = LOCAL_CHILDREN.lock().unwrap_or_else(|p| p.into_inner());
+    let children = local.as_mut().context("YoloForge wird beendet")?;
+    if name != "factoryd" {
+        ensure!(children.contains_key("factoryd"), "Lokale Factory zuerst in dieser GUI starten");
+    }
+    if let Some(child) = children.get_mut(&name) {
+        ensure!(child.try_wait()?.is_some(), "Lokaler Dienst wird bereits von dieser GUI verwaltet");
+    }
+    let child = command.stdin(std::process::Stdio::piped())
+        .env(factory_platform::GUI_LIFETIME_PIPE, "1").spawn()?;
+    children.insert(name, child);
+    Ok(())
+}
+
+pub(crate) fn owns_local_runner(id: RunnerId, pid: u32) -> bool {
+    LOCAL_CHILDREN.lock().unwrap_or_else(|p| p.into_inner()).as_mut()
+        .and_then(|children| children.get_mut(&id.to_string()))
+        .is_some_and(|child| child.id() == pid && matches!(child.try_wait(), Ok(None)))
+}
+
+struct LocalStartup(bool);
+impl Drop for LocalStartup {
+    fn drop(&mut self) {
+        if self.0 {
+            let children = LOCAL_CHILDREN.lock().unwrap_or_else(|p| p.into_inner())
+                .as_mut().map(std::mem::take).unwrap_or_default();
+            stop_owned(children);
+        }
+    }
+}
+
 pub async fn start_local() -> Result<LocalConnection> {
     let root = data_dir()?.join("local");
     // Do not change permissions of an existing installation's state directory.
     if !root.exists() {
         factory_platform::private_dir(&root)?;
     }
+    let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false)
+        .open(root.join("gui-start.lock"))?;
+    lock.try_lock().context("Die lokale Factory wird bereits gestartet")?;
+    let owned = {
+        let mut local = LOCAL_CHILDREN.lock().unwrap_or_else(|p| p.into_inner());
+        match local.as_mut().and_then(|children| children.get_mut("factoryd")) {
+            Some(child) => child.try_wait()?.is_none(),
+            None => false,
+        }
+    };
     let token_path = root.join("token");
     if !token_path.exists() {
         write_new(
             &token_path,
             format!("{}{}", RequestId::new(), RequestId::new()).as_bytes(),
         )?;
+        factory_platform::private_file(&token_path)?;
     }
     let token = fs::read_to_string(&token_path)?;
-    let server = "http://127.0.0.1:17433".to_string();
+    let server = LOCAL_FACTORY_URL.to_string();
     let client = FactoryClient::new_desktop(&server, &token, desktop_client_id()?)?;
     let start = |binary: &str, arguments: &[String]| -> Result<()> {
         let executable = companion_binary(binary)?;
-        ensure!(
-            executable.is_file(),
-            crate::tr!("{binary} fehlt neben der GUI. Server und Runner zusammen mit der GUI installieren.", binary = binary)
-        );
+        ensure!(executable.is_file(), crate::tr!("Eingebettete Factory-Laufzeit fehlt: {}", binary));
         let log = OpenOptions::new()
             .append(true)
             .create(true)
@@ -411,7 +529,6 @@ pub async fn start_local() -> Result<LocalConnection> {
             .current_dir(&root)
             .env_remove("FACTORY_TOKEN")
             .env("FACTORY_TOKEN_FILE", &token_path)
-            .stdin(std::process::Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
         #[cfg(unix)]
@@ -424,25 +541,28 @@ pub async fn start_local() -> Result<LocalConnection> {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         }
-        let mut child = command.spawn()?;
-        // Reap eventual exits without tying the process to the UI's lifetime.
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
+        spawn_owned(binary.into(), &mut command)
     };
-    match client.snapshot().await {
-        Ok(_) => {},
-        Err(factory_protocol::client::ClientError::Transport) => {
-            start("factoryd", &["--listen".into(), "127.0.0.1:17433".into(), "--database".into(), root.join("factory.sqlite3").display().to_string()])?;
-            let mut ready = false;
-            for _ in 0..30 { if client.snapshot().await.is_ok() { ready = true; break; } tokio::time::sleep(std::time::Duration::from_millis(300)).await; }
-            ensure!(ready, crate::tr!("Lokaler Server startet nicht. Diagnose: {}", root.join("factoryd.log").display()));
+    let mut startup = LocalStartup(false);
+    if !owned {
+        // Do not adopt a standalone server or leave it running on GUI exit.
+        std::net::TcpListener::bind(("127.0.0.1", 17433)).context(
+            crate::tr!("Port 17433 ist bereits belegt. Eine ältere lokale Factory bitte gezielt beenden; fremde Prozesse werden nicht verändert."))?;
+        start("factoryd", &["--listen".into(), "127.0.0.1:17433".into(), "--database".into(), root.join("factory.sqlite3").display().to_string()])?;
+        startup.0 = true;
+        let mut ready = false;
+        for _ in 0..30 {
+            if client.snapshot().await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
-        Err(_) => anyhow::bail!("{}", crate::tr!("Port 17433 gehört nicht zur gespeicherten lokalen Factory oder der Zugang wurde widerrufen. Keine fremden Prozesse verändert.", )),
+        ensure!(ready, crate::tr!("Lokaler Server startet nicht. Diagnose: {}", root.join("factoryd.log").display()));
     }
     client.desktop_snapshot().await.map_err(|error| anyhow::anyhow!("{}", crate::tr!("Lokaler Server auf Port 17433 läuft, ist aber nicht mit dieser GUI kompatibel oder nicht erreichbar ({error}). Eine ältere laufende factoryd-Version zuerst gezielt neu starten; es werden keine fremden oder laufenden Prozesse automatisch beendet.", error = error)))?;
     crate::local_runners::ensure_builtin(&client, &server, &root).await?;
+    startup.0 = false;
     Ok(LocalConnection {
         server,
         token,
@@ -453,6 +573,19 @@ pub async fn start_local() -> Result<LocalConnection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_runtime_extracts_privately_and_repairs_damaged_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime: &[(&str, &[u8])] = &[("factoryd", b"factory fixture"), ("opencode", b"open fixture")];
+        let cache = root.path().join("runtime");
+        let directory = unpack_runtime(runtime, &cache).unwrap();
+        let server = directory.join(format!("factoryd{}", std::env::consts::EXE_SUFFIX));
+        factory_platform::ensure_private(&server).unwrap();
+        assert_eq!(fs::read(&server).unwrap(), b"factory fixture");
+        fs::write(&server, b"bad runtime!!!!").unwrap();
+        assert_eq!(unpack_runtime(runtime, &cache).unwrap(), directory);
+        assert_eq!(fs::read(&server).unwrap(), b"factory fixture");
+    }
     #[test]
     fn desktop_identity_survives_restart_and_simultaneous_first_starts() {
         let root = tempfile::tempdir().unwrap();

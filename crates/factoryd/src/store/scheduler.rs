@@ -1582,7 +1582,8 @@ impl Store {
                     target_git,
                     false,
                 ) {
-                    Ok(c) => {
+                    Ok(mut c) => {
+                        super::validation::defer_publication(&tx, &mut c)?;
                         let mut ticket = t.clone();
                         ticket.execution_command = Some(c.id);
                         save_ticket(&tx, &mut ticket)?;

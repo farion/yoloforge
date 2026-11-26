@@ -72,6 +72,13 @@ async fn main() -> Result<()> {
         );
     }
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
+    let (gui_closed, mut gui_shutdown) = tokio::sync::oneshot::channel();
+    factory_platform::watch_gui_lifetime(move || { let _ = gui_closed.send(()); })?;
+    let mut gui_shutdown = Box::pin(async move {
+        if (&mut gui_shutdown).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    });
     let binary = env::var_os("FACTORY_OPENCODE_BIN").map(PathBuf::from);
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -84,6 +91,7 @@ async fn main() -> Result<()> {
     let (mut opencode, gateway) = tokio::select! {
         result = managed_opencode::Runtime::start(&args.database, binary.as_deref()) => result?,
         _ = &mut shutdown => return Ok(()),
+        _ = &mut gui_shutdown => return Ok(()),
     };
     store
         .enable_model_settings()
@@ -130,6 +138,7 @@ async fn main() -> Result<()> {
             }
         }
     });
+    let stopping_on_signal = stopping.clone();
     let serving = axum::serve(
         listener,
         factoryd::router_with_model_gateway(&token, store, stopping.clone(), Some(gateway))
@@ -138,10 +147,14 @@ async fn main() -> Result<()> {
     )
     .with_graceful_shutdown(async move {
         shutdown.await;
-        stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        stopping_on_signal.store(true, std::sync::atomic::Ordering::Relaxed);
     });
     let result = tokio::select! {
         result = std::future::IntoFuture::into_future(serving) => result,
+        _ = &mut gui_shutdown => {
+            stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        },
         _ = opencode.supervise() => unreachable!("OpenCode supervisor never returns"),
     };
     opencode.shutdown().await;

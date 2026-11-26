@@ -1285,6 +1285,9 @@ fn intent_history_opens_the_exact_routing_run() {
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
     snapshot.tickets[0].prompt = Some("Kurzer Test-Intent".into());
     let ticket = snapshot.tickets[0].id;
+    let execution = snapshot.commands[0].id;
+    let execution_created = 1795510043691;
+    snapshot.commands[0].created_unix_ms = execution_created;
     let mut routing = snapshot.commands[0].clone();
     routing.id = CommandId::new();
     let spec = routing.agent_spec.as_mut().unwrap();
@@ -1293,14 +1296,31 @@ fn intent_history_opens_the_exact_routing_run() {
     let run = routing.id;
     let root = routing.session_root();
     snapshot.commands.push(routing);
+    let mut memory = snapshot.commands[0].clone();
+    memory.id = CommandId::new();
+    memory.agent_spec.as_mut().unwrap().role = "memorizer".into();
+    memory.state = CommandState::Succeeded;
+    let mut result = memory.agent_progress.clone().unwrap();
+    result.phase = AgentPhase::Succeeded;
+    let takeaway = "GUI-Lokalisierung über Übersetzungsschlüssel gemerkt.";
+    result.summary = json!({"memory":"Ausführliche Beobachtung", "summary":takeaway}).to_string();
+    memory.result = Some(CommandOutput::Agent { agent: result });
+    let memory_run = memory.id;
+    snapshot.commands.push(memory);
     app.view_task(ticket);
     let mut dialog = app.dialog.take().unwrap();
     let Dialog::Task(task) = &mut dialog else { panic!("expected intent dialog"); };
     task.receive_history(None, Ok(TaskHistoryPage {
         next_before: None,
         entries: vec![TaskHistoryEntry {
+            sequence: 2,
+            created_unix_ms: execution_created + 2000,
+            message: "Memorizer hat Wissen für den Branch gespeichert".into(),
+            level: TaskHistoryLevel::Success,
+            command_id: Some(memory_run),
+        }, TaskHistoryEntry {
             sequence: 1,
-            created_unix_ms: 1,
+            created_unix_ms: execution_created + 1000,
             message: "Orchestrator-Lauf abgeschlossen".into(),
             level: TaskHistoryLevel::Success,
             command_id: Some(run),
@@ -1313,7 +1333,28 @@ fn intent_history_opens_the_exact_routing_run() {
         events,
         ..Default::default()
     }, |ctx| { closed = dialog.show(ctx, &mut app); });
-    for _ in 0..3 { let _ = render(vec![]); }
+    for _ in 0..2 { let _ = render(vec![]); }
+    let output = render(vec![]);
+    let texts: Vec<_> = output.shapes.iter().filter_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) => Some(&text.galley.job),
+        _ => None,
+    }).collect();
+    assert!(texts.iter().any(|job| job.text == takeaway
+        && job.sections[0].format.color == crate::app::GREEN));
+    assert!(!texts.iter().any(|job| job.text == crate::tr!("Verwaltung …")
+        || job.text == "Ausführliche Beobachtung"));
+    for (id, at) in [(execution, execution_created), (memory_run, execution_created + 2000),
+                     (run, execution_created + 1000)] {
+        let link = ctx.data_mut(|d| d.get_temp::<egui::Rect>(
+            egui::Id::new(("test-intent-run-open", id)),
+        )).unwrap();
+        assert!(output.shapes.iter().any(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => text.galley.job.text == timestamp(at)
+                && text.pos.x < link.left() && (text.pos.y - link.top()).abs() < 4.0
+                && text.galley.job.sections[0].format.color == crate::app::MUTED,
+            _ => false,
+        }), "Missing log timestamp before link for {id}");
+    }
     let button_id = egui::Id::new(("test-intent-run-open", run));
     let pos = ctx.data_mut(|d| d.get_temp::<egui::Rect>(button_id)).unwrap().center();
     let _ = render(vec![
@@ -1329,9 +1370,33 @@ fn intent_history_opens_the_exact_routing_run() {
 }
 
 #[test]
+fn intent_history_only_calls_a_confirmed_merge_successful() {
+    let app = fixture();
+    let mut command = app.snapshot.as_ref().unwrap().commands[0].clone();
+    command.agent_spec.as_mut().unwrap().role = MERGER_ROLE.into();
+    command.state = CommandState::Succeeded;
+    let mut agent = command.agent_progress.clone().unwrap();
+    agent.phase = AgentPhase::Succeeded;
+    agent.summary = format!("{PUBLICATION_CONFIRMED_PREFIX}\nGit: private technical details");
+    command.result = Some(CommandOutput::Agent { agent: agent.clone() });
+    assert_eq!(intent_run_summary(&command, None), (
+        crate::tr!("Merge erfolgreich durchgeführt.").into(), Some(TaskHistoryLevel::Success),
+    ));
+    agent.summary = format!("{PUBLICATION_BLOCKED_PREFIX}\nGit: conflict");
+    command.result = Some(CommandOutput::Agent { agent });
+    assert_eq!(intent_run_summary(&command, None).0, crate::tr!("Übernahme blockiert"));
+}
+
+#[test]
 fn task_history_is_colored_and_rendered_below_the_prompt() {
     let mut app = fixture();
-    let ticket = &mut Arc::make_mut(app.snapshot.as_mut().unwrap()).tickets[0];
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let runner = snapshot.runners.iter_mut().find(|runner| runner.id == snapshot.commands[0].runner_id).unwrap();
+    runner.name = format!("{} {}", "Test Runner", "mit langem Namen ".repeat(20));
+    let profile = &mut snapshot.commands[0].agent_spec.as_mut().unwrap().profile;
+    profile.model_id = "test-model".into();
+    profile.provider_id = "test-provider".into();
+    let ticket = &mut snapshot.tickets[0];
     ticket.prompt = Some("Kurze Aufgabe".into());
     let ticket = ticket.id;
     app.view_task(ticket);
@@ -1365,7 +1430,14 @@ fn task_history_is_colored_and_rendered_below_the_prompt() {
         _ => None,
     }).unwrap_or_else(|| panic!("Missing text: {wanted}"));
     let prompt = ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new("test-task-prompt"))).unwrap();
-    assert!(prompt.bottom() <= text("Verlauf").pos.y);
+    let model = text(&crate::tr!("Modell: {}", "test-model / test-provider"));
+    let runner = output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) if text.galley.job.text.starts_with("Zuordnung: Test Runner") => Some(text),
+        _ => None,
+    }).expect("runner assignment below prompt");
+    assert!(runner.galley.elided);
+    assert!(prompt.bottom() <= model.pos.y && model.pos.y < runner.pos.y);
+    assert!(runner.pos.y < text("Verlauf").pos.y);
     assert!(text("Verlauf").pos.y < text(message).pos.y);
     assert_eq!(text(message).galley.job.sections[0].format.color, crate::app::RED);
     assert!((text(&timestamp(1795510043691)).pos.y - text(message).pos.y).abs() < 2.0);
@@ -2190,9 +2262,12 @@ fn unanswered_question_windows_keep_inputs_but_hide_raw_data_and_export() {
 }
 
 #[test]
-fn question_windows_show_readable_pairs_separators_and_no_raw_data_or_export() {
+fn question_windows_page_through_readable_pairs_without_raw_data_or_export() {
     let mut app = fixture();
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let ticket = s.tickets[0].id;
+    let intent_summary = "Farbauswahl und Hinweise abstimmen";
+    s.tickets[0].title = intent_summary.into();
     let mut color = s.questions[0].clone();
     color.external.payload["title"] = json!("Welche Farbe?");
     color.external.payload["metadata"] = json!({"internal":"DARF_NICHT_SICHTBAR_SEIN"});
@@ -2214,46 +2289,70 @@ fn question_windows_show_readable_pairs_separators_and_no_raw_data_or_export() {
     let questions = vec![color, note, permission];
     let ctx = app.backend.context().clone();
     for mut dialog in [
-        Dialog::QuestionView(questions.clone()),
+        Dialog::QuestionView { questions: questions.clone(), page: 0 },
         Dialog::questions(questions),
     ] {
-        let mut output = None;
-        for _ in 0..4 {
-            ctx.data_mut(|d| d.insert_temp(egui::Id::new("test-question-pair-separators"), 0usize));
-            output = Some(ctx.run(
+        let mut frame = |events| ctx.run(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO, egui::vec2(1360.0, 1000.0),
                     )),
+                    events,
                     ..Default::default()
                 },
                 |ctx| { dialog.show(ctx, &mut app); },
-            ));
+        );
+        let expected = [("Welche Farbe?", "Blau"), ("Weitere Hinweise?", "Bitte morgen starten."),
+            ("Aktivieren?", "Ja"), ("Befehl ausführen?", "Einmal erlaubt")];
+        let mut footer_position = None;
+        for (index, action) in [(0, None), (1, Some("next")), (2, Some("next")),
+                                (3, Some("next")), (3, Some("next")), (2, Some("back"))] {
+        if let Some(action) = action {
+            let id = egui::Id::new(format!("test-question-view-{action}"));
+            let pos = ctx.data_mut(|d| d.get_temp::<egui::Rect>(id)).unwrap().center();
+            let button = |pressed| egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            };
+            let _ = frame(vec![egui::Event::PointerMoved(pos), button(true)]);
+            let _ = frame(vec![button(false)]);
         }
+        for _ in 0..3 { let _ = frame(vec![]); }
         let mut text = vec![];
-        let output = output.unwrap();
+        let output = frame(vec![]);
         for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
-        for expected in ["Frage", "Antwort", "Welche Farbe?", "Blau", "Weitere Hinweise?",
-            "Bitte morgen starten.", "Ja", "Befehl ausführen?", "Einmal erlaubt"] {
-            assert!(text.iter().any(|t| t == expected), "{expected}: {text:?}");
+        for (i, (question, answer)) in expected.iter().enumerate() {
+            assert_eq!(text.iter().any(|t| t == question), i == index, "{question}: {text:?}");
+            assert_eq!(text.iter().any(|t| t == answer), i == index, "{answer}: {text:?}");
         }
-        assert_eq!(text.iter().filter(|t| t.as_str() == "Frage").count(), 4);
-        assert_eq!(text.iter().filter(|t| t.as_str() == "Antwort").count(), 4);
+        assert!(text.contains(&format!("Frage {} von 4", index + 1)));
         let headings = output.shapes.iter().filter_map(|shape| {
             if let egui::epaint::Shape::Text(text) = &shape.shape {
                 matches!(text.galley.job.text.as_str(), "Frage" | "Antwort").then_some(text)
             } else { None }
         }).collect::<Vec<_>>();
-        assert_eq!(headings.len(), 8);
+        assert_eq!(headings.len(), 2);
+        assert!(output.shapes.iter().any(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(text) => text.galley.job.text == intent_summary
+                && text.pos.y < headings[0].pos.y,
+            _ => false,
+        }));
+        let (footer, intent_button, next_button) = ctx.data(|d| (
+            d.get_temp::<egui::Rect>(egui::Id::new("test-question-view-footer")).unwrap(),
+            d.get_temp::<egui::Rect>(egui::Id::new(("test-question-intent", ticket))).unwrap(),
+            d.get_temp::<egui::Rect>(egui::Id::new("test-question-view-next")).unwrap(),
+        ));
+        let previous = *footer_position.get_or_insert(footer.top());
+        assert!((previous - footer.top()).abs() < 1.0, "Paging moved the footer");
+        assert!(intent_button.top() > headings[1].pos.y);
+        assert!((intent_button.left() - footer.left()).abs() < 2.0);
+        assert!(intent_button.right() < next_button.left());
         assert!(headings.iter().all(|text| text.galley.job.sections.iter().all(|section| {
             section.format.font_id.family == egui::FontFamily::Name("factory-bold".into())
         })), "Question and answer headings must use a real bold font");
-        assert_eq!(ctx.data_mut(|d| d.get_temp::<usize>(
-            egui::Id::new("test-question-pair-separators"),
-        )), Some(3));
         for forbidden in ["Exportieren", "Originaldaten", "Vollständige Daten", "Metadaten",
             "DARF_NICHT_SICHTBAR_SEIN", "\"color\"", "\"decision\"", "Antworten senden", "Questions"] {
             assert!(!text.iter().any(|t| t.contains(forbidden)), "{forbidden}: {text:?}");
+        }
         }
     }
     assert!(app.settings.pending.is_empty());
@@ -2396,7 +2495,7 @@ fn session_sidebar_shows_equal_width_ordered_rows_and_opens_the_correct_dialogs(
         ]);
         match (kind, app.dialog.take().unwrap()) {
             (0, Dialog::Task(task)) => assert!(task.read_only),
-            (1, Dialog::QuestionView(questions)) => {
+            (1, Dialog::QuestionView { questions, .. }) => {
                 assert_eq!(questions.len(), 1);
                 assert_eq!(questions[0].id, answered_id);
                 assert_eq!(questions[0].answer.as_ref().unwrap()["color"], "blue");
@@ -3639,7 +3738,7 @@ fn prompt_summary_marks_truncated_prefixes_without_changing_original_content() {
 }
 
 #[test]
-fn intent_result_stays_out_of_the_overview_and_intent_dialog() {
+fn intent_result_stays_out_of_the_overview_and_is_short_in_the_intent_history() {
     let mut app = fixture();
     app.settings.page = Page::Tasks;
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
@@ -3691,8 +3790,8 @@ fn intent_result_stays_out_of_the_overview_and_intent_dialog() {
     app.view_task(id);
     let text = draw(&mut app);
     assert!(text.iter().any(|text| text.contains("Originalauftrag mit Details")));
+    assert!(text.iter().any(|text| text == "Ergebnis der Arbeit…"));
     assert!(!text.iter().any(|text| text == "Ergebnis"
-        || text.contains("Ergebnis der Arbeit")
         || text.contains("Eindeutiges Suchwort")
         || text.contains("[yoloforge:")));
 }

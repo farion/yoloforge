@@ -121,7 +121,10 @@ impl Store {
                         (c.state='succeeded'
                          AND COALESCE(json_extract(c.data,'$.agent_spec.role'),'') NOT IN (?1,'direct')
                          AND instr(json_extract(c.data,'$.result.agent.summary'),?2)=1
-                         AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=c.id AND json_extract(a.data,'$.final_scan_complete')=1))
+                          AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=
+                              CASE WHEN json_extract(c.data,'$.agent_spec.role')=?5
+                                   THEN json_extract(c.data,'$.agent_spec.prompt') ELSE c.id END
+                              AND json_extract(a.data,'$.final_scan_complete')=1))
                         OR (c.state='succeeded'
                             AND json_extract(c.data,'$.agent_spec.role')=?1
                             AND instr(json_extract(c.data,'$.result.agent.summary'),?4)=1
@@ -135,7 +138,7 @@ impl Store {
             )?;
             let rows = query
                 .query_map(params![MERGER_ROLE, PUBLICATION_CONFLICT_PREFIX,
-                    OLD_MERGER_PREFLIGHT, uncommitted_result_prefix()], |row| {
+                     OLD_MERGER_PREFLIGHT, uncommitted_result_prefix(), APPROVED_PUBLICATION_ROLE], |row| {
                     row.get::<_, String>(0)
                 })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -151,10 +154,12 @@ impl Store {
                     .and_then(|line| line.strip_prefix(MERGE_PARENT_PREFIX))
                     .and_then(|id| id.parse::<CommandId>().ok()) else { continue; };
                 let raw: Option<String> = tx.query_row(
-                    "SELECT c.data FROM commands c JOIN archive_status a ON a.command_id=c.id
+                    "SELECT c.data FROM commands c JOIN archive_status a ON a.command_id=
+                         CASE WHEN json_extract(c.data,'$.agent_spec.role')=?3
+                              THEN json_extract(c.data,'$.agent_spec.prompt') ELSE c.id END
                      WHERE c.id=?1 AND c.stream_id=?2 AND c.state='succeeded'
-                         AND json_extract(a.data,'$.final_scan_complete')=1",
-                    params![parent.to_string(), latest.stream_id.to_string()], |row| row.get(0),
+                          AND json_extract(a.data,'$.final_scan_complete')=1",
+                    params![parent.to_string(), latest.stream_id.to_string(), APPROVED_PUBLICATION_ROLE], |row| row.get(0),
                 ).optional()?;
                 let Some(raw) = raw else { continue; };
                 serde_json::from_str(&raw)?

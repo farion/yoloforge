@@ -29,7 +29,7 @@ impl Store {
                 UNION SELECT id FROM questions WHERE command_id IN (SELECT id FROM assigned_commands)
                 UNION SELECT ?1
              )
-             SELECT sequence, kind, created_unix_ms, payload FROM events
+              SELECT sequence, kind, created_unix_ms, payload FROM events
                WHERE sequence<?2
                  AND sequence>=COALESCE((SELECT MAX(sequence) FROM events
                     WHERE aggregate_id=?1 AND kind='intent.returned_to_draft'),0)
@@ -47,7 +47,7 @@ impl Store {
         let rows = statement.query_map(
             params![id, before.unwrap_or(i64::MAX as u64).min(i64::MAX as u64)],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?,
-                      row.get::<_, u64>(2)?, row.get::<_, String>(3)?)),
+                       row.get::<_, u64>(2)?, row.get::<_, String>(3)?)),
         )?.collect::<std::result::Result<Vec<_>, _>>()?;
         let next_before = (rows.len() > 100).then(|| rows[99].0);
         // A command can publish multiple updates in one state. Collapse adjacent
@@ -58,10 +58,12 @@ impl Store {
             let payload: serde_json::Value = serde_json::from_str(&payload)?;
             if let Some((message, level)) = summarize(&kind, &payload) {
                 let command_id = match kind.as_str() {
-                    "command.created" | "command.updated" => &payload["id"],
-                    "supervisor.evaluation" | "memory.evaluation" => &payload["command_id"],
-                    _ => &serde_json::Value::Null,
-                }.as_str().and_then(|id| id.parse().ok());
+                    "command.created" | "command.updated" => payload["id"].as_str(),
+                    "supervisor.evaluation" | "memory.evaluation" |
+                    "validation.rework_queued" | "validation.approved" | "validation.failed" |
+                    "validation.uncertain" | "validation.limit" => payload["command_id"].as_str(),
+                    _ => None,
+                }.and_then(|id| id.parse().ok());
                 let dedup = command_id.map(|id| (id, message.clone(), level));
                 if dedup.is_some() && dedup == previous && kind == "command.updated" {
                     continue;

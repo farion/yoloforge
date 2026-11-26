@@ -2,6 +2,7 @@
 use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
 fn main() {
+    embed_factory_runtime();
     println!("cargo:rerun-if-changed=locales/messages.json");
     let messages: BTreeMap<String, [String; 2]> =
         serde_json::from_str(&fs::read_to_string("locales/messages.json").unwrap()).unwrap();
@@ -35,6 +36,25 @@ fn main() {
         source,
     )
     .unwrap();
+}
+
+fn embed_factory_runtime() {
+    println!("cargo:rerun-if-env-changed=YOLOFORGE_BUNDLE_DIR");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("factory_runtime.rs");
+    let mut source = String::from("const EMBEDDED_RUNTIME: &[(&str, &[u8])] = &[\n");
+    if let Some(directory) = env::var_os("YOLOFORGE_BUNDLE_DIR") {
+        let directory = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+            .join("../..").join(directory);
+        let suffix = if env::var("CARGO_CFG_TARGET_OS").unwrap() == "windows" { ".exe" } else { "" };
+        for name in ["factoryd", "factory-runner", "opencode"] {
+            let path = directory.join(format!("{name}{suffix}")).canonicalize()
+                .unwrap_or_else(|error| panic!("Missing runtime binary {name}: {error}"));
+            println!("cargo:rerun-if-changed={}", path.display());
+            source.push_str(&format!("    ({name:?}, include_bytes!({:?})),\n", path.to_str().unwrap()));
+        }
+    }
+    source.push_str("];\n");
+    fs::write(out, source).unwrap();
 }
 
 fn fields(text: &str) -> Vec<&str> {

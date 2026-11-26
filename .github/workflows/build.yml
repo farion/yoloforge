@@ -86,12 +86,18 @@ jobs:
         run: cargo +stable test --locked --target "$BUILD_TARGET" -p factory-platform -p factory-core -p factory-protocol -p factory-opencode -p factory-runner -p factory-gui --all-targets
       - name: Server tests
         run: cargo +stable test --locked --target "$BUILD_TARGET" -p factoryd --all-targets
-      - name: Build GUI, server and runner
+      - name: Build server and runner
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
-        run: cargo +stable build --locked --release --target "$BUILD_TARGET" -p factory-gui -p factory-runner -p factoryd
+        run: cargo +stable build --locked --release --target "$BUILD_TARGET" -p factory-runner -p factoryd
       - name: Stage the verified OpenCode runtime
         run: cargo +stable run --locked --target "$BUILD_TARGET" -p factory-opencode --example package_distribution -- "target/$BUILD_TARGET/release"
+      - name: Build self-contained GUI
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        run: |
+          export YOLOFORGE_BUNDLE_DIR="target/$BUILD_TARGET/release"
+          cargo +stable build --locked --release --target "$BUILD_TARGET" -p factory-gui
       - name: Package native binaries
         run: |
           set -euo pipefail

@@ -158,8 +158,36 @@ pub fn ticket_pill(ui: &mut egui::Ui, key: &str) -> egui::Response {
     .inner
 }
 
+#[derive(Clone, Copy)]
+pub enum ListEntryKind {
+    Intent,
+    Question,
+    Problem,
+    Session,
+    Memorizer,
+    Supervisor,
+}
+
+impl ListEntryKind {
+    fn show(self, ui: &mut egui::Ui) {
+        use egui_phosphor::regular::{BRAIN, EYE, QUESTION, TARGET, TERMINAL_WINDOW, WARNING};
+        let (icon, label) = match self {
+            Self::Intent => (TARGET, crate::tr!("Intent")),
+            Self::Question => (QUESTION, crate::tr!("Frage")),
+            Self::Problem => (WARNING, crate::tr!("Problem")),
+            Self::Session => (TERMINAL_WINDOW, "Session"),
+            Self::Memorizer => (BRAIN, "Memorizer"),
+            Self::Supervisor => (EYE, "Supervisor"),
+        };
+        let response = ui.label(RichText::new(icon).size(18.0).color(crate::app::MUTED));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
+        response.on_hover_text(label);
+    }
+}
+
 pub fn ticket_title(
     ui: &mut egui::Ui,
+    kind: impl Into<Option<ListEntryKind>>,
     key: &str,
     text: &str,
     font: egui::FontId,
@@ -171,6 +199,9 @@ pub fn ticket_title(
         egui::vec2(width.min(ui.available_width()), 0.0),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            if let Some(kind) = kind.into() {
+                kind.show(ui);
+            }
             if !key.is_empty() {
                 ticket_pill(ui, key);
             }
@@ -1346,6 +1377,35 @@ pub fn dialog_header(ui: &mut egui::Ui, title: &str) -> egui::Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_entry_type_icon_precedes_the_reference_or_title() {
+        use egui_phosphor::regular::{BRAIN, EYE, QUESTION, TARGET, TERMINAL_WINDOW, WARNING};
+        let ctx = egui::Context::default();
+        for (kind, icon, reference) in [
+            (super::ListEntryKind::Intent, TARGET, "YOLO-25"),
+            (super::ListEntryKind::Question, QUESTION, "YOLO-25"),
+            (super::ListEntryKind::Problem, WARNING, "YOLO-25"),
+            (super::ListEntryKind::Session, TERMINAL_WINDOW, ""),
+            (super::ListEntryKind::Memorizer, BRAIN, ""),
+            (super::ListEntryKind::Supervisor, EYE, ""),
+        ] {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    super::ticket_title(ui, kind, reference, "Beispiel", egui::FontId::proportional(16.0), 300.0);
+                });
+            });
+            let position = |label: &str| output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == label => Some(text.pos.x),
+                _ => None,
+            }).unwrap();
+            assert!(position(icon) < position("Beispiel"));
+            if !reference.is_empty() {
+                assert!(position(icon) < position(reference));
+                assert!(position(reference) < position("Beispiel"));
+            }
+        }
+    }
+
     #[test]
     fn settings_footer_leaves_clearance_below_the_content_divider() {
         let ctx = egui::Context::default();

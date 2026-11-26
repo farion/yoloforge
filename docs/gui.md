@@ -77,9 +77,11 @@ merkt sich nur deren Pfad. Der nächste Start kann diese Verbindung wiederverwen
 
 ### Lokale Factory
 
-Das GUI-Releasepaket enthält Server, Runner und die passende OpenCode-Version
-für Linux, macOS und Windows. Das Paket vollständig entpacken bzw. die ganze
-`YoloForge.app` übernehmen und **Lokale Factory** wählen. Dafür sind weder
+Eine frische GUI startet ohne Factory-Verbindung. **Lokale Factory** startet
+Server, Runner und die passende OpenCode-Version aus dem Desktop-Binary.
+Unter macOS steckt das Binary in `YoloForge.app`; unter Windows und Linux
+sind keine weiteren ausführbaren Dateien neben der GUI nötig. Die GUI
+entpackt die eingebettete Laufzeit in einen privaten Cache. Dafür sind weder
 Docker noch eine separate Installation oder ein OpenCode-Download nötig.
 Modellzugänge, externe Repositories und projektspezifische Tools werden bei
 Bedarf weiter separat eingerichtet.
@@ -92,9 +94,14 @@ Benutzerdatenverzeichnis (`$XDG_DATA_HOME/yoloforge/local` bzw.
 - Token, Runner-ID, SQLite-Daten und Journal bleiben erhalten.
 - `factoryd.log` im lokalen Datenverzeichnis und `factory-runner.log` im jeweiligen
   Runner-Verzeichnis erklären Startfehler.
-- Bereits laufende, authentifizierbare lokale Dienste werden wiederverwendet.
+- Wenn das OpenCode des Runners beim Start beendet wird, nennt `factory-runner.log`
+  den Exit-Status, den Loopback-Port und den Pfad zur privaten `opencode-startup.log`.
+  Vor dem Teilen der Logs Zugangsdaten und vertrauliche Inhalte entfernen.
+- Nur eine von derselben GUI gestartete lokale Factory wird wiederverwendet.
 - Fremde Portbelegungen oder unpassende Zugangsdaten werden nicht übernommen.
-- GUI- oder Tab-Schließen beendet keine Dienste, Sessions oder Aufgaben.
+- Beim Schließen der GUI enden die lokale Factory, ihre lokalen Runner und
+  deren OpenCode-Dienste. Daten und Journale bleiben für den nächsten Start
+  erhalten. Tab-Schließen und externe Factorys sind davon nicht betroffen.
 
 ### Lokale Runner verwalten
 
@@ -106,7 +113,7 @@ Runner-Zugang; der Admin-Token wird nicht an den Runner weitergegeben.
 Auch **Lokale Factory** startet automatisch einen solchen Runner.
 
 Die Runner richten ihren eigenen verwalteten OpenCode-Server automatisch ein.
-Sie verwenden die OpenCode-Version aus dem GUI-Paket. Bei einem
+Sie verwenden die im GUI-Binary enthaltene OpenCode-Version. Bei einem
 Workspace-Build ohne gebündelte Laufzeit wird sie bei Bedarf heruntergeladen.
 Sie verwenden einen dauerhaft gespeicherten Loopback-Port und beziehen den
 Modellkatalog von der Factory. Anbieter und Standardmodelle werden zentral in der Factory

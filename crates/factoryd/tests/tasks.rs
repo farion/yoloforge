@@ -1067,7 +1067,8 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     prepare(&s, &s.pending(runner).unwrap()[0]);
     s.scheduler_tick().unwrap();
     let first = s.pending(runner).unwrap().pop().unwrap();
-    agent_reply(&s, &first, &format!("{PUBLICATION_CONFIRMED_PREFIX}\n{NO_GIT_CHANGES_MARKER}\n\nAgentenergebnis:\nI implemented step one."));
+    assert!(first.agent_spec.as_ref().unwrap().defer_publication);
+    agent_reply(&s, &first, &format!("{PUBLICATION_PREPARED_PREFIX}\n{NO_GIT_CHANGES_MARKER}\n\nAgentenergebnis:\nI implemented step one."));
     let current = |s: &Store, id| s.snapshot().unwrap().tickets.into_iter().find(|t| t.id == id).unwrap();
     assert_eq!(current(&s, intent.id).status, TicketState::Validating);
     let owner = s.snapshot().unwrap().streams.into_iter().find(|w| w.id == first.stream_id).unwrap();
@@ -1105,7 +1106,8 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     assert!(rework.agent_spec.as_ref().unwrap().prompt.contains("Implement steps two and three."));
     assert_eq!(current(&s, intent.id).execution_command, Some(rework.id));
     assert_eq!(current(&s, fresh.id).execution_command, None);
-    agent_reply(&s, rework, "I implemented steps two and three.");
+    assert!(rework.agent_spec.as_ref().unwrap().defer_publication);
+    agent_reply(&s, rework, &format!("{PUBLICATION_PREPARED_PREFIX}\nI implemented steps two and three."));
     s.scheduler_tick().unwrap();
     let reviewer = s.pending(runner).unwrap().into_iter().find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
     let prompt = &reviewer.agent_spec.as_ref().unwrap().prompt;
@@ -1125,10 +1127,17 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     assert!(s.snapshot().unwrap().commands.iter().any(|c| c.id == reviewer.id));
     agent_reply(&s, &new_review, r#"{"action":"approve"}"#);
     s.scheduler_tick().unwrap();
+    let publication = s.pending(runner).unwrap().into_iter()
+        .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == APPROVED_PUBLICATION_ROLE)).unwrap();
+    assert_eq!(publication.agent_spec.as_ref().unwrap().prompt, rework.id.to_string());
+    assert_eq!(publication.workspace_spec, rework.workspace_spec);
+    assert_eq!(current(&s, intent.id).status, TicketState::InProgress);
+    agent_reply(&s, &publication, PUBLICATION_CONFIRMED_PREFIX);
     assert_eq!(current(&s, intent.id).status, TicketState::Done);
     let history = s.task_history(intent.id, None).unwrap();
     assert!(history.entries.iter().any(|e| e.message.contains("Nacharbeit")));
-    assert!(history.entries.iter().any(|e| e.message == "Reviewer hat die Erfüllung anhand des Textes bestätigt"));
+    assert!(history.entries.iter().any(|e| e.message == "Reviewer hat die Erfüllung anhand des Textes bestätigt"
+        && e.command_id == Some(new_review.id)));
     for command in [first.id, rework.id, reviewer.id, new_review.id] {
         assert!(history.entries.iter().any(|e| e.command_id == Some(command)), "Missing {command}");
         assert!(!s.task_history(fresh.id, None).unwrap().entries.iter().any(|e| e.command_id == Some(command)));

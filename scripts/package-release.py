@@ -78,11 +78,6 @@ def main():
         elif args.kind == "tui":
             shutil.copy2(ROOT / "docs/client-installation.md", package / "README.md")
         elif args.kind == "gui":
-            suffix = ".exe" if args.os == "windows" else ""
-            for companion in ("factoryd", "factory-runner", "opencode"):
-                filename = companion + suffix
-                shutil.copy2(args.binaries / filename, binary_dir / filename)
-                executables.add(binary_dir / filename)
             shutil.copy2(ROOT / "deploy/OPENCODE-LICENSE", package / "OPENCODE-LICENSE")
             shutil.copy2(ROOT / "docs/gui.md", package / "README.md")
             if args.os == "linux":

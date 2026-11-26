@@ -417,6 +417,13 @@ pub const MERGER_UNCOMMITTED_RESULT: &str = "Merger changes must be committed be
 pub const INTENT_RECOVERY_PROMPT: &str = "Resume this failed intent from its last safe point. Inspect and preserve existing work. Do not repeat writes or external actions with an uncertain outcome, change permissions or credentials, or discard work. Verify what already happened, then complete only the remaining work or ask for the missing input.";
 pub const INTENT_RECOVERY_CAPABILITY: &str = "intent-recovery-v1";
 pub const PUBLICATION_CONFIRMED_PREFIX: &str = "[yoloforge:publication-confirmed]";
+pub const PUBLICATION_PREPARED_PREFIX: &str = "[yoloforge:publication-prepared]";
+pub const APPROVED_PUBLICATION_ROLE: &str = "approved-publication";
+pub const REVIEWED_PUBLICATION_CAPABILITY: &str = "reviewed-publication-v1";
+
+pub fn requires_reviewed_publication(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|s| s.defer_publication || s.role == APPROVED_PUBLICATION_ROLE)
+}
 pub const NO_GIT_CHANGES_MARKER: &str = "[yoloforge:no-git-changes]";
 pub const SESSION_STOPPED_PREFIX: &str = "[yoloforge:session-stopped]";
 
@@ -607,6 +614,8 @@ pub struct ContextTokenCount {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentSpec {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer_publication: bool,
     /// An explicit allowlist for native repository skills. None is a legacy run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_skills: Option<Vec<String>>,

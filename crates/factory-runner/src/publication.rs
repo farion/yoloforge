@@ -292,7 +292,7 @@ fn managed_commit(repository: &Path, args: &[&str]) -> Result<String> {
     ])
 }
 
-fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
+fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str, prepare_only: bool) -> Result<Option<PathBuf>> {
     let spec = r.command.workspace_spec.as_ref().context("Workspace specification missing")?;
     let root = args.workspace_root.as_deref().context("Workspace root missing")?;
     let workspace = execution_workspace(j, r, args, false)?;
@@ -328,7 +328,19 @@ fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Resul
             let pin = source_plan(j, r, source)?.merger_target.context("Merger target commit missing")?;
             (pin, git(&work, &["rev-parse", "HEAD"])?)
         } else {
-            (workspace.base_commit.clone(), workspace.base_commit.clone())
+            // A reviewed publication leaves the implementation worktree
+            // untouched. Its next snapshot is relative to the last approved
+            // worktree tree, not the original checkout or combined target tree.
+            let previous: Option<String> = j.db.query_row(
+                "SELECT json_extract(p.data,'$.snapshot') FROM publications p JOIN commands c ON c.id=p.command_id
+                 WHERE json_extract(p.data,'$.stream')=?1 AND json_extract(p.data,'$.epoch')=?2
+                   AND json_extract(p.data,'$.published')=1 AND json_extract(c.data,'$.command.agent_spec.role')=?3
+                 ORDER BY p.rowid DESC LIMIT 1",
+                params![r.command.stream_id.to_string(), r.command.ownership_epoch, APPROVED_PUBLICATION_ROLE],
+                |row| row.get(0),
+            ).optional()?.flatten();
+            let base = previous.unwrap_or_else(|| workspace.base_commit.clone());
+            (base.clone(), base)
         };
         let message = summary_commit_message(summary).unwrap_or_else(|| "Record task result".into());
         let snapshot = managed_commit(&repository, &[
@@ -351,6 +363,9 @@ fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Resul
         git(&repository, &["update-ref", &snapshot_ref, &snapshot, &"0".repeat(snapshot.len())])?;
     } else {
         ensure!(existing == snapshot, "Managed publication snapshot changed");
+    }
+    if prepare_only {
+        return Ok(Some(work));
     }
     let base_ref = format!("refs/heads/{}", spec.base_branch);
     let current = git(&repository, &["rev-parse", &base_ref])?;
@@ -386,7 +401,7 @@ fn publish_managed(j: &Journal, r: &Record, args: &Args, summary: &str) -> Resul
         ensure!(current == plan.parent, "Managed project base changed during publication");
         git(&repository, &["update-ref", &base_ref, &plan.commit, &current])?;
     }
-    if merger_parent(r)?.is_none() {
+    if merger_parent(r)?.is_none() && !is_approved_publication(&r.command) {
         git(&work, &["reset", "--hard", &plan.commit])?;
         ensure!(git(&work, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
             "Managed result worktree is not clean after publication");
@@ -415,6 +430,31 @@ pub(crate) fn commit_tree(target: &Path, repository: &Path, args: &[&str]) -> Re
 }
 
 pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
+    publish_or_prepare(j, r, args, summary, false)
+}
+
+pub(crate) fn is_approved_publication(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|s| s.role == APPROVED_PUBLICATION_ROLE)
+}
+
+pub(crate) fn prepare_for_review(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
+    publish_or_prepare(j, r, args, summary, true)
+}
+
+pub(crate) fn publish_approved(j: &Journal, r: &Record, args: &Args) -> Result<()> {
+    let source = r.command.agent_spec.as_ref().context("Missing publication source")?
+        .prompt.parse::<CommandId>().map_err(|_| anyhow::anyhow!("Invalid publication source"))?;
+    let plan = source_plan(j, r, source)?;
+    let snapshot = plan.snapshot.as_ref().context("Missing reviewed snapshot")?;
+    let reference = format!("refs/yoloforge/publication-snapshots/{source}");
+    ensure!(git(&plan.repository, &["rev-parse", &reference])? == *snapshot, "Reviewed snapshot changed");
+    j.db.execute("INSERT OR IGNORE INTO publications(command_id,data) VALUES(?1,?2)",
+        params![r.command.id.to_string(), serde_json::to_string(&plan)?])?;
+    publish_with_summary(j, r, args, "")?.context("Missing publication destination")?;
+    Ok(())
+}
+
+fn publish_or_prepare(j: &Journal, r: &Record, args: &Args, summary: &str, prepare_only: bool) -> Result<Option<PathBuf>> {
     // Publication already journaled may be recovering after it advanced the
     // target. In that case the existing plan is the durable proof.
     let already_planned: bool = j.db.query_row("SELECT EXISTS(SELECT 1 FROM publications WHERE command_id=?1)",
@@ -431,7 +471,7 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         return Ok(None);
     };
     if setup.repository_source == "factory:managed" && setup.repository_path.is_empty() {
-        return publish_managed(j, r, args, summary);
+        return publish_managed(j, r, args, summary, prepare_only);
     }
     // Remote URLs and Factory-managed storage have no user-selected local output folder.
     let source = Path::new(&setup.repository_source);
@@ -470,12 +510,14 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
         plan
     } else {
         let previous:Option<String>=j.db.query_row("SELECT COALESCE(json_extract(data,'$.snapshot'),json_extract(data,'$.commit')) FROM publications WHERE json_extract(data,'$.stream')=?1 AND json_extract(data,'$.epoch')=?2 AND json_extract(data,'$.published')=1 ORDER BY rowid DESC LIMIT 1",params![r.command.stream_id.to_string(),r.command.ownership_epoch],|row|row.get(0)).optional()?;
-        let current = git(&target, &["rev-parse", "HEAD"])?;
+        let current = if prepare_only { workspace.base_commit.clone() } else { git(&target, &["rev-parse", "HEAD"])? };
         check_merger_target(j, r, &current, None)?;
         let parent = if merger_parent(r)?.is_some() { current.clone() } else {
             previous.unwrap_or_else(|| workspace.base_commit.clone())
         };
-        target_at(&target, &spec.base_branch, &current)?;
+        if !prepare_only {
+            target_at(&target, &spec.base_branch, &current)?;
+        }
         if spec.target_git.is_some() {
             unchanged_target(&target, &spec.base_branch, &current)?;
         }
@@ -560,6 +602,9 @@ pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str)
             )?;
         } else {
             ensure!(existing == *snapshot, "Publication snapshot ref changed");
+        }
+        if prepare_only {
+            return Ok(Some(target));
         }
         let current = git(&target, &["rev-parse", "HEAD"])?;
         check_merger_target(j, r, &current, Some(&plan.commit))?;
@@ -714,7 +759,7 @@ pub(crate) fn published_unchanged_tree(journal: &Journal, id: CommandId) -> Resu
         [id.to_string()], |row| row.get(0)).optional()?;
     let Some(raw) = raw else { return Ok(false); };
     let plan: Plan = serde_json::from_str(&raw)?;
-    let Some(snapshot) = plan.snapshot.filter(|_| plan.published) else { return Ok(false); };
+    let Some(snapshot) = plan.snapshot else { return Ok(false); };
     let tree = git(&plan.repository, &["rev-parse", &format!("{snapshot}^{{tree}}")])?;
     let parent_tree = git(&plan.repository, &["rev-parse", &format!("{snapshot}^1^{{tree}}")])?;
     Ok(tree == parent_tree)
@@ -912,6 +957,34 @@ mod tests {
             work,
             target,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dirty_target_does_not_prevent_review_and_merge_uses_only_the_reviewed_snapshot() {
+        let f = fixture().await;
+        let before = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(f.target.join("result.txt"), "local edit").unwrap();
+        prepare_for_review(&f.journal, &f.record, &f.args, "Reviewed result").unwrap();
+        assert_eq!(git(&f.target, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(fs::read_to_string(f.target.join("result.txt")).unwrap(), "local edit");
+        assert!(published_commit(&f.journal, f.record.command.id).is_err());
+
+        let mut command = f.record.command.clone();
+        command.id = CommandId::new();
+        command.agent_spec = Some(serde_json::from_value(serde_json::json!({
+            "role": APPROVED_PUBLICATION_ROLE,
+            "prompt": f.record.command.id.to_string(),
+            "profile": ExecutionProfile::default()
+        })).unwrap());
+        let merge = f.journal.receive(command).unwrap();
+        assert!(publish_approved(&f.journal, &merge, &f.args).is_err());
+        assert_eq!(fs::read_to_string(f.target.join("result.txt")).unwrap(), "local edit");
+        fs::remove_file(f.target.join("result.txt")).unwrap();
+        fs::write(f.work.join("result.txt"), "post-review edit").unwrap();
+        publish_approved(&f.journal, &merge, &f.args).unwrap();
+        publish_approved(&f.journal, &merge, &f.args).unwrap();
+        assert_eq!(fs::read_to_string(f.target.join("result.txt")).unwrap(), "result");
+        assert_eq!(fs::read_to_string(f.work.join("result.txt")).unwrap(), "post-review edit");
     }
     fn parallel(f: &Fixture) -> (Record, PathBuf) {
         let mut command = f.record.command.clone();

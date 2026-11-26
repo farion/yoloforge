@@ -60,7 +60,7 @@ class Packages(unittest.TestCase):
                                 self.assertEqual(info["CFBundleExecutable"], "yoloforge-gui")
                             binary_path = name + ("/YoloForge.app/Contents/MacOS/" if os == "macos" and kind == "gui" else "/")
                             filenames = {
-                                "gui": ("yoloforge-gui", "factoryd", "factory-runner", "opencode"),
+                                "gui": ("yoloforge-gui",),
                                 "runner": ("factory-runner",), "server": ("factoryd",),
                             }[kind]
                             for filename in filenames:
@@ -70,8 +70,9 @@ class Packages(unittest.TestCase):
                     if kind == "gui":
                         prefix = "YoloForge.app/Contents/MacOS/" if os == "macos" else ""
                         suffix = ".exe" if os == "windows" else ""
-                        for filename in ("yoloforge-gui", "factoryd", "factory-runner", "opencode"):
-                            self.assertIn(prefix + filename + suffix, names)
+                        self.assertIn(prefix + "yoloforge-gui" + suffix, names)
+                        for filename in ("factoryd", "factory-runner", "opencode"):
+                            self.assertNotIn(prefix + filename + suffix, names)
                         self.assertIn("OPENCODE-LICENSE", names)
                         self.assertEqual("yoloforge.desktop" in names, os == "linux")
                     if kind == "runner":
@@ -81,13 +82,13 @@ class Packages(unittest.TestCase):
                             self.assertIn(required, names)
                     with mock.patch.object(NATIVE.subprocess, "run") as startup:
                         NATIVE.check_archive(archive)
-                    expected_binaries = 4 if kind == "gui" else 1
+                    expected_binaries = 2 if kind == "gui" else 1
                     self.assertEqual(startup.call_count, expected_binaries)
-                    for call in startup.call_args_list:
-                        self.assertEqual(call.args[0][1:], ["--version"])
+                    for index, call in enumerate(startup.call_args_list):
+                        self.assertEqual(call.args[0][1], "--version" if index == 0 else "--verify-local-runtime")
                         self.assertTrue(Path(call.args[0][0]).is_absolute())
                         self.assertTrue(call.kwargs["check"])
-                        self.assertEqual(call.kwargs["timeout"], 30)
+                        self.assertEqual(call.kwargs["timeout"], 30 if index == 0 else 90)
             VERIFY.verify(output, VERSION)
             (output / "SHA256SUMS").unlink()
             for kind in ("gui", "runner"):

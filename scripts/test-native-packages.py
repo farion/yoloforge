@@ -31,6 +31,11 @@ def check_archive(archive):
         for binary in binaries:
             # Absolute executable path and a fresh cwd: no sibling build assets.
             subprocess.run([str(binary), "--version"], cwd=root, check=True, timeout=30)
+            if binary.stem == "yoloforge-gui":
+                if len(binaries) != 1:
+                    raise ValueError("Desktop package must not contain companion executables")
+                subprocess.run([str(binary), "--verify-local-runtime", str(root / "runtime")],
+                               cwd=root, check=True, timeout=90)
         print(f"PASS {archive.name}", flush=True)
 
 

@@ -75,14 +75,16 @@ fn save(tx: &Transaction<'_>, id: TicketId, e: &Evaluation) -> Result<()> {
     Ok(())
 }
 fn candidates(tx: &Transaction<'_>, project: ProjectId) -> Result<Vec<RunnerCommand>> {
-    let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND c.rowid=(SELECT MAX(c2.rowid) FROM commands c2 WHERE c2.stream_id=c.stream_id AND json_extract(c2.data,'$.kind')='run_agent') ORDER BY c.rowid DESC")?;
-    let rows = stmt.query_map([project.to_string()], |r| r.get::<_, String>(0))?;
+    let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND c.rowid=(SELECT MAX(c2.rowid) FROM commands c2 WHERE c2.stream_id=c.stream_id AND json_extract(c2.data,'$.kind')='run_agent'
+        AND NOT (COALESCE(json_extract(c2.data,'$.agent_spec.role'),'')=?2 AND c2.state='succeeded'
+                 AND COALESCE(instr(json_extract(c2.data,'$.result.agent.summary'),?3),0)=1)) ORDER BY c.rowid DESC")?;
+    let rows = stmt.query_map(params![project.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX], |r| r.get::<_, String>(0))?;
     rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
 }
 
 fn cannot_continue(command: &RunnerCommand) -> bool {
     command.agent_spec.as_ref().is_some_and(|spec|
-        matches!(spec.role.as_str(), MERGER_ROLE | factory_protocol::directs::ROLE))
+        matches!(spec.role.as_str(), MERGER_ROLE | APPROVED_PUBLICATION_ROLE | factory_protocol::directs::ROLE))
         || command_publication_blocked(command)
         || (command.state == CommandState::Failed
             && !matches!(&command.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted))
@@ -509,6 +511,7 @@ pub(super) fn continue_task(
         t.session_prompt_request.is_some(),
     ) {
         Ok(mut c) => {
+            super::validation::defer_publication(tx, &mut c)?;
             c.agent_spec.as_mut().ok_or(StoreError::Internal)?.images = t.images.clone();
             c.agent_spec.as_mut().ok_or(StoreError::Internal)?.files = t.files.clone();
             super::work::save_command(tx, &c, "pending")?;

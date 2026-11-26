@@ -62,6 +62,15 @@
   "Supervisor-Auswertung abgeschlossen": ["Supervisor-Auswertung abgeschlossen", "Supervisor evaluation completed"],
   "Supervisor prüft die Session": ["Supervisor prüft die Session", "Supervisor is evaluating the session"],
   "Memorizer hat Wissen für den Branch gespeichert": ["Memorizer hat Wissen für den Branch gespeichert", "Memorizer saved knowledge for the branch"],
+  "Branch-Wissen gespeichert.": ["Branch-Wissen gespeichert.", "Saved a branch note."],
+  "Auswertung abgeschlossen.": ["Auswertung abgeschlossen.", "Finished the review."],
+  "Prüft den Lauf.": ["Prüft den Lauf.", "Reviewing the run."],
+  "Merge erfolgreich durchgeführt.": ["Merge erfolgreich durchgeführt.", "Merge completed successfully."],
+  "Ergebnis per Textprüfung bestätigt.": ["Ergebnis per Textprüfung bestätigt.", "Accepted after reviewing the report."],
+  "Nacharbeit eingereiht.": ["Nacharbeit eingereiht.", "Queued rework."],
+  "Ergebnis nicht beurteilbar.": ["Ergebnis nicht beurteilbar.", "Could not assess the result."],
+  "Kein gültiges Urteil.": ["Kein gültiges Urteil.", "No valid verdict."],
+  "Limit für automatische Nacharbeit erreicht": ["Limit für automatische Nacharbeit erreicht", "Automatic rework limit reached"],
   "Memorizer prüft den abgeschlossenen Lauf": ["Memorizer prüft den abgeschlossenen Lauf", "Memorizer is analyzing the completed run"],
   "Memorizer-Auswertung abgeschlossen": ["Memorizer-Auswertung abgeschlossen", "Memorizer evaluation completed"],
   "Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.": ["Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", "Delete intent “{}”? Factory will request a stop if the intent is running. Shared work, OpenCode history and files will be kept."],
@@ -1144,6 +1153,7 @@
     "OpenCode anzeigen",
     "Show OpenCode"
   ],
+  "Modell: {}": ["Modell: {}", "Model: {}"],
   "Zuordnung: {title}": [
     "Zuordnung: {title}",
     "Assignment: {title}"
@@ -2100,6 +2110,12 @@
     "Projektmenü",
     "Project menu"
   ],
+  "Eingebettete Factory-Laufzeit fehlt: {}": ["Eingebettete Factory-Laufzeit fehlt: {}", "Embedded Factory runtime is missing: {}"],
+  "Port 17433 ist bereits belegt. Eine ältere lokale Factory bitte gezielt beenden; fremde Prozesse werden nicht verändert.": [
+    "Port 17433 ist bereits belegt. Eine ältere lokale Factory bitte gezielt beenden; fremde Prozesse werden nicht verändert.",
+    "Port 17433 is already in use. Stop the previous local Factory manually; unrelated processes are not changed."
+  ],
+  "Problem": ["Problem", "Problem"],
   "Intent": [
     "Intent",
     "Intent"

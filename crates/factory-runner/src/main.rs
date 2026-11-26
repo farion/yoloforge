@@ -160,7 +160,11 @@ async fn report(
     if !compaction::process(client, journal, &mut record, args, registration, false).await? {
         return Ok(());
     }
-    let archived = archive::step(client, journal, &mut record, args, registration).await;
+    let archived = if publication::is_approved_publication(&record.command) {
+        Ok(true)
+    } else {
+        archive::step(client, journal, &mut record, args, registration).await
+    };
     if !matches!(archived, Ok(true)) {
         let (phase, summary) = if archived.is_ok() {
             (AgentPhase::Finalizing, "Execution result recorded locally; final session archive pending.")
@@ -330,6 +334,32 @@ async fn commands(
         if termination::process(client, journal, &mut record, args, registration).await? {
             return Ok(true);
         }
+        if publication::is_approved_publication(&record.command) && record.result.is_none() {
+            client.observe_agent(args.id, registration, record.command.id, &ObserveAgent {
+                ownership_epoch: record.command.ownership_epoch,
+                progress: AgentProgress {
+                    session_id: record.command.session_id(),
+                    message_id: agent_message_id(record.command.id),
+                    phase: AgentPhase::Starting,
+                    summary: AGENT_START_GRANT.into(),
+                },
+            }).await?;
+            let result = tokio::task::block_in_place(|| publication::publish_approved(journal, &record, args));
+            let summary = match result {
+                Ok(()) => format!("{PUBLICATION_CONFIRMED_PREFIX}\nGeprüfter Snapshot auf dem Zielbranch bestätigt."),
+                Err(error) if error.is::<publication::PublicationConflict>() => format!("{PUBLICATION_CONFLICT_PREFIX}\n{error}"),
+                Err(error) => format!("{PUBLICATION_BLOCKED_PREFIX}\nGeprüfter Snapshot erhalten; Übernahme blockiert: {error}"),
+            };
+            record.result = Some(CommandOutput::Agent { agent: AgentProgress {
+                session_id: record.command.session_id(),
+                message_id: agent_message_id(record.command.id),
+                phase: AgentPhase::Succeeded,
+                summary,
+            } });
+            tokio::task::block_in_place(|| journal.save(&record))?;
+            report(client, journal, registration, record, args).await?;
+            return Ok(true);
+        }
         if record.command.kind == CommandKind::RunAgent && record.result.is_none() {
             containment::publish_binding(client, journal, &mut record, registration).await?;
             if containment::control(client, journal, &mut record, args, registration).await? {
@@ -441,10 +471,16 @@ async fn commands(
                         .is_some_and(|s| !s.read_only && s.role != factory_protocol::directs::ROLE)
                 {
                     let planned_git = record.command.requires_target_git();
-                    let publication = tokio::task::block_in_place(|| publication::publish_with_summary(journal, &record, args, &progress.summary));
+                    let review_first = !planned_git && record.command.agent_spec.as_ref().is_some_and(|s| s.defer_publication);
+                    let publication = tokio::task::block_in_place(|| if review_first {
+                        publication::prepare_for_review(journal, &record, args, &progress.summary)
+                    } else {
+                        publication::publish_with_summary(journal, &record, args, &progress.summary)
+                    });
                     let managed = record.command.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref())
                         .is_some_and(|setup| setup.repository_source == "factory:managed");
                     let outcome = match &publication {
+                        Ok(Some(_)) if review_first => PublicationOutcome::NotPublished,
                         Ok(Some(_)) if managed => PublicationOutcome::Managed,
                         Ok(Some(_)) => PublicationOutcome::Local,
                         Ok(None) => PublicationOutcome::NotPublished,
@@ -470,6 +506,11 @@ async fn commands(
                         progress.summary.truncate(end);
                     } else {
                         match publication {
+                            Ok(Some(_)) if review_first => {
+                                let unchanged = tokio::task::block_in_place(|| publication::published_unchanged_tree(journal, record.command.id)).unwrap_or(false);
+                                let evidence = if unchanged { format!("\n{NO_GIT_CHANGES_MARKER}") } else { String::new() };
+                                progress.summary = format!("{PUBLICATION_PREPARED_PREFIX}{evidence}\nSnapshot für den Review gesichert.\n\nAgentenergebnis:\n{}", progress.summary);
+                            }
                             Ok(Some(path)) => {
                                 let unchanged = record.command.agent_spec.as_ref().is_some_and(|spec| spec.role.is_empty())
                                     && tokio::task::block_in_place(|| publication::published_unchanged_tree(journal, record.command.id)).unwrap_or(false);
@@ -888,11 +929,16 @@ async fn run(mut args: Args) -> Result<()> {
             input.capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
             input.capabilities.push(MERGER_RECOVERY_CAPABILITY.into());
             input.capabilities.push(INTENT_RECOVERY_CAPABILITY.into());
+            input.capabilities.push(REVIEWED_PUBLICATION_CAPABILITY.into());
             if args.managed_opencode.is_some() {
                 input.capabilities.push(DRAFT_RESET_CAPABILITY.into());
                 input.capabilities.push(MERGER_DRAFT_RESET_CAPABILITY.into());
             }
             let mut result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
+                input.capabilities.retain(|capability| capability != REVIEWED_PUBLICATION_CAPABILITY);
+                result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            }
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400)
                 && input.capabilities.iter().any(|capability| capability == MERGER_DRAFT_RESET_CAPABILITY)
             {
@@ -1091,6 +1137,8 @@ async fn run(mut args: Args) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let (gui_closed, gui_shutdown) = tokio::sync::oneshot::channel();
+    factory_platform::watch_gui_lifetime(move || { let _ = gui_closed.send(()); })?;
     let control = control::listen(&args).await?;
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -1104,6 +1152,7 @@ async fn main() -> Result<()> {
         result = run(args) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = terminate => Ok(()),
+        Ok(()) = gui_shutdown => Ok(()),
         result = control::serve(control) => result,
     }
 }

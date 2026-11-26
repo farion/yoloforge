@@ -175,6 +175,7 @@ impl App {
         #[cfg(test)]
         let settings = Settings { language: crate::i18n::Language::German, ..settings };
         crate::i18n::set_language(settings.language);
+        let explicit = !server.is_empty();
         let server = settings.startup_server(server);
         let stored_credential = settings.credential_for(&server).cloned();
         let backend = Backend::new(ctx.clone());
@@ -267,12 +268,15 @@ impl App {
                 }
             }
         }
-        let (token, credential_file) = match (
-            std::env::var("FACTORY_TOKEN"),
-            std::env::var_os("FACTORY_TOKEN_FILE"),
+        let (token, credential_file) = if server == crate::persistence::LOCAL_FACTORY_URL
+            && !explicit {
+            (None, None)
+        } else { match (
+            explicit.then(|| std::env::var("FACTORY_TOKEN")).transpose(),
+            explicit.then(|| std::env::var_os("FACTORY_TOKEN_FILE")).flatten(),
         ) {
-            (Ok(token), None) => (Some(token), None),
-            (Err(_), source) => {
+            (Ok(Some(token)), None) => (Some(token), None),
+            (Ok(None) | Err(_), source) => {
                 let (file, keep_path) = match source {
                     Some(path) => (Some(std::path::PathBuf::from(path)), false),
                     None => (stored_credential, true),
@@ -288,13 +292,13 @@ impl App {
                 });
                 (token, if keep_path { file } else { None })
             }
-            (Ok(_), Some(_)) => {
+            (Ok(Some(_)), Some(_)) => {
                 let error = crate::tr!("Nur FACTORY_TOKEN oder FACTORY_TOKEN_FILE setzen, nicht beides.");
                 app.error = Some(error.into());
                 app.notice_error(error);
                 (None, None)
             }
-        };
+        }};
         if let Some(token) = token {
             if cfg!(test) {
                 return app;
@@ -948,7 +952,7 @@ impl App {
             }
         }
         if !close {
-            if matches!(&dialog, Dialog::Questions(_) | Dialog::QuestionView(_)) {
+            if matches!(&dialog, Dialog::Questions(_) | Dialog::QuestionView { .. }) {
                 if let Some(Dialog::Task(task)) = &mut self.dialog {
                     task.return_to_questions = Some(Box::new(dialog));
                     return;
@@ -1320,6 +1324,9 @@ impl App {
                 }
                 Event::Snapshot(Err(e)) => {
                     self.server_peer = None;
+                    if self.pending_credential.take().is_some() && !self.online {
+                        self.backend.disconnect();
+                    }
                     self.connection_lost(e);
                 }
                 Event::Instances(result) => match result {
@@ -2338,6 +2345,13 @@ mod toast_tests {
     use super::*;
 
     #[test]
+    fn fresh_gui_has_no_active_factory_or_default_endpoint() {
+        let app = App::new(&egui::Context::default(), String::new(), None, None);
+        assert!(app.server.is_empty());
+        assert!(!app.connection_active());
+    }
+
+    #[test]
     fn toast_vertical_padding_is_smaller_than_horizontal_padding() {
         fn frame(shape: &egui::Shape) -> Option<egui::Rect> {
             match shape {
@@ -2376,13 +2390,16 @@ mod remembered_connection_tests {
         app.settings.server = "https://old.example".into();
         app.settings.credential_file = Some("old.token".into());
         app.server = "https://remote.example".into();
+        app.online = false;
         app.pending_credential = Some(ConnectionCredential::Existing("remote.token".into()));
 
         app.backend.emit_for_test(Event::Snapshot(Err("not connected".into())));
         app.receive();
         assert_eq!(app.settings.server, "https://old.example");
         assert_eq!(app.settings.credential_file.as_deref(), Some(std::path::Path::new("old.token")));
+        assert!(!app.connection_active());
 
+        app.pending_credential = Some(ConnectionCredential::Existing("remote.token".into()));
         app.backend.emit_for_test(Event::Snapshot(Ok(snapshot)));
         app.receive();
         assert_eq!(app.settings.server, app.server);
@@ -2408,8 +2425,9 @@ mod remembered_connection_tests {
         let json = serde_json::to_string(&app.settings).unwrap();
         assert!(!json.contains(token));
         let restored: Settings = serde_json::from_str(&json).unwrap();
-        let server = restored.startup_server("http://127.0.0.1:7432".into());
+        let server = restored.startup_server(String::new());
         assert_eq!(server, "https://remote.example");
+        assert_eq!(restored.startup_server("http://127.0.0.1:7432".into()), "http://127.0.0.1:7432");
         assert_eq!(std::fs::read_to_string(restored.credential_for(&server).unwrap()).unwrap(), token);
         assert!(restored.credential_for("https://other.example").is_none());
     }

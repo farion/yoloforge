@@ -255,6 +255,7 @@ mod tests {
             agent_progress: None,
             created_unix_ms: 0,
             agent_spec: Some(AgentSpec {
+                defer_publication: false,
                 repo_skills: None,
                 factory_skills: vec![],
                 local_mcps: vec![],
