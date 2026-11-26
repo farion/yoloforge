@@ -620,6 +620,7 @@ impl Store {
                 }
                 super::models::apply(&mut project.profile, model);
             }
+            // Publishing an approved snapshot is a Git-only runner operation.
             if !publication {
                 line(&project.profile.provider_id, 120)?;
                 line(&project.profile.model_id, 200)?;

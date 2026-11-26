@@ -1280,6 +1280,17 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     let new_review = s.pending(runner).unwrap().into_iter().find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
     assert_ne!(new_review.id, reviewer.id);
     assert!(s.snapshot().unwrap().commands.iter().any(|c| c.id == reviewer.id));
+    let current_project = s.snapshot().unwrap().projects.into_iter()
+        .find(|p| p.id == project.id).unwrap();
+    s.update_profile(project.id, UpdateProfile {
+        request_id: RequestId::new(),
+        expected_revision: current_project.revision,
+        profile: ExecutionProfile {
+            provider_id: String::new(),
+            model_id: String::new(),
+            ..current_project.profile
+        },
+    }).unwrap();
     agent_reply(&s, &new_review, r#"{"action":"approve"}"#);
     s.scheduler_tick().unwrap();
     let publication = s.pending(runner).unwrap().into_iter()
