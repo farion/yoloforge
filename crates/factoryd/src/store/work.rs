@@ -620,8 +620,11 @@ impl Store {
                 }
                 super::models::apply(&mut project.profile, model);
             }
-            line(&project.profile.provider_id, 120)?;
-            line(&project.profile.model_id, 200)?;
+            // Publishing an approved snapshot is a Git-only runner operation.
+            if !publication {
+                line(&project.profile.provider_id, 120)?;
+                line(&project.profile.model_id, 200)?;
+            }
             let context = Self::select_knowledge(
                 tx,
                 owner.project_id,
