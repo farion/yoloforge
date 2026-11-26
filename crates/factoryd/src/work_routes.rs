@@ -538,6 +538,17 @@ pub(super) async fn publication_recovery(
     db_call(body.grant_id, move || store.claim_publication_recovery(runner, id, body.grant_id)).await
 }
 
+pub(super) async fn pending_review_snapshot_recoveries(
+    State(app): State<App>, Path(runner): Path<RunnerId>, headers: HeaderMap,
+) -> Response {
+    let _guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    let store = app.store.clone();
+    db_call(RequestId::new(), move || store.pending_review_snapshot_recoveries(runner)).await
+}
+
 pub(super) async fn claim_review_snapshot_recovery(
     State(app): State<App>, Path((runner, id)): Path<(RunnerId, CommandId)>,
     headers: HeaderMap, Json(body): Json<PublicationRecoveryClaim>,

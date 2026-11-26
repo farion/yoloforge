@@ -929,6 +929,7 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
     assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::InProgress);
     let grant_id = RequestId::new();
     assert!(!s.claim_review_snapshot_recovery(runner, run.id, grant_id).unwrap());
+    assert!(s.pending_review_snapshot_recoveries(runner).unwrap().is_empty());
     final_archive(&s, &run);
     // Model the deployed legacy state and restart, as with WOAI-4.
     drop(s);
@@ -936,8 +937,20 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
         "UPDATE tickets SET data=json_set(data,'$.status','blocked','$.routing_note','Automatische Übernahme blockiert; Änderungen liegen im Arbeitsbereich.') WHERE id=?1",
         [intent.id.to_string()]).unwrap();
     let s = Store::open(&path).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    for rowid in -31..0 {
+        let stale = CommandId::new();
+        db.execute(
+            "INSERT INTO commands(rowid,id,stream_id,runner_id,state,data)
+             SELECT ?1,?2,stream_id,runner_id,state,json_set(data,'$.id',?2) FROM commands WHERE id=?3",
+            rusqlite::params![rowid, stale.to_string(), run.id.to_string()],
+        ).unwrap();
+    }
     s.merger_tick().unwrap();
     assert_eq!(s.task_payload(intent.id).unwrap().routing_note, SNAPSHOT_RETRY_NOTE);
+    assert_eq!(s.pending_review_snapshot_recoveries(runner).unwrap(), vec![run.id]);
+    assert!(s.pending_review_snapshot_recoveries(RunnerId::new()).unwrap().is_empty());
+    db.execute("DELETE FROM commands WHERE rowid BETWEEN -31 AND -1", []).unwrap();
     assert!(!s.claim_publication_recovery(runner, run.id, grant_id).unwrap());
     assert!(!s.claim_review_snapshot_recovery(RunnerId::new(), run.id, grant_id).unwrap());
     assert!(s.claim_review_snapshot_recovery(runner, run.id, grant_id).unwrap());
@@ -951,6 +964,7 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
     };
     s.report_recovered_review_snapshot(runner, run.id, proof.clone()).unwrap();
     s.report_recovered_review_snapshot(runner, run.id, proof).unwrap();
+    assert!(s.pending_review_snapshot_recoveries(runner).unwrap().is_empty());
     assert_eq!(s.task_payload(intent.id).unwrap().status, TicketState::Validating);
     assert_eq!(s.task_payload(intent.id).unwrap().execution_command, Some(run.id));
     assert!(s.task_history(intent.id, None).unwrap().entries.iter().any(|entry|

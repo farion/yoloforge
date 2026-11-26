@@ -850,8 +850,8 @@ pub(crate) fn review_snapshot_candidate(journal: &Journal, position: usize) -> R
                 OR instr(json_extract(data,'$.result.agent.summary'),?2)=1
                 OR instr(json_extract(data,'$.result.agent.summary'),?3)>0)
            AND NOT EXISTS(SELECT 1 FROM publications p WHERE p.command_id=commands.id
-                           AND json_extract(p.data,'$.recovery_reported')=1)
-         ORDER BY rowid",
+                            AND json_extract(p.data,'$.recovery_reported')=1)
+          ORDER BY rowid DESC",
     )?;
     let ids = statement.query_map(params![PUBLICATION_BLOCKED_PREFIX, PUBLICATION_CONFLICT_PREFIX,
         "Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:"], |row| row.get::<_, String>(0))?

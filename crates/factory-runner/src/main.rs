@@ -1006,6 +1006,54 @@ async fn run(mut args: Args) -> Result<()> {
                     .await;
                     next_presence = std::time::Instant::now() + Duration::from_secs(10);
                 }
+                let check_publication = std::time::Instant::now() >= next_publication_check;
+                if check_publication {
+                    next_publication_check = std::time::Instant::now() + Duration::from_secs(30);
+                    let registration = current.registration_id;
+                    let pending = tokio::time::timeout(Duration::from_secs(8),
+                        client.pending_review_snapshot_recoveries(args.id, registration)).await;
+                    let candidates = match pending {
+                        Ok(Ok(ids)) => ids,
+                        // Rolling upgrades may temporarily run this runner against an older server.
+                        Ok(Err(ClientError::Http { status: reqwest::StatusCode::NOT_FOUND, .. })) =>
+                            tokio::task::block_in_place(|| publication::review_snapshot_candidate(&journal, next_publication_recovery))?
+                                .into_iter().collect(),
+                        Ok(Err(error)) => {
+                            eprintln!("Review snapshot queue unavailable: {error}");
+                            Vec::new()
+                        }
+                        Err(_) => {
+                            eprintln!("Review snapshot queue timed out");
+                            Vec::new()
+                        }
+                    };
+                    for candidate in candidates {
+                        let grant = RequestId::new();
+                        let recovery = async {
+                            if !client.review_snapshot_recovery(args.id, registration, candidate, grant).await? {
+                                return Ok::<_, anyhow::Error>(false);
+                            }
+                            let proof = tokio::task::block_in_place(||
+                                publication::recover_review_snapshot(&journal, candidate, grant, &args))?;
+                            client.report_recovered_review_snapshot(args.id, registration, candidate, &proof).await?;
+                            tokio::task::block_in_place(|| publication::acknowledge_recovery(&journal, candidate))?;
+                            Ok(true)
+                        };
+                        match tokio::time::timeout(Duration::from_secs(12), recovery).await {
+                            Ok(Ok(true)) => eprintln!("Review snapshot recovery confirmed for {candidate}"),
+                            Ok(Ok(false)) => {}
+                            outcome => {
+                                match outcome {
+                                    Ok(Err(error)) => eprintln!("Review snapshot recovery deferred for {candidate}: {error:#}"),
+                                    Err(_) => eprintln!("Review snapshot recovery timed out for {candidate}"),
+                                    _ => unreachable!(),
+                                }
+                                let _ = tokio::time::timeout(Duration::from_secs(4),
+                                    client.release_publication_recovery(args.id, registration, candidate, grant)).await;
+                            }
+                        }
+                    }
+                }
                 let command_result = commands(
                     &client,
                     &journal,
@@ -1015,8 +1063,7 @@ async fn run(mut args: Args) -> Result<()> {
                     &mut next_cleanup,
                 )
                 .await;
-                if command_result.is_ok() && std::time::Instant::now() >= next_publication_check {
-                    next_publication_check = std::time::Instant::now() + Duration::from_secs(30);
+                if command_result.is_ok() && check_publication {
                     if matches!(command_result, Ok(false)) && args.managed_opencode.is_some() {
                         if let Ok(Err(error)) = tokio::time::timeout(Duration::from_secs(8),
                             draft_reset::step(&client, &journal, &args, current.registration_id)).await
@@ -1026,29 +1073,6 @@ async fn run(mut args: Args) -> Result<()> {
                     }
                     let position = next_publication_recovery;
                     next_publication_recovery = next_publication_recovery.wrapping_add(1);
-                    let snapshot_recovery = async {
-                        let Some(candidate) = tokio::task::block_in_place(|| publication::review_snapshot_candidate(&journal, position))? else {
-                            return Ok::<_, anyhow::Error>(());
-                        };
-                        let grant = RequestId::new();
-                        if !matches!(client.review_snapshot_recovery(args.id, current.registration_id, candidate, grant).await, Ok(true)) {
-                            return Ok(());
-                        }
-                        match tokio::task::block_in_place(|| publication::recover_review_snapshot(&journal, candidate, grant, &args)) {
-                            Ok(proof) => {
-                                client.report_recovered_review_snapshot(args.id, current.registration_id, candidate, &proof).await?;
-                                tokio::task::block_in_place(|| publication::acknowledge_recovery(&journal, candidate))?;
-                            }
-                            Err(error) => {
-                                client.release_publication_recovery(args.id, current.registration_id, candidate, grant).await?;
-                                return Err(error);
-                            }
-                        }
-                        Ok(())
-                    };
-                    if let Ok(Err(error)) = tokio::time::timeout(Duration::from_secs(12), snapshot_recovery).await {
-                        eprintln!("Review snapshot recovery deferred: {error:#}");
-                    }
                     let _ = tokio::time::timeout(Duration::from_secs(8), async {
                         let Some(candidate) = tokio::task::block_in_place(|| publication::recovery_candidate(&journal, position))? else {
                             return Ok::<_, anyhow::Error>(());

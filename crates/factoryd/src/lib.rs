@@ -431,6 +431,10 @@ pub fn router_with_shutdown(
                 .delete(work_routes::release_publication_recovery),
         )
         .route(
+            "/v1/runners/{runner}/review-snapshot-recovery",
+            get(work_routes::pending_review_snapshot_recoveries),
+        )
+        .route(
             "/v1/runners/{runner}/commands/{command}/review-snapshot-recovery",
             axum::routing::put(work_routes::claim_review_snapshot_recovery)
                 .post(work_routes::report_recovered_review_snapshot),

@@ -212,6 +212,31 @@ impl Store {
         self.claim_result_recovery(runner, id, grant, true)
     }
 
+    pub fn pending_review_snapshot_recoveries(&self, runner: RunnerId) -> Result<Vec<CommandId>> {
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        let ids = {
+            let mut query = tx.prepare(
+                "SELECT c.id FROM tickets t JOIN scheduler_runs r ON r.ticket_id=t.id
+                 JOIN commands c ON c.id=r.agent_id AND c.id=json_extract(t.data,'$.execution_command')
+                 WHERE c.runner_id=?1 AND c.state='succeeded'
+                   AND json_extract(t.data,'$.status') IN ('in_progress','blocked')
+                   AND COALESCE(json_extract(t.data,'$.draft'),0)=0
+                 GROUP BY c.id ORDER BY MIN(c.rowid)",
+            )?;
+            let rows = query.query_map([runner.to_string()], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut pending = Vec::new();
+        for id in ids {
+            let id = id.parse().map_err(|_| StoreError::Internal)?;
+            if recoverable_publication(&tx, runner, id, true)?.is_some() {
+                pending.push(id);
+            }
+        }
+        Ok(pending)
+    }
+
     fn claim_result_recovery(&self, runner: RunnerId, id: CommandId, grant: RequestId, review_snapshot: bool) -> Result<bool> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
