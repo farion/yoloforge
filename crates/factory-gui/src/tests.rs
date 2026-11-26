@@ -74,6 +74,39 @@ fn legacy_publication_failure_stays_in_queue_and_completion_notice_is_corrected(
 }
 
 #[test]
+fn completion_notifications_use_the_ticket_key_instead_of_the_project_name() {
+    use crate::i18n::{set_language, Language};
+
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.projects[0].name = "YoloForge".into();
+    let ticket = &mut snapshot.tickets[0];
+    ticket.key = "YOLO-5".into();
+    let mut notification = Notification {
+        id: 1,
+        project_id: Some(ticket.project_id),
+        command_id: ticket.execution_command,
+        question_id: None,
+        ticket_id: None,
+        title: "Aufgabe abgeschlossen".into(),
+        kind: "command.updated".into(),
+        created_unix_ms: 0,
+        read: false,
+    };
+
+    set_language(Language::German);
+    assert_eq!(app.notification_label(&notification), "YOLO-5 abgeschlossen");
+    set_language(Language::English);
+    assert_eq!(app.notification_label(&notification), "YOLO-5 completed");
+
+    set_language(Language::German);
+    notification.command_id = Some(CommandId::new());
+    assert_eq!(app.notification_label(&notification), "YoloForge: Intent abgeschlossen");
+    notification.title = "Aufgabe fehlgeschlagen".into();
+    assert_eq!(app.notification_label(&notification), "YoloForge: Aufgabe fehlgeschlagen");
+}
+
+#[test]
 fn task_advanced_toggle_hides_choices_and_second_divider_by_default() {
     let mut app = fixture();
     let project = app.settings.project.unwrap();

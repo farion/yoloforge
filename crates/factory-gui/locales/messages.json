@@ -115,6 +115,8 @@
   "Zurück zur Factory": ["Zurück zur Factory", "Back to Factory"],
   "License GPL v3.0": ["License GPL v3.0", "License GPL v3.0"],
   "Wird abgeschlossen": ["Wird abgeschlossen", "Finalizing"],
+  "{key} abgeschlossen": ["{key} abgeschlossen", "{key} completed"],
+  "Intent abgeschlossen": ["Intent abgeschlossen", "Intent completed"],
   "Ergebnis liegt vor. Der Session-Verlauf wird noch gespeichert.": ["Ergebnis liegt vor. Der Session-Verlauf wird noch gespeichert.", "The result is available. The session history is still being saved."],
   "Wartend": ["Wartend", "Waiting"],
   "{queue} eingereiht · {waiting} wartend": ["{queue} eingereiht · {waiting} wartend", "{queue} queued · {waiting} waiting"],
