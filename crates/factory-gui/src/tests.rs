@@ -1609,7 +1609,7 @@ fn sidebar_renders_all_current_status_colors_for_every_project_page() {
     for (page, expected) in [
         (Page::Tasks, &[(1, GREEN), (1, AMBER)][..]),
         (Page::Questions, &[(1, AMBER)][..]),
-        (Page::Sessions, &[(1, GREEN), (2, BLUE), (1, RED)][..]),
+        (Page::Sessions, &[(1, BLUE), (3, MUTED)][..]),
         (Page::ProjectActivity, &[(2, GREEN), (2, BLUE)][..]),
     ] {
         let rect: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-project-navigation", page)))).unwrap();
