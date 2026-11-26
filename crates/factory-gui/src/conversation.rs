@@ -548,6 +548,8 @@ pub(crate) fn execution_outcome(
     };
     let (label, color) = match command.state {
         CommandState::Pending | CommandState::Accepted => return None,
+        _ if command_publication_blocked(command) => (crate::tr!("Übernahme blockiert"), RED),
+        _ if command_publication_unconfirmed(command) => (crate::tr!("Übernahme nicht bestätigt"), AMBER),
         _ if progress.is_some_and(|p| p.phase == AgentPhase::Interrupted) => (crate::tr!("Unterbrochen"), AMBER),
         _ if progress.is_some_and(|p| p.phase == AgentPhase::Failed) => (crate::tr!("Fehlgeschlagen"), RED),
         CommandState::Failed => (crate::tr!("Fehlgeschlagen"), RED),

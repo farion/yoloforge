@@ -95,6 +95,9 @@ struct Args {
     /// Repair publication of an already successful task (requires an operator Factory token).
     #[arg(long)]
     publish_result: Option<CommandId>,
+    /// Record an already integrated, manually reviewed Factory snapshot; do not write Git.
+    #[arg(long, requires = "publish_result")]
+    record_integrated_snapshot: Option<String>,
     /// Open the recorded OpenCode session without registering another runner or requiring a Factory token.
     #[arg(long, conflicts_with = "publish_result")]
     open_session: Option<CommandId>,
@@ -746,6 +749,28 @@ async fn run(mut args: Args) -> Result<()> {
                 && record.command.ownership_epoch == current.ownership_epoch,
             "Stream ownership changed"
         );
+        if let Some(integrated) = args.record_integrated_snapshot.as_deref() {
+            let (base_branch, target_commit) =
+                publication::verify_integrated_snapshot(&record, integrated)?;
+            let mut matched = 0;
+            for ticket in snapshot.tickets.iter().filter(|ticket|
+                !ticket.draft && ticket.status != TicketState::Cancelled
+                    && ticket.execution_command == Some(id) && owner.ticket_ids.contains(&ticket.id))
+            {
+                client.management_request(
+                    "POST", &format!("/v1/tickets/{}/reconcile-publication", ticket.id),
+                    &serde_json::to_value(ReconcilePublication {
+                        request_id: RequestId::new(), expected_revision: ticket.revision,
+                        command_id: id, base_branch: base_branch.clone(),
+                        integrated_snapshot: integrated.into(), target_commit: target_commit.clone(),
+                    })?,
+                ).await?;
+                println!("{}: Übernahme auf {} bestätigt ({})", ticket.key, base_branch, target_commit);
+                matched += 1;
+            }
+            anyhow::ensure!(matched > 0, "No current Intent is assigned to this execution");
+            return Ok(());
+        }
         anyhow::ensure!(
             !snapshot.commands.iter().any(|c| snapshot
                 .streams

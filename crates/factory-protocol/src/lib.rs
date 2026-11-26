@@ -261,6 +261,18 @@ pub struct RetryTask {
 
 pub const DELETE_FAILED_TASK_CAPABILITY: &str = "delete-failed-intent-v1";
 
+/// Operator attestation after reconciling an old result in Git.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcilePublication {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub command_id: CommandId,
+    pub base_branch: String,
+    pub integrated_snapshot: String,
+    pub target_commit: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteFailedTask {

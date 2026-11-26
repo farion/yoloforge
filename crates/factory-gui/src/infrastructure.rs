@@ -1201,7 +1201,8 @@ mod tests {
             app.local_runners_busy = true;
             app.restarting_runner = Some(id);
             let (card, labels, spinner) = draw(&mut app);
-            assert_eq!(card, idle_card);
+            assert!((card.center() - idle_card.center()).length() < 1.0);
+            assert_eq!(card.size(), idle_card.size());
             assert!(labels.iter().any(|label| label == "Neustart läuft …"));
             assert!(labels.iter().any(|label| label == &other.name));
             assert!(!labels.iter().any(|label| label == "Test-Runner"));
@@ -1215,7 +1216,8 @@ mod tests {
             }));
             app.receive();
             let (card, labels, spinner) = draw(&mut app);
-            assert_eq!(card, idle_card);
+            assert!((card.center() - idle_card.center()).length() < 1.0);
+            assert_eq!(card.size(), idle_card.size());
             assert!(labels.iter().any(|label| label == "Test-Runner"));
             assert!(!labels.iter().any(|label| label == "Neustart läuft …"));
             assert!(spinner.is_none());

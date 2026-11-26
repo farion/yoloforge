@@ -1848,7 +1848,7 @@ impl App {
             });
         }
         // Clone references' backing values only for this view's interaction, not the snapshot.
-        let mut entries = entries
+        let entries = entries
             .iter()
             .map(|(id, e)| (*id, (*e).clone()))
             .collect::<Vec<_>>();
@@ -1933,10 +1933,11 @@ impl App {
                 if Some(id) == new_prompt { response.scroll_to_me(Some(egui::Align::BOTTOM)); }
             }
             for (command, entry) in restored {
-                ui.add_space(conversation::line_height(ui));
+                let height = conversation::line_height(ui);
+                ui.add_space(height);
                 conversation::message(ui, self, command, &entry, false);
             }
-            if submitted {
+            if new_prompt.is_some() {
                 ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
             }
         });

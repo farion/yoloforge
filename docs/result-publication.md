@@ -70,6 +70,15 @@ dazu gestoppt sein. Die Option prüft Factory-Erfolg, aktuellen Besitzer/Epoche,
 neueste Ausführung und ausstehende Projektarbeit, nutzt denselben journalisierten
 Übernahmeablauf und startet keinen Agenten erneut.
 
+Wurde ein altes Ergebnis bereits manuell zusammengeführt, kann der Operator
+mit `--publish-result COMMAND_ID --record-integrated-snapshot SNAPSHOT_COMMIT`
+genau diesen Intent nachtragen. Erst die fachliche Übernahme prüfen: Die reine
+Git-Abstammung belegt nicht, ob die richtigen Konfliktauflösungen gewählt wurden.
+Der Runner prüft anschließend, dass der gesicherte Stream-Snapshot
+(`refs/yoloforge/consolidation/STREAM_ID`) im konfigurierten Zielbranch enthalten
+ist. Nur ein Admin-Zugang kann die Bestätigung an die Factory melden. Der Befehl
+schreibt weder in Git noch startet er einen Agenten.
+
 Geprüft: ignorierte Dateien, unveränderter Ausführungsindex/HEAD, Folgeaufgaben,
 Fortsetzung, Zieländerungen, idempotentes Replay und Wiederaufnahme nach erfolgtem
 Ziel-Fast-forward. Der Realmodell-Test `scripts/smoke-prompt-image.py` prüft zusätzlich,

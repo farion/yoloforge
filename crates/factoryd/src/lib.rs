@@ -320,6 +320,7 @@ pub fn router_with_shutdown(
         .route("/v1/commands/{id}/hosting", post(review_routes::hosted))
         .route("/v1/tickets", post(create_ticket))
         .route("/v1/tickets/{id}", patch(update_ticket))
+        .route("/v1/tickets/{id}/reconcile-publication", post(reconcile_publication))
         .route("/v1/streams", post(create_stream))
         .route("/v1/streams/{id}/control", post(set_control))
         .route("/v1/projects/setup", post(review_routes::setup))
@@ -1013,6 +1014,21 @@ async fn update_ticket(
         );
     };
     db_call(body.request_id, move || app.store.update_ticket(id, body)).await
+}
+
+async fn reconcile_publication(
+    State(app): State<App>,
+    axum::Extension(principal): axum::Extension<Principal>,
+    Path(id): Path<TicketId>,
+    body: Result<Json<ReconcilePublication>, JsonRejection>,
+) -> Response {
+    if principal.role != DeviceRole::Admin {
+        return error(StatusCode::FORBIDDEN, ErrorCode::Unauthorized, "Admin attestation required");
+    }
+    let Ok(Json(body)) = body else {
+        return error(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, "Invalid publication attestation");
+    };
+    db_call(body.request_id, move || app.store.reconcile_publication(id, body)).await
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

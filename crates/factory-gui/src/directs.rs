@@ -24,7 +24,15 @@ pub(crate) fn list(ui: &mut egui::Ui, app: &mut App) {
     let archived = directs.iter().filter(|d| d.state == DirectState::Archived).count();
     design::section_toolbar_with(ui, "directs", &mut app.query, crate::tr!("Directs durchsuchen …"),
         &[(crate::tr!("Offen"), directs.len() - archived), (crate::tr!("Archiv"), archived)], &mut selected,
-        |ui| create = design::icon_button(ui, egui_phosphor::regular::PLUS, crate::tr!("Neues Direct"), can_create).clicked());
+        |ui| {
+            let height = ui.text_style_height(&egui::TextStyle::Body)
+                + f32::from(design::INPUT_MARGIN.top + design::INPUT_MARGIN.bottom);
+            ui.allocate_ui_with_layout(
+                egui::vec2(design::ICON_BUTTON_SIZE, height.max(design::ICON_BUTTON_SIZE)),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| create = design::icon_button(ui, egui_phosphor::regular::PLUS, crate::tr!("Neues Direct"), can_create).clicked(),
+            );
+        });
     app.show_answered = selected == 1;
     if create {
         app.write(crate::tr!("Neues Direct"), "POST", "/v1/directs".into(), json!(CreateDirect {

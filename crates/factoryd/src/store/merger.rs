@@ -328,6 +328,23 @@ mod tests {
             store.task_payload(sources[0].0).unwrap().status,
             TicketState::Blocked
         );
+        let blocked = store.task_payload(sources[0].0).unwrap();
+        let mut confirmation = ReconcilePublication {
+            request_id: RequestId::new(),
+            expected_revision: blocked.revision,
+            command_id: sources[0].1.id,
+            base_branch: "wrong-branch".into(),
+            integrated_snapshot: "b".repeat(40),
+            target_commit: "c".repeat(40),
+        };
+        assert!(matches!(store.reconcile_publication(blocked.id, confirmation.clone()), Err(StoreError::WorkConflict)));
+        confirmation.request_id = RequestId::new();
+        confirmation.base_branch = "main".into();
+        assert_eq!(store.reconcile_publication(blocked.id, confirmation).unwrap().status, TicketState::Done);
+        let snapshot = store.snapshot().unwrap();
+        let reconciled = snapshot.commands.iter().find(|c| c.id == sources[0].1.id).unwrap();
+        assert!(!command_publication_blocked(reconciled));
+        assert!(!command_publication_unconfirmed(reconciled));
         assert_eq!(
             store.task_payload(sources[1].0).unwrap().execution_command,
             Some(merge.id)

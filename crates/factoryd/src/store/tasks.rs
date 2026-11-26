@@ -43,6 +43,75 @@ pub(super) fn editable(db: &Connection, t: &Ticket) -> Result<bool> {
     )?)
 }
 impl Store {
+    pub fn reconcile_publication(&self, id: TicketId, body: ReconcilePublication) -> Result<Ticket> {
+        let oid = |value: &str| matches!(value.len(), 40 | 64)
+            && value.bytes().all(|b| b.is_ascii_hexdigit());
+        if !oid(&body.target_commit) || !oid(&body.integrated_snapshot)
+            || body.target_commit.len() != body.integrated_snapshot.len()
+        {
+            return Err(StoreError::Invalid("Invalid Git commit IDs"));
+        }
+        self.mutate(body.request_id, &format!("task.reconcile_publication/{id}"), &body, |tx| {
+            let raw: String = tx.query_row(
+                "SELECT t.data FROM tickets t JOIN active_projects p ON p.id=t.project_id
+                 WHERE t.id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)",
+                [id.to_string()], |row| row.get(0),
+            ).optional()?.ok_or(StoreError::NotFound)?;
+            let mut ticket: Ticket = serde_json::from_str(&raw)?;
+            if ticket.revision != body.expected_revision {
+                return Err(StoreError::RevisionConflict(ticket.revision));
+            }
+            if ticket.draft || ticket.status == TicketState::Cancelled
+                || ticket.execution_command != Some(body.command_id)
+            {
+                return Err(StoreError::WorkConflict);
+            }
+            let raw: String = tx.query_row("SELECT data FROM commands WHERE id=?1",
+                [body.command_id.to_string()], |row| row.get(0),
+            ).optional()?.ok_or(StoreError::NotFound)?;
+            let mut command: RunnerCommand = serde_json::from_str(&raw)?;
+            let mut owner = super::work::stream(tx, command.stream_id)?;
+            let raw: String = tx.query_row("SELECT data FROM active_projects WHERE id=?1",
+                [ticket.project_id.to_string()], |row| row.get(0))?;
+            let project: Project = serde_json::from_str(&raw)?;
+            if owner.project_id != ticket.project_id || !owner.ticket_ids.contains(&id)
+                || project.base_branch != body.base_branch
+                || command.workspace_spec.as_ref().is_none_or(|w| w.base_branch != body.base_branch)
+                || command.kind != CommandKind::RunAgent || command.state != CommandState::Succeeded
+                || !command_publication_blocked(&command)
+                || command.agent_spec.as_ref().is_none_or(|s| s.read_only)
+            {
+                return Err(StoreError::WorkConflict);
+            }
+            // Legacy successful runs already hold their original archive. Keep
+            // the historical result in the record and prepend the later proof.
+            let Some(CommandOutput::Agent { agent }) = &mut command.result else {
+                return Err(StoreError::WorkConflict);
+            };
+            let old = std::mem::take(&mut agent.summary);
+            let historical = old.lines().filter(|line|
+                !line.starts_with("Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:")
+            ).collect::<Vec<_>>().join("\n");
+            agent.summary = format!("{PUBLICATION_CONFIRMED_PREFIX}\nGit: {} @ {} (Snapshot {})\n\nAgentenergebnis:\n{}",
+                body.base_branch, body.target_commit, body.integrated_snapshot, historical.trim());
+            let mut end = agent.summary.len().min(32768);
+            while !agent.summary.is_char_boundary(end) { end -= 1; }
+            agent.summary.truncate(end);
+            command.agent_progress = Some(agent.clone());
+            super::work::save_command(tx, &command, "succeeded")?;
+            ticket.status = TicketState::Done;
+            ticket.routing_note = "Nachträgliche Übernahme auf dem Zielbranch bestätigt.".into();
+            super::scheduler::save_ticket(tx, &mut ticket)?;
+            let latest: bool = tx.query_row("SELECT id=?1 FROM commands WHERE stream_id=?2 ORDER BY rowid DESC LIMIT 1",
+                params![command.id.to_string(), owner.id.to_string()], |row| row.get(0))?;
+            if latest && owner.status == StreamState::Blocked {
+                super::work::save_stream(tx, &mut owner, StreamState::Review)?;
+            }
+            event(tx, "publication.reconciled", id.to_string(), &body)?;
+            Ok(ticket)
+        })
+    }
+
     pub fn delete_failed_task(&self, id: TicketId, body: DeleteFailedTask) -> Result<Ticket> {
         let result = self.mutate(body.request_id, &format!("task.delete_failed/{id}"), &body, |tx| {
             let raw: String = tx.query_row(

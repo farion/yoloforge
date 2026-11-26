@@ -982,6 +982,7 @@ mod tests {
             rescan_archive_files: None,
             watch_publications: None,
             publish_result: None,
+            record_integrated_snapshot: None,
             review_image: None,
             review_docker_socket: "/var/run/docker.sock".into(),
             containment: None,

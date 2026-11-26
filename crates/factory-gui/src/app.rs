@@ -1608,7 +1608,7 @@ impl App {
                                          if let Ok(request_id) = serde_json::from_value(request.body["request_id"].clone()) {
                                              for image in &mut ticket.images { image.data.clear(); }
                                              for file in &mut ticket.files { file.data.clear(); }
-                                             self.confirmed_session_prompts.insert(request_id, ticket);
+                                             self.confirmed_session_prompts.insert(request_id, ticket.clone());
                                          }
                                      }
                                     self.settings.session_prompts.retain(|saved|
