@@ -282,13 +282,16 @@ impl App {
                                              s, project, page, &self.settings.archived_orchestrator_failures),
                                      )
                                  };
-                                 let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
+                                 let incompatible = page == Page::Directs && snapshot.as_deref()
+                                     .is_some_and(|s| !server_supports(s, factory_protocol::directs::CAPABILITY));
+                                 let row = ui.add_enabled_ui((self.online || page == Page::Tasks) && !incompatible, |ui| design::navigation_row_with_badges(
                                     ui,
                                     Some(page.icon()),
                                     page.title(),
                                     self.page() == page,
                                      &badges,
-                                 )).inner;
+                                  )).inner;
+                                  let row = design::server_compatibility_tooltip(row, incompatible);
                                  let row = if hint.is_empty() { row } else { row.on_hover_text(hint) };
                                  #[cfg(test)]
                                  ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-project-navigation", page)), row.rect));
@@ -832,6 +835,7 @@ impl App {
                                           && matches!(t.status, TicketState::InProgress | TicketState::Blocked) && !t.draft
                                           && s.server_capabilities.iter().any(|cap| cap == DELETE_FAILED_TASK_CAPABILITY)
                                   };
+                                  let show_delete = deletable || retryable && task_command(&s, t).is_some_and(|c| c.state == CommandState::Failed);
                                  if retryable { labels.push(crate::tr!("Erneut einreihen")); }
                                 let reserved = labels
                                     .iter()
@@ -849,7 +853,7 @@ impl App {
                                     })
                                     .sum::<f32>()
                                     + labels.len() as f32 * ui.spacing().item_spacing.x
-                                    + if deletable { design::ICON_BUTTON_SIZE + ui.spacing().item_spacing.x } else { 0.0 };
+                                    + if show_delete { design::ICON_BUTTON_SIZE + ui.spacing().item_spacing.x } else { 0.0 };
                                 let metadata_width = (ui.available_width() - reserved).max(100.0);
                                 let _date = ui
                                     .allocate_ui_with_layout(
@@ -952,14 +956,17 @@ impl App {
                                          if view.clicked() {
                                              self.view_task(t.id);
                                          }
-                                         if deletable {
+                                         if show_delete {
                                              let retry_path = format!("/v1/tasks/{}/retry", t.id);
                                              let path = format!("/v1/tasks/{}", t.id);
                                              let delete_path = if full_delete { format!("{path}/intent") }
                                                  else if inactive_delete { format!("{path}/inactive") } else { path.clone() };
                                              let busy = self.settings.pending.iter().any(|r| r.server == self.server && (r.path == retry_path || (r.method == "DELETE" && r.path == delete_path)));
-                                             let delete = design::icon_button(ui, egui_phosphor::regular::TRASH, crate::tr!("Intent löschen"), self.online && !busy)
-                                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                              let delete = design::server_compatibility_tooltip(
+                                                  design::icon_button(ui, egui_phosphor::regular::TRASH, crate::tr!("Intent löschen"), self.online && !busy && deletable)
+                                                      .on_hover_cursor(egui::CursorIcon::PointingHand),
+                                                  !deletable,
+                                              );
                                              #[cfg(test)]
                                              ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-delete", t.id)), delete.rect));
                                              if delete.clicked() {
@@ -1397,7 +1404,10 @@ impl App {
                             egui::vec2(design::ICON_BUTTON_SIZE, height.max(design::ICON_BUTTON_SIZE)),
                             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
                             |ui| {
-                                let add = design::icon_button(ui, egui_phosphor::regular::PLUS, crate::tr!("Neue manuelle Session"), can_create);
+                                let add = design::server_compatibility_tooltip(
+                                    design::icon_button(ui, egui_phosphor::regular::PLUS, crate::tr!("Neue manuelle Session"), can_create),
+                                    !server_supports(&s, factory_protocol::directs::CAPABILITY),
+                                );
                                 #[cfg(test)]
                                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-session-add-manual"), (add.rect, add.enabled())));
                                  create = add.clicked();

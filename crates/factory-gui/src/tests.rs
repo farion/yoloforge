@@ -14,6 +14,23 @@ pub(crate) fn click_events(pos: egui::Pos2) -> Vec<egui::Event> {
     vec![egui::Event::PointerMoved(pos), button(true), button(false)]
 }
 
+pub(crate) fn assert_server_compatibility_tooltip(
+    ctx: &egui::Context,
+    pos: egui::Pos2,
+    mut draw: impl FnMut(Vec<egui::Event>) -> egui::FullOutput,
+) {
+    ctx.style_mut(|style| style.interaction.tooltip_delay = 0.0);
+    let mut output = draw(vec![egui::Event::PointerMoved(pos)]);
+    for _ in 0..7 {
+        output = draw(vec![]);
+    }
+    let mut text = vec![];
+    for shape in output.shapes {
+        shape_text(&shape.shape, &mut text);
+    }
+    assert!(text.iter().any(|line| line == crate::tr!("Funktion deaktiviert: Serverversion inkompatibel")), "{text:?}");
+}
+
 fn enter_events(modifiers: egui::Modifiers) -> Vec<egui::Event> {
     [true, false].into_iter().map(|pressed| egui::Event::Key {
         key: egui::Key::Enter,
@@ -3194,7 +3211,6 @@ fn check_intent_trash(state: CommandState) {
     let mut app = fixture();
     app.online = true;
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
-    s.server_capabilities.push(factory_protocol::DELETE_FAILED_TASK_CAPABILITY.into());
     if publication_blocked {
         s.server_capabilities.push(factory_protocol::DELETE_INACTIVE_TASK_CAPABILITY.into());
         let command = &mut s.commands[0];
@@ -3227,6 +3243,15 @@ fn check_intent_trash(state: CommandState) {
     let rect = |which| ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new((which, id)))).unwrap();
     let trash = rect("test-task-row-delete");
     assert!(trash.right() < rect("test-task-row-view").left());
+    if state == CommandState::Failed {
+        assert_server_compatibility_tooltip(&ctx, trash.center(), |events| draw(&mut app, events));
+        let _ = draw(&mut app, click_events(trash.center()));
+        assert!(app.dialog.is_none());
+        assert!(app.settings.pending.is_empty());
+        Arc::make_mut(app.snapshot.as_mut().unwrap()).server_capabilities.push(DELETE_FAILED_TASK_CAPABILITY.into());
+        for _ in 0..3 { let _ = draw(&mut app, vec![]); }
+        assert_eq!(trash, rect("test-task-row-delete"));
+    }
     let _ = draw(&mut app, click_events(trash.center()));
     assert!(matches!(app.dialog, Some(Dialog::Form(_))));
     assert!(app.settings.pending.is_empty());

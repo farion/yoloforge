@@ -1182,6 +1182,14 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, enabled: bool) ->
     response.on_hover_text(label)
 }
 
+pub(crate) fn server_compatibility_tooltip(response: egui::Response, incompatible: bool) -> egui::Response {
+    if incompatible {
+        response.on_disabled_hover_text(crate::tr!("Funktion deaktiviert: Serverversion inkompatibel"))
+    } else {
+        response
+    }
+}
+
 /// Paint on the dialog's layer without affecting its size or position.
 pub fn dialog_loading_overlay(dialog: &egui::Response, corner_radius: egui::CornerRadius) {
     const SPINNER_SIZE: f32 = 32.0;

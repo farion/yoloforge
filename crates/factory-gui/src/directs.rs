@@ -15,7 +15,7 @@ fn pending(app: &App, path: &str) -> bool {
 }
 
 pub(crate) fn can_create(app: &App, s: &Snapshot) -> bool {
-    app.online && s.server_capabilities.iter().any(|cap| cap == CAPABILITY)
+    app.online && server_supports(s, CAPABILITY)
         && !pending(app, "/v1/directs")
 }
 
@@ -61,6 +61,7 @@ pub(crate) fn status(s: &Snapshot, direct: &Direct) -> (&'static str, egui::Colo
 
 pub(crate) fn tab_controls(ui: &mut egui::Ui, app: &mut App, index: usize, direct: &Direct) {
     let Some(s) = app.snapshot.clone() else { return; };
+    let supported = server_supports(&s, CAPABILITY);
     let current = direct.current_command_id.and_then(|id| s.commands.iter().find(|c| c.id == id));
     let busy = direct.current_command_id.is_some()
         && current.is_none_or(|c| matches!(c.state, CommandState::Pending | CommandState::Accepted));
@@ -72,8 +73,11 @@ pub(crate) fn tab_controls(ui: &mut egui::Ui, app: &mut App, index: usize, direc
             DirectState::Archiving => crate::tr!("Archiviert nach der Antwort"),
             DirectState::Archived => crate::tr!("Session reaktivieren"),
         };
-        if ui.add_enabled(app.online && !archive_pending && direct.state != DirectState::Archiving,
-            egui::Button::new(label)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+        if design::server_compatibility_tooltip(
+            ui.add_enabled(supported && app.online && !archive_pending && direct.state != DirectState::Archiving,
+                egui::Button::new(label)).on_hover_cursor(egui::CursorIcon::PointingHand),
+            !supported,
+        ).clicked()
         {
             app.write(label, "POST", archive_path, json!(SetDirectArchived {
                 request_id: RequestId::new(), archived: direct.state == DirectState::Open,
@@ -84,7 +88,7 @@ pub(crate) fn tab_controls(ui: &mut egui::Ui, app: &mut App, index: usize, direc
         && q.external.kind == QuestionKind::Permission && needs_answer(q))
     {
         let path = format!("/v1/questions/{}/answer", permission.id);
-        let enabled = app.online && !pending(app, &path) && permission.state != QuestionState::Unknown;
+        let enabled = supported && app.online && !pending(app, &path) && permission.state != QuestionState::Unknown;
         let intent = DirectIntent::from_permission(&permission.external);
         ui.group(|ui| {
             if let Some(intent) = &intent {
@@ -106,7 +110,10 @@ pub(crate) fn tab_controls(ui: &mut egui::Ui, app: &mut App, index: usize, direc
                 ];
                 let choices = if intent.is_some() { &intent_choices[..] } else { &choices[..] };
                 for &(decision, label) in choices {
-                    if ui.add_enabled(enabled, egui::Button::new(label)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    if design::server_compatibility_tooltip(
+                        ui.add_enabled(enabled, egui::Button::new(label)).on_hover_cursor(egui::CursorIcon::PointingHand),
+                        !supported,
+                    ).clicked() {
                         app.write(label, "POST", path.clone(), json!(AnswerQuestion {
                             request_id: RequestId::new(), legacy_revision: None, answer: json!({"decision":decision}),
                         }));
@@ -211,6 +218,32 @@ mod tests {
         app.sessions_closed = true;
         let _ = draw(&mut app, vec![]);
         assert!(rect("test-manual-session-open", archived.id).is_some());
+    }
+
+    #[test]
+    fn manual_session_create_explains_missing_server_support() {
+        let mut app = crate::tests::fixture();
+        app.online = true;
+        let ctx = app.backend.context().clone();
+        let draw = |app: &mut App, events| ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 700.0))),
+            events, ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        app.set_page(Page::Sessions);
+        for _ in 0..3 { let _ = draw(&mut app, vec![]); }
+        let create = ctx.data(|d| d.get_temp::<(egui::Rect, bool)>(egui::Id::new("test-session-add-manual"))).unwrap().0.center();
+        crate::tests::assert_server_compatibility_tooltip(&ctx, create, |events| draw(&mut app, events));
+        let _ = draw(&mut app, crate::tests::click_events(create));
+        assert!(app.settings.pending.is_empty());
+
+        let s = std::sync::Arc::make_mut(app.snapshot.as_mut().unwrap());
+        s.server_capabilities.push(CAPABILITY.into());
+        s.protocol_version += 1;
+        assert!(!server_supports(s, CAPABILITY));
+        s.protocol_version = factory_protocol::PROTOCOL_VERSION;
+        for _ in 0..3 { let _ = draw(&mut app, vec![]); }
+        let _ = draw(&mut app, crate::tests::click_events(create));
+        assert_eq!(app.settings.pending.len(), 1);
     }
 
     #[test]

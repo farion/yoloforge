@@ -433,6 +433,8 @@ impl Dialog {
                   let recovery_start = blocked && app.snapshot.as_ref()
                       .is_some_and(|s| crate::local_runners::recovery_start_available(s, *id));
                   let admin = app.access.as_ref().is_some_and(|a| a.role == DeviceRole::Admin);
+                   let incompatible = app.snapshot.as_deref()
+                       .is_some_and(|s| !server_supports(s, RUNNER_RESTART_CAPABILITY));
                    let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body"))
                       .max_height((body_height - 72.0).max(24.0)).auto_shrink([false, true])
                       .show(ui, |ui| {
@@ -451,9 +453,11 @@ impl Dialog {
                   ui.separator();
                    let footer_bottom = ui.cursor().top() + design::SETTINGS_FOOTER_HEIGHT;
                    design::settings_footer(ui, footer_bottom, |ui| {
-                      let confirm = ui.add_enabled((!blocked || recovery_start) && admin && app.online && !app.local_runners_busy,
-                          egui::Button::new(if recovery_start { crate::tr!("Runner starten") }
-                              else { crate::tr!("Runner neu starten") }));
+                       let confirm = design::server_compatibility_tooltip(
+                            ui.add_enabled(!incompatible && (!blocked || recovery_start) && admin && app.online && !app.local_runners_busy,
+                                egui::Button::new(if recovery_start { crate::tr!("Runner starten") } else { crate::tr!("Runner neu starten") })),
+                            incompatible,
+                        );
                       #[cfg(test)]
                       ui.ctx().data_mut(|d| {
                           d.insert_temp(egui::Id::new("test-runner-restart-confirm"), confirm.rect);
@@ -820,6 +824,8 @@ impl TaskDialog {
         direct: Option<(bool, Option<factory_protocol::directs::DirectSelection>)>,
     ) -> Option<u64> {
         let root = self.draft.requested_session.expect("Session composer target");
+        let incompatible = direct.is_some() && app.snapshot.as_deref()
+            .is_some_and(|s| !server_supports(s, factory_protocol::directs::CAPABILITY));
         let path = if direct.is_some() { format!("/v1/directs/{root}/prompt") } else { format!("/v1/commands/{root}/prompt") };
         if self.request.is_none() {
             self.request = app.settings.pending.iter().find(|r|
@@ -857,8 +863,11 @@ impl TaskDialog {
         ui.horizontal(|ui| {
             let editable = self.request.is_none();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let submit = design::accent_button(ui, egui::Button::new(crate::tr!("Prompten")),
-                    app.online && editable && direct.as_ref().is_none_or(|(ready, _)| *ready), BLUE.gamma_multiply(0.7));
+                 let submit = design::server_compatibility_tooltip(
+                     design::accent_button(ui, egui::Button::new(crate::tr!("Prompten")),
+                         !incompatible && app.online && editable && direct.as_ref().is_none_or(|(ready, _)| *ready), BLUE.gamma_multiply(0.7)),
+                     incompatible,
+                 );
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-prompt-submit", root)), submit.rect));
                 if submit.clicked() || (submit.enabled() && submit_from_prompt && app.dialog.is_none()) {
@@ -891,7 +900,9 @@ impl TaskDialog {
                 if let Some(id) = self.request {
                     if app.responses.get(&id).is_some_and(|r| r.as_ref().is_err_and(|e| e.uncertain))
                         || (!app.in_flight.contains(&id) && !app.responses.contains_key(&id)) {
-                        if ui.button(crate::tr!("Zustellung prüfen")).clicked() { app.retry(id); }
+                         if design::server_compatibility_tooltip(
+                             ui.add_enabled(!incompatible, egui::Button::new(crate::tr!("Zustellung prüfen"))), incompatible,
+                         ).clicked() { app.retry(id); }
                     } else { ui.spinner(); }
                 }
             });
@@ -2967,13 +2978,22 @@ impl FormDialog {
         // Do not silently retarget the confirmation if the Intent changed.
         let rejected = self.request.is_some_and(|id| app.responses.get(&id)
             .is_some_and(|r| r.as_ref().is_err_and(|error| !error.uncertain)));
+        let capability = if self.method != "DELETE" { None }
+            else if self.path.ends_with("/intent") { Some(DELETE_TASK_CAPABILITY) }
+            else if self.path.ends_with("/inactive") { Some(DELETE_INACTIVE_TASK_CAPABILITY) }
+            else { Some(DELETE_FAILED_TASK_CAPABILITY) };
+        let incompatible = capability.is_some_and(|cap| app.snapshot.as_deref()
+            .is_some_and(|s| !server_supports(s, cap)));
         ui.label(&self.help);
         ui.add_space(12.0);
         ui.separator();
         ui.add_space(12.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let confirm = design::accent_button(ui, egui::Button::new(action),
-                app.online && self.request.is_none(), color.gamma_multiply(0.7));
+            let confirm = design::server_compatibility_tooltip(
+                design::accent_button(ui, egui::Button::new(action),
+                    !incompatible && app.online && self.request.is_none(), color.gamma_multiply(0.7)),
+                incompatible,
+            );
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(_test_id), confirm.rect));
             if confirm.clicked() {
@@ -2983,7 +3003,9 @@ impl FormDialog {
             if let Some(id) = self.request.filter(|_| !rejected) {
                 if app.in_flight.contains(&id) {
                     ui.spinner();
-                } else if ui.add_enabled(app.online, egui::Button::new(crate::tr!("Zustellung prüfen"))).clicked() {
+                } else if design::server_compatibility_tooltip(
+                    ui.add_enabled(app.online && !incompatible, egui::Button::new(crate::tr!("Zustellung prüfen"))), incompatible,
+                ).clicked() {
                     app.retry(id);
                 }
             }

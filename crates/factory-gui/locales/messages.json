@@ -85,6 +85,7 @@
   "Übernahme blockiert · Details in der Diagnose": ["Übernahme blockiert · Details in der Diagnose", "Publication blocked · see Diagnostics"],
   "Keine direkte Übernahme am ausführenden Runner": ["Keine direkte Übernahme am ausführenden Runner", "No direct publication on the executing runner"],
   "Intent löschen": ["Intent löschen", "Delete intent"],
+  "Funktion deaktiviert: Serverversion inkompatibel": ["Funktion deaktiviert: Serverversion inkompatibel", "Feature disabled: incompatible server version"],
   "Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.": ["Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", "Delete failed intent “{}”? OpenCode history and files will be kept."],
   "Intent gelöscht.": ["Intent gelöscht.", "Intent deleted."],
   "Löschen nicht bestätigt. Details stehen in der Diagnose.": ["Löschen nicht bestätigt. Details stehen in der Diagnose.", "Deletion not confirmed. See Diagnostics for details."],

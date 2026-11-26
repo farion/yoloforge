@@ -1,7 +1,7 @@
 //! Live topology and explicit management of desktop-owned runners.
 use crate::{
     app::{App, AMBER, BLUE, GREEN, MUTED, RED},
-    model::{command_project, session_title, timestamp},
+    model::{command_project, server_supports, session_title, timestamp},
 };
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use factory_core::*;
@@ -446,7 +446,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let restarting = app.restarting_runner
                 .filter(|id| managed.iter().any(|runner| runner.id == *id))
                 .map(runner_key);
-            if let Some(action) = graph(ui, "all", &infra, &removable, restarting.as_deref()) {
+            let restart_incompatible = app.snapshot.as_deref()
+                .is_some_and(|s| !server_supports(s, RUNNER_RESTART_CAPABILITY));
+            if let Some(action) = graph(ui, "all", &infra, &removable, restarting.as_deref(), restart_incompatible) {
                 let id = match action { RunnerNodeAction::Remove(id) | RunnerNodeAction::Restart(id) => id };
                 if let Some(runner) = managed.iter().find(|r| r.id == id) {
                     app.dialog = Some(match action {
@@ -501,7 +503,7 @@ fn local_runner_route(server: Rect, runner: Rect, row: usize, rows: usize) -> [P
     [start, Pos2::new(right, start.y), Pos2::new(right, end.y), end]
 }
 
-fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)], restarting: Option<&str>) -> Option<RunnerNodeAction> {
+fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)], restarting: Option<&str>, restart_incompatible: bool) -> Option<RunnerNodeAction> {
     let mut remove = None;
     if graph.columns.iter().all(|(_, nodes)| nodes.is_empty()) {
         ui.colored_label(
@@ -779,14 +781,24 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-local-runner-remove", *runner)), button.rect));
             if button.clicked() { remove = Some(RunnerNodeAction::Remove(*runner)); }
             let restart_rect = Rect::from_center_size(rect.right_top() - Vec2::new(34.0, 0.0), Vec2::splat(26.0));
-            let restart = ui.interact(restart_rect, ui.id().with(("restart-local-runner", runner)), Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(crate::tr!("Lokalen Runner neu starten"));
+             let restart_id = ui.id().with(("restart-local-runner", runner));
+             let restart = if restart_incompatible {
+                 ui.new_child(egui::UiBuilder::new().id_salt(restart_id).max_rect(restart_rect).disabled())
+                     .interact(restart_rect, restart_id, Sense::click())
+             } else {
+                 ui.interact(restart_rect, restart_id, Sense::click())
+             };
+             let restart = crate::design::server_compatibility_tooltip(
+                 restart.on_hover_cursor(egui::CursorIcon::PointingHand)
+                     .on_hover_text(crate::tr!("Lokalen Runner neu starten")),
+                 restart_incompatible,
+             );
             ui.painter().circle_filled(restart_rect.center(), 13.0,
                 if restart.hovered() { crate::design::HOVER_FILL } else { Color32::from_rgb(29, 34, 43) });
             ui.painter().text(restart_rect.center(), egui::Align2::CENTER_CENTER,
-                egui_phosphor::regular::ARROWS_CLOCKWISE, FontId::proportional(14.0), ui.visuals().text_color());
-            restart.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, crate::tr!("Lokalen Runner neu starten")));
+                 egui_phosphor::regular::ARROWS_CLOCKWISE, FontId::proportional(14.0),
+                 if restart_incompatible { MUTED } else { ui.visuals().text_color() });
+             restart.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, restart.enabled(), crate::tr!("Lokalen Runner neu starten")));
             #[cfg(test)]
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-local-runner-restart", *runner)), restart.rect));
             if restart.clicked() { remove = Some(RunnerNodeAction::Restart(*runner)); }
@@ -1188,6 +1200,11 @@ mod tests {
         let restart: Rect = ctx.data_mut(|d| d.get_temp(key)).unwrap();
         let remove: Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-local-runner-remove", id)))).unwrap();
         assert!(!restart.intersects(remove), "Restart and removal must have separate hit targets");
+        crate::tests::assert_server_compatibility_tooltip(&ctx, restart.center(), |events| render(&mut app, events));
+        let _ = render(&mut app, crate::tests::click_events(restart.center()));
+        assert!(app.dialog.is_none());
+        Arc::make_mut(app.snapshot.as_mut().unwrap()).server_capabilities.push(RUNNER_RESTART_CAPABILITY.into());
+        let _ = render(&mut app, vec![]);
         let _ = render(&mut app, crate::tests::click_events(restart.center()));
         assert!(matches!(app.dialog, Some(crate::dialogs::Dialog::RestartLocalRunner { id: selected, .. }) if selected == id));
         assert!(!app.local_runners_busy);
@@ -1268,6 +1285,7 @@ mod tests {
         let id = app.snapshot.as_ref().unwrap().runners[0].id;
         app.access = Some(factory_protocol::AccessView { role: DeviceRole::Admin, device_id: None, runner_id: None });
         let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        snapshot.server_capabilities.push(RUNNER_RESTART_CAPABILITY.into());
         snapshot.commands[0].state = CommandState::Pending;
         snapshot.commands[0].agent_progress = None;
         snapshot.streams[0].status = StreamState::Queued;
@@ -1294,6 +1312,10 @@ mod tests {
             }
             assert_eq!(ctx.data_mut(|d| d.get_temp::<bool>(egui::Id::new("test-runner-restart-confirm-enabled"))), Some(enabled));
         }
+        app.access.as_mut().unwrap().role = DeviceRole::Admin;
+        Arc::make_mut(app.snapshot.as_mut().unwrap()).server_capabilities.clear();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| { assert!(!dialog.show(ctx, &mut app)); });
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(egui::Id::new("test-runner-restart-confirm-enabled"))), Some(false));
         assert!(app.settings.pending.is_empty());
         assert!(!app.local_runners_busy);
     }

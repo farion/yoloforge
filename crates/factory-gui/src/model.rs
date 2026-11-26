@@ -2,6 +2,12 @@ use factory_core::*;
 use factory_protocol::{IntentProblem, IntentSolution, Snapshot, DISCARDED_SESSION_REASON};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+pub(crate) fn server_supports(snapshot: &Snapshot, capability: &str) -> bool {
+    snapshot.protocol_version == factory_protocol::PROTOCOL_VERSION
+        && snapshot.server_capabilities.iter().any(|cap| cap == capability)
+}
+
 pub fn hash_of(value: impl std::hash::Hash) -> u64 {
     use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
