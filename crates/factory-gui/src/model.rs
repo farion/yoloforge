@@ -719,18 +719,6 @@ pub(crate) fn intent_run_role(c: &RunnerCommand) -> &'static str {
     }
 }
 
-pub fn session_archived_for_page(s: &Snapshot, page: Page, c: &RunnerCommand) -> bool {
-    if page == Page::Sessions {
-        session_closed(s, c)
-    } else if c.kind == CommandKind::PrepareWorkspace {
-        c.state == CommandState::Failed && s.commands.iter().any(|later|
-            later.stream_id == c.stream_id && later.kind == CommandKind::PrepareWorkspace
-                && later.state == CommandState::Succeeded && later.created_unix_ms >= c.created_unix_ms)
-    } else {
-        controller_archived(s, c)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SessionActivity<'a> {
     Task(&'a Ticket),
@@ -835,6 +823,37 @@ pub fn session_closed(s: &Snapshot, command: &RunnerCommand) -> bool {
 pub fn controller_archived(s: &Snapshot, command: &RunnerCommand) -> bool {
     session_closed(s, command)
         || matches!(command.state, CommandState::Succeeded | CommandState::Failed)
+}
+
+const ORCHESTRATOR_FAILURE_ARCHIVE_DELAY_MS: u64 = 60 * 60 * 1000;
+
+pub fn orchestrator_failure_archive_at(s: &Snapshot, command: &RunnerCommand) -> u64 {
+    // Older servers provide activity for agent runs, but no timestamp for preparation failures.
+    s.command_failed_unix_ms
+        .get(&command.id)
+        .copied()
+        .or_else(|| s.session_activity_unix_ms.get(&command.session_id()).copied())
+        .unwrap_or(command.created_unix_ms)
+        .max(command.created_unix_ms)
+        .saturating_add(ORCHESTRATOR_FAILURE_ARCHIVE_DELAY_MS)
+}
+
+pub fn session_archived_for_page(
+    s: &Snapshot,
+    command: &RunnerCommand,
+    page: Page,
+    now_ms: u64,
+    manually_archived: &std::collections::BTreeSet<CommandId>,
+) -> bool {
+    match page {
+        Page::Sessions => session_closed(s, command),
+        Page::Orchestrator if command.state == CommandState::Failed => {
+            manually_archived.contains(&command.id)
+                || now_ms >= orchestrator_failure_archive_at(s, command)
+        }
+        Page::Orchestrator if command.kind == CommandKind::PrepareWorkspace => false,
+        _ => controller_archived(s, command),
+    }
 }
 
 pub fn assignable_sessions(s: &Snapshot, project: ProjectId) -> Vec<RunnerCommand> {

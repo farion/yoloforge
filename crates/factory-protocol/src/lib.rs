@@ -287,6 +287,9 @@ pub struct Snapshot {
     /// Last durable activity per OpenCode session, excluding presence heartbeats.
     #[serde(default)]
     pub session_activity_unix_ms: std::collections::BTreeMap<String, u64>,
+    /// Durable failure time per command; absent from older servers.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub command_failed_unix_ms: std::collections::BTreeMap<CommandId, u64>,
     #[serde(default)]
     pub editable_tasks: std::collections::BTreeMap<TicketId, Revision>,
     #[serde(default)]

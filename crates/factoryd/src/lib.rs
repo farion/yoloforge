@@ -880,6 +880,7 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
         server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into(), DELETE_TASK_CAPABILITY.into(), DRAFT_RESET_CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
+        command_failed_unix_ms: durable.command_failed_unix_ms,
         editable_tasks: durable.editable_tasks,
         session_titles: durable.session_titles,
         payloads_deferred: compact,

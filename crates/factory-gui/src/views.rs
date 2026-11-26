@@ -278,7 +278,8 @@ impl App {
                                  } else {
                                      snapshot.as_deref().zip(self.settings.project).map_or_else(
                                          || (Vec::new(), String::new()),
-                                         |(s, project)| project_navigation_badges(s, project, page),
+                                         |(s, project)| project_navigation_badges_with_archive(
+                                             s, project, page, &self.settings.archived_orchestrator_failures),
                                      )
                                  };
                                  let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
@@ -1344,7 +1345,8 @@ impl App {
         let mut create = false;
         let mut awaiting_review = Vec::new();
         {
-            let archived = |c: &RunnerCommand| session_archived_for_page(&s, page, c);
+            let now = crate::overview::now_ms();
+            let archived = |c: &RunnerCommand| session_archived_for_page(&s, c, page, now, &self.settings.archived_orchestrator_failures);
             if page == Page::Reviewer {
                 awaiting_review.extend(s.tickets.iter().filter(|t| t.project_id == project
                     && t.status == TicketState::Validating
@@ -1352,10 +1354,24 @@ impl App {
                         && c.agent_spec.as_ref().is_some_and(|a| a.review_of == Some(t.id)))));
                 awaiting_review.sort_by_key(|t| (t.updated_unix_ms, t.id));
             }
-            let closed = sessions.iter().filter(|c| archived(c)).count();
             let manual_closed = manual.iter().filter(|d| manual_archived(d)).count();
+            let mut failures = Vec::new();
+            let mut next_archive = None;
+            let mut closed = 0;
+            for c in &sessions {
+                if archived(c) {
+                    closed += 1;
+                } else if page == Page::Orchestrator && c.state == CommandState::Failed {
+                    failures.push(c.id);
+                    let deadline = orchestrator_failure_archive_at(&s, c);
+                    next_archive = Some(next_archive.map_or(deadline, |next: u64| next.min(deadline)));
+                }
+            }
+            if let Some(deadline) = next_archive {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(deadline.saturating_sub(now)));
+            }
             let mut selected = usize::from(self.sessions_closed);
-            design::section_toolbar_extras(
+            let archive_all = design::section_toolbar_action(
                 ui,
                 match page {
                     Page::Supervisor => "supervisor",
@@ -1398,7 +1414,16 @@ impl App {
                          ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-project-activity-filter"), _filter.rect));
                      }
                  },
-             );
+                (page == Page::Orchestrator).then(|| {
+                    (crate::tr!("Alle Fehlgeschlagenen ins Archiv verschieben"), !failures.is_empty())
+                }),
+            );
+            if archive_all {
+                self.settings.archived_orchestrator_failures.extend(failures);
+                self.settings_dirty = true;
+                self.notice(crate::tr!("Fehlgeschlagene Orchestrator-Läufe archiviert."));
+                ui.ctx().request_repaint();
+            }
             if filter != previous_filter {
                 ui.ctx().data_mut(|data| data.insert_temp(filter_id, filter));
                 sessions = sessions_for_page(&s, project, filter);
@@ -1408,7 +1433,9 @@ impl App {
             let needle = self.query.to_lowercase();
             awaiting_review.retain(|t| !self.sessions_closed && task_summary(&s, t).to_lowercase().contains(&needle));
             sessions.retain(|c| {
-                archived(c) == self.sessions_closed
+                session_archived_for_page(
+                    &s, c, page, now, &self.settings.archived_orchestrator_failures,
+                ) == self.sessions_closed
                     && (needle.is_empty()
                         || session_title(&s, c).to_lowercase().contains(&needle)
                         || (page == Page::ProjectActivity && intent_run_role(c).to_lowercase().contains(&needle))
@@ -2412,9 +2439,18 @@ impl App {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn project_navigation_badges(
     s: &Snapshot, project: ProjectId, page: Page,
 ) -> (Vec<(usize, egui::Color32)>, String) {
+    project_navigation_badges_with_archive(s, project, page, &Default::default())
+}
+
+fn project_navigation_badges_with_archive(
+    s: &Snapshot, project: ProjectId, page: Page,
+    manually_archived: &std::collections::BTreeSet<CommandId>,
+) -> (Vec<(usize, egui::Color32)>, String) {
+    let now = crate::overview::now_ms();
     let mut badges = [GREEN, BLUE, AMBER, RED, MUTED].map(|color| (0, color));
     let mut statuses = BTreeMap::new();
     let mut count = |(status, color)| {
@@ -2441,7 +2477,7 @@ pub(crate) fn project_navigation_badges(
         }
         Page::Sessions | Page::ProjectActivity | Page::Orchestrator | Page::Supervisor | Page::Reviewer | Page::Memorizer | Page::Merger => {
             sessions_for_page(s, project, page).iter()
-                .filter(|c| !session_archived_for_page(s, page, c))
+                .filter(|c| !session_archived_for_page(s, c, page, now, manually_archived))
                 .map(|c| session_list_pill(s, page, c))
                 .for_each(&mut count);
             if page == Page::Sessions {

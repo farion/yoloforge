@@ -1387,6 +1387,7 @@ fn sidebar_renders_all_current_status_colors_for_every_project_page() {
     preparation.state = CommandState::Failed;
     preparation.agent_progress = None;
     preparation.agent_spec = None;
+    s.command_failed_unix_ms.insert(preparation.id, crate::overview::now_ms());
     s.streams[0].goal = "Orchestrator".into();
     s.commands.push(preparation);
 
@@ -1625,6 +1626,83 @@ fn orchestrator_preparation_failure_is_listed_without_a_native_session() {
     assert_eq!(session_title(s, &command), "Orchestrator-Vorbereitung");
     assert!(sessions_for_page(s, project, Page::Sessions).is_empty());
     assert!(sessions_for_page(s, project, Page::Supervisor).is_empty());
+}
+
+#[test]
+fn orchestrator_failures_archive_one_hour_after_failure_not_creation() {
+    let app = fixture();
+    let mut snapshot = (*app.snapshot.unwrap()).clone();
+    let mut command = snapshot.commands[0].clone();
+    command.state = CommandState::Failed;
+    command.created_unix_ms = 1;
+    snapshot.command_failed_unix_ms.insert(command.id, 7_200_000);
+    let manual = Default::default();
+    for kind in [CommandKind::RunAgent, CommandKind::PrepareWorkspace] {
+        command.kind = kind;
+        assert!(!session_archived_for_page(&snapshot, &command, Page::Orchestrator, 10_799_999, &manual));
+        assert!(session_archived_for_page(&snapshot, &command, Page::Orchestrator, 10_800_000, &manual));
+    }
+    assert!(session_archived_for_page(&snapshot, &command, Page::Supervisor, 7_200_000, &manual));
+}
+
+#[test]
+fn orchestrator_archive_button_moves_only_project_failures_independent_of_search() {
+    let mut app = fixture();
+    app.set_page(Page::Orchestrator);
+    app.sessions_closed = false;
+    app.query = "absichtlich kein Treffer".into();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    s.streams[0].goal = "Orchestrator".into();
+    let now = crate::overview::now_ms();
+    let mut running = s.commands[0].clone();
+    running.id = CommandId::new();
+    running.agent_spec.as_mut().unwrap().read_only = true;
+    running.agent_spec.as_mut().unwrap().role = "orchestrator".into();
+    let mut failed = running.clone();
+    failed.id = CommandId::new();
+    failed.state = CommandState::Failed;
+    let mut prep = failed.clone();
+    prep.id = CommandId::new();
+    prep.kind = CommandKind::PrepareWorkspace;
+    prep.agent_spec = None;
+    let mut other = failed.clone();
+    other.id = CommandId::new();
+    let mut other_stream = s.streams[0].clone();
+    other_stream.id = StreamId::new();
+    other_stream.project_id = ProjectId::new();
+    other.stream_id = other_stream.id;
+    s.streams.push(other_stream);
+    for c in [&failed, &prep, &other] {
+        s.command_failed_unix_ms.insert(c.id, now);
+    }
+    let expected = [failed.id, prep.id].into_iter().collect();
+    s.commands.extend([running, failed, prep, other]);
+    let ctx = app.backend.context().clone();
+    let draw = |app: &mut App, size, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        events,
+        ..Default::default()
+    }, |ctx| app.draw_shell(ctx));
+    let rect = |name| ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(name))).unwrap();
+    let count = |index| ctx.data_mut(|d| {
+        d.get_temp::<(egui::Rect, bool, usize)>(egui::Id::new(("test-controller-bucket-tab", index)))
+    }).unwrap().2;
+    for size in [egui::vec2(820.0, 560.0), egui::vec2(1360.0, 900.0)] {
+        for _ in 0..4 { let _ = draw(&mut app, size, vec![]); }
+        let action = rect("test-controller-action");
+        let search = rect("test-controller-search");
+        assert!(action.right() <= search.left() || action.bottom() <= search.top());
+        assert_eq!([count(0_usize), count(1_usize)], [3, 0]);
+    }
+    let size = egui::vec2(1360.0, 900.0);
+    let _ = draw(&mut app, size, click_events(rect("test-controller-action").center()));
+    assert_eq!(app.settings.archived_orchestrator_failures, expected);
+    assert!(app.settings_dirty);
+    assert!(app.settings.pending.is_empty());
+    let _ = draw(&mut app, size, vec![]);
+    assert_eq!([count(0_usize), count(1_usize)], [1, 2]);
+    let restored: crate::persistence::Settings = serde_json::from_value(serde_json::to_value(&app.settings).unwrap()).unwrap();
+    assert_eq!(restored.archived_orchestrator_failures, expected);
 }
 
 #[test]

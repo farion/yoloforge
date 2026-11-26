@@ -4,6 +4,36 @@ use factoryd::store::{Store, StoreError};
 use serde_json::json;
 
 #[test]
+fn snapshot_uses_the_durable_failure_event_for_archive_age() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive-age.sqlite");
+    let store = Store::open(&path).unwrap();
+    let c = command(&store);
+    assert!(store.desktop_snapshot().unwrap().command_failed_unix_ms.is_empty());
+    store.complete(c.runner_id, c.id, CommandResult {
+        request_id: RequestId::new(),
+        ownership_epoch: c.ownership_epoch,
+        result: CommandOutput::Agent { agent: AgentProgress {
+            session_id: c.session_id(),
+            message_id: agent_message_id(c.id),
+            phase: AgentPhase::Failed,
+            summary: "Failed archive test".into(),
+        } },
+    }).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let failed_at = c.created_unix_ms + 7_200_000;
+    assert_eq!(db.execute(
+        "UPDATE events SET created_unix_ms=?1 WHERE aggregate_id=?2
+         AND kind='command.updated' AND json_extract(payload,'$.state')='failed'",
+        rusqlite::params![failed_at, c.id.to_string()],
+    ).unwrap(), 1);
+    assert_eq!(store.desktop_snapshot().unwrap().command_failed_unix_ms[&c.id], failed_at);
+    drop(store);
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(reopened.desktop_snapshot().unwrap().command_failed_unix_ms[&c.id], failed_at);
+}
+
+#[test]
 fn snapshot_session_activity_uses_durable_changes_not_snapshot_poll_time() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("activity.sqlite");

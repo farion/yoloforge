@@ -422,9 +422,14 @@ Schlägt die Orchestrator-Vorbereitung fehl, zeigt **Orchestrator → Offen**
 den fehlgeschlagenen Versuch mit Ursache; der erste Fehler eines Arbeitsbereichs
 erscheint zusätzlich als Benachrichtigung und Toast. Die Aufgabe bleibt
 eingereiht. Die Factory versucht die Vorbereitung nach einer Minute erneut,
-auch nach einem Neustart. Nach erfolgreicher Vorbereitung wandert der Fehler
-ins Archiv. Fehlgeschlagene Modell-Auswertungen werden mit längeren Abständen
-weiter versucht. Es muss kein neuer Auftrag angelegt werden.
+auch nach einem Neustart. Fehlgeschlagene Modell-Auswertungen werden mit längeren
+Abständen weiter versucht. Es muss kein neuer Auftrag angelegt werden.
+
+Fehlgeschlagene Orchestrator-Läufe (Vorbereitungen und Auswertungen) wechseln
+eine Stunde nach dem Fehlschlag von **Offen** ins **Archiv**. Der Button
+**Alle Fehlgeschlagenen ins Archiv verschieben** neben der Suche archiviert sie
+auf diesem Desktop sofort für das gewählte Projekt, unabhängig vom Suchfilter.
+Das Archivieren löst keine Wiederholung aus und beendet keine laufende Ausführung.
 
 **Eingereiht** heißt, dass der Orchestrator diesen Auftrag noch nicht prüft.
 Danach zeigt die Aufgabenliste den aktuellen Schritt oder dass die Aufgabe

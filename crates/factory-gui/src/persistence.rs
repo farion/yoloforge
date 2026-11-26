@@ -19,6 +19,8 @@ pub struct Settings {
     pub cached_projects: Vec<CachedProjects>,
     pub offline_tasks: Vec<OfflineTask>,
     pub session_prompts: Vec<SessionPromptDraft>,
+    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub archived_orchestrator_failures: std::collections::BTreeSet<CommandId>,
     pub server: String,
     pub credential_file: Option<PathBuf>,
     pub project: Option<ProjectId>,

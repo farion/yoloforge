@@ -2351,6 +2351,14 @@
     "Beantworten",
     "Answer"
   ],
+  "Alle Fehlgeschlagenen ins Archiv verschieben": [
+    "Alle Fehlgeschlagenen ins Archiv verschieben",
+    "Move all failed runs to archive"
+  ],
+  "Fehlgeschlagene Orchestrator-Läufe archiviert.": [
+    "Fehlgeschlagene Orchestrator-Läufe archiviert.",
+    "Failed Orchestrator runs archived."
+  ],
   "Sessions durchsuchen …": [
     "Sessions durchsuchen …",
     "Search Sessions …"

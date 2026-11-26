@@ -212,7 +212,7 @@ pub fn compact_status_pill(
         .on_hover_text(text)
 }
 
-/// Shared search-left / tabs-right toolbar for all list views.
+/// Shared search-left / tabs-right toolbar, with an optional leading action.
 pub fn section_toolbar(
     ui: &mut egui::Ui,
     id: &str,
@@ -273,25 +273,60 @@ pub(crate) fn section_toolbar_extras(
     filter_width: f32,
     filter: impl FnOnce(&mut egui::Ui),
 ) {
+    section_toolbar_action(ui, id, query, hint, tabs, selected, leading, filter_width, filter, None);
+}
+
+pub fn section_toolbar_action(
+    ui: &mut egui::Ui, id: &str, query: &mut String, hint: &str,
+    tabs: &[(&str, usize)], selected: &mut usize, leading: impl FnOnce(&mut egui::Ui),
+    filter_width: f32, filter: impl FnOnce(&mut egui::Ui),
+    action: Option<(&str, bool)>,
+) -> bool {
     ui.push_id(id, |ui| {
+        let tab_width = tabs
+            .iter()
+            .map(|(title, count)| {
+                ui.painter()
+                    .layout_no_wrap(
+                        format!("{title} ({count})"),
+                        egui::FontId::proportional(16.0),
+                        Color32::WHITE,
+                    )
+                    .size()
+                    .x
+                    + 24.0
+            })
+            .fold(SECTION_TAB_WIDTH, f32::max);
+        let reserved = tabs.len() as f32 * (tab_width + ui.spacing().item_spacing.x)
+            + if filter_width > 0.0 { filter_width + ui.spacing().item_spacing.x } else { 0.0 };
+        let action_fits = action.is_some_and(|(label, _)| {
+            let width = ui
+                .painter()
+                .layout_no_wrap(
+                    label.to_owned(),
+                    egui::TextStyle::Button.resolve(ui.style()),
+                    Color32::WHITE,
+                )
+                .size()
+                .x;
+            ui.available_width()
+                >= reserved + 80.0 + width + 2.0 * ui.spacing().button_padding.x
+                    + ui.spacing().item_spacing.x
+        });
+        let show_action = |ui: &mut egui::Ui| {
+            action.is_some_and(|(label, enabled)| {
+                let button = ui.add_enabled(enabled, egui::Button::new(label));
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(format!("test-{id}-action")), button.rect)
+                });
+                button.clicked()
+            })
+        };
+        let clicked_above = !action_fits && show_action(ui);
         let _row = ui.horizontal(|ui| {
             leading(ui);
-            let tab_width = tabs
-                .iter()
-                .map(|(title, count)| {
-                    ui.painter()
-                        .layout_no_wrap(
-                            format!("{title} ({count})"),
-                            egui::FontId::proportional(16.0),
-                            Color32::WHITE,
-                        )
-                        .size()
-                        .x
-                        + 24.0
-                })
-                .fold(SECTION_TAB_WIDTH, f32::max);
-            let reserved = tabs.len() as f32 * (tab_width + ui.spacing().item_spacing.x)
-                + if filter_width > 0.0 { filter_width + ui.spacing().item_spacing.x } else { 0.0 };
+            let clicked_inline = action_fits && show_action(ui);
             let width = (ui.available_width() - reserved).clamp(80.0, 280.0)
                 - f32::from(INPUT_MARGIN.left + INPUT_MARGIN.right);
             let _search = ui.add(singleline(query).hint_text(input_hint(hint)).desired_width(width));
@@ -316,6 +351,7 @@ pub(crate) fn section_toolbar_extras(
                     }
                 }
             });
+            clicked_inline
         });
         #[cfg(test)]
         ui.ctx().data_mut(|d| {
@@ -324,7 +360,9 @@ pub(crate) fn section_toolbar_extras(
                 _row.response.rect,
             )
         });
-    });
+        clicked_above || _row.inner
+    })
+    .inner
 }
 
 /// Equal-sized section tabs with an explicit selected background and underline.

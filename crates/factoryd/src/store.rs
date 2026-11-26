@@ -41,6 +41,7 @@ pub struct DurableSnapshot {
     pub directs: Vec<factory_protocol::directs::Direct>,
     pub token_totals: ObservedTokenTotals,
     pub session_activity_unix_ms: std::collections::BTreeMap<String, u64>,
+    pub command_failed_unix_ms: std::collections::BTreeMap<CommandId, u64>,
     pub editable_tasks: std::collections::BTreeMap<TicketId, Revision>,
     pub session_titles: std::collections::BTreeMap<String, String>,
     pub session_closures: Vec<SessionClosure>,
@@ -636,6 +637,21 @@ impl Store {
             }
             activity
         };
+        let command_failed_unix_ms = {
+            let mut stmt = tx.prepare(
+                "SELECT c.id,MIN(e.created_unix_ms) FROM commands c
+                 JOIN events e ON e.aggregate_id=c.id AND e.kind='command.updated'
+                 WHERE c.state='failed' AND json_extract(e.payload,'$.state')='failed'
+                 GROUP BY c.id",
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get(1)?)))?;
+            let mut failed = std::collections::BTreeMap::new();
+            for row in rows {
+                let (id, time) = row?;
+                failed.insert(id.parse().map_err(|_| StoreError::Internal)?, time);
+            }
+            failed
+        };
         let token_totals = if include_usage {
             usage::observed_token_totals(&tx, &commands)?
         } else {
@@ -649,6 +665,7 @@ impl Store {
             directs,
             token_totals,
             session_activity_unix_ms,
+            command_failed_unix_ms,
             editable_tasks,
             session_titles,
             session_closures,
