@@ -73,7 +73,7 @@ pub(super) fn activate_prompts(tx: &Transaction<'_>, id: ProjectId) -> Result<()
     }
     Ok(())
 }
-fn save_ticket(tx: &Transaction<'_>, t: &mut Ticket) -> Result<()> {
+pub(super) fn save_ticket(tx: &Transaction<'_>, t: &mut Ticket) -> Result<()> {
     t.revision.0 += 1;
     t.updated_unix_ms = super::super::unix_ms();
     tx.execute(
@@ -298,6 +298,7 @@ fn export_portable_results(tx: &Transaction<'_>, project: ProjectId, since: u64)
     let mut stmt = tx.prepare("SELECT c.data FROM scheduler_runs r
         JOIN tickets t ON t.id=r.ticket_id JOIN commands c ON c.id=r.agent_id
         WHERE t.project_id=?1 AND c.state='succeeded'
+          AND json_extract(t.data,'$.status') NOT IN ('validating','rework_queued','blocked','cancelled')
           AND json_extract(c.data,'$.kind')='run_agent'
           AND json_extract(c.data,'$.workspace_spec.setup.repository_source') IN (?2,?3)
           AND c.rowid=(SELECT MAX(latest.rowid) FROM commands latest WHERE latest.stream_id=c.stream_id)
@@ -645,6 +646,24 @@ mod automatic_runner_tests {
                     phase: AgentPhase::Succeeded, summary: "Finished with the desktop offline".into(),
                 }});
                 store.scheduler_tick().unwrap();
+                let reviewer_prep = store.pending(target).unwrap().into_iter()
+                    .find(|c| c.kind == CommandKind::PrepareWorkspace).unwrap();
+                store.acknowledge(target, reviewer_prep.id, ack(&reviewer_prep)).unwrap();
+                complete(&reviewer_prep, CommandOutput::Workspace { workspace: Workspace {
+                    path: "/target/reviewer".into(),
+                    branch: reviewer_prep.workspace_spec.as_ref().unwrap().branch.clone(),
+                    base_commit: "b".repeat(40),
+                }});
+                store.scheduler_tick().unwrap();
+                let review = store.pending(target).unwrap().into_iter()
+                    .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
+                assert!(store.pending(source).unwrap().is_empty());
+                store.acknowledge(target, review.id, ack(&review)).unwrap();
+                complete(&review, CommandOutput::Agent { agent: AgentProgress {
+                    session_id: review.session_id(), message_id: agent_message_id(review.id),
+                    phase: AgentPhase::Succeeded, summary: r#"{"action":"approve"}"#.into(),
+                }});
+                store.scheduler_tick().unwrap();
                 assert!(store.pending(target).unwrap().iter().any(|c| c.kind == CommandKind::Checkpoint
                     && store.checkpoint(c.id).unwrap().unwrap().project_result.is_some()));
                 continue;
@@ -795,6 +814,16 @@ mod automatic_runner_tests {
                 let blocked = snapshot.tickets.iter().find(|t| t.id == too_old.id).unwrap();
                 assert!(blocked.execution_command.is_none());
                 assert!(blocked.routing_note.contains("ausreichend aktueller Checkpoint"));
+                let reviewer = store.pending(target).unwrap().into_iter()
+                    .find(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "reviewer")).unwrap();
+                assert!(!store.pending(target).unwrap().iter().any(|c|
+                    c.stream_id == remote_agent.stream_id && c.kind == CommandKind::Checkpoint));
+                store.acknowledge(target, reviewer.id, ack(&reviewer)).unwrap();
+                complete(&reviewer, CommandOutput::Agent { agent: AgentProgress {
+                    session_id: reviewer.session_id(), message_id: agent_message_id(reviewer.id),
+                    phase: AgentPhase::Succeeded, summary: r#"{"action":"approve"}"#.into(),
+                }});
+                store.scheduler_tick().unwrap();
                 let export = store.pending(target).unwrap().into_iter()
                     .find(|c| c.stream_id == remote_agent.stream_id && c.kind == CommandKind::Checkpoint)
                     .expect("a successful imported result is exported without stopping the native runner");
@@ -1347,6 +1376,15 @@ impl Store {
             if paused {
                 continue;
             }
+            super::validation::resolve(&tx, p.project_id)?;
+            tx.execute_batch("SAVEPOINT validation_start")?;
+            match super::validation::start(&tx, &p) {
+                Ok(()) => {}
+                Err(StoreError::WorkConflict | StoreError::Invalid(_) | StoreError::RevisionConflict(_)) =>
+                    tx.execute_batch("ROLLBACK TO validation_start")?,
+                Err(error) => return Err(error),
+            }
+            tx.execute_batch("RELEASE validation_start")?;
             let mut all = tickets(&tx, p.project_id)?;
             if let Some(ticket) = all.values().filter(|t| !t.draft && t.requested_session.is_none()
                 && matches!(t.status, TicketState::Backlog | TicketState::Ready)
@@ -1541,7 +1579,7 @@ impl Store {
             let mut active = 0;
             for s in &streams {
                 let controller: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM orchestrators WHERE stream_id=?1 UNION ALL SELECT 1 FROM supervisor_policies WHERE stream_id=?1)",
+                    "SELECT EXISTS(SELECT 1 FROM orchestrators WHERE stream_id=?1 UNION ALL SELECT 1 FROM supervisor_policies WHERE stream_id=?1 UNION ALL SELECT 1 FROM validation_controllers WHERE stream_id=?1)",
                     [s.id.to_string()],
                     |r| r.get(0),
                 )?;
@@ -1558,6 +1596,10 @@ impl Store {
                     active += 1;
                     *counts.entry(s.runner_id).or_default() += 1;
                 }
+            }
+            active += super::validation::dispatch(&tx, p.project_id, (p.max_parallel as usize).saturating_sub(active))?;
+            if p.runner_ids.is_empty() {
+                continue;
             }
             let mut ready = all
                 .values()

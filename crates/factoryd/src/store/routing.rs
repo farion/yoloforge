@@ -121,6 +121,9 @@ pub(super) fn route(
             continue;
         }
         let owner = super::work::stream(tx, c.stream_id)?;
+        if super::validation::awaiting(tx, owner.id)? {
+            continue;
+        }
         if !super::mcp::runner_ready(tx, owner.runner_id, &local_mcps)? {
             continue;
         }

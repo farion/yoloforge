@@ -214,7 +214,7 @@ impl Journal {
                  AND json_extract(data,'$.archive.finished')=1
                  AND COALESCE(json_extract(data,'$.archive.native_archived'),0)=0
                  AND json_extract(data,'$.command.agent_spec.read_only')=1
-                 AND json_extract(data,'$.command.agent_spec.role') IN ('orchestrator','orchestrator-question','orchestrator-memory','supervisor','memorizer')
+                 AND json_extract(data,'$.command.agent_spec.role') IN ('orchestrator','orchestrator-question','orchestrator-memory','supervisor','memorizer','reviewer')
                  AND COALESCE(json_extract(data,'$.archive.retry_after_ms'),0)<=?1
                  ORDER BY COALESCE(json_extract(data,'$.archive.retry_after_ms'),0),rowid LIMIT 1",
                 [now.min(i64::MAX as u64)],

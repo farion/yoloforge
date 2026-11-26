@@ -1964,6 +1964,30 @@ fn memorizer_lists_old_and_new_extractions_without_counting_them_as_orchestratio
 }
 
 #[test]
+fn reviewer_has_its_own_open_list_and_archive() {
+    let mut app = fixture();
+    let project = app.settings.project.unwrap();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let ticket = s.tickets[0].clone();
+    for state in [CommandState::Pending, CommandState::Succeeded, CommandState::Failed] {
+        let mut command = s.commands[0].clone();
+        command.id = CommandId::new();
+        command.state = state;
+        let spec = command.agent_spec.as_mut().unwrap();
+        spec.read_only = true;
+        spec.role = "reviewer".into();
+        spec.review_of = Some(ticket.id);
+        s.commands.push(command);
+    }
+    let reviews = sessions_for_page(s, project, Page::Reviewer);
+    assert_eq!(reviews.len(), 3);
+    assert_eq!(reviews.iter().filter(|c| controller_archived(s, c)).count(), 2);
+    assert!(reviews.iter().all(|c| session_title(s, c) == task_summary(&ticket)));
+    assert!(sessions_for_page(s, project, Page::Orchestrator).is_empty());
+    assert_eq!(sessions_for_page(s, project, Page::Sessions).len(), 1);
+}
+
+#[test]
 fn controller_title_fallback_uses_role_not_the_shared_workspace_name() {
     let mut app = fixture();
     let project = app.settings.project.unwrap();

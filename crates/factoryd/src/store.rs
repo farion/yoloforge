@@ -20,7 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
-pub const SCHEMA_VERSION: u32 = 44;
+pub const SCHEMA_VERSION: u32 = 45;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -217,6 +217,9 @@ impl Store {
         }
         if version < 44 {
             tx.execute_batch(include_str!("../migrations/044_deleted_intents.sql"))?;
+        }
+        if version < 45 {
+            tx.execute_batch(include_str!("../migrations/045_validation.sql"))?;
         }
         tx.commit()?;
         // Connection-local view centralizes fencing of removed projects without
@@ -483,6 +486,12 @@ impl Store {
                 if ticket.revision != body.expected_revision {
                     return Err(StoreError::RevisionConflict(ticket.revision));
                 }
+                if matches!(body.status, Some(TicketState::Validating | TicketState::ReworkQueued))
+                    || (matches!(ticket.status, TicketState::Validating | TicketState::ReworkQueued)
+                        && body.status != Some(TicketState::Cancelled))
+                {
+                    return Err(StoreError::Invalid("Ticket validation is managed by the Reviewer"));
+                }
                 ticket.revision.0 = ticket
                     .revision
                     .0
@@ -698,6 +707,7 @@ mod reviews;
 mod routing;
 mod runner_restart;
 mod scheduler;
+mod validation;
 mod sessions;
 mod directs;
 mod merger;

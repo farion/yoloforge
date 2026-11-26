@@ -287,7 +287,7 @@ fn candidate(
             continue;
         }
         let stream = super::work::stream(tx, c.stream_id)?;
-        if super::merger::owns_conflict(&c, &stream) {
+        if super::merger::owns_conflict(&c, &stream) || super::validation::awaiting(tx, stream.id)? {
             continue;
         }
         if !terminable

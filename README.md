@@ -50,6 +50,13 @@ Builddateien anderer Projekte. Nicht während fremder Builds bereinigen.
 
 Dark Theme, Aufgaben-/Fragenverwaltung, schreibgeschützte OpenCode-Tabs,
 Instanzpräsenz, Orchestrator, Runner, Diagnose und globale Benachrichtigungen.
+
+**Reviewer:** Der Overview zeigt Eingang → Verteilung → Ausführung → Validierung
+→ Ergebnis. Der Reviewer vergleicht den Intent und die Antworttexte des Implementers,
+ohne Dateien, Code oder tatsächliche Testergebnisse zu prüfen. Konkrete Restarbeit
+kommt mit Vorrang zurück in dieselbe Session. Erst eine Freigabe macht den Intent
+zum Ergebnis. Offene und archivierte Reviewer-Läufe stehen im linken Menü; das
+Reviewer-Model lässt sich in den Factory- und Projekt-Settings wählen.
 Ohne Zugang öffnet sich ein Verbindungsdialog mit lokalem Startassistenten.
 [Bedienung und Grenzen](docs/gui.md) · [Funktionszuordnung](docs/gui-parity.md).
 

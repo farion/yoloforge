@@ -154,6 +154,7 @@ enum Stage {
     Input,
     Routing,
     Execution,
+    Validation,
     Result,
 }
 
@@ -186,6 +187,10 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     let success = task_bucket(s, ticket) == TaskBucket::Archive;
     let stage = if ticket.draft {
         Stage::Input
+    } else if ticket.status == TicketState::Validating || crate::model::validation_blocked(ticket) {
+        Stage::Validation
+    } else if ticket.status == TicketState::ReworkQueued {
+        Stage::Routing
     } else if waiting {
         if command.is_some_and(|c| c.kind == CommandKind::PrepareWorkspace) {
             Stage::Routing
@@ -441,10 +446,18 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
             runner_busy: None,
         },
         Lane {
+            key: "validation".into(),
+            title: "Reviewer".into(),
+            subtitle: Some(crate::tr!("Textprüfung vor dem Ergebnis")),
+            column: 3,
+            cards: vec![],
+            runner_busy: None,
+        },
+        Lane {
             key: "result".into(),
             title: crate::tr!("Ergebnis").into(),
             subtitle: Some(crate::tr!("Erfolg bleibt 2 Minuten")),
-            column: 3,
+            column: 4,
             cards: vec![],
             runner_busy: None,
         },
@@ -481,7 +494,8 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
         match c.stage {
             Stage::Input => result[0].cards.push(c),
             Stage::Routing => result[1].cards.push(c),
-            Stage::Result => result[2].cards.push(c),
+            Stage::Validation => result[2].cards.push(c),
+            Stage::Result => result[3].cards.push(c),
             Stage::Execution => {
                 let key = c.command.map_or_else(
                     || "unassigned".into(),
@@ -590,11 +604,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, |ui| {
             let width = ui
                 .available_width()
-                .max(design::FLOW_MIN_CARD_WIDTH * 4.0 + design::FLOW_COLUMN_GAP * 3.0 + 32.0);
-            let card_width = ((width - 32.0 - design::FLOW_COLUMN_GAP * 3.0) / 4.0)
+                .max(design::FLOW_MIN_CARD_WIDTH * 5.0 + design::FLOW_COLUMN_GAP * 4.0 + 32.0);
+            let card_width = ((width - 32.0 - design::FLOW_COLUMN_GAP * 4.0) / 5.0)
                 .min(design::FLOW_CARD_SIZE.x);
             let card_size = egui::vec2(card_width, design::FLOW_CARD_SIZE.y);
-            let stride = (width - 32.0 - card_width) / 3.0;
+            let stride = (width - 32.0 - card_width) / 4.0;
             let layout = (project, width.round() as u32);
             if app.factory_flow.layout != Some(layout) {
                 app.factory_flow.positions.clear();
@@ -647,7 +661,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             // stay quiet; only observed activity produces moving light packets.
             let routing = placements.iter().find(|(l, _, _)| l.column == 1).unwrap().1;
             let input = placements.iter().find(|(l, _, _)| l.column == 0).unwrap().1;
-            let output = placements.iter().find(|(l, _, _)| l.column == 3).unwrap().1;
+            let validation = placements.iter().find(|(l, _, _)| l.column == 3).unwrap().1;
+            let output = placements.iter().find(|(l, _, _)| l.column == 4).unwrap().1;
             edge(
                 ui,
                 input + egui::vec2(card_width, 26.0),
@@ -669,12 +684,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 edge(
                     ui,
                     *origin + egui::vec2(card_width, 26.0),
-                    output + egui::vec2(0.0, 26.0),
-                    GREEN,
+                    validation + egui::vec2(0.0, 26.0),
+                    BLUE,
                     false,
                     clock,
                 );
             }
+            edge(ui, validation + egui::vec2(card_width, 26.0), output + egui::vec2(0.0, 26.0), GREEN, false, clock);
             for (lane, origin, height) in placements {
                 let header = Rect::from_min_size(origin, egui::vec2(card_width, HEADER_HEIGHT));
                 let active = if lane.column == 1 {
@@ -1098,6 +1114,20 @@ mod tests {
         s.tickets[0].draft = true;
         assert_eq!(card(&s, &s.tickets[0]).stage, Stage::Input);
         assert!(!card(&s, &s.tickets[0]).active);
+    }
+
+    #[test]
+    fn validation_and_priority_rework_keep_successful_executor_out_of_results() {
+        let app = crate::tests::fixture();
+        let mut s = (*app.snapshot.unwrap()).clone();
+        complete(&mut s);
+        for (status, expected) in [(TicketState::Validating, Stage::Validation),
+            (TicketState::ReworkQueued, Stage::Routing), (TicketState::Done, Stage::Result)] {
+            s.tickets[0].status = status;
+            let tile = card(&s, &s.tickets[0]);
+            assert_eq!(tile.stage, expected);
+            assert_eq!(tile.success, status == TicketState::Done);
+        }
     }
 
     #[test]

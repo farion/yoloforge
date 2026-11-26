@@ -112,7 +112,7 @@ impl Models {
                                 draft.accesses.clone_from(&saved.accesses);
                                 for model in [&mut draft.default_model, &mut draft.roles.orchestrator,
                                     &mut draft.roles.implementer, &mut draft.roles.supervisor,
-                                     &mut draft.roles.memorizer, &mut draft.roles.merger] {
+                                     &mut draft.roles.memorizer, &mut draft.roles.merger, &mut draft.roles.reviewer] {
                                     if model.as_ref().is_some_and(|model| model.access_id == id) {
                                         *model = None;
                                     }
@@ -321,6 +321,7 @@ fn roles(ui: &mut egui::Ui, scope: &str, catalog: &[ModelAccess], models: &mut R
     for (name, selection) in [
         ("Orchestrator", &mut models.orchestrator),
         ("Implementer", &mut models.implementer),
+        ("Reviewer", &mut models.reviewer),
         ("Supervisor", &mut models.supervisor),
         ("Memorizer", &mut models.memorizer),
         ("Merger", &mut models.merger),
@@ -1312,7 +1313,7 @@ mod tests {
             }, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| pane.show(ui, &mut app, 730.0));
             });
-            for role in ["Memorizer", "Merger"] {
+            for role in ["Memorizer", "Merger", "Reviewer"] {
                 assert!(output.shapes.iter().any(|s| matches!(
                     &s.shape, egui::epaint::Shape::Text(text) if text.galley.job.text == role
                 )), "{role} not visible");

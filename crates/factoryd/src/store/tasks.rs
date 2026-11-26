@@ -291,7 +291,8 @@ impl Store {
                            implementer_override: Some(model.clone()), implementer: Some(model),
                            orchestrator: None,
                            supervisor: super::models::role_selection(tx, t.project_id, "supervisor")?,
-                           memorizer: super::models::role_selection(tx, t.project_id, "memorizer")?,
+                            memorizer: super::models::role_selection(tx, t.project_id, "memorizer")?,
+                            reviewer: super::models::role_selection(tx, t.project_id, "reviewer")?,
                        })
                    } else { None }
                } else { super::models::for_task(tx, t.id, t.project_id, implementer, t.draft)? };
@@ -356,6 +357,9 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask)
     }
     let raw: String = tx.query_row("SELECT data FROM commands WHERE id=?1", [body.previous_command.to_string()], |r| r.get(0))?;
     let failed: RunnerCommand = serde_json::from_str(&raw)?;
+    if super::validation::retry(tx, &mut ticket, &failed)? {
+        return Ok(ticket);
+    }
     let owner = super::work::stream(tx, failed.stream_id)?;
     let latest: String = tx.query_row("SELECT id FROM commands WHERE stream_id=?1 ORDER BY rowid DESC LIMIT 1",
         [owner.id.to_string()], |r| r.get(0))?;

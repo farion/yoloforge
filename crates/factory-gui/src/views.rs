@@ -258,7 +258,7 @@ impl App {
                             ui.add_space(10.0);
                              for page in [
                                  Page::Tasks, Page::Questions, Page::Directs, Page::Sessions,
-                                 Page::Orchestrator, Page::Supervisor, Page::Memorizer, Page::Merger,
+                                 Page::Orchestrator, Page::Reviewer, Page::Supervisor, Page::Memorizer, Page::Merger,
                              ] {
                                  let (badges, hint) = if page == Page::Tasks && !self.online {
                                      let queue = self.settings.offline_tasks.iter().filter(|t|
@@ -412,7 +412,7 @@ impl App {
                     Page::Tasks => self.tasks(ui),
                     Page::Questions => self.questions(ui),
                     Page::Directs => crate::directs::list(ui, self),
-                    Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer | Page::Merger => {
+                    Page::Sessions | Page::Orchestrator | Page::Reviewer | Page::Supervisor | Page::Memorizer | Page::Merger => {
                         self.session_list(ui, self.page())
                     }
                     Page::Diagnostics => self.diagnostics(ui),
@@ -709,7 +709,7 @@ impl App {
                         || t.description.to_lowercase().contains(&needle))
             })
             .collect::<Vec<_>>();
-        tasks.sort_by_key(|t| std::cmp::Reverse(t.created_unix_ms));
+        tasks.sort_by_key(|t| (t.status != TicketState::ReworkQueued, std::cmp::Reverse(t.created_unix_ms)));
         if tasks.is_empty() {
             let message = if !needle.is_empty() {
                 crate::tr!("Keine passenden Aufgaben")
@@ -1167,14 +1167,23 @@ impl App {
             return;
         };
         let mut sessions = sessions_for_page(&s, project, page);
+        let mut awaiting_review = Vec::new();
         {
             let archived = |c: &RunnerCommand| session_archived_for_page(&s, page, c);
+            if page == Page::Reviewer {
+                awaiting_review.extend(s.tickets.iter().filter(|t| t.project_id == project
+                    && t.status == TicketState::Validating
+                    && !sessions.iter().any(|c| !archived(c)
+                        && c.agent_spec.as_ref().is_some_and(|a| a.review_of == Some(t.id)))));
+                awaiting_review.sort_by_key(|t| (t.updated_unix_ms, t.id));
+            }
             let closed = sessions.iter().filter(|c| archived(c)).count();
             let mut selected = usize::from(self.sessions_closed);
             design::section_toolbar(
                 ui,
                 match page {
                     Page::Supervisor => "supervisor",
+                    Page::Reviewer => "reviewer",
                     Page::Orchestrator => "controller",
                     Page::Memorizer => "memorizer",
                     Page::Merger => "merger",
@@ -1183,13 +1192,14 @@ impl App {
                 &mut self.query,
                 crate::tr!("Sessions durchsuchen …"),
                 &[
-                    (crate::tr!("Offen"), sessions.len() - closed),
+                    (crate::tr!("Offen"), sessions.len() - closed + awaiting_review.len()),
                     (if controllers { crate::tr!("Archiv") } else { crate::tr!("Geschlossen") }, closed),
                 ],
                 &mut selected,
             );
             self.sessions_closed = selected == 1;
             let needle = self.query.to_lowercase();
+            awaiting_review.retain(|t| !self.sessions_closed && task_summary(t).to_lowercase().contains(&needle));
             sessions.retain(|c| {
                 archived(c) == self.sessions_closed
                     && (needle.is_empty()
@@ -1205,7 +1215,7 @@ impl App {
                             .is_some_and(|p| p.summary.to_lowercase().contains(&needle)))
             });
         }
-        if sessions.is_empty() {
+        if sessions.is_empty() && awaiting_review.is_empty() {
             let message = if controllers {
                 let modifier = if self.query.is_empty() { "" } else { crate::tr!("passenden ") };
                 crate::tr!("Keine {modifier}{}-Läufe", page.title(), modifier = modifier)
@@ -1227,6 +1237,23 @@ impl App {
                 self.sessions_closed,
             ))
             .show(ui, |ui| {
+                for ticket in awaiting_review {
+                    design::task_row_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let title = task_summary(ticket);
+                            let width = (ui.available_width() - 220.0).max(1.0);
+                            let job = design::elided_text_job(title.clone(), egui::FontId::proportional(18.0), ui.visuals().text_color(), width, 1);
+                            ui.add(egui::Label::new(job)).on_hover_text(title);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button(crate::tr!("Intent anzeigen")).clicked() {
+                                    self.navigate(Target::Task(project, ticket.id));
+                                }
+                                badge(ui, crate::tr!("Wartend"), AMBER);
+                            });
+                        });
+                    });
+                }
                 for c in sessions {
                     ui.push_id(c.session_root(), |ui| {
                         let _row=design::task_row_frame().show(ui, |ui| {
@@ -1414,6 +1441,7 @@ impl App {
                                         "knowledge" | "memory" => crate::tr!("Wissen"),
                                         "supervisor" => "Supervisor",
                                         "memorizer" | "orchestrator-memory" => "Memorizer",
+                                        "reviewer" => "Reviewer",
                                         "orchestrator" | "scheduler" => crate::tr!("Verteilung"),
                                         "session" => "Session",
                                         "stream" => crate::tr!("Arbeitsbereich"),
@@ -2046,7 +2074,7 @@ pub(crate) fn project_navigation_badges(
                 let (total, answered) = question_group_progress(group);
                 question_group_pill(total, answered)
             }).for_each(&mut count),
-        Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Memorizer | Page::Merger => {
+        Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Reviewer | Page::Memorizer | Page::Merger => {
             sessions_for_page(s, project, page).iter()
                 .filter(|c| !session_archived_for_page(s, page, c))
                 .map(|c| session_list_pill(s, page, c))

@@ -16,6 +16,7 @@ fn settings(revision: u64, default: Option<ModelSelection>) -> FactoryModelSetti
         roles: RoleModels {
             orchestrator: Some(selection("b")),
             memorizer: Some(selection("b")),
+            reviewer: Some(selection("c")),
             ..Default::default()
         },
         accesses: ["a", "b", "c"]
@@ -122,6 +123,7 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
                         implementer: Some(selection("b")),
                         supervisor: Some(selection("c")),
                         memorizer: Some(selection("a")),
+                        reviewer: Some(selection("a")),
                         ..Default::default()
                     },
                 },
@@ -147,12 +149,14 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
     assert_eq!(models.orchestrator, Some(selection("b")));
     assert_eq!(models.supervisor, Some(selection("c")));
     assert_eq!(models.memorizer, Some(selection("a")));
+    assert_eq!(models.reviewer, Some(selection("a")));
     let mut next = settings(1, Some(selection("b")));
     next.roles.orchestrator = Some(selection("a"));
     next.roles.memorizer = Some(selection("c"));
     set(&store, next);
     let mut settings = store.project_models(project.id).unwrap();
     settings.roles.memorizer = None;
+    settings.roles.reviewer = None;
     store.set_project_models(project.id, SetProjectModels {
         request_id: RequestId::new(),
         settings,
@@ -225,6 +229,15 @@ fn role_precedence_and_ticket_override_are_frozen_and_used_for_real_command_enqu
         },
     }).unwrap();
     store.scheduler_tick().unwrap();
+    let reviewer = store.pending(runner).unwrap().pop().unwrap();
+    let spec = reviewer.agent_spec.as_ref().unwrap();
+    assert_eq!(spec.role, "reviewer");
+    assert_eq!(spec.profile.provider_id, "factory-a", "Use the pinned project Reviewer model despite later Settings changes");
+    complete(&store, &reviewer, CommandOutput::Agent { agent: AgentProgress {
+        session_id: reviewer.session_id(), message_id: agent_message_id(reviewer.id),
+        phase: AgentPhase::Succeeded, summary: r#"{"action":"approve"}"#.into(),
+    }});
+    store.scheduler_tick().unwrap();
     let pending = store.pending(runner).unwrap();
     assert_eq!(pending.len(), 1);
     let spec = pending[0].agent_spec.as_ref().unwrap();
@@ -286,8 +299,10 @@ fn format_migration_backfills_old_queue_once_and_missing_default_blocks_new_rele
     assert_eq!(pin.implementer, Some(selection("a")));
     assert_eq!(pin.orchestrator, Some(selection("a")));
     assert_eq!(pin.memorizer, Some(selection("a")));
+    assert_eq!(pin.reviewer, Some(selection("a")));
     let new = store.save_task(submit(p.id, "Uses new default")).unwrap();
     assert_eq!(store.task_models(new.id).unwrap().unwrap().memorizer, Some(selection("b")));
+    assert_eq!(store.task_models(new.id).unwrap().unwrap().reviewer, Some(selection("c")));
     assert_eq!(
         store.task_models(new.id).unwrap().unwrap().implementer,
         Some(selection("b"))
