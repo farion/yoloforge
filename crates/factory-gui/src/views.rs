@@ -282,16 +282,13 @@ impl App {
                                              s, project, page, &self.settings.archived_orchestrator_failures),
                                      )
                                  };
-                                 let incompatible = page == Page::Directs && snapshot.as_deref()
-                                     .is_some_and(|s| !server_supports(s, factory_protocol::directs::CAPABILITY));
-                                 let row = ui.add_enabled_ui((self.online || page == Page::Tasks) && !incompatible, |ui| design::navigation_row_with_badges(
+                                  let row = ui.add_enabled_ui(self.online || page == Page::Tasks, |ui| design::navigation_row_with_badges(
                                     ui,
                                     Some(page.icon()),
                                     page.title(),
                                     self.page() == page,
                                      &badges,
                                   )).inner;
-                                  let row = design::server_compatibility_tooltip(row, incompatible);
                                  let row = if hint.is_empty() { row } else { row.on_hover_text(hint) };
                                  #[cfg(test)]
                                  ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-project-navigation", page)), row.rect));
