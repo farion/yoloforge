@@ -3,8 +3,8 @@ use crate::{
     app::{App, AMBER, BLUE, GREEN, MUTED, RED},
     design,
     model::{
-        command_project, needs_answer, session_title, task_bucket, task_command, task_intent_text,
-        task_status, TaskBucket,
+        command_project, needs_answer, session_title, task_bucket, task_command,
+        task_display_status, task_intent_text, task_status, TaskBucket,
     },
 };
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
@@ -172,7 +172,6 @@ impl FlowState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
-    Input,
     Routing,
     Execution,
     Validation,
@@ -209,7 +208,7 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
                     .starts_with("Orchestrator: Lauf fehlgeschlagen"))));
     let success = task_bucket(s, ticket) == TaskBucket::Archive;
     let stage = if ticket.draft {
-        Stage::Input
+        Stage::Routing
     } else if !success && command.is_some_and(crate::model::is_merger) {
         Stage::Merge
     } else if ticket.status == TicketState::Validating || crate::model::validation_blocked(ticket) {
@@ -242,7 +241,7 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     } else if ticket.status == TicketState::InProgress {
         Stage::Execution
     } else if ticket.routing_note.is_empty() && ticket.status == TicketState::Backlog {
-        Stage::Input
+        Stage::Routing
     } else {
         Stage::Routing
     };
@@ -329,26 +328,7 @@ impl Card<'_> {
         }
     }
     fn status(&self, s: &Snapshot) -> &'static str {
-        if let Some(status) = self.command.and_then(|c| crate::model::merger_pending_status(s, c)) {
-            status
-        } else if self.waiting {
-            crate::tr!("Braucht Antwort")
-        } else if self.failed {
-            let status = task_status(s, self.ticket);
-            if status == crate::tr!("Wartet auf Wiederholung") {
-                status
-            } else if self.command.is_some_and(command_publication_blocked) {
-                crate::tr!("Übernahme blockiert")
-            } else if self.command.is_some_and(|c| c.state == CommandState::Failed) {
-                crate::tr!("Fehlgeschlagen")
-            } else if crate::model::validation_blocked(self.ticket) {
-                crate::tr!("Validierung blockiert")
-            } else {
-                crate::tr!("Blockiert")
-            }
-        } else {
-            task_status(s, self.ticket)
-        }
+        task_display_status(s, self.ticket)
     }
 }
 
@@ -390,7 +370,6 @@ struct Lane<'a> {
     key: String,
     icon: &'static str,
     title: String,
-    subtitle: Option<&'static str>,
     column: usize,
     cards: Vec<Card<'a>>,
 }
@@ -442,58 +421,42 @@ fn orchestration_active(s: &Snapshot, project: Option<ProjectId>) -> bool {
 fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> Vec<Lane<'a>> {
     let mut result = vec![
         Lane {
-            key: "input".into(),
-            icon: icons::ENVELOPE,
-            title: crate::tr!("Eingang").into(),
-            subtitle: Some(crate::tr!("Entwürfe & neue Aufgaben")),
-            column: 0,
-            cards: vec![],
-        },
-        Lane {
             key: "routing".into(),
             icon: icons::ROBOT,
             title: "Orchestrator".into(),
-            subtitle: Some(crate::tr!("Orchestrierung & Start")),
-            column: 1,
+            column: 0,
             cards: vec![],
         },
         Lane {
             key: "implementation".into(),
             icon: icons::ROBOT,
             title: "Implementer".into(),
-            subtitle: None,
-            column: 2,
+            column: 1,
             cards: vec![],
         },
         Lane {
             key: "validation".into(),
             icon: icons::ROBOT,
             title: "Reviewer".into(),
-            subtitle: Some(crate::tr!("Textprüfung vor dem Ergebnis")),
-            column: 3,
+            column: 2,
             cards: vec![],
         },
         Lane {
             key: "merge".into(),
             icon: icons::ROBOT,
             title: "Merger".into(),
-            subtitle: Some(crate::tr!("Git-Konflikte auflösen")),
-            column: 4,
-            cards: vec![],
-        },
-        Lane {
-            key: "result".into(),
-            icon: icons::CHECK,
-            title: "Done".into(),
-            subtitle: Some(crate::tr!("Erfolg bleibt 2 Minuten")),
-            column: 5,
+            column: 3,
             cards: vec![],
         },
     ];
     for ticket in s
         .tickets
         .iter()
-        .filter(|t| t.status != TicketState::Cancelled && project.is_none_or(|p| p == t.project_id))
+        .filter(|t| {
+            !t.draft
+                && t.status != TicketState::Cancelled
+                && project.is_none_or(|p| p == t.project_id)
+        })
     {
         if s.projects
             .iter()
@@ -504,12 +467,11 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
         }
         let c = card(s, ticket);
         match c.stage {
-            Stage::Input => result[0].cards.push(c),
-            Stage::Routing => result[1].cards.push(c),
-            Stage::Execution => result[2].cards.push(c),
-            Stage::Validation => result[3].cards.push(c),
-            Stage::Merge => result[4].cards.push(c),
-            Stage::Result => result[5].cards.push(c),
+            Stage::Routing => result[0].cards.push(c),
+            Stage::Execution => result[1].cards.push(c),
+            Stage::Validation => result[2].cards.push(c),
+            Stage::Merge => result[3].cards.push(c),
+            Stage::Result => {}
         }
     }
     for lane in &mut result {
@@ -577,7 +539,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     }
     let lanes = lanes(&s, &app.factory_flow, project);
     let orchestrating = orchestration_active(&s, project);
-    let routing_active = orchestrating || lanes[1].cards.iter().any(|c| c.active);
+    let routing_active = orchestrating || lanes[0].cards.iter().any(|c| c.active);
     ui.add_space(12.0);
     let mut task = None;
     egui::ScrollArea::both()
@@ -586,12 +548,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, |ui| {
             let base_width = ui
                 .available_width()
-                .max(design::FLOW_MIN_CARD_WIDTH * 5.0 + design::FLOW_COLUMN_GAP * 4.0 + 32.0);
-            let card_width = ((base_width - 32.0 - design::FLOW_COLUMN_GAP * 4.0) / 5.0)
+                .max(design::FLOW_MIN_CARD_WIDTH * 4.0 + design::FLOW_COLUMN_GAP * 3.0 + 64.0);
+            let card_width = ((base_width - 64.0 - design::FLOW_COLUMN_GAP * 3.0) / 4.0)
                 .min(design::FLOW_CARD_SIZE.x);
-            let card_size = egui::vec2(card_width, design::FLOW_CARD_SIZE.y);
-            let stride = (base_width - 32.0 - card_width) / 4.0;
-            let width = base_width + stride;
+            let card_heights: BTreeMap<_, _> = lanes.iter()
+                .flat_map(|lane| lane.cards.iter())
+                .map(|card| (card.ticket.id, card_height(ui, card, card_width)))
+                .collect();
+            let stride = (base_width - 64.0 - card_width) / 3.0;
+            let width = base_width;
             let layout = (project, width.round() as u32);
             if app.factory_flow.layout != Some(layout) {
                 app.factory_flow.positions.clear();
@@ -603,7 +568,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 } else {
                     lane.cards.len().min(design::FLOW_VISIBLE_CARDS)
                 };
-                74.0 + count.max(1) as f32 * (design::FLOW_CARD_SIZE.y + design::FLOW_CARD_GAP)
+                let cards_height = if count == 0 {
+                    design::FLOW_CARD_SIZE.y + design::FLOW_CARD_GAP
+                } else {
+                    lane.cards.iter().take(count)
+                        .map(|card| card_heights[&card.ticket.id] + design::FLOW_CARD_GAP)
+                        .sum()
+                };
+                74.0 + cards_height
                     + if lane.cards.len() > design::FLOW_VISIBLE_CARDS {
                         46.0
                     } else {
@@ -619,27 +591,25 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let mut placements = Vec::new();
             for lane in &lanes {
                 let origin =
-                    canvas.min + egui::vec2(16.0 + lane.column as f32 * stride, CANVAS_TOP);
+                    canvas.min + egui::vec2(32.0 + lane.column as f32 * stride, CANVAS_TOP);
                 placements.push((lane, origin, lane_height(lane)));
             }
             let clock = app.factory_flow.clock;
             let animate = app.online && app.factory_flow.motion;
             // Edges connect actual stages and assigned runner branches. Idle edges
             // stay quiet; only observed activity produces moving light packets.
-            let routing = placements.iter().find(|(l, _, _)| l.column == 1).unwrap().1;
-            let input = placements.iter().find(|(l, _, _)| l.column == 0).unwrap().1;
-            let validation = placements.iter().find(|(l, _, _)| l.column == 3).unwrap().1;
-            let merger = placements.iter().find(|(l, _, _)| l.column == 4).unwrap().1;
-            let output = placements.iter().find(|(l, _, _)| l.column == 5).unwrap().1;
+            let routing = placements.iter().find(|(l, _, _)| l.column == 0).unwrap().1;
+            let validation = placements.iter().find(|(l, _, _)| l.column == 2).unwrap().1;
+            let merger = placements.iter().find(|(l, _, _)| l.column == 3).unwrap().1;
             edge(
                 ui,
-                input + egui::vec2(card_width, 26.0),
+                egui::pos2(canvas.left(), routing.y + 26.0),
                 routing + egui::vec2(0.0, 26.0),
                 BLUE,
                 animate && routing_active,
                 clock,
             );
-            let implementation = placements.iter().find(|(l, _, _)| l.column == 2).unwrap();
+            let implementation = placements.iter().find(|(l, _, _)| l.column == 1).unwrap();
             let starting = implementation.0.cards.iter().any(Card::starting_execution);
             edge(
                 ui,
@@ -658,10 +628,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 clock,
             );
             edge(ui, validation + egui::vec2(card_width, 26.0), merger + egui::vec2(0.0, 26.0), BLUE, false, clock);
-            edge(ui, merger + egui::vec2(card_width, 26.0), output + egui::vec2(0.0, 26.0), GREEN, false, clock);
+            edge(
+                ui,
+                merger + egui::vec2(card_width, 26.0),
+                egui::pos2(canvas.right(), merger.y + 26.0),
+                GREEN,
+                false,
+                clock,
+            );
             for (lane, origin, height) in placements {
                 let header = Rect::from_min_size(origin, egui::vec2(card_width, HEADER_HEIGHT));
-                let active = if lane.column == 1 {
+                let active = if lane.column == 0 {
                     routing_active
                 } else {
                     lane.cards.iter().any(|c| c.active)
@@ -678,10 +655,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     egui::StrokeKind::Inside,
                 );
                 let title = format!("{} ({})", lane.title, lane.cards.len());
-                let subtitle = lane.subtitle;
                 text(
                     ui,
-                    header.min + egui::vec2(12.0, if subtitle.is_some() { 7.0 } else { 17.0 }),
+                    header.min + egui::vec2(12.0, 17.0),
                     lane.icon,
                     17.0,
                     ui.visuals().text_color(),
@@ -689,16 +665,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 );
                 text(
                     ui,
-                    header.min + egui::vec2(38.0, if subtitle.is_some() { 7.0 } else { 18.0 }),
+                    header.min + egui::vec2(38.0, 18.0),
                     &title,
                     14.0,
                     ui.visuals().text_color(),
                     header.width() - 50.0,
                 );
-                if let Some(subtitle) = subtitle {
-                    text(ui, header.min + egui::vec2(38.0, 31.0), subtitle,
-                        11.0, MUTED, header.width() - 50.0);
-                }
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| {
                     d.insert_temp(egui::Id::new(("test-flow-lane", &lane.key)), header)
@@ -720,13 +692,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     );
                 }
                 for (row, c) in lane.cards.iter().take(shown).enumerate() {
+                    let preceding_height: f32 = lane.cards.iter().take(row)
+                        .map(|card| card_heights[&card.ticket.id] + design::FLOW_CARD_GAP)
+                        .sum();
                     let target = origin - canvas.min
                         + egui::vec2(
                             0.0,
-                            74.0 + row as f32 * (design::FLOW_CARD_SIZE.y + design::FLOW_CARD_GAP),
+                            74.0 + preceding_height,
                         );
                     let position = app.factory_flow.position(c.ticket.id, target);
-                    let rect = Rect::from_min_size(canvas.min + position, card_size);
+                    let rect = Rect::from_min_size(
+                        canvas.min + position,
+                        egui::vec2(card_width, card_heights[&c.ticket.id]),
+                    );
                     if draw_card(ui, &s, c, rect, animate, clock).clicked() {
                         task = Some(c.ticket.id);
                     }
@@ -832,9 +810,29 @@ fn text_rows(
     width: f32,
     rows: usize,
 ) {
+    text_font(
+        ui,
+        position,
+        value,
+        FontId::proportional(size),
+        color,
+        width,
+        rows,
+    );
+}
+
+fn text_font(
+    ui: &egui::Ui,
+    position: Pos2,
+    value: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+    rows: usize,
+) {
     let galley = ui.painter().layout_job(design::elided_text_job(
         value.to_owned(),
-        FontId::proportional(size),
+        font,
         color,
         width.max(1.0),
         rows,
@@ -866,6 +864,37 @@ fn edge(ui: &egui::Ui, from: Pos2, to: Pos2, color: Color32, active: bool, clock
                 distance -= length;
             }
         }
+    }
+}
+
+fn card_height(ui: &egui::Ui, card: &Card<'_>, width: f32) -> f32 {
+    let galley = ui.painter().layout_job(design::elided_text_job(
+        task_intent_text(card.ticket),
+        FontId::proportional(12.0),
+        ui.visuals().text_color(),
+        (width - 24.0).max(1.0),
+        3,
+    ));
+    let rows = galley.rows.len().clamp(1, 3);
+    design::FLOW_CARD_SIZE.y - (3 - rows) as f32 * 16.0
+}
+
+fn card_border_color(
+    snapshot: &Snapshot,
+    card: &Card<'_>,
+    animate: bool,
+    clock: u64,
+) -> Color32 {
+    let color = card.color(snapshot);
+    let intensity = if card.waiting && animate {
+        0.65 + 0.25 * (clock as f32 / 330.0).sin()
+    } else {
+        0.8
+    };
+    if card.active || card.waiting || card.failed || card.success {
+        color.gamma_multiply(intensity)
+    } else {
+        design::FLOW_TASK_ACCENT.gamma_multiply(0.5)
     }
 }
 
@@ -901,22 +930,11 @@ fn draw_card(
             design::FLOW_TASK_FILL
         },
     );
-    let intensity = if c.waiting && animate {
-        0.65 + 0.25 * (clock as f32 / 330.0).sin()
-    } else {
-        0.8
-    };
+    let border_color = card_border_color(s, c, animate, clock);
     ui.painter().rect_stroke(
         rect,
         10,
-        Stroke::new(
-            1.0_f32,
-            if c.active || c.waiting || c.failed || c.success {
-                color.gamma_multiply(intensity)
-            } else {
-                design::FLOW_TASK_ACCENT.gamma_multiply(0.5)
-            },
-        ),
+        Stroke::new(1.0_f32, border_color),
         egui::StrokeKind::Inside,
     );
     ui.painter().rect_filled(
@@ -925,7 +943,7 @@ fn draw_card(
             egui::vec2(3.0, rect.height() - 24.0),
         ),
         2,
-        design::FLOW_TASK_ACCENT,
+        border_color,
     );
     let reference = if c.ticket.key.is_empty() {
         c.ticket.id.to_string()
@@ -983,7 +1001,14 @@ fn draw_card(
                 format!("{actor} · {model}")
             },
         );
-    text(ui, at(12.0, 101.0), &metadata, 10.5, MUTED, rect.width() - 24.0);
+    text(
+        ui,
+        at(12.0, rect.height() - 23.0),
+        &metadata,
+        10.5,
+        MUTED,
+        rect.width() - 24.0,
+    );
     let project = s
         .projects
         .iter()
@@ -1168,7 +1193,7 @@ mod tests {
         s.commands[0].kind = CommandKind::PrepareWorkspace;
         assert_eq!(card(&s, &s.tickets[0]).stage, Stage::Routing);
         s.tickets[0].draft = true;
-        assert_eq!(card(&s, &s.tickets[0]).stage, Stage::Input);
+        assert_eq!(card(&s, &s.tickets[0]).stage, Stage::Routing);
         assert!(!card(&s, &s.tickets[0]).active);
     }
 
@@ -1341,6 +1366,12 @@ mod tests {
         let mut s = (*crate::tests::fixture().snapshot.unwrap()).clone();
         let state = FlowState::default();
         assert!(lanes(&s, &state, None).iter().any(|lane| !lane.cards.is_empty()));
+        s.tickets[0].draft = true;
+        assert!(
+            lanes(&s, &state, None).iter().all(|lane| lane.cards.is_empty()),
+            "Drafts must stay outside the Overview flow"
+        );
+        s.tickets[0].draft = false;
         s.tickets[0].status = TicketState::Cancelled;
         assert!(lanes(&s, &state, None).iter().all(|lane| lane.cards.is_empty()));
         assert_eq!(task_bucket(&s, &s.tickets[0]), TaskBucket::Archive);
@@ -1371,7 +1402,7 @@ mod tests {
         let scoped = lanes(&s, &state, Some(first));
         assert_eq!(global.iter().map(|l| l.cards.len()).sum::<usize>(), 8);
         assert_eq!(scoped.iter().map(|l| l.cards.len()).sum::<usize>(), 7);
-        let executing = scoped.iter().find(|l| l.column == 2).unwrap();
+        let executing = scoped.iter().find(|l| l.column == 1).unwrap();
         assert_eq!(executing.cards.len(), 7);
         assert!(executing.cards[0].waiting);
         assert_eq!(executing.key, "implementation");
@@ -1453,15 +1484,13 @@ mod tests {
         assert_eq!(
             lanes.iter().map(|lane| (lane.title.as_str(), lane.icon)).collect::<Vec<_>>(),
             [
-                ("Eingang", icons::ENVELOPE),
                 ("Orchestrator", icons::ROBOT),
                 ("Implementer", icons::ROBOT),
                 ("Reviewer", icons::ROBOT),
                 ("Merger", icons::ROBOT),
-                ("Done", icons::CHECK),
             ]
         );
-        let execution: Vec<_> = lanes.iter().filter(|lane| lane.column == 2).collect();
+        let execution: Vec<_> = lanes.iter().filter(|lane| lane.column == 1).collect();
         assert_eq!(execution.len(), 1);
         assert_eq!(execution[0].key, "implementation");
         assert_eq!(
@@ -1469,7 +1498,7 @@ mod tests {
             BTreeSet::from([ticket, second_ticket, third_ticket])
         );
         let filtered = self::lanes(s, &app.factory_flow, Some(ProjectId::new()));
-        let filtered_execution = filtered.iter().find(|lane| lane.column == 2).unwrap();
+        let filtered_execution = filtered.iter().find(|lane| lane.column == 1).unwrap();
         assert!(filtered_execution.cards.is_empty());
 
         for _ in 0..4 {
@@ -1481,11 +1510,20 @@ mod tests {
             egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
             _ => None,
         }).collect();
-        for label in ["Eingang (0)", "Orchestrator (0)", "Implementer (3)", "Reviewer (0)", "Merger (0)", "Done (0)"] {
+        for label in ["Orchestrator (0)", "Implementer (3)", "Reviewer (0)", "Merger (0)"] {
             assert!(labels.contains(&label), "Missing {label}: {labels:?}");
         }
-        for label in ["Eingang", "Verteilung", "Ausführung", "Ergebnis", "Test-Runner (2)", "Idle-Runner (0)"] {
+        for label in ["Eingang", "Eingang (0)", "Done", "Done (0)", "Verteilung", "Ausführung", "Ergebnis", "Test-Runner (2)", "Idle-Runner (0)"] {
             assert!(!labels.contains(&label), "Redundant column heading: {label}");
+        }
+        for subtitle in [
+            "Entwürfe & neue Aufgaben",
+            "Orchestrierung & Start",
+            "Textprüfung vor dem Ergebnis",
+            "Git-Konflikte auflösen",
+            "Erfolg bleibt 2 Minuten",
+        ] {
+            assert!(!labels.contains(&subtitle), "Unexpected header subtitle: {subtitle}");
         }
         let header = ctx.data_mut(|d| d.get_temp::<Rect>(egui::Id::new((
             "test-flow-lane", "implementation",
@@ -1493,7 +1531,8 @@ mod tests {
         let card = |id| ctx.data_mut(|d| d.get_temp::<Rect>(egui::Id::new(("test-flow-task", id)))).unwrap();
         let first = card(ticket);
         let second = card(second_ticket);
-        assert_eq!(first.size(), design::FLOW_CARD_SIZE);
+        assert_eq!(first.width(), design::FLOW_CARD_SIZE.x);
+        assert!((92.0..=design::FLOW_CARD_SIZE.y).contains(&first.height()));
         assert_eq!(second.size(), first.size());
         assert_eq!(header.left(), first.left());
         assert_eq!(first.left(), second.left());
@@ -1594,9 +1633,17 @@ mod tests {
             "Neutral stage header"
         );
         assert!(fills.contains(&design::FLOW_TASK_FILL), "Blue task surface");
+        let snapshot = app.snapshot.as_ref().unwrap();
+        let tile = card(snapshot, &snapshot.tickets[0]);
+        let border = card_border_color(
+            snapshot,
+            &tile,
+            app.online && app.factory_flow.motion,
+            app.factory_flow.clock,
+        );
         assert!(
-            fills.contains(&design::FLOW_TASK_ACCENT),
-            "Persistent task identity stripe"
+            fills.contains(&border),
+            "Identity stripe uses the card border color"
         );
         assert!(fills.contains(&design::FLOW_ID_FILL), "Blue ticket pill");
         assert!(

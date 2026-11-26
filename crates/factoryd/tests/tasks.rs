@@ -222,7 +222,8 @@ fn check_preparation_retry(error: &str, access_denied: bool) {
     });
     s.scheduler_tick().unwrap();
     assert!(s.pending(runner).unwrap().is_empty());
-    assert_eq!(s.notifications("test", None).unwrap().entries[0].command_id, Some(first.id));
+    assert!(s.notifications("test", None).unwrap().entries.is_empty(),
+        "Routine preparation failures belong in task history, not in notifications");
     let history = s.task_history(ticket.id, None).unwrap();
     if access_denied {
         assert_eq!(s.task_payload(ticket.id).unwrap().routing_note,
@@ -266,6 +267,8 @@ fn check_preparation_retry(error: &str, access_denied: bool) {
     assert!(s.snapshot().unwrap().streams.iter().any(|w| w.ticket_ids == [ticket.id]));
     let history = s.task_history(ticket.id, None).unwrap();
     assert!(history.entries.iter().any(|entry| entry.message == "Arbeitsbereich wird vorbereitet"));
+    assert!(history.entries.iter().any(|entry| entry.command_id == Some(decision.id)
+        && entry.message == "Orchestrator-Lauf abgeschlossen"));
 }
 
 #[test]
@@ -559,7 +562,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
 }
 
 #[test]
-fn forms_wait_for_humans_and_permission_orchestration_remains_once_only() {
+fn only_approved_form_answers_and_once_only_permissions_are_automated() {
     for (human, reply, expected) in [
         (
             false,
@@ -583,6 +586,10 @@ fn forms_wait_for_humans_and_permission_orchestration_remains_once_only() {
         ),
         (false, "interview", None),
         (false, "ordinary form", None),
+        (false, "approved form", Some("blue")),
+        (false, "conflicting form", None),
+        (false, "interview with FAQ", None),
+        (false, "permission timeout", None),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("db");
@@ -602,7 +609,7 @@ fn forms_wait_for_humans_and_permission_orchestration_remains_once_only() {
             request_id: RequestId::new(),
             project_id: p.id,
             title: "Build blue UI".into(),
-            description: if reply == "interview" {
+            description: if reply.starts_with("interview") {
                 "Use blue. Grill me"
             } else {
                 "Use blue"
@@ -628,12 +635,29 @@ fn forms_wait_for_humans_and_permission_orchestration_remains_once_only() {
             },
         )
         .unwrap();
-        let form = matches!(reply, "interview" | "ordinary form");
+        let form = reply.starts_with("interview") || reply.ends_with(" form");
+        let schema = serde_json::json!({"title":"Which color?","fields":[{
+            "key":"color","type":"string","required":true,
+            "options":[{"value":"blue"},{"value":"green"}]
+        }]});
+        if matches!(reply, "approved form" | "conflicting form" | "interview with FAQ") {
+            for answer in ["blue", "green"].into_iter().take(if reply == "conflicting form" { 2 } else { 1 }) {
+                s.create_knowledge(CreateKnowledge {
+                    request_id: RequestId::new(), project_id: p.id, ticket_id: None, branch: Some("main".into()),
+                    title: "Approved question".into(), source: "orchestrator-approved-faq".into(),
+                    content: serde_json::json!({ "form": schema, "answer": { "color": answer } }).to_string(),
+                    source_command: None, priority: 1, supersedes: None,
+                }).unwrap();
+            }
+        }
+        let mut form_payload = schema;
+        form_payload["id"] = "request_test".into();
+        form_payload["sessionID"] = worker.session_id().into();
         let external = ExternalQuestion {
             external_id: "request_test".into(),
             kind: if form { QuestionKind::Form } else { QuestionKind::Permission },
             payload: if form {
-                serde_json::json!({"id":"request_test","sessionID":worker.session_id(),"title":"Which color?","fields":[{"key":"color","type":"string","required":true}]})
+                form_payload
             } else {
                 serde_json::json!({"id":"request_test","sessionID":worker.session_id(),"action":"read","resources":["resource"]})
             },
@@ -642,6 +666,20 @@ fn forms_wait_for_humans_and_permission_orchestration_remains_once_only() {
             ownership_epoch: 1,
             questions: vec![external.clone()],
         }).unwrap()[0].clone();
+        let alerts = || s.notifications("test-operator", None).unwrap().entries.into_iter()
+            .filter(|n| n.question_id == Some(question.id)).count();
+        assert_eq!(alerts(), usize::from(form && expected.is_none()));
+        if reply == "permission timeout" {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute("UPDATE events SET created_unix_ms=0 WHERE kind='question.created' AND aggregate_id=?1",
+                [question.id.to_string()]).unwrap();
+            for _ in 0..3 { s.scheduler_tick().unwrap(); }
+            let timed_out = &s.snapshot().unwrap().questions[0];
+            assert_eq!(timed_out.state, QuestionState::Pending);
+            assert!(timed_out.orchestration_note.starts_with("human:"));
+            assert_eq!(alerts(), 1);
+            continue;
+        }
         s.scheduler_tick().unwrap();
         if form {
             drop(s);
@@ -650,6 +688,15 @@ fn forms_wait_for_humans_and_permission_orchestration_remains_once_only() {
                 s.scheduler_tick().unwrap();
             }
             let snapshot = s.snapshot().unwrap();
+            if let Some(answer) = expected {
+                let answered = &snapshot.questions[0];
+                assert_eq!(answered.state, QuestionState::AnswerQueued);
+                assert_eq!(answered.answer, Some(serde_json::json!({"color":answer})));
+                assert!(answered.orchestration_note.contains("approved project FAQ"));
+                assert!(answered.answer_request.is_some());
+                assert_eq!(snapshot.commands.len(), 2);
+                continue;
+            }
             assert_eq!(snapshot.questions[0].state, QuestionState::Pending);
             assert!(snapshot.questions[0].answer.is_none());
             assert_eq!(snapshot.questions[0], question);
@@ -1006,7 +1053,7 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     prepare(&s, &s.pending(runner).unwrap()[0]);
     s.scheduler_tick().unwrap();
     let first = s.pending(runner).unwrap().pop().unwrap();
-    agent_reply(&s, &first, "I implemented step one.");
+    agent_reply(&s, &first, &format!("{PUBLICATION_CONFIRMED_PREFIX}\n{NO_GIT_CHANGES_MARKER}\n\nAgentenergebnis:\nI implemented step one."));
     let current = |s: &Store, id| s.snapshot().unwrap().tickets.into_iter().find(|t| t.id == id).unwrap();
     assert_eq!(current(&s, intent.id).status, TicketState::Validating);
     let owner = s.snapshot().unwrap().streams.into_iter().find(|w| w.id == first.stream_id).unwrap();
@@ -1020,6 +1067,7 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     assert!(spec.read_only && spec.images.is_empty() && spec.files.is_empty());
     assert!(spec.prompt.contains("Implement all three steps"));
     assert!(spec.prompt.contains("I implemented step one."));
+    assert!(spec.prompt.contains("\"runner_reports_unchanged_git_tree\":true"));
     agent_reply(&s, &review, r#"{"action":"rework","followup":"Implement steps two and three."}"#);
     s.scheduler_tick().unwrap();
     assert_eq!(current(&s, intent.id).status, TicketState::ReworkQueued);
@@ -1064,7 +1112,13 @@ fn reviewer_requeues_the_same_intent_and_session_ahead_of_new_work() {
     agent_reply(&s, &new_review, r#"{"action":"approve"}"#);
     s.scheduler_tick().unwrap();
     assert_eq!(current(&s, intent.id).status, TicketState::Done);
-    assert!(s.task_history(intent.id, None).unwrap().entries.iter().any(|e| e.message.contains("Nacharbeit")));
+    let history = s.task_history(intent.id, None).unwrap();
+    assert!(history.entries.iter().any(|e| e.message.contains("Nacharbeit")));
+    assert!(history.entries.iter().any(|e| e.message == "Reviewer hat die Erfüllung anhand des Textes bestätigt"));
+    for command in [first.id, rework.id, reviewer.id, new_review.id] {
+        assert!(history.entries.iter().any(|e| e.command_id == Some(command)), "Missing {command}");
+        assert!(!s.task_history(fresh.id, None).unwrap().entries.iter().any(|e| e.command_id == Some(command)));
+    }
 }
 
 fn decide(s: &Store, c: &RunnerCommand, text: &str) {
@@ -1348,6 +1402,32 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
     assert!(s.prompt_session(controller.id, PromptSession { request_id: RequestId::new(), ..direct.clone() }).is_err());
     assert!(s.prompt_session(CommandId::new(), PromptSession { request_id: RequestId::new(), ..direct.clone() }).is_err());
     s.scheduler_tick().unwrap();
+    assert!(s.desktop_snapshot().unwrap().intent_problems.iter().all(|problem| problem.ticket_id != follow.id),
+        "Waiting for an active session is not an Inbox problem");
+    let orphan = s.save_task(task("A formerly fixed follow-up", Some(c.id))).unwrap();
+    let missing = CommandId::new();
+    {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("UPDATE tickets SET data=json_set(data,'$.requested_session',?1) WHERE id=?2",
+            rusqlite::params![missing.to_string(), orphan.id.to_string()]).unwrap();
+    }
+    for _ in 0..2 { s.scheduler_tick().unwrap(); }
+    let problems = s.desktop_snapshot().unwrap().intent_problems;
+    let matching: Vec<_> = problems.iter().filter(|p| p.ticket_id == orphan.id).collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].solution, Some(IntentSolution::ReassignSession));
+    assert_eq!(matching[0].command_id, missing);
+    let before = s.task_payload(orphan.id).unwrap();
+    assert_eq!(before.requested_session, Some(missing));
+    let reassigned = s.accept_intent_solution(orphan.id, AcceptIntentSolution {
+        request_id: RequestId::new(), expected_revision: before.revision, previous_command: missing,
+    }).unwrap();
+    assert_eq!(reassigned.requested_session, None);
+    assert_eq!(reassigned.execution_command, None);
+    assert_eq!(reassigned.prompt, orphan.prompt);
+    s.delete_inactive_task(orphan.id, DeleteInactiveTask {
+        request_id: RequestId::new(), expected_revision: reassigned.revision, execution_command: None,
+    }).unwrap();
     assert!(!s
         .snapshot()
         .unwrap()

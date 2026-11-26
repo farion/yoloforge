@@ -350,6 +350,7 @@ pub(super) async fn pending_commands(
         let directs = guard.entries[&id].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
         let merger = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
         let merger_recovery = guard.entries[&id].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
+        let intent_recovery = guard.entries[&id].input.capabilities.iter().any(|c| c == INTENT_RECOVERY_CAPABILITY);
         let result = tokio::task::spawn_blocking(move || {
             if !identity.active(&store) {
                 return Err(StoreError::NotFound);
@@ -357,6 +358,7 @@ pub(super) async fn pending_commands(
             store.pending_with_direct_support(id, directs).map(|mut commands| {
                 commands.retain(|c| merger || c.agent_spec.as_ref().is_none_or(|s| s.role != MERGER_ROLE));
                 commands.retain(|c| merger_recovery || !is_merger_recovery(c));
+                commands.retain(|c| intent_recovery || !is_intent_recovery(c));
                 commands
                     .retain(|c| files || c.agent_spec.as_ref().is_none_or(|s| s.files.is_empty()));
                 commands.retain(|c| repo_skills || c.agent_spec.as_ref().is_none_or(|s| s.repo_skills.is_none()));
@@ -466,9 +468,11 @@ pub(super) async fn ack_command(
     let directs = guard.entries[&runner].input.capabilities.iter().any(|c| c == factory_protocol::directs::CAPABILITY);
     let merger = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_CAPABILITY);
     let merger_recovery = guard.entries[&runner].input.capabilities.iter().any(|c| c == MERGER_RECOVERY_CAPABILITY);
+    let intent_recovery = guard.entries[&runner].input.capabilities.iter().any(|c| c == INTENT_RECOVERY_CAPABILITY);
     db_call(body.request_id, move || {
         store.require_direct_support(runner, id, body.ownership_epoch, directs)?;
         store.require_merger_support(runner, id, body.ownership_epoch, merger, merger_recovery)?;
+        store.require_intent_recovery_support(runner, id, body.ownership_epoch, intent_recovery)?;
         store.require_context_planning_support(
             runner,
             id,
@@ -522,6 +526,34 @@ pub(super) async fn publication_recovery(
     };
     let store = app.store.clone();
     db_call(body.grant_id, move || store.claim_publication_recovery(runner, id, body.grant_id)).await
+}
+
+pub(super) async fn pending_draft_reset(
+    State(app): State<App>, Path(runner): Path<RunnerId>, headers: HeaderMap,
+) -> Response {
+    let guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    if !guard.entries[&runner].input.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY) {
+        return Json(Option::<DraftReset>::None).into_response();
+    }
+    let store = app.store.clone();
+    db_call(RequestId::new(), move || store.pending_draft_reset(runner)).await
+}
+
+pub(super) async fn confirm_draft_reset(
+    State(app): State<App>, Path((runner, request)): Path<(RunnerId, RequestId)>, headers: HeaderMap,
+) -> Response {
+    let guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    if !guard.entries[&runner].input.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY) {
+        return error(StatusCode::CONFLICT, ErrorCode::WorkConflict, "Runner does not support draft reset");
+    }
+    let store = app.store.clone();
+    db_call(request, move || store.confirm_draft_reset(runner, request).map(|_| ())).await
 }
 
 pub(super) async fn release_publication_recovery(

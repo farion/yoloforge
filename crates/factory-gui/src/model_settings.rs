@@ -360,18 +360,20 @@ enum Provider {
     #[default]
     ChatGpt,
     Copilot,
+    OpenCodeFree,
     Key(KeyModelProvider),
 }
 
 impl Provider {
     fn available() -> impl Iterator<Item = Self> {
-        [Self::ChatGpt, Self::Copilot].into_iter().chain(KeyModelProvider::ALL.into_iter().map(Self::Key))
+        [Self::ChatGpt, Self::Copilot, Self::OpenCodeFree].into_iter().chain(KeyModelProvider::ALL.into_iter().map(Self::Key))
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::ChatGpt => "OpenAI (ChatGPT)",
             Self::Copilot => "GitHub Copilot",
+            Self::OpenCodeFree => crate::tr!("OpenCode (kostenlos)"),
             Self::Key(provider) => provider.label(),
         }
     }
@@ -389,6 +391,7 @@ impl Provider {
                 let path = format!("/v1/model-settings/accesses/{id}/key");
                 (id, path)
             }
+            Self::OpenCodeFree => (OPENCODE_FREE_ACCESS.into(), "/v1/model-settings/opencode-free".into()),
         }
     }
 }
@@ -470,7 +473,7 @@ pub fn show_add_dialog(ctx: &egui::Context, app: &mut App) {
     }
     if pane.remove_access.is_some() {
         pane.show_remove_dialog(ctx, app);
-    } else if pane.naming && matches!(pane.provider, Provider::Key(_)) {
+    } else if pane.naming && matches!(pane.provider, Provider::Key(_) | Provider::OpenCodeFree) {
         pane.show_key_dialog(ctx, app);
     } else if pane.naming {
         let mut close = false;
@@ -579,7 +582,8 @@ impl FactoryPane {
 
     fn provider_picker(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let count = Provider::available().count() as f32;
-        let rows_height = count * (design::LIST_ROW_HEIGHT + ui.spacing().item_spacing.y);
+        let row_spacing = 2.0;
+        let rows_height = count * (design::PICKER_ROW_HEIGHT + row_spacing);
         let viewport = ui.ctx().content_rect();
         let anchor = ui.cursor().top();
         let room = (anchor - viewport.top())
@@ -587,10 +591,11 @@ impl FactoryPane {
         egui::ComboBox::from_id_salt("add-model-provider")
             .selected_text(self.provider.label())
             .width(ui.available_width().min(260.0))
-            .height(rows_height.min((room - 24.0).max(design::LIST_ROW_HEIGHT)))
+            .height(rows_height.min((room - 24.0).max(design::PICKER_ROW_HEIGHT)))
             .show_ui(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = row_spacing;
                 for provider in Provider::available() {
-                    if design::navigation_row(ui, provider.label(), provider == self.provider, None)
+                    if design::picker_row(ui, provider.label(), provider == self.provider)
                         .clicked()
                     {
                         if provider != self.provider {
@@ -607,7 +612,11 @@ impl FactoryPane {
     }
 
     fn show_key_dialog(&mut self, ctx: &egui::Context, app: &mut App) {
-        let Provider::Key(provider) = self.provider else { return };
+        let provider = match self.provider {
+            Provider::Key(provider) => Some(provider),
+            Provider::OpenCodeFree => None,
+            _ => return,
+        };
         let mut close = false;
         let response = egui::Modal::new(egui::Id::new("key-model-access"))
             .frame(egui::Frame::window(&ctx.style()).inner_margin(design::DIALOG_PADDING))
@@ -615,7 +624,7 @@ impl FactoryPane {
                 let size = design::dialog_content_size(ctx.content_rect().size());
                 ui.set_width(size.x.min(440.0));
                 let max_bottom = ui.cursor().top() + size.y;
-                close = design::dialog_header(ui, &crate::tr!("{} hinzufügen", provider.label())).clicked();
+                close = design::dialog_header(ui, &crate::tr!("{} hinzufügen", self.provider.label())).clicked();
                 ui.separator();
                 let pending = self.key_request.is_some();
                 let max_height = design::settings_body_height(ui, max_bottom).max(24.0);
@@ -630,8 +639,8 @@ impl FactoryPane {
                             input.request_focus();
                         }
                     });
-                    if provider.endpoint_env().is_some() {
-                        let example = if provider == KeyModelProvider::Ollama {
+                     if provider.and_then(KeyModelProvider::endpoint_env).is_some() {
+                         let example = if provider == Some(KeyModelProvider::Ollama) {
                             "http://localhost:11434"
                         } else {
                             "http://litellm:4000"
@@ -643,20 +652,27 @@ impl FactoryPane {
                             ui.label(egui::RichText::new(crate::tr!("Die URL muss vom Factory-Server erreichbar sein.")).color(MUTED));
                         });
                     }
-                    let key_label = if provider.key_optional() {
-                        crate::tr!("API-Schlüssel (optional)")
-                    } else {
-                        crate::tr!("API-Schlüssel")
-                    };
-                    design::settings_field(ui, key_label, |ui| {
-                        ui.add(design::singleline(&mut self.api_key)
-                            .password(true)
-                            .hint_text(design::input_hint(crate::tr!("API-Schlüssel einfügen")))
-                            .desired_width(f32::INFINITY));
-                        if provider == KeyModelProvider::Gemini {
-                            ui.hyperlink_to(crate::tr!("Schlüssel in Google AI Studio erstellen"), "https://aistudio.google.com/apikey");
-                        }
-                    });
+                     if let Some(provider) = provider {
+                         let key_label = if provider.key_optional() {
+                             crate::tr!("API-Schlüssel (optional)")
+                         } else {
+                             crate::tr!("API-Schlüssel")
+                         };
+                         design::settings_field(ui, key_label, |ui| {
+                             ui.add(design::singleline(&mut self.api_key)
+                                 .password(true)
+                                 .hint_text(design::input_hint(crate::tr!("API-Schlüssel einfügen")))
+                                 .desired_width(f32::INFINITY));
+                             if provider == KeyModelProvider::Gemini {
+                                 ui.hyperlink_to(crate::tr!("Schlüssel in Google AI Studio erstellen"), "https://aistudio.google.com/apikey");
+                             } else if provider == KeyModelProvider::OpenCodeConsole {
+                                 ui.hyperlink_to(crate::tr!("API-Schlüssel in der OpenCode Console erstellen"), "https://opencode.ai/console");
+                                 ui.colored_label(MUTED, crate::tr!("Die Nutzung wird über das Guthaben in der OpenCode Console abgerechnet."));
+                             }
+                         });
+                     } else {
+                         ui.colored_label(MUTED, crate::tr!("Keine Anmeldung und kein API-Schlüssel nötig. Manche Modelle speichern Eingaben zur Modellverbesserung."));
+                     }
                     });
                     let name = self.name.trim();
                     let duplicate = app.models.factory.value.as_ref().is_some_and(|settings| {
@@ -678,7 +694,7 @@ impl FactoryPane {
                 let endpoint = self.endpoint.trim();
                 let valid = app.online && !pending && !body.inner && !name.is_empty()
                     && name.len() <= 120 && !name.chars().any(char::is_control)
-                    && (provider.key_optional() || !key.is_empty())
+                    && provider.is_none_or(|provider| provider.key_optional() || !key.is_empty())
                     && (endpoint.is_empty() || endpoint.starts_with("https://") || endpoint.starts_with("http://"))
                     && key.len() <= 4096 && key.bytes().all(|b| b.is_ascii_graphic());
                 ui.separator();
@@ -689,15 +705,24 @@ impl FactoryPane {
                     #[cfg(test)]
                     ctx.data_mut(|d| d.insert_temp(egui::Id::new("test-provider-form-cancel"), cancel.rect));
                     if pending {
-                        ui.spinner().on_hover_text(crate::tr!("API-Schlüssel wird geprüft …"));
+                        ui.spinner().on_hover_text(if provider.is_some() {
+                            crate::tr!("API-Schlüssel wird geprüft …")
+                        } else {
+                            crate::tr!("Modelle werden geladen …")
+                        });
                     }
                     (save.clicked(), cancel.clicked())
                 });
                 close |= cancel;
                 if save && !close {
                     let (_, path) = self.provider.new_access();
-                    let url = (provider.endpoint_env().is_some() && !endpoint.is_empty()).then_some(endpoint);
-                    self.key_request = Some(ephemeral(app, "POST", path, json!({"name":name,"key":key,"url":url})));
+                    let payload = if let Some(provider) = provider {
+                        let url = (provider.endpoint_env().is_some() && !endpoint.is_empty()).then_some(endpoint);
+                        json!({"name":name,"key":key,"url":url})
+                    } else {
+                        json!({"name":name})
+                    };
+                    self.key_request = Some(ephemeral(app, "POST", path, payload));
                 }
             });
         self.naming = !(close || response.should_close());
@@ -768,7 +793,9 @@ impl FactoryPane {
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(editable && self.login.is_none() && self.key_request.is_none(), |ui| {
                 self.provider_picker(ui);
-                if ui.button(crate::tr!("Hinzufügen")).clicked() {
+                let already_added = self.provider == Provider::OpenCodeFree
+                    && saved.accesses.iter().any(|access| access.id == OPENCODE_FREE_ACCESS);
+                if ui.add_enabled(!already_added, egui::Button::new(crate::tr!("Hinzufügen"))).clicked() {
                     self.naming = true;
                     self.focus_name = true;
                 }
@@ -799,7 +826,7 @@ impl FactoryPane {
                         Some("ready") => {
                             ui.colored_label(crate::app::GREEN, crate::tr!("Verbunden"));
                         }
-                        Some(_) if KeyModelProvider::from_access_id(&access.id).is_some() => {
+                        Some(_) if access.id == OPENCODE_FREE_ACCESS || KeyModelProvider::from_access_id(&access.id).is_some() => {
                             ui.colored_label(RED, crate::tr!("Zugang nicht verfügbar"));
                         }
                         Some(state) => {
@@ -1529,6 +1556,20 @@ mod tests {
                 provider == KeyModelProvider::Ollama,
             );
         }
+        app.models.pane.provider = Provider::OpenCodeFree;
+        let mut text = Vec::new();
+        for shape in render(&mut app).shapes {
+            text_of(&shape.shape, &mut text);
+        }
+        assert!(!text.iter().any(|text| text == crate::tr!("API-Schlüssel")
+            || text == crate::tr!("API-Schlüssel (optional)") || text == crate::tr!("Server-URL")));
+        app.models.pane.provider = Provider::Key(KeyModelProvider::OpenCodeConsole);
+        let mut text = Vec::new();
+        for shape in render(&mut app).shapes {
+            text_of(&shape.shape, &mut text);
+        }
+        assert!(text.iter().any(|text| text == crate::tr!("API-Schlüssel")));
+        assert!(!text.iter().any(|text| text == crate::tr!("Server-URL")));
     }
 
     #[test]
@@ -1573,7 +1614,14 @@ mod tests {
                     && text.galley.elided == false
                     && s.clip_rect.contains_rect(text.galley.rect.translate(text.pos.to_vec2())),
                 _ => false,
-            }), "{} wasn't fully visible", provider.label());
+            }), "{} wasn't fully visible: {:?}", provider.label(), output.shapes.iter().filter_map(|s| {
+                match &s.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.job.text == provider.label() => {
+                        Some((s.clip_rect, text.galley.rect.translate(text.pos.to_vec2()), text.galley.elided))
+                    }
+                    _ => None,
+                }
+            }).collect::<Vec<_>>());
         }
     }
 

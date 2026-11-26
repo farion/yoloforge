@@ -300,6 +300,8 @@ pub enum QuestionKind {
     Permission,
 }
 
+pub const QUESTION_AUTOMATION_PENDING: &str = "automation pending";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionState {
@@ -411,8 +413,16 @@ pub const REVIEW_CAPABILITY: &str = "git-review-v1";
 /// supervisor's bounded evidence rather than burying it after the model summary.
 pub const PUBLICATION_CONFLICT_PREFIX: &str = "[yoloforge:publication-conflict]";
 pub const PUBLICATION_BLOCKED_PREFIX: &str = "[yoloforge:publication-blocked]";
+pub const MERGER_UNCOMMITTED_RESULT: &str = "Merger changes must be committed before publication";
+pub const INTENT_RECOVERY_PROMPT: &str = "Resume this failed intent from its last safe point. Inspect and preserve existing work. Do not repeat writes or external actions with an uncertain outcome, change permissions or credentials, or discard work. Verify what already happened, then complete only the remaining work or ask for the missing input.";
+pub const INTENT_RECOVERY_CAPABILITY: &str = "intent-recovery-v1";
 pub const PUBLICATION_CONFIRMED_PREFIX: &str = "[yoloforge:publication-confirmed]";
+pub const NO_GIT_CHANGES_MARKER: &str = "[yoloforge:no-git-changes]";
 pub const SESSION_STOPPED_PREFIX: &str = "[yoloforge:session-stopped]";
+
+pub fn is_intent_recovery(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|spec| spec.continuation.is_some() && spec.prompt == INTENT_RECOVERY_PROMPT)
+}
 
 pub fn session_stopped_without_result(result: &Option<CommandOutput>) -> bool {
     matches!(result, Some(CommandOutput::Agent { agent })

@@ -1,4 +1,4 @@
-//! Local Git worktrees with a durable pre-operation plan. Never reset, clean or delete.
+//! Local Git worktrees with a durable pre-operation plan. Preparation never resets, cleans or deletes.
 use crate::journal::Journal;
 use anyhow::{bail, ensure, Context, Result};
 use factory_core::*;
@@ -263,6 +263,50 @@ fn path_key(command: &RunnerCommand) -> String {
 pub(crate) fn has_plan(journal: &Journal, command: &RunnerCommand) -> Result<bool> {
     Ok(journal.db.query_row("SELECT EXISTS(SELECT 1 FROM workspaces WHERE stream_id=?1)",
         [key(command)], |row| row.get(0))?)
+}
+
+/// Only an explicit draft reset reaches here. Bind the removal to the recorded
+/// linked worktree, never the user's checkout, a reused path or a symlink.
+pub(crate) fn discard(
+    journal: &Journal, command: &RunnerCommand, workspace: &Workspace,
+    root: &Path, verified: bool, remove: bool,
+) -> Result<()> {
+    let raw: String = journal.db.query_row("SELECT data FROM workspaces WHERE stream_id=?1",
+        [key(command)], |row| row.get(0)).context("No journaled worktree")?;
+    let plan: Plan = serde_json::from_str(&raw)?;
+    let root = fs::canonicalize(root)?;
+    ensure!(plan.ready && plan.path.parent() == Some(root.as_path())
+        && (plan.path == root.join(path_key(command)) || plan.path == root.join(key(command)))
+        && git_path(&plan.path)? == git_path(Path::new(&workspace.path))?
+        && plan.spec.branch == workspace.branch && plan.path != plan.repository,
+        "Draft reset worktree binding changed");
+    ensure!(fs::canonicalize(&plan.repository)? == plan.repository
+        && common_dir(&plan.repository)? == plan.common_dir, "Draft reset repository changed");
+    let path = git_path(&plan.path)?;
+    let listed = || -> Result<bool> {
+        let output = git(&plan.repository, &["worktree", "list", "--porcelain", "-z"])?;
+        Ok(output.split('\0').any(|line| line.strip_prefix("worktree ") == Some(path.as_ref())))
+    };
+    match fs::symlink_metadata(&plan.path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure!(verified && !listed()?, "No verified removal of the worktree");
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+        Ok(meta) => ensure!(meta.file_type().is_dir(), "Draft reset path is not an ordinary directory"),
+    }
+    ensure!(fs::canonicalize(&plan.path)? == plan.path
+        && fs::symlink_metadata(plan.path.join(".git"))?.file_type().is_file()
+        && common_dir(&plan.path)? == plan.common_dir
+        && git(&plan.path, &["symbolic-ref", "HEAD"])? == format!("refs/heads/{}", workspace.branch)
+        && listed()?, "Draft reset worktree identity changed");
+    if remove {
+        ensure!(verified, "Missing local draft reset confirmation");
+        git(&plan.repository, &["worktree", "remove", "--force", "--", &path])?;
+        ensure!(!listed()? && matches!(fs::symlink_metadata(&plan.path), Err(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "Worktree removal not confirmed");
+    }
+    Ok(())
 }
 
 pub fn prepare(
@@ -604,6 +648,30 @@ mod tests {
             serde_json::from_str(&data).unwrap()
         }
     }
+    #[test]
+    fn draft_discard_removes_only_the_verified_linked_worktree_and_is_replayable() {
+        let f = Fixture::new();
+        let a = f.command();
+        let b = f.command();
+        let first = f.prepare(&a).unwrap();
+        let second = f.prepare(&b).unwrap();
+        fs::write(Path::new(&first.path).join("unpublished"), "discard me").unwrap();
+        fs::write(Path::new(&second.path).join("unpublished"), "other intent").unwrap();
+        fs::write(f.repository.join("file.txt"), "user change").unwrap();
+        assert!(discard(&f.journal, &a, &second, &f.root, true, true).is_err());
+        assert!(discard(&f.journal, &a, &first, &f.root, false, true).is_err());
+        discard(&f.journal, &a, &first, &f.root, false, false).unwrap();
+        discard(&f.journal, &a, &first, &f.root, true, true).unwrap();
+        assert!(!Path::new(&first.path).exists());
+        discard(&f.journal, &a, &first, &f.root, true, true).unwrap();
+        assert_eq!(fs::read_to_string(Path::new(&second.path).join("unpublished")).unwrap(), "other intent");
+        assert_eq!(fs::read_to_string(f.repository.join("file.txt")).unwrap(), "user change");
+        fs::create_dir(&first.path).unwrap();
+        fs::write(Path::new(&first.path).join("keep"), "replacement").unwrap();
+        assert!(discard(&f.journal, &a, &first, &f.root, true, true).is_err());
+        assert_eq!(fs::read_to_string(Path::new(&first.path).join("keep")).unwrap(), "replacement");
+    }
+
     #[test]
     fn two_streams_are_isolated_and_replay_preserves_dirty_source_and_worktrees() {
         let fixture = Fixture::new();

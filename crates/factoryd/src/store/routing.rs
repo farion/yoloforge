@@ -419,6 +419,7 @@ pub(super) fn route(
             attempts: previous.map_or(1, |e| e.attempts.saturating_add(1)),
         },
     )?;
+    event(tx, "task.routing_run", t.id.to_string(), &serde_json::json!({"command_id": c.id}))?;
     note(tx, t, "Orchestrator entscheidet ueber die Session")?;
     Ok(Route::Pending)
 }
@@ -440,13 +441,14 @@ pub(super) fn continue_task(
 ) -> Result<Option<RunnerId>> {
     let all = candidates(tx, t.project_id)?;
     let Some(previous) = all.iter().find(|c| c.session_root() == root) else {
-        note(
-            tx,
-            t,
-            "Ausgewaehlte Session nicht mehr verfuegbar; keine automatische Umleitung",
-        )?;
+        unusable_session(tx, t, root)?;
         return Ok(None);
     };
+    let mut owner = super::work::stream(tx, previous.stream_id)?;
+    if retired_session(tx, root, owner.id)? {
+        unusable_session(tx, t, root)?;
+        return Ok(None);
+    }
     if previous.state != CommandState::Succeeded
         && !(previous.state == CommandState::Failed
             && matches!(&previous.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted))
@@ -458,7 +460,6 @@ pub(super) fn continue_task(
         )?;
         return Ok(None);
     }
-    let mut owner = super::work::stream(tx, previous.stream_id)?;
     let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",[owner.id.to_string()],|r|r.get(0))?;
     if busy {
         return Ok(None);
@@ -519,5 +520,37 @@ pub(super) fn continue_task(
             Ok(None)
         }
         Err(e) => Err(e),
+    }
+}
+
+fn retired_session(tx: &Transaction<'_>, root: CommandId, stream: StreamId) -> Result<bool> {
+    Ok(super::sessions::closed(tx, root)? || super::draft_resets::retired(tx, stream)?
+        || tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_terminations WHERE stream_id=?1 AND json_extract(data,'$.state')='stopped')",
+            [stream.to_string()], |row| row.get(0))?)
+}
+
+pub(super) fn check_fixed_session(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<bool> {
+    let Some(root) = ticket.requested_session else { return Ok(true); };
+    let available = candidates(tx, ticket.project_id)?;
+    if let Some(command) = available.iter().find(|c| c.session_root() == root) {
+        if !retired_session(tx, root, command.stream_id)? { return Ok(true); }
+    }
+    unusable_session(tx, ticket, root)?;
+    Ok(false)
+}
+
+fn unusable_session(tx: &Transaction<'_>, ticket: &mut Ticket, root: CommandId) -> Result<()> {
+    if ticket.requested_session == Some(root) {
+        let reason = "Die gewählte Session kann nicht mehr fortgesetzt werden. Der Orchestrator kann eine andere Session wählen.";
+        note(tx, ticket, reason)?;
+        super::desktop::report_intent_problem(tx, ticket, reason, Some(IntentSolution::ReassignSession))
+    } else {
+        if let Some(raw) = tx.query_row("SELECT data FROM task_routing WHERE ticket_id=?1",
+            [ticket.id.to_string()], |row| row.get::<_, String>(0)).optional()? {
+            let mut evaluation: Evaluation = serde_json::from_str(&raw)?;
+            evaluation.decision = Some(Decision::New { reason: "Previous session is no longer reusable".into() });
+            save(tx, ticket.id, &evaluation)?;
+        }
+        note(tx, ticket, "Orchestrator wechselt auf eine neue Session.")
     }
 }

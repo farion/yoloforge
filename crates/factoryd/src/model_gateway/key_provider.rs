@@ -15,6 +15,8 @@ use std::{net::IpAddr, time::Duration};
 const GOOGLE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const ROUTER: &str = "https://openrouter.ai/api/v1";
 const ANTHROPIC: &str = "https://api.anthropic.com/v1";
+const OPENCODE_CONSOLE_MODELS: &str = "https://opencode.ai/console/api/v1/models";
+const OPENCODE_CHAT: &str = "https://opencode.ai/inference/openai/v1/chat/completions";
 
 pub(super) struct KeyCredential {
     key: String,
@@ -153,6 +155,7 @@ fn authenticate(
             request.bearer_auth(secret)
         }
         Provider::OpenRouter | Provider::LiteLlm | Provider::Ollama => request,
+        Provider::OpenCodeConsole => request.bearer_auth(secret),
         Provider::Anthropic => request
             .header("x-api-key", secret)
             .header("anthropic-version", "2023-06-01"),
@@ -166,6 +169,9 @@ fn supports_tools(item: &Value) -> bool {
 }
 
 fn model_ids(provider: Provider, payload: &Value) -> Vec<String> {
+    if provider == Provider::OpenCodeConsole {
+        return opencode_console_models(payload);
+    }
     let entries = match provider {
         Provider::Gemini | Provider::Ollama => &payload["models"],
         _ => &payload["data"],
@@ -202,6 +208,7 @@ fn model_ids(provider: Provider, payload: &Value) -> Vec<String> {
                 .map(str::to_owned),
             Provider::LiteLlm => item["id"].as_str().map(str::to_owned),
             Provider::Ollama => item["name"].as_str().map(str::to_owned),
+            Provider::OpenCodeConsole => unreachable!("handled above"),
         })
         .filter(|id| {
             !id.is_empty()
@@ -226,6 +233,32 @@ fn model_ids(provider: Provider, payload: &Value) -> Vec<String> {
     ids.dedup();
     ids.truncate(256);
     ids
+}
+
+fn opencode_console_models(payload: &Value) -> Vec<String> {
+    let mut models: Vec<_> = payload["opencode"]["models"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(id, model)| {
+            if model["type"] != "chat"
+                || model["capabilities"]["tools"]["supported"] != true
+                || model["id"] != id.as_str()
+                || id.is_empty()
+                || id.len() > 200
+                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            {
+                return None;
+            }
+            let cost = &model["cost"]["text"];
+            let input = cost["input"]["price"].as_f64()?;
+            let output = cost["output"]["price"].as_f64()?;
+            (input > 0.0 && output >= 0.0).then_some((id, input + output))
+        })
+        .collect();
+    // When this is the first access, the first model becomes Factory's default.
+    models.sort_unstable_by(|(a, price_a), (b, price_b)| price_a.total_cmp(price_b).then(a.cmp(b)));
+    models.into_iter().take(256).map(|(id, _)| id.clone()).collect()
 }
 
 async fn discover(
@@ -257,6 +290,7 @@ async fn discover(
             format!("{ROUTER}/models")
         }
         Provider::Anthropic => format!("{ANTHROPIC}/models?limit=100"),
+        Provider::OpenCodeConsole => OPENCODE_CONSOLE_MODELS.into(),
         Provider::LiteLlm | Provider::Ollama => {
             let base = credential.endpoint.as_deref().ok_or_else(unavailable)?;
             let path = if provider == Provider::Ollama {
@@ -488,7 +522,7 @@ pub(super) async fn chat(
         )
         .await;
     }
-    let Some(provider @ (Provider::OpenRouter | Provider::LiteLlm | Provider::Ollama)) =
+    let Some(provider @ (Provider::OpenRouter | Provider::LiteLlm | Provider::Ollama | Provider::OpenCodeConsole)) =
         Provider::from_access_id(&alias)
     else {
         return error(StatusCode::NOT_FOUND, "Factory model access unavailable");
@@ -557,7 +591,7 @@ async fn relay(
         let native = match provider {
             Provider::Gemini => headers.get("x-goog-api-key"),
             Provider::Anthropic => headers.get("x-api-key"),
-            Provider::OpenRouter | Provider::LiteLlm | Provider::Ollama => None,
+            Provider::OpenRouter | Provider::LiteLlm | Provider::Ollama | Provider::OpenCodeConsole => None,
         };
         if let Some(bearer) = native
             .and_then(|key| key.to_str().ok())
@@ -572,7 +606,7 @@ async fn relay(
     if Provider::from_access_id(&alias) != Some(provider) {
         return error(StatusCode::NOT_FOUND, "Factory model access unavailable");
     }
-    if matches!(provider, Provider::OpenRouter | Provider::LiteLlm) && data.get("models").is_some()
+    if matches!(provider, Provider::OpenRouter | Provider::LiteLlm | Provider::OpenCodeConsole) && data.get("models").is_some()
     {
         return error(
             StatusCode::BAD_REQUEST,
@@ -625,6 +659,7 @@ async fn relay(
                     format!("{GOOGLE}/{model}:{action}{query}")
                 }
                 Provider::OpenRouter => format!("{ROUTER}/chat/completions"),
+                Provider::OpenCodeConsole => OPENCODE_CHAT.into(),
                 Provider::Anthropic => format!("{ANTHROPIC}/messages"),
                 Provider::LiteLlm | Provider::Ollama => {
                     let Some(base) = credential.endpoint.as_deref() else {
@@ -837,5 +872,25 @@ mod tests {
             assert!(!is_litellm_chat_request(&body));
             body.as_object_mut().unwrap().remove(key);
         }
+    }
+    #[test]
+    fn opencode_console_lists_only_paid_tool_capable_chat_models_by_price() {
+        let model = |id, kind, tools, input, output| json!({
+            "id":id,"type":kind,"capabilities":{"tools":{"supported":tools}},
+            "cost":{"text":{"input":{"price":input},"output":{"price":output}}}
+        });
+        let payload = json!({
+            "opencode":{"models":{
+                "a-expensive":model("a-expensive","chat",true,10.0,20.0),
+                "z-cheap":model("z-cheap","chat",true,0.1,0.2),
+                "big-pickle":model("big-pickle","chat",true,0.0,0.0),
+                "decision":model("decision","decision",true,0.1,0.2),
+                "no-tools":model("no-tools","chat",false,0.1,0.2),
+                "other-id":model("upstream-id","chat",true,0.1,0.2),
+                "unpriced":{"id":"unpriced","type":"chat","capabilities":{"tools":{"supported":true}}}
+            }},
+            "opencode-go":{"models":{"subscriber":model("subscriber","chat",true,0.1,0.2)}}
+        });
+        assert_eq!(model_ids(Provider::OpenCodeConsole, &payload), ["z-cheap", "a-expensive"]);
     }
 }

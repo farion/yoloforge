@@ -131,7 +131,7 @@ fn verify_merger(j: &Journal, record: &Record, args: &Args) -> Result<()> {
     let workspace = execution_workspace(j, record, args, false)?;
     let path = Path::new(&workspace.path);
     ensure!(git(path, &["status", "--porcelain", "--untracked-files=normal"])?.is_empty(),
-        "Merger changes must be committed before publication");
+        "{MERGER_UNCOMMITTED_RESULT}");
     for reference in [format!("refs/yoloforge/publication-snapshots/{source}"), format!("refs/yoloforge/merger-targets/{source}")] {
         git(path, &["merge-base", "--is-ancestor", &reference, "HEAD"])
             .context("Merger resolution must contain both original results")?;
@@ -709,6 +709,17 @@ fn promote_local(target: &Path, repository: &Path, plan: &Plan, reference: &str,
     Ok(())
 }
 
+pub(crate) fn published_unchanged_tree(journal: &Journal, id: CommandId) -> Result<bool> {
+    let raw: Option<String> = journal.db.query_row("SELECT data FROM publications WHERE command_id=?1",
+        [id.to_string()], |row| row.get(0)).optional()?;
+    let Some(raw) = raw else { return Ok(false); };
+    let plan: Plan = serde_json::from_str(&raw)?;
+    let Some(snapshot) = plan.snapshot.filter(|_| plan.published) else { return Ok(false); };
+    let tree = git(&plan.repository, &["rev-parse", &format!("{snapshot}^{{tree}}")])?;
+    let parent_tree = git(&plan.repository, &["rev-parse", &format!("{snapshot}^1^{{tree}}")])?;
+    Ok(tree == parent_tree)
+}
+
 pub(crate) fn recovery_candidate(journal: &Journal, position: usize) -> Result<Option<CommandId>> {
     let candidates: i64 = journal.db.query_row(
         &format!("SELECT COUNT(*) {RECOVERY_CANDIDATES}"), [], |row| row.get(0),
@@ -1179,15 +1190,20 @@ mod tests {
         assert_eq!(recovery_candidate(&f.journal, 0).unwrap(), Some(merger.command.id));
         assert!(recover_prepared(&f.journal, merger.command.id, RequestId::new()).is_err());
         assert!(recover_prepared(&f.journal, merger.command.id, RequestId::new()).unwrap().is_none());
+        let journal_path = f.args.journal.as_ref().unwrap().clone();
+        drop(f.journal);
+        let journal = Journal::open(&journal_path, &f.args.server, f.args.id).unwrap();
+        assert_eq!(recovery_candidate(&journal, 0).unwrap(), Some(merger.command.id));
+        assert!(recover_prepared(&journal, merger.command.id, RequestId::new()).unwrap().is_none());
         fs::write(work.join("result.txt"), "later edit in merger worktree").unwrap();
         // Simulate the user moving the overlapping edit out of the checkout.
         git(&f.target, &["restore", "--", "result.txt"]).unwrap();
-        let proof = recover_prepared(&f.journal, merger.command.id, RequestId::new()).unwrap().unwrap();
-        let replay = recover_prepared(&f.journal, merger.command.id, RequestId::new()).unwrap().unwrap();
+        let proof = recover_prepared(&journal, merger.command.id, RequestId::new()).unwrap().unwrap();
+        let replay = recover_prepared(&journal, merger.command.id, RequestId::new()).unwrap().unwrap();
         assert_eq!(proof.target_commit, replay.target_commit);
         assert_eq!(proof.snapshot_commit, replay.snapshot_commit);
-        acknowledge_recovery(&f.journal, merger.command.id).unwrap();
-        assert!(recovery_candidate(&f.journal, 0).unwrap().is_none());
+        acknowledge_recovery(&journal, merger.command.id).unwrap();
+        assert!(recovery_candidate(&journal, 0).unwrap().is_none());
         let head = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(proof.target_commit, head);
         for commit in [&target, &workspace.base_commit] {

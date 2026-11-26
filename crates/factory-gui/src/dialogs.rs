@@ -928,10 +928,10 @@ impl TaskDialog {
         }
     }
 
-    fn show_history(&mut self, ui: &mut egui::Ui, app: &App) {
-        let Some(ticket) = self.draft.ticket else { return };
+    fn show_history(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
+        let Some(ticket) = self.draft.ticket else { return false };
         if self.draft.server != app.server {
-            return;
+            return false;
         }
         let cursor = app.snapshot.as_ref().map_or(0, |s| s.event_cursor);
         if app.online && !self.history.loading && self.history.error.is_none()
@@ -944,24 +944,59 @@ impl TaskDialog {
         ui.add_space(8.0);
         ui.separator();
         ui.strong(crate::tr!("Verlauf"));
-        if let Some(reason) = app.snapshot.as_ref().and_then(|s| {
-            let ticket = s.tickets.iter().find(|t| t.id == ticket)?;
-            task_runner_blocker(s, ticket)
-        }) {
-            design::routing_note_spacing(ui);
-            ui.colored_label(AMBER, reason);
+        let snapshot = app.snapshot.clone();
+        let intent = snapshot.as_ref().and_then(|s| s.tickets.iter().find(|t| t.id == ticket));
+        let mut linked = std::collections::BTreeSet::new();
+        if let Some((s, intent)) = snapshot.as_deref().zip(intent) {
+            if self.read_only {
+                let status = task_display_status(s, intent);
+                app::badge(ui, status, crate::views::status_color(status));
+            }
+            if let Some(reason) = task_runner_blocker(s, intent) {
+                design::routing_note_spacing(ui);
+                ui.colored_label(AMBER, reason);
+            }
+            // The current execution and queued/running review should be reachable
+            // even before the paginated journal has returned.
+            if self.read_only && app.online {
+                for c in s.commands.iter().rev().filter(|c| {
+                    Some(c.id) == intent.execution_command
+                        || (matches!(c.state, CommandState::Pending | CommandState::Accepted)
+                            && c.agent_spec.as_ref().is_some_and(|a| a.review_of == Some(ticket)))
+                }) {
+                    linked.insert(c.id);
+                    let open_in_footer = task_session_command(s, intent).is_some_and(|current| current.id == c.id);
+                    if self.show_intent_run(ui, app, c, !open_in_footer) {
+                        return true;
+                    }
+                }
+            }
         }
         for entry in &self.history.entries {
-            ui.horizontal_top(|ui| {
-                ui.colored_label(MUTED, timestamp(entry.created_unix_ms));
-                let level = if entry.level == TaskHistoryLevel::Info {
-                    task_routing_level(&entry.message)
-                } else {
-                    entry.level
-                };
-                ui.add(egui::Label::new(egui::RichText::new(&entry.message)
-                    .color(design::history_color(level, ui.visuals().text_color()))).wrap());
+            let open = ui.push_id(entry.sequence, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.colored_label(MUTED, timestamp(entry.created_unix_ms));
+                    let level = if entry.level == TaskHistoryLevel::Info {
+                        task_routing_level(&entry.message)
+                    } else {
+                        entry.level
+                    };
+                    ui.add(egui::Label::new(egui::RichText::new(crate::i18n::label(&entry.message))
+                        .color(design::history_color(level, ui.visuals().text_color()))).wrap());
+                });
+                if self.read_only && app.online {
+                    if let Some(id) = entry.command_id.filter(|id| linked.insert(*id)) {
+                        if let Some(c) = snapshot.as_ref().and_then(|s| s.commands.iter().find(|c| c.id == id)) {
+                            return self.show_intent_run(ui, app, c, true);
+                        }
+                        if ui.button(crate::tr!("Laufdetails …")).clicked() {
+                            app.read(crate::tr!("Laufdetails …"), format!("/v1/commands/{id}"));
+                        }
+                    }
+                }
+                false
             });
+            if open.inner { return true; }
         }
         if self.history.entries.is_empty() {
             if let Some(ticket) = app.snapshot.as_ref().and_then(|s| s.tickets.iter().find(|t| t.id == ticket))
@@ -977,7 +1012,7 @@ impl TaskDialog {
             }
         }
         if !app.online {
-            return;
+            return false;
         }
         if self.history.loading {
             ui.label(crate::tr!("Verlauf wird geladen …"));
@@ -992,9 +1027,37 @@ impl TaskDialog {
                 app.backend.task_history(self.id, ticket, Some(before));
             }
         }
+        false
     }
 
-    fn show_read_only_body(&mut self, ui: &mut egui::Ui, app: &mut App) {
+    fn show_intent_run(&self, ui: &mut egui::Ui, app: &mut App, c: &RunnerCommand, show_open: bool) -> bool {
+        ui.push_id(c.id, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.strong(intent_run_role(c));
+                let status = command_status(c);
+                app::badge(ui, status, crate::views::status_color(status));
+                if show_open && c.kind == CommandKind::RunAgent {
+                    let open = ui.button(crate::tr!("OpenCode anzeigen"));
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-intent-run-open", c.id)), open.rect));
+                    if open.clicked() {
+                        app.open_intent_execution(self.draft.project, c.session_root(), c.id);
+                        return true;
+                    }
+                }
+                ui.menu_button(crate::tr!("Verwaltung …"), |ui| {
+                    if ui.button(crate::tr!("Laufdetails …")).clicked() {
+                        app.inspect(crate::tr!("Laufdetails …"), json!(c));
+                        ui.close();
+                    }
+                    app.command_menu(ui, c);
+                });
+                false
+            }).inner
+        }).inner
+    }
+
+    fn show_read_only_body(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
         if !self.payloads_complete {
             if let Some(ticket) = app
                 .snapshot
@@ -1070,7 +1133,7 @@ impl TaskDialog {
             });
         }
         design::task_prompt_read_only(ui, &self.draft.prompt, 3);
-        self.show_history(ui, app);
+        self.show_history(ui, app)
     }
 
     fn show_layout(
@@ -1091,7 +1154,7 @@ impl TaskDialog {
             .show(ui, |ui| self.show_body(ui, app));
         ui.separator();
         let close = if self.read_only {
-            ui.horizontal(|ui| self.show_footer(ui, app, false)).inner
+            body.inner || ui.horizontal(|ui| self.show_footer(ui, app, false)).inner
         } else {
             self.show_footer(ui, app, body.inner)
         };
@@ -1178,8 +1241,7 @@ impl TaskDialog {
                     }
                 }
             }
-            self.show_read_only_body(ui, app);
-            return false;
+            return self.show_read_only_body(ui, app);
         }
         if self.draft.edit_token.is_some() && self.request.is_none() {
             if let Some(current) = app
@@ -2618,7 +2680,13 @@ impl FormDialog {
             return self.show_project_delete(ui, app);
         }
         if self.method == "DELETE" && self.path.starts_with("/v1/tasks/") {
-            return self.show_failed_task_delete(ui, app);
+            return self.show_intent_confirmation(ui, app, crate::tr!("Löschen"), RED, "test-task-delete-confirm");
+        }
+        if self.method == "POST" && self.path.starts_with("/v1/tasks/") && self.path.ends_with("/accept-solution") {
+            return self.show_intent_confirmation(ui, app, crate::tr!("Lösung annehmen"), BLUE, "test-inbox-solution-confirm");
+        }
+        if self.method == "POST" && self.path.starts_with("/v1/tasks/") && self.path.ends_with("/return-to-draft") {
+            return self.show_intent_confirmation(ui, app, crate::tr!("Session und Worktree verwerfen"), RED, "test-inbox-draft-confirm");
         }
         if self.path == "/v1/projects/setup" && self.request.is_none() {
             self.body["setup"]["repository_source"] = self.body["repository"].clone();
@@ -2892,7 +2960,7 @@ impl FormDialog {
         false
     }
 
-    fn show_failed_task_delete(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
+    fn show_intent_confirmation(&mut self, ui: &mut egui::Ui, app: &mut App, action: &str, color: egui::Color32, _test_id: &str) -> bool {
         if self.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)) {
             return true;
         }
@@ -2904,10 +2972,10 @@ impl FormDialog {
         ui.separator();
         ui.add_space(12.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let confirm = design::accent_button(ui, egui::Button::new(crate::tr!("Löschen")),
-                app.online && self.request.is_none(), RED.gamma_multiply(0.7));
+            let confirm = design::accent_button(ui, egui::Button::new(action),
+                app.online && self.request.is_none(), color.gamma_multiply(0.7));
             #[cfg(test)]
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-task-delete-confirm"), confirm.rect));
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(_test_id), confirm.rect));
             if confirm.clicked() {
                 self.request = Some(app.write(&self.title, &self.method, self.path.clone(), self.body.clone()));
             }
@@ -2955,6 +3023,11 @@ pub(crate) fn is_project_update(method: &str, path: &str) -> bool {
 }
 
 pub(crate) fn same_form_body(method: &str, path: &str, first: &Value, second: &Value) -> bool {
+    if method == "POST" && path.starts_with("/v1/tasks/")
+        && (path.ends_with("/accept-solution") || path.ends_with("/return-to-draft")) {
+        return first.get("previous_command") == second.get("previous_command")
+            && first.get("expected_revision") == second.get("expected_revision");
+    }
     first.get("project_id") == second.get("project_id")
         && (!is_project_update(method, path) || first.get("name").is_some() == second.get("name").is_some())
 }
@@ -2993,10 +3066,21 @@ fn local_project_branch(path: &str) -> Result<String, String> {
     if !path.is_absolute() {
         return Err(crate::tr!("Bitte einen absoluten lokalen Pfad angeben.").into());
     }
-    match std::fs::symlink_metadata(path) {
+    let metadata = match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("main".into()),
-        Ok(_) if path.is_dir() => {}
+        Ok(meta) if path.is_dir() => meta,
         _ => return Err(crate::tr!("Der lokale Pfad muss ein Ordner sein.").into()),
+    };
+    let mut entries = std::fs::read_dir(path)
+        .map_err(|_| crate::tr!("Der lokale Ordner kann nicht gelesen werden."))?;
+    if entries.next().transpose().map_err(|_| crate::tr!("Der lokale Ordner kann nicht gelesen werden."))?.is_none() {
+        if !metadata.is_dir() {
+            return Err(crate::tr!("Bitte den leeren Ordner direkt statt über einen Link angeben.").into());
+        }
+        return Ok("main".into());
+    }
+    if !path.join(".git").exists() {
+        return Err(crate::tr!("Der Ordner ist nicht leer und enthält kein Git-Repository. Bitte einen leeren Ordner wählen.").into());
     }
     let run_git = |args: &[&str]| {
         let mut command = std::process::Command::new("git");
@@ -3008,18 +3092,25 @@ fn local_project_branch(path: &str) -> Result<String, String> {
         if let Some(parent) = path.parent() {
             command.env("GIT_CEILING_DIRECTORIES", parent);
         }
-        command.arg("-C").arg(path).args(args).output().ok()
-            .filter(|output| output.status.success())
+        command.arg("-C").arg(path).args(args).output()
     };
-    let branch = run_git(&["symbolic-ref", "--quiet", "HEAD"])
-        .and_then(|output| String::from_utf8(output.stdout).ok());
+    let branch = run_git(&["symbolic-ref", "--quiet", "HEAD"]).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            crate::tr!("Git wurde nicht gefunden. Bitte Git installieren und die App neu starten.")
+        } else {
+            crate::tr!("Git konnte nicht gestartet werden.")
+        }
+    })?;
+    let branch = if branch.status.success() { String::from_utf8(branch.stdout).ok() } else { None };
     if let Some(branch) = branch.as_deref()
         .and_then(|branch| branch.trim_end().strip_prefix("refs/heads/"))
-        .filter(|_| run_git(&["rev-parse", "--verify", "HEAD^{commit}"]).is_some())
     {
+        if !run_git(&["rev-parse", "--verify", "HEAD^{commit}"]).is_ok_and(|out| out.status.success()) {
+            return Err(crate::tr!("Der ausgecheckte Branch hat keinen gültigen Commit.").into());
+        }
         Ok(branch.into())
     } else {
-        Err(crate::tr!("Bitte ein Git-Repository mit ausgechecktem Branch und mindestens einem Commit oder einen noch nicht vorhandenen Ordner angeben.").into())
+        Err(crate::tr!("Git konnte keinen ausgecheckten Branch lesen. Bitte den Branch und den Zugriff auf das Repository prüfen.").into())
     }
 }
 
@@ -3984,6 +4075,9 @@ mod tests {
         assert_eq!(local_project_branch(nested.to_str().unwrap()).unwrap(), "main");
         assert!(!nested.exists());
         std::fs::create_dir(&nested).unwrap();
+        assert_eq!(local_project_branch(nested.to_str().unwrap()).unwrap(), "main");
+        assert!(!nested.join(".git").exists(), "Only the runner may initialize Git");
+        std::fs::write(nested.join("keep.txt"), "preserve").unwrap();
         assert!(local_project_branch(nested.to_str().unwrap()).is_err());
         assert!(local_project_branch("relative").is_err());
     }

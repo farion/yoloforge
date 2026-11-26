@@ -20,7 +20,7 @@ pub enum StoreError {
     WorkConflict,
 }
 type Result<T> = std::result::Result<T, StoreError>;
-pub const SCHEMA_VERSION: u32 = 46;
+pub const SCHEMA_VERSION: u32 = 47;
 impl From<rusqlite::Error> for StoreError {
     fn from(_: rusqlite::Error) -> Self {
         Self::Internal
@@ -36,6 +36,8 @@ impl From<serde_json::Error> for StoreError {
 pub struct Store(Arc<Mutex<Connection>>, Arc<tokio::sync::Notify>);
 
 pub struct DurableSnapshot {
+    pub draft_resets: Vec<DraftReset>,
+    pub intent_problems: Vec<IntentProblem>,
     pub directs: Vec<factory_protocol::directs::Direct>,
     pub token_totals: ObservedTokenTotals,
     pub session_activity_unix_ms: std::collections::BTreeMap<String, u64>,
@@ -223,6 +225,9 @@ impl Store {
         }
         if version < 46 {
             tx.execute_batch(include_str!("../migrations/046_publication_recovery.sql"))?;
+        }
+        if version < 47 {
+            tx.execute_batch(include_str!("../migrations/047_draft_resets.sql"))?;
         }
         tx.commit()?;
         // Connection-local view centralizes fencing of removed projects without
@@ -567,6 +572,8 @@ impl Store {
         })?;
         let projects = records(&tx, "SELECT data FROM active_projects ORDER BY rowid")?;
         let tickets: Vec<Ticket> = records(&tx, "SELECT t.data FROM tickets t WHERE NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id) ORDER BY t.rowid")?;
+        let intent_problems = desktop::intent_problems(&tx)?;
+        let draft_resets = records(&tx, "SELECT data FROM draft_resets WHERE completed=0 ORDER BY rowid")?;
         let mut editable_tasks = std::collections::BTreeMap::new();
         for ticket in &tickets {
             if tasks::editable(&tx, ticket)? {
@@ -637,6 +644,8 @@ impl Store {
         let directs = directs::list(&tx, None)?;
         tx.commit()?;
         Ok(DurableSnapshot {
+            draft_resets,
+            intent_problems,
             directs,
             token_totals,
             session_activity_unix_ms,
@@ -702,6 +711,7 @@ mod checkpoints;
 mod compaction;
 mod controls;
 mod desktop;
+mod draft_resets;
 mod devices;
 mod excerpts;
 mod knowledge;
@@ -737,16 +747,20 @@ fn records<T: DeserializeOwned>(tx: &Transaction<'_>, sql: &str) -> Result<Vec<T
     }
     Ok(result)
 }
-fn event(tx: &Transaction<'_>, kind: &str, id: String, payload: &impl Serialize) -> Result<()> {
+fn append_event(tx: &Transaction<'_>, kind: &str, id: &str, payload: &impl Serialize) -> Result<u64> {
     tx.execute(
         "INSERT INTO events(kind,aggregate_id,created_unix_ms,payload) VALUES(?1,?2,?3,?4)",
         params![kind, id, super::unix_ms(), serde_json::to_string(payload)?],
     )?;
+    Ok(tx.last_insert_rowid() as u64)
+}
+fn event(tx: &Transaction<'_>, kind: &str, id: String, payload: &impl Serialize) -> Result<()> {
+    let sequence = append_event(tx, kind, &id, payload)?;
     if matches!(
         kind,
-        "question.created" | "question.updated" | "command.updated" | "scheduler.blocked"
+        "question.created" | "question.updated" | "scheduler.blocked" | INTENT_ATTENTION_EVENT
     ) {
-        desktop::record_notification(tx, kind, &id, &serde_json::to_value(payload)?)?;
+        desktop::record_notification(tx, sequence, kind, &id, &serde_json::to_value(payload)?)?;
     }
     Ok(())
 }

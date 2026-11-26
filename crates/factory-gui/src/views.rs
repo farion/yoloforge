@@ -267,10 +267,10 @@ impl App {
                                 self.new_task();
                             }
                             ui.add_space(10.0);
-                             for page in [
-                                 Page::Tasks, Page::Questions, Page::Directs, Page::Sessions,
-                                 Page::Orchestrator, Page::Reviewer, Page::Supervisor, Page::Memorizer, Page::Merger,
-                             ] {
+                              for page in [
+                                  Page::Tasks, Page::Questions,
+                                  Page::Sessions, Page::ProjectActivity,
+                              ] {
                                  let (badges, hint) = if page == Page::Tasks && !self.online {
                                      let queue = self.settings.offline_tasks.iter().filter(|t|
                                          t.draft.server == self.server && Some(t.draft.project) == self.settings.project).count();
@@ -369,7 +369,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     let context = if direct_tab {
-                        "OpenCode · Direct"
+                         crate::tr!("OpenCode · Manuelle Session")
                     } else if self.active_tab > 0 {
                         crate::tr!("OpenCode · schreibgeschützt")
                     } else {
@@ -443,8 +443,7 @@ impl App {
                 match self.page() {
                     Page::Tasks => self.tasks(ui),
                     Page::Questions => self.questions(ui),
-                    Page::Directs => crate::directs::list(ui, self),
-                    Page::Sessions | Page::Orchestrator | Page::Reviewer | Page::Supervisor | Page::Memorizer | Page::Merger => {
+                    Page::Sessions | Page::ProjectActivity | Page::Orchestrator | Page::Reviewer | Page::Supervisor | Page::Memorizer | Page::Merger => {
                         self.session_list(ui, self.page())
                     }
                     Page::Diagnostics => self.diagnostics(ui),
@@ -763,7 +762,7 @@ impl App {
             hash_of(
                 tasks
                     .iter()
-                    .map(|t| (t.id, &t.key, t.revision.0, task_status(&s, t)))
+                    .map(|t| (t.id, &t.key, t.revision.0, task_display_status(&s, t)))
                     .collect::<Vec<_>>(),
             ),
         );
@@ -778,7 +777,7 @@ impl App {
                             ui.set_width(ui.available_width());
                             ui.spacing_mut().item_spacing.y = 4.0;
                             ui.horizontal_top(|ui| {
-                                let status = if t.draft { crate::tr!("Draft") } else { task_status(&s, t) };
+                                let status = task_display_status(&s, t);
                                 let tokens = task_tokens(&s, t);
                                 let badges_width = design::badge_width(ui, status)
                                     + design::badge_width(ui, &design::token_label(tokens));
@@ -1030,7 +1029,8 @@ impl App {
             }
         }
         ui.horizontal_wrapped(|ui| {
-            badge(ui, task_status(&s, t), status_color(task_status(&s, t)));
+            let status = task_display_status(&s, t);
+            badge(ui, status, status_color(status));
             design::token_pill(ui, task_tokens(&s, t));
             if task_command(&s, t).is_none() && ui.button(crate::tr!("Bearbeiten …")).clicked() { self.edit_task(t.id); }
             if ui.button(crate::tr!("Technisches Ticket bearbeiten …")).clicked() { self.dialog = Some(Dialog::form(crate::tr!("Ticket bearbeiten"), crate::tr!("Status und Metadaten des Tickets ändern. Eine Änderung beendet keine laufenden Prozesse."), "PATCH", format!("/v1/tickets/{}", t.id), json!(UpdateTicket { request_id: RequestId::new(), expected_revision: t.revision, title: Some(t.title.clone()), description: Some(t.description.clone()), acceptance_criteria: Some(t.acceptance_criteria.clone()), priority: Some(t.priority), status: Some(t.status) }))); }
@@ -1117,18 +1117,37 @@ impl App {
         let Some(project) = self.settings.project else {
             return;
         };
-        let current = question_task_groups(&s, project, false);
-        let archived = question_task_groups(&s, project, true);
+        let (current, archived): (Vec<_>, Vec<_>) = question_task_groups(&s, project, false)
+            .into_iter().chain(question_task_groups(&s, project, true))
+            .filter_map(|mut group| {
+                group.questions.retain(|q| !question_under_automation(q));
+                (!group.questions.is_empty()).then_some(group)
+            }).partition(|group| group.questions.iter().any(inbox_question));
+        let problems: Vec<_> = inbox_problems(&s, project).collect();
         let mut selected = usize::from(self.show_answered);
-        design::section_toolbar(
+        let show_problems = self.show_inbox_problems;
+        let question_tabs = [(crate::tr!("Offen"), current.len()), (crate::tr!("Archiv"), archived.len())];
+        design::section_toolbar_extras(
             ui,
             "question",
             &mut self.query,
-            crate::tr!("Fragen durchsuchen …"),
-            &[(crate::tr!("Offen"), current.len()), (crate::tr!("Archiv"), archived.len())],
+            if show_problems { crate::tr!("Probleme durchsuchen …") } else { crate::tr!("Fragen durchsuchen …") },
+            if show_problems { &[] } else { &question_tabs },
             &mut selected,
+            |_| {},
+            design::SECTION_FILTER_WIDTH,
+            |ui| {
+                let _filter = design::section_filter(ui, crate::tr!("Inbox filtern"), &mut self.show_inbox_problems,
+                    &[(false, crate::tr!("Fragen")), (true, crate::tr!("Probleme"))]);
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-inbox-filter"), _filter.rect));
+            },
         );
         self.show_answered = selected == 1;
+        if self.show_inbox_problems {
+            self.intent_problems(ui, &s, project, problems);
+            return;
+        }
         let needle = self.query.to_lowercase();
         let mut groups = if self.show_answered {
             archived
@@ -1161,7 +1180,7 @@ impl App {
             } else {
                 crate::tr!("Keine Fragen")
             };
-            design::list_empty_state(ui, Page::Questions.icon(), message);
+            design::list_empty_state(ui, egui_phosphor::regular::CHAT_CIRCLE_TEXT, message);
             return;
         }
         egui::ScrollArea::vertical()
@@ -1215,6 +1234,94 @@ impl App {
                 }
             });
     }
+    fn intent_problems(&mut self, ui: &mut egui::Ui, s: &Snapshot, project: ProjectId,
+        problems: Vec<(&IntentProblem, &Ticket)>,
+    ) {
+        let needle = self.query.to_lowercase();
+        let problems: Vec<_> = problems.into_iter().filter(|(problem, ticket)|
+            needle.is_empty() || [&ticket.key, &ticket.title, &problem.reason]
+                .into_iter().any(|text| text.to_lowercase().contains(&needle))).collect();
+        if problems.is_empty() {
+            design::list_empty_state(ui, Page::Questions.icon(), if needle.is_empty() {
+                crate::tr!("Keine offenen Probleme")
+            } else { crate::tr!("Keine passenden Probleme") });
+            return;
+        }
+        let inactive_delete = s.server_capabilities.iter().any(|cap| cap == DELETE_INACTIVE_TASK_CAPABILITY);
+        egui::ScrollArea::vertical().id_salt(("inbox-problems", project)).show(ui, |ui| {
+            for (problem, ticket) in problems {
+                ui.push_id(ticket.id, |ui| {
+                    design::task_row_frame().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        design::ticket_title(ui, &ticket.key, &ticket.title,
+                            egui::FontId::proportional(18.0), ui.available_width())
+                            .on_hover_text(&ticket.title);
+                        ui.label(RichText::new(&problem.reason).color(MUTED));
+                        let resetting = s.draft_resets.iter().any(|reset| reset.ticket_id == ticket.id);
+                        if resetting {
+                            ui.colored_label(AMBER, crate::tr!("Wartet auf das Verwerfen von Session und Worktree"));
+                        }
+                        let can_reset = s.server_capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY)
+                            && task_command(s, ticket).is_some_and(|c|
+                                c.id == problem.command_id && c.kind == CommandKind::RunAgent && !c.requires_target_git()
+                                && c.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && spec.role.is_empty())
+                                && matches!(&c.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Failed
+                                    || (agent.phase == AgentPhase::Succeeded && command_publication_blocked(c)))
+                                && s.runners.iter().any(|r| r.id == c.runner_id
+                                    && r.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY)));
+                        let suggestion = problem.solution.map(|solution| match solution {
+                            IntentSolution::ContinueSession => crate::tr!("Vorschlag: In derselben Session fortsetzen"),
+                            IntentSolution::RetryWorkspace => crate::tr!("Vorschlag: Worktree erneut vorbereiten"),
+                            IntentSolution::ReassignSession => crate::tr!("Vorschlag: Andere Session wählen lassen"),
+                        });
+                        if let Some(suggestion) = suggestion { ui.label(suggestion); }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            let path = format!("/v1/tasks/{}", ticket.id);
+                            let delete_path = format!("{path}/inactive");
+                            let retry_path = format!("{path}/retry");
+                            let accept_path = format!("{path}/accept-solution");
+                            let reset_path = format!("{path}/return-to-draft");
+                            let busy = resetting || self.settings.pending.iter().any(|r| r.server == self.server
+                                && (r.path == delete_path || r.path == retry_path || r.path == accept_path || r.path == reset_path));
+                            if ui.button(crate::tr!("Anzeigen")).clicked() {
+                                self.view_task(ticket.id);
+                            }
+                            if let Some(suggestion) = suggestion {
+                                let accept = ui.add_enabled(self.online && !busy, egui::Button::new(crate::tr!("Lösung annehmen")));
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-inbox-accept", ticket.id)), accept.rect));
+                                if accept.clicked() {
+                                    self.dialog = Some(Dialog::form(crate::tr!("Lösung annehmen"), suggestion, "POST",
+                                        accept_path, json!(AcceptIntentSolution { request_id: RequestId::new(),
+                                            expected_revision: ticket.revision, previous_command: problem.command_id })));
+                                }
+                            } else if retryable_task(s, ticket) && ui.add_enabled(self.online && !busy,
+                                egui::Button::new(crate::tr!("Erneut einreihen"))).clicked()
+                            {
+                                self.requeue_task(ticket);
+                            }
+                            if can_reset && ui.add_enabled(self.online && !busy, egui::Button::new(crate::tr!("Zurück zum Entwurf"))).clicked() {
+                                self.dialog = Some(Dialog::form(crate::tr!("Zurück zum Entwurf"),
+                                    crate::tr!("Session und Worktree werden endgültig verworfen. Prompt, Anhänge und bereits integrierte Ergebnisse bleiben erhalten. Noch nicht gestartete Folge-Intents werden neu zugeordnet."),
+                                    "POST", reset_path, json!(ReturnIntentToDraft { request_id: RequestId::new(),
+                                        expected_revision: ticket.revision, previous_command: problem.command_id })));
+                            }
+                            if inactive_delete && design::icon_button(ui, egui_phosphor::regular::TRASH,
+                                crate::tr!("Intent löschen"), self.online && !busy).clicked()
+                            {
+                                self.dialog = Some(Dialog::form(
+                                    crate::tr!("Intent löschen"),
+                                    &crate::tr!("Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(s, ticket)),
+                                    "DELETE", delete_path, json!(DeleteInactiveTask { request_id: RequestId::new(),
+                                        expected_revision: ticket.revision, execution_command: ticket.execution_command }),
+                                ));
+                            }
+                        });
+                    });
+                });
+            }
+        });
+    }
     fn session_list(&mut self, ui: &mut egui::Ui, page: Page) {
         let controllers = page != Page::Sessions;
         let Some(s) = self.snapshot.clone() else {
@@ -1223,7 +1330,18 @@ impl App {
         let Some(project) = self.settings.project else {
             return;
         };
-        let mut sessions = sessions_for_page(&s, project, page);
+        let filter_id = egui::Id::new(("project-activity-role", &self.server, project));
+        let mut filter = if page == Page::ProjectActivity {
+            ui.ctx().data(|data| data.get_temp::<Page>(filter_id)).unwrap_or(page)
+        } else { page };
+        let previous_filter = filter;
+        let mut sessions = sessions_for_page(&s, project, filter);
+        let mut manual: Vec<_> = s.directs.iter()
+            .filter(|d| page == Page::Sessions && d.project_id == project)
+            .collect();
+        let manual_archived = |d: &factory_protocol::directs::Direct| d.state == factory_protocol::directs::DirectState::Archived;
+        let can_create = crate::directs::can_create(self, &s);
+        let mut create = false;
         let mut awaiting_review = Vec::new();
         {
             let archived = |c: &RunnerCommand| session_archived_for_page(&s, page, c);
@@ -1235,25 +1353,57 @@ impl App {
                 awaiting_review.sort_by_key(|t| (t.updated_unix_ms, t.id));
             }
             let closed = sessions.iter().filter(|c| archived(c)).count();
+            let manual_closed = manual.iter().filter(|d| manual_archived(d)).count();
             let mut selected = usize::from(self.sessions_closed);
-            design::section_toolbar(
+            design::section_toolbar_extras(
                 ui,
                 match page {
                     Page::Supervisor => "supervisor",
                     Page::Reviewer => "reviewer",
                     Page::Orchestrator => "controller",
                     Page::Memorizer => "memorizer",
-                    Page::Merger => "merger",
+                     Page::Merger => "merger",
+                     Page::ProjectActivity => "project-activity",
                     _ => "session",
                 },
                 &mut self.query,
                 crate::tr!("Sessions durchsuchen …"),
                 &[
-                    (crate::tr!("Offen"), sessions.len() - closed + awaiting_review.len()),
-                    (if controllers { crate::tr!("Archiv") } else { crate::tr!("Geschlossen") }, closed),
+                     (crate::tr!("Offen"), sessions.len() - closed + awaiting_review.len() + manual.len() - manual_closed),
+                     (if controllers { crate::tr!("Archiv") } else { crate::tr!("Geschlossen") }, closed + manual_closed),
                 ],
                 &mut selected,
-            );
+                |ui| {
+                    if page == Page::Sessions {
+                        let height = ui.text_style_height(&egui::TextStyle::Body)
+                            + f32::from(design::INPUT_MARGIN.top + design::INPUT_MARGIN.bottom);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(design::ICON_BUTTON_SIZE, height.max(design::ICON_BUTTON_SIZE)),
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                let add = design::icon_button(ui, egui_phosphor::regular::PLUS, crate::tr!("Neue manuelle Session"), can_create);
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-session-add-manual"), (add.rect, add.enabled())));
+                                 create = add.clicked();
+                            },
+                        );
+                    }
+                },
+                 if page == Page::ProjectActivity { design::SECTION_FILTER_WIDTH } else { 0.0 },
+                 |ui| {
+                     if page == Page::ProjectActivity {
+                         let _filter = design::section_filter(ui, crate::tr!("Nach Rolle filtern"), &mut filter,
+                             &[(page, crate::tr!("Alle Rollen")), (Page::Supervisor, "Supervisor"), (Page::Memorizer, "Memorizer")]);
+                         #[cfg(test)]
+                         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-project-activity-filter"), _filter.rect));
+                     }
+                 },
+             );
+            if filter != previous_filter {
+                ui.ctx().data_mut(|data| data.insert_temp(filter_id, filter));
+                sessions = sessions_for_page(&s, project, filter);
+                ui.ctx().request_repaint();
+            }
             self.sessions_closed = selected == 1;
             let needle = self.query.to_lowercase();
             awaiting_review.retain(|t| !self.sessions_closed && task_summary(&s, t).to_lowercase().contains(&needle));
@@ -1261,6 +1411,7 @@ impl App {
                 archived(c) == self.sessions_closed
                     && (needle.is_empty()
                         || session_title(&s, c).to_lowercase().contains(&needle)
+                        || (page == Page::ProjectActivity && intent_run_role(c).to_lowercase().contains(&needle))
                         || merger_ticket(&s, c).is_some_and(|t| t.key.to_lowercase().contains(&needle))
                         || c.session_id().to_lowercase().contains(&needle)
                         || c.runner_id.to_string().contains(&needle)
@@ -1272,9 +1423,20 @@ impl App {
                             .as_ref()
                             .is_some_and(|p| p.summary.to_lowercase().contains(&needle)))
             });
+            manual.retain(|d| manual_archived(d) == self.sessions_closed
+                && (needle.is_empty()
+                    || crate::directs::title(&s, d).to_lowercase().contains(&needle)
+                    || crate::tr!("Manuelle Session").to_lowercase().contains(&needle)
+                    || d.selection.as_ref().is_some_and(|selection| s.runners.iter()
+                        .any(|r| r.id == selection.runner_id && r.name.to_lowercase().contains(&needle)))));
         }
-        if sessions.is_empty() && awaiting_review.is_empty() {
-            let message = if controllers {
+        if create {
+            crate::directs::create(self, project);
+        }
+        if sessions.is_empty() && awaiting_review.is_empty() && manual.is_empty() {
+            let message = if page == Page::ProjectActivity {
+                crate::tr!("Keine passende Projektaktivität").into()
+            } else if controllers {
                 let modifier = if self.query.is_empty() { "" } else { crate::tr!("passenden ") };
                 crate::tr!("Keine {modifier}{}-Läufe", page.title(), modifier = modifier)
             } else if !self.query.is_empty() {
@@ -1286,6 +1448,17 @@ impl App {
             };
             design::list_empty_state(ui, page.icon(), &message);
             return;
+        }
+        enum Row<'a> {
+            Work(&'a RunnerCommand),
+            Manual(&'a factory_protocol::directs::Direct),
+        }
+        let mut rows: Vec<_> = sessions.iter().map(Row::Work).chain(manual.into_iter().map(Row::Manual)).collect();
+        if page == Page::Sessions {
+            rows.sort_by_key(|row| std::cmp::Reverse(match row {
+                Row::Work(c) => session_last_activity(&s, c),
+                Row::Manual(d) => crate::directs::last_activity(&s, d),
+            }));
         }
         egui::ScrollArea::vertical()
             .id_salt((
@@ -1312,7 +1485,14 @@ impl App {
                         });
                     });
                 }
-                for c in sessions {
+                 for row in rows {
+                     let c = match row {
+                         Row::Work(c) => c,
+                         Row::Manual(d) => {
+                             self.manual_session_row(ui, &s, d);
+                             continue;
+                         }
+                     };
                     ui.push_id(c.session_root(), |ui| {
                         let _row=design::task_row_frame().show(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -1338,9 +1518,11 @@ impl App {
                                 let metadata_width=(ui.available_width()-230.0).max(100.0);
                                 let metadata=ui.allocate_ui_with_layout(egui::vec2(metadata_width,0.0),egui::Layout::top_down(egui::Align::LEFT),|ui| {
                                     ui.spacing_mut().item_spacing.y=design::TASK_METADATA_LINE_GAP;
-                                    if let Some(CommandOutput::WorkspaceError { workspace_error }) = &c.result {
-                                        ui.add(egui::Label::new(egui::RichText::new(workspace_error).color(RED)).wrap());
-                                    } else {
+                                     if let Some(CommandOutput::WorkspaceError { workspace_error }) = &c.result {
+                                         ui.add(egui::Label::new(egui::RichText::new(workspace_error).color(RED)).wrap());
+                                     } else if page == Page::ProjectActivity {
+                                         ui.colored_label(MUTED, intent_run_role(&c));
+                                     } else {
                                          let ticket = session_last_task(&s, &c);
                                          let task = ticket.map(|t| task_summary(&s, t)).unwrap_or_else(||crate::tr!("Keine zugeordnete Aufgabe").into());
                                          let label = ui.add(egui::Label::new(egui::RichText::new(crate::tr!("Letzte Aufgabe: {task}", task = task)).color(MUTED)).wrap());
@@ -1387,6 +1569,43 @@ impl App {
                     });
                 }
             });
+    }
+    fn manual_session_row(&mut self, ui: &mut egui::Ui, s: &Snapshot, direct: &factory_protocol::directs::Direct) {
+        ui.push_id(("manual-session", direct.id), |ui| design::task_row_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let (status, color) = crate::directs::status(s, direct);
+            let tokens = direct.root_command_id.and_then(|id| s.token_totals.by_session.get(&id).copied());
+            ui.horizontal_top(|ui| {
+                let badges = design::badge_width(ui, status) + design::badge_width(ui, &design::token_label(tokens));
+                let width = (ui.available_width() - badges.max(185.0)).max(1.0);
+                let title = crate::directs::title(s, direct);
+                let job = design::elided_text_job(title.clone(), egui::FontId::proportional(18.0),
+                    ui.visuals().text_color(), width, 1);
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.add(egui::Label::new(job)).on_hover_text(title);
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    badge(ui, status, color);
+                    design::token_pill(ui, tokens);
+                });
+            });
+            ui.horizontal_top(|ui| {
+                let width = (ui.available_width() - 230.0).max(100.0);
+                let details = ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.spacing_mut().item_spacing.y = design::TASK_METADATA_LINE_GAP;
+                    ui.colored_label(MUTED, crate::tr!("Manuell"));
+                    ui.colored_label(MUTED, crate::tr!("Zuletzt aktiv {}", timestamp(crate::directs::last_activity(s, direct))));
+                });
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), details.response.rect.height()),
+                    egui::Layout::right_to_left(egui::Align::Max), |ui| {
+                        let open = ui.button(crate::tr!("OpenCode anzeigen"));
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-manual-session-open", direct.id)), open.rect));
+                        if open.clicked() { self.open_direct(direct); }
+                    });
+            });
+        }));
     }
     fn diagnostics(&mut self, ui: &mut egui::Ui) {
         if self.error.is_some()
@@ -1700,7 +1919,7 @@ impl App {
                             let (id, kind, title, status, action) = match activity {
                                 SessionActivity::Task(task) => (
                                      task.id.to_string(), crate::tr!("Aufgabe").to_string(), task_text(&snapshot, task),
-                                    task_status(&snapshot, task), crate::tr!("Anzeigen"),
+                                    task_display_status(&snapshot, task), crate::tr!("Anzeigen"),
                                 ),
                                 SessionActivity::Question(question) => (
                                     question.id.to_string(),
@@ -2208,19 +2427,29 @@ pub(crate) fn project_navigation_badges(
         Page::Tasks => s.tickets.iter()
             .filter(|t| t.project_id == project && task_bucket(s, t) == TaskBucket::Current)
             .map(|t| {
-                let status = task_status(s, t);
+                let status = task_display_status(s, t);
                 (status, status_color(status))
             }).for_each(&mut count),
-        Page::Questions => question_task_groups(s, project, false).iter()
-            .map(|group| {
-                let (total, answered) = question_group_progress(group);
-                question_group_pill(total, answered)
-            }).for_each(&mut count),
-        Page::Sessions | Page::Orchestrator | Page::Supervisor | Page::Reviewer | Page::Memorizer | Page::Merger => {
+        Page::Questions => {
+            for _ in question_task_groups(s, project, false).iter()
+                .filter(|group| group.questions.iter().any(inbox_question)) {
+                count((crate::tr!("Fragen"), AMBER));
+            }
+            for _ in inbox_problems(s, project) {
+                count((crate::tr!("Probleme"), AMBER));
+            }
+        }
+        Page::Sessions | Page::ProjectActivity | Page::Orchestrator | Page::Supervisor | Page::Reviewer | Page::Memorizer | Page::Merger => {
             sessions_for_page(s, project, page).iter()
                 .filter(|c| !session_archived_for_page(s, page, c))
                 .map(|c| session_list_pill(s, page, c))
                 .for_each(&mut count);
+            if page == Page::Sessions {
+                s.directs.iter()
+                    .filter(|d| d.project_id == project && d.state != factory_protocol::directs::DirectState::Archived)
+                    .map(|d| crate::directs::status(s, d))
+                    .for_each(&mut count);
+            }
         }
         _ => {}
     }
@@ -2243,6 +2472,12 @@ fn question_group_pill(total: usize, answered: usize) -> (&'static str, egui::Co
 }
 
 fn session_list_pill(s: &Snapshot, page: Page, c: &RunnerCommand) -> (&'static str, egui::Color32) {
+    if page == Page::Sessions && !session_closed(s, c) {
+        if let Some(ticket) = session_last_task(s, c) {
+            let status = task_display_status(s, ticket);
+            return (status, status_color(status));
+        }
+    }
     if let Some(status) = merger_pending_status(s, c) {
         return (status, AMBER);
     }

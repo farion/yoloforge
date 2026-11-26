@@ -7,6 +7,7 @@ fn delete_intent_in(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<()> {
 }
 
 fn tombstone_intent(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<()> {
+    super::draft_resets::require_not_resetting(tx, ticket.id)?;
     let id = ticket.id.to_string();
     ticket.status = TicketState::Cancelled;
     ticket.routing_note = "Intent gelöscht".into();
@@ -94,6 +95,7 @@ fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId
         "SELECT c.data,s.data,p.data FROM commands c JOIN streams s ON s.id=c.stream_id
          JOIN active_projects p ON p.id=s.project_id
          WHERE c.id=?1 AND c.runner_id=?2 AND c.state='succeeded'
+            AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=s.id)
            AND COALESCE(json_extract(p.data,'$.paused'),0)=0
            AND c.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
            AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=c.id
@@ -245,6 +247,7 @@ impl Store {
                 [id.to_string()], |row| row.get(0),
             ).optional()?.ok_or(StoreError::NotFound)?;
             let mut ticket: Ticket = serde_json::from_str(&raw)?;
+            super::draft_resets::require_not_resetting(tx, ticket.id)?;
             require_no_publication_recovery(tx, ticket.project_id)?;
             if ticket.revision != body.expected_revision {
                 return Err(StoreError::RevisionConflict(ticket.revision));
@@ -408,7 +411,8 @@ impl Store {
             if project.revision!=body.expected_revision {return Err(StoreError::RevisionConflict(project.revision));}
             if body.confirm_name!=project.name {return Err(StoreError::Invalid("Zum Löschen den vollständigen Projektnamen bestätigen"));}
             let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND c.state IN ('pending','accepted'))",[id.to_string()],|row|row.get(0))?;
-            if busy {return Err(StoreError::Invalid("Projekt hat noch laufende oder eingereihte Aufträge und kann nicht gelöscht werden"));}
+            let resetting:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM draft_resets d JOIN streams s ON s.id=d.stream_id WHERE s.project_id=?1 AND d.completed=0)",[id.to_string()],|row|row.get(0))?;
+            if busy || resetting {return Err(StoreError::Invalid("Projekt hat noch laufende oder eingereihte Aufträge und kann nicht gelöscht werden"));}
             project.deleted=true;
             project.paused=true;
             project.revision.0=project.revision.0.checked_add(1).ok_or(StoreError::Internal)?;
@@ -547,7 +551,8 @@ impl Store {
             let now=super::super::unix_ms();
              let session = if let Some(root)=b.requested_session {
                 let data:Option<String>=tx.query_row("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1 AND s.project_id=?2",params![root.to_string(),b.project_id.to_string()],|r|r.get(0)).optional()?;
-                let c:RunnerCommand=serde_json::from_str(&data.ok_or(StoreError::Invalid("Session gehoert nicht zu diesem Projekt"))?)?;
+                 let c:RunnerCommand=serde_json::from_str(&data.ok_or(StoreError::Invalid("Session gehoert nicht zu diesem Projekt"))?)?;
+                 if super::draft_resets::retired(tx, c.stream_id)? { return Err(StoreError::WorkConflict); }
                  if c.kind!=CommandKind::RunAgent || c.session_root()!=root || c.agent_spec.as_ref().is_none_or(|a|a.read_only || a.role == factory_protocol::directs::ROLE){return Err(StoreError::Invalid("Keine auswaehlbare Arbeitssession"));}
                  if direct && tx.query_row(
                      "SELECT EXISTS(SELECT 1 FROM runtime_terminations WHERE stream_id=?1)",
@@ -646,6 +651,7 @@ pub(super) fn recover_stopped(tx: &Transaction<'_>, project: ProjectId) -> Resul
                AND json_extract(a.data,'$.final_scan_complete')=1
                AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
                AND NOT EXISTS(SELECT 1 FROM events e WHERE e.aggregate_id=t.id AND e.kind='task.session_recovered')
+               AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=c.stream_id)
              ORDER BY c.rowid",
         )?;
         let rows = query.query_map(params![project.to_string(), SESSION_STOPPED_PREFIX], |row| row.get::<_, String>(0))?;
@@ -672,7 +678,43 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask)
     retry_failed_inner(tx, id, body, false)
 }
 
+pub(super) fn continue_failed_agent(tx: &Transaction<'_>, ticket: &mut Ticket, failed: &RunnerCommand) -> Result<()> {
+    let owner = super::work::stream(tx, failed.stream_id)?;
+    if ticket.execution_command != Some(failed.id)
+        || failed.kind != CommandKind::RunAgent || failed.state != CommandState::Failed
+        || owner.project_id != ticket.project_id || !owner.ticket_ids.contains(&ticket.id)
+        || failed.requires_target_git()
+        || failed.agent_spec.as_ref().is_none_or(|s| s.read_only || !s.role.is_empty())
+        || !matches!(&failed.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Failed)
+        || !tx.query_row("SELECT id=?1 FROM commands WHERE stream_id=?2 ORDER BY rowid DESC LIMIT 1",
+            params![failed.id.to_string(), owner.id.to_string()], |r| r.get::<_, bool>(0))?
+        || tx.query_row("SELECT EXISTS(SELECT 1 FROM questions WHERE command_id=?1 AND json_extract(data,'$.state')<>'answered')",
+            [failed.id.to_string()], |r| r.get::<_, bool>(0))?
+    {
+        return Err(StoreError::WorkConflict);
+    }
+    let pins = super::models::ticket(tx, ticket.id)?;
+    let skills = super::skills::for_ticket(tx, ticket.id, ticket.project_id)?;
+    let mcps = super::mcp::for_ticket(tx, ticket.id, ticket.project_id)?;
+    let next = Store::enqueue_intent_recovery(tx, owner.id, &EnqueueCommand {
+        request_id: RequestId::new(), expected_revision: owner.revision, kind: CommandKind::RunAgent,
+        prompt: Some(INTENT_RECOVERY_PROMPT.into()),
+    }, failed.id, pins.as_ref().and_then(|m| m.implementer.as_ref()), (&skills, &mcps))?;
+    if next.workspace_spec != failed.workspace_spec {
+        return Err(StoreError::WorkConflict);
+    }
+    tx.execute("UPDATE scheduler_runs SET agent_id=?1 WHERE ticket_id=?2 AND agent_id=?3",
+        params![next.id.to_string(), ticket.id.to_string(), failed.id.to_string()])?;
+    ticket.execution_command = Some(next.id);
+    ticket.status = TicketState::InProgress;
+    super::routing::note(tx, ticket, "Orchestrator setzt den fehlgeschlagenen Intent in derselben Session fort.")?;
+    event(tx, "task.session_recovered", ticket.id.to_string(), &serde_json::json!({
+        "ticket":ticket,"previous_command":failed.id,"command":next.id
+    }))
+}
+
 fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, automatic: bool) -> Result<Ticket> {
+    super::draft_resets::require_not_resetting(tx, id)?;
     let raw: Option<String> = tx.query_row("SELECT data FROM tickets WHERE id=?1", [id.to_string()], |r| r.get(0)).optional()?;
     let mut ticket: Ticket = serde_json::from_str(&raw.ok_or(StoreError::NotFound)?)?;
     if ticket.revision != body.expected_revision {

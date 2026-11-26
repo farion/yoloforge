@@ -48,6 +48,8 @@ pub struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_notice: Option<PublicationNotice>,
     pub reported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_reset_verified: Option<RequestId>,
     #[serde(default)]
     pub agent: Option<crate::agent::Execution>,
     #[serde(default)]
@@ -166,6 +168,7 @@ impl Journal {
             result: None,
             publication_notice: None,
             reported: false,
+            draft_reset_verified: None,
             agent: None,
             question_snapshot: None,
             replies: Default::default(),

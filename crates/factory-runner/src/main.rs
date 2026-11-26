@@ -9,6 +9,7 @@ use factory_protocol::{
 use std::{path::PathBuf, time::Duration};
 mod agent;
 mod archive;
+mod draft_reset;
 mod archive_blobs;
 mod archive_files;
 mod attach;
@@ -469,7 +470,12 @@ async fn commands(
                         progress.summary.truncate(end);
                     } else {
                         match publication {
-                            Ok(Some(path))=>progress.summary = format!("{PUBLICATION_CONFIRMED_PREFIX}\nErgebnis automatisch im Projektordner bereitgestellt: {}\n\nAgentenergebnis:\n{}", path.display(), progress.summary),
+                            Ok(Some(path)) => {
+                                let unchanged = record.command.agent_spec.as_ref().is_some_and(|spec| spec.role.is_empty())
+                                    && tokio::task::block_in_place(|| publication::published_unchanged_tree(journal, record.command.id)).unwrap_or(false);
+                                let evidence = if unchanged { format!("\n{NO_GIT_CHANGES_MARKER}") } else { String::new() };
+                                progress.summary = format!("{PUBLICATION_CONFIRMED_PREFIX}{evidence}\nErgebnis automatisch im Projektordner bereitgestellt: {}\n\nAgentenergebnis:\n{}", path.display(), progress.summary);
+                            }
                             Ok(None)=>{},
                             Err(e) if e.downcast_ref::<publication::PublicationConflict>().is_some()=> {
                                 progress.summary=format!("{PUBLICATION_CONFLICT_PREFIX}\n{e}\n\nAgentenergebnis:\n{}",progress.summary);
@@ -881,7 +887,19 @@ async fn run(mut args: Args) -> Result<()> {
                 };
             input.capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
             input.capabilities.push(MERGER_RECOVERY_CAPABILITY.into());
+            input.capabilities.push(INTENT_RECOVERY_CAPABILITY.into());
+            if args.managed_opencode.is_some() { input.capabilities.push(DRAFT_RESET_CAPABILITY.into()); }
             let mut result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400)
+                && input.capabilities.iter().any(|capability| capability == DRAFT_RESET_CAPABILITY)
+            {
+                input.capabilities.retain(|capability| capability != DRAFT_RESET_CAPABILITY);
+                result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            }
+            if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
+                input.capabilities.retain(|capability| capability != INTENT_RECOVERY_CAPABILITY);
+                result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            }
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
                 input.capabilities.retain(|capability| capability != MERGER_RECOVERY_CAPABILITY);
                 result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
@@ -940,6 +958,13 @@ async fn run(mut args: Args) -> Result<()> {
                 .await;
                 if matches!(command_result, Ok(false)) && std::time::Instant::now() >= next_publication_check {
                     next_publication_check = std::time::Instant::now() + Duration::from_secs(30);
+                    if args.managed_opencode.is_some() {
+                        if let Ok(Err(error)) = tokio::time::timeout(Duration::from_secs(8),
+                            draft_reset::step(&client, &journal, &args, current.registration_id)).await
+                        {
+                            eprintln!("Draft reset deferred: {error}");
+                        }
+                    }
                     let position = next_publication_recovery;
                     next_publication_recovery = next_publication_recovery.wrapping_add(1);
                     let _ = tokio::time::timeout(Duration::from_secs(8), async {

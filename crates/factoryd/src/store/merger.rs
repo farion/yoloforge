@@ -1,5 +1,69 @@
 use super::*;
 
+const MERGER_POLICY_MARKER: &str = "factory_merge_policy=pinned-target-v2";
+const OLD_MERGER_PREFLIGHT: &str = "Merger konnte nicht starten: Projektordner enthaelt eigene Aenderungen; nichts ueberschrieben";
+
+fn uncommitted_result_prefix() -> String {
+    format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: {MERGER_UNCOMMITTED_RESULT}\n")
+}
+
+fn attempted_current_recovery(command: &RunnerCommand) -> bool {
+    is_merger_recovery(command) && command.agent_spec.as_ref().is_some_and(|spec|
+        spec.prompt.lines().any(|line| line == MERGER_POLICY_MARKER))
+}
+
+pub(super) fn can_recover(tx: &Transaction<'_>, command: &RunnerCommand) -> Result<bool> {
+    if attempted_current_recovery(command) { return Ok(false); }
+    let Some(CommandOutput::Agent { agent }) = &command.result else { return Ok(false); };
+    if agent.summary.starts_with(&uncommitted_result_prefix()) {
+        return Ok(true);
+    }
+    if agent.summary == OLD_MERGER_PREFLIGHT {
+        return Ok(!tx.query_row("SELECT EXISTS(SELECT 1 FROM runtime_bindings WHERE command_id=?1)",
+            [command.id.to_string()], |row| row.get::<_, bool>(0))?);
+    }
+    Ok(false)
+}
+
+pub(super) fn publication_attention_reason(tx: &Transaction<'_>, command: &RunnerCommand) -> Result<Option<&'static str>> {
+    let Some(CommandOutput::Agent { agent }) = &command.result else { return Ok(None); };
+    let merger = command.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
+    if merger && !publication_was_confirmed(&agent.summary) {
+        if can_recover(tx, command)? { return Ok(None); }
+        return Ok(Some("Merger hat die Übernahme nicht abgeschlossen; Änderungen bleiben erhalten."));
+    }
+    Ok((publication_was_blocked(&agent.summary) && !agent.summary.starts_with(PUBLICATION_CONFLICT_PREFIX))
+        .then_some("Die Übernahme in den Zielbranch ist blockiert. Der Arbeitsstand bleibt erhalten."))
+}
+
+fn find_existing_publication_problems(tx: &Transaction<'_>) -> Result<()> {
+    // Older servers recorded the actual runner failure without an Inbox entry.
+    // Never backfill an inferred problem from a missing success confirmation alone.
+    let mut query = tx.prepare(
+        "SELECT t.data,c.data FROM tickets t JOIN active_projects p ON p.id=t.project_id
+         JOIN commands c ON c.id=json_extract(t.data,'$.execution_command')
+         WHERE json_extract(t.data,'$.status') IN ('in_progress','blocked')
+           AND COALESCE(json_extract(t.data,'$.draft'),0)=0 AND COALESCE(json_extract(p.data,'$.paused'),0)=0
+           AND c.state IN ('succeeded','failed')
+           AND c.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
+           AND (json_extract(c.data,'$.agent_spec.role')=?1 OR instr(json_extract(c.data,'$.result.agent.summary'),?2)=1
+                OR instr(json_extract(c.data,'$.result.agent.summary'),?3)>0)
+           AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+           AND NOT EXISTS(SELECT 1 FROM events e WHERE e.kind=?4 AND e.aggregate_id=t.id
+                AND json_extract(e.payload,'$.command_id')=c.id)",
+    )?;
+    let rows = query.query_map(params![MERGER_ROLE, PUBLICATION_BLOCKED_PREFIX,
+        "Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:", INTENT_ATTENTION_EVENT],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (ticket, command) in rows {
+        if let Some(reason) = publication_attention_reason(tx, &serde_json::from_str::<RunnerCommand>(&command)?)? {
+            super::desktop::require_intent_attention(tx, &serde_json::from_str::<Ticket>(&ticket)?, reason)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn owns_conflict(original: &RunnerCommand, owner: &Workstream) -> bool {
     original.runner_id == owner.runner_id
         && original.ownership_epoch == owner.ownership_epoch
@@ -24,8 +88,8 @@ pub(super) fn owns_conflict(original: &RunnerCommand, owner: &Workstream) -> boo
 }
 
 impl Store {
-    /// A real merge conflict is attempted once, with one recovery if the old
-    /// checkout preflight failed before the Merger started.
+    /// A real merge conflict is attempted once, with a bounded recovery for
+    /// an old checkout preflight failure or an uncommitted Merger result.
     pub fn merger_tick(&self) -> Result<()> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -41,6 +105,10 @@ impl Store {
                          AND COALESCE(json_extract(c.data,'$.agent_spec.role'),'') NOT IN (?1,'direct')
                          AND instr(json_extract(c.data,'$.result.agent.summary'),?2)=1
                          AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=c.id AND json_extract(a.data,'$.final_scan_complete')=1))
+                        OR (c.state='succeeded'
+                            AND json_extract(c.data,'$.agent_spec.role')=?1
+                            AND instr(json_extract(c.data,'$.result.agent.summary'),?4)=1
+                            AND EXISTS(SELECT 1 FROM archive_status a WHERE a.command_id=c.id AND json_extract(a.data,'$.final_scan_complete')=1))
                         OR (c.state='failed' AND json_extract(c.data,'$.agent_spec.role')=?1
                             AND json_extract(c.data,'$.result.agent.phase')='failed'
                             AND json_extract(c.data,'$.result.agent.summary')=?3
@@ -50,16 +118,16 @@ impl Store {
             )?;
             let rows = query
                 .query_map(params![MERGER_ROLE, PUBLICATION_CONFLICT_PREFIX,
-                    "Merger konnte nicht starten: Projektordner enthaelt eigene Aenderungen; nichts ueberschrieben"], |row| {
+                    OLD_MERGER_PREFLIGHT, uncommitted_result_prefix()], |row| {
                     row.get::<_, String>(0)
                 })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         for row in rows {
             let latest: RunnerCommand = serde_json::from_str(&row)?;
-            let recovery = latest.state == CommandState::Failed;
+            let recovery = latest.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
             let original = if recovery {
-                if is_merger_recovery(&latest) {
+                if attempted_current_recovery(&latest) {
                     continue;
                 }
                 let Some(parent) = latest.agent_spec.as_ref().and_then(|spec| spec.prompt.lines().next())
@@ -109,12 +177,16 @@ impl Store {
             };
              let marker = if recovery { format!("{MERGER_RECOVERY_PROMPT_MARKER}\n") } else { String::new() };
              let prompt = format!(
-                "{MERGE_PARENT_PREFIX}{}\n{marker}Resolve the integration conflict only. The original result is \
+                "{MERGE_PARENT_PREFIX}{}\n{marker}{MERGER_POLICY_MARKER}\nResolve the integration conflict only. The original result is \
                  at refs/yoloforge/publication-snapshots/{} and the pinned target is at \
                  refs/yoloforge/merger-targets/{}. Preserve both commits as ancestors of your resolution. \
+                 Treat the pinned target as the current authoritative baseline. Preserve its behavior when both \
+                 sides change the same concern, and integrate the original result's non-conflicting intent. \
                  Run the relevant tests and commit the \
                  resolution in the assigned worktree. Never edit the project checkout or push. \
-                 If the intended resolution is ambiguous, ask the user first.", original.id, original.id, original.id);
+                 If a material decision remains genuinely ambiguous after applying that policy, use the question \
+                 tool and wait for the answer; never end the run with a question in the final response. Do not \
+                 report completion or stop before the resolution is committed.", original.id, original.id, original.id);
             tx.execute_batch("SAVEPOINT merge_result")?;
             let result = Store::enqueue_with_pins(
                 &tx,
@@ -173,6 +245,7 @@ impl Store {
             }
             tx.execute_batch("RELEASE merge_result")?;
         }
+        find_existing_publication_problems(&tx)?;
         tx.commit()?;
         Ok(())
     }
@@ -185,17 +258,34 @@ mod tests {
         FactoryModelSettings, ModelAccess, ModelSelection, RoleModels, SetFactoryModels,
     };
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MergerBlock {
+        OldPreflight,
+        Uncommitted,
+        TargetOverlap,
+    }
+
     #[test]
     fn conflict_enqueues_once_with_merger_model_but_dirty_target_does_not() {
-        check_merger_recovery(true);
+        check_merger_recovery(true, MergerBlock::OldPreflight);
     }
 
     #[test]
     fn unsuccessful_merger_recovery_does_not_queue_again() {
-        check_merger_recovery(false);
+        check_merger_recovery(false, MergerBlock::OldPreflight);
     }
 
-    fn check_merger_recovery(success: bool) {
+    #[test]
+    fn unpublished_merger_gets_one_recovery_run() {
+        check_merger_recovery(true, MergerBlock::Uncommitted);
+    }
+
+    #[test]
+    fn committed_merger_with_overlapping_target_edits_is_not_rerun() {
+        check_merger_recovery(false, MergerBlock::TargetOverlap);
+    }
+
+    fn check_merger_recovery(success: bool, block: MergerBlock) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("factory.db")).unwrap();
         let runner = RunnerId::new();
@@ -375,11 +465,17 @@ mod tests {
         assert!(spec
             .prompt
             .starts_with(&format!("{MERGE_PARENT_PREFIX}{}", sources[1].1.id)));
+        assert!(spec.prompt.lines().any(|line| line == MERGER_POLICY_MARKER));
+        assert!(spec.prompt.contains("Treat the pinned target as the current authoritative baseline"));
+        assert!(spec.prompt.contains("use the question tool and wait for the answer"));
         assert_eq!(
             store.task_payload(sources[0].0).unwrap().status,
             TicketState::Blocked
         );
         let blocked = store.task_payload(sources[0].0).unwrap();
+        let problems = store.desktop_snapshot().unwrap().intent_problems;
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].ticket_id, blocked.id);
         let mut confirmation = ReconcilePublication {
             request_id: RequestId::new(),
             expected_revision: blocked.revision,
@@ -393,6 +489,7 @@ mod tests {
         confirmation.base_branch = "main".into();
         assert_eq!(store.reconcile_publication(blocked.id, confirmation).unwrap().status, TicketState::Done);
         let snapshot = store.snapshot().unwrap();
+        assert!(snapshot.intent_problems.is_empty());
         let reconciled = snapshot.commands.iter().find(|c| c.id == sources[0].1.id).unwrap();
         assert!(!command_publication_blocked(reconciled));
         assert!(!command_publication_unconfirmed(reconciled));
@@ -410,6 +507,18 @@ mod tests {
                 },
             )
             .unwrap();
+        if block != MergerBlock::OldPreflight {
+            store.report_archive(runner, merge.id, ReportArchive {
+                ownership_epoch: merge.ownership_epoch,
+                batch: ArchiveBatch {
+                    session_id: merge.session_id(),
+                    revision: 1,
+                    captured_unix_ms: 1,
+                    final_scan_complete: true,
+                    messages: vec![],
+                },
+            }).unwrap();
+        }
         store
             .complete(
                 runner,
@@ -421,8 +530,12 @@ mod tests {
                         agent: AgentProgress {
                             session_id: merge.session_id(),
                             message_id: agent_message_id(merge.id),
-                            phase: AgentPhase::Failed,
-                            summary: "Merger konnte nicht starten: Projektordner enthaelt eigene Aenderungen; nichts ueberschrieben".into(),
+                            phase: if block == MergerBlock::OldPreflight { AgentPhase::Failed } else { AgentPhase::Succeeded },
+                            summary: match block {
+                                MergerBlock::OldPreflight => "Merger konnte nicht starten: Projektordner enthaelt eigene Aenderungen; nichts ueberschrieben".into(),
+                                MergerBlock::Uncommitted => format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: {MERGER_UNCOMMITTED_RESULT}\n\nAgentenergebnis:\nMerge paused."),
+                                MergerBlock::TargetOverlap => format!("{PUBLICATION_BLOCKED_PREFIX}\nErgebnis im Arbeitsbereich erhalten. Automatische Übernahme blockiert: Lokale Aenderungen ueberschneiden sich\n\nAgentenergebnis:\nResolution committed."),
+                            },
                         },
                     },
                 },
@@ -432,6 +545,11 @@ mod tests {
         store.merger_tick().unwrap();
         store.merger_tick().unwrap();
         let pending = store.pending(runner).unwrap();
+        if block == MergerBlock::TargetOverlap {
+            assert!(pending.is_empty());
+            assert_eq!(store.task_payload(sources[1].0).unwrap().execution_command, Some(merge.id));
+            return;
+        }
         assert_eq!(pending.len(), 1);
         let retry = &pending[0];
         assert_ne!(retry.id, merge.id);

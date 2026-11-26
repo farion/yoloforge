@@ -1,5 +1,5 @@
 use factory_core::*;
-use factory_protocol::Snapshot;
+use factory_protocol::{IntentProblem, IntentSolution, Snapshot, DISCARDED_SESSION_REASON};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 pub fn hash_of(value: impl std::hash::Hash) -> u64 {
@@ -26,8 +26,9 @@ pub enum Page {
     #[default]
     Tasks,
     Questions,
-    Directs,
+    #[serde(alias = "Directs")]
     Sessions,
+    ProjectActivity,
     Reviewer,
     Orchestrator,
     Supervisor,
@@ -47,9 +48,9 @@ impl Page {
         use egui_phosphor::regular as icons;
         match self {
             Self::Tasks => icons::LIST_CHECKS,
-            Self::Questions => icons::CHAT_CIRCLE_TEXT,
-            Self::Directs => icons::CHAT_TEARDROP,
+            Self::Questions => icons::TRAY,
             Self::Sessions => icons::TERMINAL_WINDOW,
+            Self::ProjectActivity => icons::PULSE,
             Self::Reviewer => icons::CLIPBOARD_TEXT,
             Self::Orchestrator => icons::FLOW_ARROW,
             Self::Supervisor => icons::EYE,
@@ -64,10 +65,10 @@ impl Page {
     }
     pub fn title(self) -> &'static str {
         match self {
-            Self::Tasks => crate::tr!("Aufgaben"),
-            Self::Questions => crate::tr!("Fragen"),
-            Self::Directs => "Directs",
-            Self::Sessions => "Implementer",
+            Self::Tasks => crate::tr!("Intents"),
+            Self::Questions => crate::tr!("Inbox"),
+            Self::Sessions => crate::tr!("Sessions"),
+            Self::ProjectActivity => crate::tr!("Projektaktivität"),
             Self::Reviewer => "Reviewer",
             Self::Orchestrator => "Orchestrator",
             Self::Supervisor => "Supervisor",
@@ -96,9 +97,10 @@ impl Page {
 pub enum Target {
     Task(ProjectId, TicketId),
     Questions(ProjectId, String),
+    IntentProblem(ProjectId, TicketId),
     Session(ProjectId, CommandId),
+    RunDetails(CommandId),
     Diagnose(Option<ProjectId>),
-    Orchestrator(ProjectId),
 }
 
 impl Target {
@@ -106,9 +108,10 @@ impl Target {
         match self {
             Self::Task(..) => crate::tr!("Zur Aufgabe"),
             Self::Questions(..) => crate::tr!("Zur Rückfrage"),
+            Self::IntentProblem(..) => crate::tr!("Zur Inbox"),
             Self::Session(..) => crate::tr!("Zur Session"),
+            Self::RunDetails(..) => crate::tr!("Laufdetails …"),
             Self::Diagnose(..) => crate::tr!("Zur Diagnose"),
-            Self::Orchestrator(..) => crate::tr!("Zum Orchestrator"),
         }
     }
 }
@@ -250,6 +253,47 @@ pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
         TicketState::Done => crate::tr!("Abgeschlossen"),
         TicketState::Cancelled => crate::tr!("Abgebrochen"),
         TicketState::Validating | TicketState::ReworkQueued => unreachable!(),
+    }
+}
+
+/// Canonical user-facing Intent status shared by lists, Overview and sessions.
+pub fn task_display_status(s: &Snapshot, t: &Ticket) -> &'static str {
+    let command = task_command(s, t);
+    if let Some(status) = command.and_then(|c| merger_pending_status(s, c)) {
+        return status;
+    }
+    if command.is_some_and(|c| command_waits_for_answer(s, c)) {
+        return crate::tr!("Braucht Antwort");
+    }
+    let retry_wait =
+        command.is_none() && task_status(s, t) == crate::tr!("Wartet auf Wiederholung");
+    let failed = !retry_wait
+        && (command.is_some_and(|c| {
+            c.state == CommandState::Failed
+                || command_publication_blocked(c)
+                || c.agent_progress.as_ref().is_some_and(|p| {
+                    matches!(p.phase, AgentPhase::Failed | AgentPhase::Interrupted)
+                })
+        }) || t.status == TicketState::Blocked
+            || (command.is_none()
+                && (t.routing_note
+                    .starts_with("Orchestrator-Vorbereitung fehlgeschlagen")
+                    || t.routing_note.starts_with("Orchestrator: Lauf fehlgeschlagen"))));
+    if failed {
+        let status = task_status(s, t);
+        if status == crate::tr!("Wartet auf Wiederholung") {
+            status
+        } else if command.is_some_and(command_publication_blocked) {
+            crate::tr!("Übernahme blockiert")
+        } else if command.is_some_and(|c| c.state == CommandState::Failed) {
+            crate::tr!("Fehlgeschlagen")
+        } else if validation_blocked(t) {
+            crate::tr!("Validierung blockiert")
+        } else {
+            crate::tr!("Blockiert")
+        }
+    } else {
+        task_status(s, t)
     }
 }
 
@@ -412,6 +456,26 @@ pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
 
 pub fn needs_answer(q: &Question) -> bool {
     matches!(q.state, QuestionState::Pending | QuestionState::Rejected)
+}
+
+pub fn question_under_automation(q: &Question) -> bool {
+    q.state == QuestionState::Pending && q.orchestration_note == QUESTION_AUTOMATION_PENDING
+}
+
+pub fn inbox_question(q: &Question) -> bool {
+    needs_answer(q) && !question_under_automation(q)
+}
+
+pub fn inbox_problems(s: &Snapshot, project: ProjectId) -> impl Iterator<Item = (&IntentProblem, &Ticket)> {
+    s.intent_problems.iter().filter_map(move |problem| {
+        let ticket = s.tickets.iter().find(|t| t.id == problem.ticket_id && t.project_id == project
+            && !t.draft && (matches!(t.status, TicketState::Blocked | TicketState::InProgress)
+                && t.execution_command == Some(problem.command_id)
+                || problem.solution == Some(IntentSolution::ReassignSession)
+                    && matches!(t.status, TicketState::Backlog | TicketState::Ready)
+                    && t.execution_command.is_none() && t.requested_session == Some(problem.command_id)))?;
+        Some((problem, ticket))
+    })
 }
 
 pub fn retryable_task(snapshot: &Snapshot, ticket: &Ticket) -> bool {
@@ -606,6 +670,12 @@ pub(crate) fn merger_ticket<'a>(s: &'a Snapshot, c: &RunnerCommand) -> Option<&'
 }
 
 pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<RunnerCommand> {
+    if page == Page::ProjectActivity {
+        let mut commands = sessions_for_page(s, project, Page::Supervisor);
+        commands.extend(sessions_for_page(s, project, Page::Memorizer));
+        commands.sort_by_key(|c| std::cmp::Reverse((c.created_unix_ms, c.id)));
+        return commands;
+    }
     if page == Page::Merger {
         return s.commands.iter().rev().filter(|c| is_merger(c) && command_project(s, c) == Some(project)).cloned().collect();
     }
@@ -634,6 +704,19 @@ pub fn sessions_for_page(s: &Snapshot, project: ProjectId, page: Page) -> Vec<Ru
         commands.sort_by_key(|c| std::cmp::Reverse(c.created_unix_ms));
     }
     commands
+}
+
+pub(crate) fn intent_run_role(c: &RunnerCommand) -> &'static str {
+    match c.agent_spec.as_ref().map(|a| a.role.as_str()) {
+        Some("orchestrator") => "Orchestrator",
+        Some("reviewer") => "Reviewer",
+        Some(MERGER_ROLE) => "Merger",
+        Some("supervisor") => "Supervisor",
+        Some("memorizer" | "orchestrator-memory") => "Memorizer",
+        _ if c.kind == CommandKind::RunAgent => "Implementer",
+        _ if c.kind == CommandKind::TargetGit => "Git",
+        _ => crate::tr!("Arbeitsbereich"),
+    }
 }
 
 pub fn session_archived_for_page(s: &Snapshot, page: Page, c: &RunnerCommand) -> bool {
@@ -770,7 +853,10 @@ pub fn assignable_sessions(s: &Snapshot, project: ProjectId) -> Vec<RunnerComman
 /// A normal closure retires scheduling but can be reopened by a user prompt.
 /// An explicitly terminated runtime must not be restarted through this editor.
 pub fn can_prompt_session(s: &Snapshot, project: ProjectId, root: CommandId) -> bool {
-    s.commands.iter().any(|c| c.kind == CommandKind::RunAgent && !is_direct(c) && !is_merger(c) && c.session_root() == root
+    !s.draft_resets.iter().any(|reset| reset.root_id == root)
+        && !s.session_closures.iter().any(|closure| closure.root_command_id == root
+        && closure.reason == DISCARDED_SESSION_REASON)
+        && s.commands.iter().any(|c| c.kind == CommandKind::RunAgent && !is_direct(c) && !is_merger(c) && c.session_root() == root
         && command_project(s, c) == Some(project)
         && !s.commands.iter().any(|v| v.stream_id == c.stream_id && is_merger(v))
         && c.agent_spec.as_ref().is_some_and(|agent| !agent.read_only))

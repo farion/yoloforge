@@ -140,7 +140,10 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
             attempted: false,
             ready: false,
             create_local: Path::new(&setup.repository_source).is_absolute()
-                && matches!(fs::symlink_metadata(&setup.repository_source),Err(e) if e.kind()==std::io::ErrorKind::NotFound),
+                && match fs::symlink_metadata(&setup.repository_source) {
+                    Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                    Ok(meta) => meta.is_dir() && is_empty_directory(Path::new(&setup.repository_source))?,
+                },
         };
         save(j, r, &plan)?;
         plan
@@ -219,6 +222,9 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                     command.env_remove(key);
                 }
             }
+            #[cfg(windows)]
+            command.args(["-c", "core.longpaths=true"]);
+            let mut diagnostic = tempfile::tempfile().context("Cannot capture Git import diagnostics")?;
             command
                 .args([
                     "-c",
@@ -236,15 +242,31 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
                 .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(diagnostic.try_clone()?)
+                .env("LC_ALL", "C")
                 .kill_on_drop(true);
             let status =
                 tokio::time::timeout(std::time::Duration::from_secs(120), command.status())
                     .await
                     .context(
                         "Clone timed out; attempt retained, retry preparation as a new command",
-                    )??;
-            ensure!(status.success(),"Repository import failed; check runner Git access. Retry preparation after fixing access; no files deleted");
+                    )?
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::NotFound {
+                            anyhow::anyhow!("Git not found on the runner; install Git and restart the runner")
+                        } else {
+                            anyhow::anyhow!("Git could not be started on the runner: {error}")
+                        }
+                    })?;
+            if !status.success() {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut output = Vec::new();
+                if diagnostic.seek(SeekFrom::Start(0)).is_ok() {
+                    let _ = diagnostic.take(16_384).read_to_end(&mut output);
+                }
+                let cause = git_import_cause(&String::from_utf8_lossy(&output));
+                anyhow::bail!("Repository import failed: {cause}. No files deleted");
+            }
         }
         if plan.source != CHECKPOINT_REPOSITORY {
             tokio::task::block_in_place(|| {
@@ -271,6 +293,33 @@ pub async fn ensure_repository(j: &Journal, r: &mut Record, args: &Args) -> Resu
     Ok(())
 }
 
+// Git may echo a credential-bearing URL, paths or arbitrary remote text.
+// Only expose known diagnostic categories, never raw clone stderr.
+fn git_import_cause(stderr: &str) -> &'static str {
+    let stderr = stderr.to_ascii_lowercase();
+    if stderr.contains("dubious ownership") || stderr.contains("not owned by current user") {
+        "Git rejected repository ownership; check which account runs the runner"
+    } else if stderr.contains("filename too long") || stderr.contains("file name too long") {
+        "Git encountered a path that is too long; use a shorter repository or runner workspace path"
+    } else if stderr.contains("remote branch") && stderr.contains("not found") {
+        "the configured base branch is missing from the source repository"
+    } else if stderr.contains("authentication failed") || stderr.contains("permission denied (publickey")
+        || stderr.contains("could not read username") || stderr.contains("terminal prompts disabled")
+    {
+        "Git authentication failed; check credentials available to the runner"
+    } else if stderr.contains("could not resolve host") || stderr.contains("could not resolve hostname")
+        || stderr.contains("failed to connect")
+    {
+        "the runner could not reach the Git host"
+    } else if stderr.contains("permission denied") || stderr.contains("access is denied") {
+        "Git was denied filesystem or repository access on the runner"
+    } else if stderr.contains("does not exist") || stderr.contains("not a git repository") {
+        "Git could not find a repository at the configured source; check the path from the runner"
+    } else {
+        "Git could not clone the source; check the base branch and Git access on the runner"
+    }
+}
+
 /// Refresh only the managed base ref from committed source history. An
 /// existing worktree remains pinned to its original command and commit.
 fn refresh_local_base(repository: &Path, source: &Path, branch: &str) -> Result<()> {
@@ -292,28 +341,31 @@ fn refresh_local_base(repository: &Path, source: &Path, branch: &str) -> Result<
     git(repository, &["update-ref", &reference, &current, &previous])?;
     Ok(())
 }
+fn is_empty_directory(path: &Path) -> std::io::Result<bool> {
+    Ok(fs::read_dir(path)?.next().transpose()?.is_none())
+}
+
 // Publish only a complete repository, without replacing an entry created by another process.
 fn initialize_local(source: &str, branch: &str, project: ProjectId) -> Result<()> {
     let target = Path::new(source);
+    let mut replace_empty = false;
     if fs::symlink_metadata(target).is_ok() {
         ensure!(
             !fs::symlink_metadata(target)?.file_type().is_symlink(),
             "Project folder was replaced by a symlink"
         );
-        ensure!(
-            git(target, &["config", "--local", "--get", "factory.projectId"])?
-                == project.to_string(),
-            "Project folder was occupied during creation; existing files preserved"
-        );
-        git(
-            target,
-            &[
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{branch}^{{commit}}"),
-            ],
-        )?;
-        return Ok(());
+        replace_empty = target.is_dir() && is_empty_directory(target)?;
+        if !replace_empty {
+            let project_id = project.to_string();
+            ensure!(
+                target.join(".git").is_dir()
+                    && git(target, &["config", "--local", "--get", "factory.projectId"]).ok().as_deref()
+                        == Some(project_id.as_str()),
+                "Project folder was occupied during creation; existing files preserved"
+            );
+            git(target, &["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])?;
+            return Ok(());
+        }
     }
     let parent = target.parent().context("Project folder has no parent")?;
     fs::create_dir_all(parent).map_err(|error| {
@@ -351,6 +403,11 @@ fn initialize_local(source: &str, branch: &str, project: ProjectId) -> Result<()
             ("GIT_COMMITTER_EMAIL", "factory@yoloforge.invalid"),
         ],
     )?;
+    if replace_empty {
+        // Never recursively remove anything. If another process added a file,
+        // removal fails; if it recreated the path, the no-replace move fails.
+        fs::remove_dir(target).context("Project folder is no longer empty; existing files preserved")?;
+    }
     factory_platform::rename_noreplace(&attempt, target)
     .context("Project folder occupied during creation; prepared repository retained")?;
     factory_platform::sync_dir(parent)?;
@@ -360,6 +417,21 @@ fn initialize_local(source: &str, branch: &str, project: ProjectId) -> Result<()
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn clone_errors_distinguish_branch_ownership_and_windows_paths_without_echoing_urls() {
+        for (stderr, expected) in [
+            ("fatal: Remote branch main not found in upstream origin", "base branch"),
+            ("fatal: detected dubious ownership in repository at 'C:/work/project'", "ownership"),
+            ("fatal: cannot create directory: Filename too long", "too long"),
+            ("fatal: Authentication failed for 'https://secret@example.invalid/repo'", "authentication"),
+            ("fatal: repository 'https://secret@example.invalid/repo' does not exist", "could not find"),
+        ] {
+            let cause = git_import_cause(stderr);
+            assert!(cause.contains(expected), "{cause}");
+            assert!(!cause.contains("secret"));
+        }
+    }
 
     #[test]
     fn project_parent_failure_reports_runner_path_and_os_error() {
@@ -377,7 +449,7 @@ mod tests {
         assert_eq!(fs::read_to_string(blocked).unwrap(), "keep");
     }
 
-    async fn exercise(import: bool, local: bool) {
+    async fn exercise(import: bool, local: bool, existing_empty: bool) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("work");
         let path = dir.path().join("journal");
@@ -385,10 +457,11 @@ mod tests {
         let project = ProjectId::new();
         let stream = StreamId::new();
         let source = if local {
-            dir.path()
-                .join("new-parent/new-project")
-                .to_string_lossy()
-                .into_owned()
+            let source = dir.path().join("new-parent/new-project");
+            if existing_empty {
+                fs::create_dir_all(&source).unwrap();
+            }
+            source.to_string_lossy().into_owned()
         } else if import {
             let repo = dir.path().join("source");
             fs::create_dir(&repo).unwrap();
@@ -429,6 +502,8 @@ mod tests {
         ensure_repository(&j, &mut r, &args).await.unwrap();
         if local {
             assert!(Path::new(&source).join(".git").is_dir());
+            assert_eq!(git(Path::new(&source), &["rev-list", "--count", "main"]).unwrap(), "1");
+            assert!(git(Path::new(&source), &["ls-tree", "-r", "main"]).unwrap().is_empty());
         }
         let resolved = resolve(c.workspace_spec.as_ref().unwrap(), &root).unwrap();
         let head = git(&resolved, &["rev-parse", "main"]).unwrap();
@@ -492,15 +567,19 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_project_manages_its_own_repository_and_preserves_work_after_restart() {
-        exercise(false, false).await;
+        exercise(false, false, false).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn import_preserves_source_and_refuses_occupied_or_rebound_destinations() {
-        exercise(true, false).await;
+        exercise(true, false, false).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn requested_missing_folder_is_created_and_recovers_after_restart() {
-        exercise(false, true).await;
+        exercise(false, true, false).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn existing_empty_folder_gets_initial_commit_and_workspace() {
+        exercise(false, true, true).await;
     }
     #[test]
     fn local_initialization_reconciles_its_own_folder_and_never_adopts_occupied_paths() {

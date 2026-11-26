@@ -505,7 +505,7 @@ fn native_image_drop_and_clipboard_target_work_in_an_open_session() {
 }
 
 #[test]
-fn notification_toasts_use_pill_colors_and_the_originating_project_logo() {
+fn toasts_use_pill_colors_and_the_originating_project_logo() {
     use crate::app::{ToastKind, AMBER, BLUE, GREEN, RED};
     fn has_stroke(shape: &egui::Shape, color: egui::Color32) -> bool {
         match shape {
@@ -525,29 +525,94 @@ fn notification_toasts_use_pill_colors_and_the_originating_project_logo() {
     let project = other_project.id;
     snapshot.projects.push(other_project);
     let ctx = app.backend.context().clone();
-    app.notifications_initialized = true;
-    for (index, (kind, title, expected, color)) in [
-        ("other", "Hinweis", ToastKind::Info, BLUE),
-        ("question.created", "Antwort erforderlich", ToastKind::Warning, AMBER),
-        ("command.updated", "Aufgabe abgeschlossen", ToastKind::Success, GREEN),
-        ("command.updated", "Aufgabe fehlgeschlagen", ToastKind::Error, RED),
+    for (index, (title, kind, color)) in [
+        ("Hinweis", ToastKind::Info, BLUE),
+        ("Antwort erforderlich", ToastKind::Warning, AMBER),
+        ("Aufgabe abgeschlossen", ToastKind::Success, GREEN),
+        ("Aufgabe fehlgeschlagen", ToastKind::Error, RED),
     ].into_iter().enumerate() {
         app.notices.clear();
-        app.backend.emit_for_test(crate::backend::Event::Notifications(Ok(NotificationPage {
-            entries: vec![Notification { id: index as u64 + 1, project_id: Some(project), command_id: None,
-                question_id: None, ticket_id: None, title: title.into(), kind: kind.into(), created_unix_ms: 0, read: false }],
-            unread: 1, next_before: None,
-        }), false));
-        app.receive();
-        assert_eq!(app.notices[0].2, expected);
+        app.project_notice(kind, Some(project), title);
+        assert_eq!(app.notices[0].2, kind);
         assert_eq!(app.notices[0].3.as_ref(), Some(&logo));
         let time = (index * 2) as f64;
         let _ = ctx.run(egui::RawInput { time: Some(time), ..Default::default() }, |ctx| app.draw_toasts(ctx));
         let output = ctx.run(egui::RawInput { time: Some(time + 1.0), ..Default::default() }, |ctx| app.draw_toasts(ctx));
-        assert!(output.shapes.iter().any(|shape| has_stroke(&shape.shape, color)), "{kind}: missing status color");
+        assert!(output.shapes.iter().any(|shape| has_stroke(&shape.shape, color)), "{kind:?}: missing status color");
     }
     app.notice("Global notice");
     assert!(app.notices.last().unwrap().3.is_none());
+}
+
+#[test]
+fn inbox_counts_only_actionable_items_and_toasts_each_escalation_once() {
+    use crate::app::{ToastKind, AMBER};
+    let mut app = fixture();
+    let project = app.settings.project.unwrap();
+    let (ticket, command, question) = {
+        let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+        let ticket = snapshot.tickets[0].id;
+        let command = snapshot.commands[0].id;
+        snapshot.questions[0].orchestration_note = QUESTION_AUTOMATION_PENDING.into();
+        snapshot.questions[1].state = QuestionState::AnswerQueued;
+        snapshot.intent_problems = vec![
+            IntentProblem { ticket_id: ticket, command_id: command, reason: "Entscheidung zur Zielversion erforderlich".into(), solution: Some(IntentSolution::ContinueSession) },
+            IntentProblem { ticket_id: ticket, command_id: CommandId::new(), reason: "Alter Lauf".into(), solution: None },
+        ];
+        (ticket, command, snapshot.questions[0].id)
+    };
+    let snapshot = app.snapshot.as_ref().unwrap();
+    assert_eq!(crate::views::project_navigation_badges(snapshot, project, Page::Questions).0, vec![(1, AMBER)]);
+    assert_eq!(inbox_problems(snapshot, project).count(), 1);
+    let event = |id, kind: &str, question_id| Notification {
+        id, kind: kind.into(), title: "Test".into(), project_id: Some(project), command_id: Some(command),
+        question_id, ticket_id: Some(ticket), created_unix_ms: 0, read: false,
+    };
+    let problem = event(3, INTENT_ATTENTION_EVENT, None);
+    assert!(matches!(app.notification_target(&problem), Some(Target::IntentProblem(p, t)) if p == project && t == ticket));
+    let entries = vec![problem, event(2, "question.created", Some(question)), event(1, "command.updated", None)];
+    app.notifications_initialized = true;
+    for _ in 0..2 {
+        app.backend.emit_for_test(crate::backend::Event::Notifications(
+            Ok(NotificationPage { entries: entries.clone(), unread: 3, next_before: None }), false));
+        app.receive();
+    }
+    assert_eq!(app.notices.len(), 1);
+    assert_eq!(app.notices[0].2, ToastKind::Warning);
+    let ctx = app.backend.context().clone();
+    app.navigate(Target::IntentProblem(project, ticket));
+    app.dialog = None;
+    let output = ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        ..Default::default()
+    }, |ctx| app.draw_shell(ctx));
+    let mut labels = vec![];
+    for shape in &output.shapes {
+        shape_text(&shape.shape, &mut labels);
+    }
+    assert!(labels.iter().any(|label| label.contains("Entscheidung zur Zielversion erforderlich")));
+    assert!(!labels.iter().any(|label| label.contains("Alter Lauf")));
+    let rect: egui::Rect = ctx.data(|data| data.get_temp(egui::Id::new(("test-inbox-accept", ticket)))).unwrap();
+    let _ = ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events: click_events(rect.center()), ..Default::default()
+    }, |ctx| app.draw_shell(ctx));
+    assert!(app.dialog.is_some());
+    assert!(app.settings.pending.is_empty(), "Opening the confirmation must not submit the solution");
+    let draw_dialog = |app: &mut App, events| {
+        let _ = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            events, ..Default::default()
+        }, |ctx| { app.draw_shell(ctx); app.draw_dialog(ctx); });
+    };
+    for _ in 0..3 { draw_dialog(&mut app, vec![]); }
+    let confirm: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-inbox-solution-confirm"))).unwrap();
+    draw_dialog(&mut app, click_events(confirm.center()));
+    assert_eq!(app.settings.pending.len(), 1);
+    let pending = &app.settings.pending[0];
+    assert_eq!(pending.path, format!("/v1/tasks/{ticket}/accept-solution"));
+    assert_eq!(pending.body["previous_command"], json!(command));
+    assert!(pending.body.get("solution").is_none(), "The server selects the recorded action");
 }
 
 #[test]
@@ -1113,6 +1178,55 @@ fn task_history_dialog_opens_the_associated_opencode_tab() {
 }
 
 #[test]
+fn intent_history_opens_the_exact_routing_run() {
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.tickets[0].prompt = Some("Kurzer Test-Intent".into());
+    let ticket = snapshot.tickets[0].id;
+    let mut routing = snapshot.commands[0].clone();
+    routing.id = CommandId::new();
+    let spec = routing.agent_spec.as_mut().unwrap();
+    spec.role = "orchestrator".into();
+    spec.read_only = true;
+    let run = routing.id;
+    let root = routing.session_root();
+    snapshot.commands.push(routing);
+    app.view_task(ticket);
+    let mut dialog = app.dialog.take().unwrap();
+    let Dialog::Task(task) = &mut dialog else { panic!("expected intent dialog"); };
+    task.receive_history(None, Ok(TaskHistoryPage {
+        next_before: None,
+        entries: vec![TaskHistoryEntry {
+            sequence: 1,
+            created_unix_ms: 1,
+            message: "Orchestrator-Lauf abgeschlossen".into(),
+            level: TaskHistoryLevel::Success,
+            command_id: Some(run),
+        }],
+    }));
+    let ctx = app.backend.context().clone();
+    let mut closed = false;
+    let mut render = |events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 900.0))),
+        events,
+        ..Default::default()
+    }, |ctx| { closed = dialog.show(ctx, &mut app); });
+    for _ in 0..3 { let _ = render(vec![]); }
+    let button_id = egui::Id::new(("test-intent-run-open", run));
+    let pos = ctx.data_mut(|d| d.get_temp::<egui::Rect>(button_id)).unwrap().center();
+    let _ = render(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+    ]);
+    let _ = render(vec![
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+    ]);
+    assert!(closed);
+    assert_eq!(app.tabs[app.active_tab - 1].root, root);
+    assert_eq!(app.tabs[app.active_tab - 1].selected_execution, Some(run));
+}
+
+#[test]
 fn task_history_is_colored_and_rendered_below_the_prompt() {
     let mut app = fixture();
     let ticket = &mut Arc::make_mut(app.snapshot.as_mut().unwrap()).tickets[0];
@@ -1129,6 +1243,7 @@ fn task_history_is_colored_and_rendered_below_the_prompt() {
             created_unix_ms: 1795510043691,
             message: message.into(),
             level: task_routing_level(message),
+            command_id: None,
         }],
     })));
     app.receive();
@@ -1142,6 +1257,7 @@ fn task_history_is_colored_and_rendered_below_the_prompt() {
         }, |ctx| { dialog.show(ctx, &mut app); }));
     }
     let output = output.unwrap();
+    let message = crate::i18n::label(message);
     let text = |wanted: &str| output.shapes.iter().find_map(|shape| match &shape.shape {
         egui::epaint::Shape::Text(text) if text.galley.job.text == wanted => Some(text),
         _ => None,
@@ -1317,11 +1433,9 @@ fn sidebar_renders_all_current_status_colors_for_every_project_page() {
     let mut width = None;
     for (page, expected) in [
         (Page::Tasks, &[(1, GREEN), (1, AMBER)][..]),
-        (Page::Questions, &[(1, BLUE), (1, AMBER)][..]),
+        (Page::Questions, &[(1, AMBER)][..]),
         (Page::Sessions, &[(1, GREEN), (2, BLUE), (1, RED)][..]),
-        (Page::Orchestrator, &[(1, GREEN), (1, BLUE), (1, RED)][..]),
-        (Page::Supervisor, &[(1, GREEN), (1, BLUE)][..]),
-        (Page::Memorizer, &[(1, GREEN), (1, BLUE)][..]),
+        (Page::ProjectActivity, &[(2, GREEN), (2, BLUE)][..]),
     ] {
         let rect: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-project-navigation", page)))).unwrap();
         assert_eq!(*width.get_or_insert(rect.width()), rect.width());
@@ -1333,6 +1447,94 @@ fn sidebar_renders_all_current_status_colors_for_every_project_page() {
         badges.sort_by(|(x, _), (other, _)| x.total_cmp(other));
         assert_eq!(badges.into_iter().map(|(_, badge)| badge).collect::<Vec<_>>(), expected, "{page:?}");
     }
+    let project_rows = [Page::Tasks, Page::Questions, Page::Sessions, Page::ProjectActivity].map(|page| {
+        ctx.data_mut(|d| d.get_temp::<egui::Rect>(
+            egui::Id::new(("test-project-navigation", page)),
+        )).unwrap()
+    });
+    assert!(project_rows.windows(2).all(|rows| rows[0].bottom() < rows[1].top()));
+    for page in [
+        Page::Orchestrator,
+        Page::Reviewer,
+        Page::Merger,
+        Page::Supervisor,
+        Page::Memorizer,
+    ] {
+        assert!(ctx.data_mut(|d| d.get_temp::<egui::Rect>(
+            egui::Id::new(("test-project-navigation", page)),
+        )).is_none(), "{page:?} must not appear in the sidebar");
+    }
+}
+
+#[test]
+fn project_activity_filter_only_shows_the_selected_background_role() {
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let mut add = |role: &str| {
+        let mut run = snapshot.commands[0].clone();
+        run.id = CommandId::new();
+        run.state = CommandState::Pending;
+        let spec = run.agent_spec.as_mut().unwrap();
+        spec.read_only = true;
+        spec.role = role.into();
+        snapshot.commands.push(run);
+    };
+    for role in ["supervisor", "memorizer", "reviewer", "orchestrator"] {
+        add(role);
+    }
+    app.set_page(Page::ProjectActivity);
+    let ctx = app.backend.context().clone();
+    let mut render = |events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events,
+        ..Default::default()
+    }, |ctx| app.draw_shell(ctx));
+    let count = |output: &egui::FullOutput, label: &str| output.shapes.iter().filter(|s|
+        matches!(&s.shape, egui::epaint::Shape::Text(t) if t.galley.job.text == label)).count();
+    let _ = render(vec![]);
+    let initial = render(vec![]);
+    assert_eq!(count(&initial, "OpenCode anzeigen"), 2);
+    let rect = |id| ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(id))).unwrap();
+    let search = rect("test-project-activity-search");
+    let filter = rect("test-project-activity-filter");
+    assert!(filter.left() >= search.right() && (filter.center().y - search.center().y).abs() < 2.0);
+    let _ = render(click_events(filter.center()));
+    let _ = render(vec![]);
+    let pos = ctx.data_mut(|d| d.get_temp::<egui::Rect>(
+        egui::Id::new(("test-section-filter-option", "Nach Rolle filtern", "Memorizer")),
+    )).unwrap().center();
+    let _ = render(vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+    ]);
+    let _ = render(vec![
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+    ]);
+    let filtered = render(vec![]);
+    assert_eq!(count(&filtered, "OpenCode anzeigen"), 1);
+    assert_eq!(count(&filtered, "Supervisor"), 0, "Supervisor must not appear after the popup closes");
+}
+
+#[test]
+fn inbox_filter_is_to_the_right_of_search_and_switches_to_problems() {
+    let mut app = fixture();
+    app.set_page(Page::Questions);
+    let ctx = app.backend.context().clone();
+    let draw = |app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(820.0, 560.0))),
+        events,
+        ..Default::default()
+    }, |ctx| app.draw_shell(ctx));
+    for _ in 0..3 { let _ = draw(&mut app, vec![]); }
+    let rect = |id| ctx.data(|d| d.get_temp::<egui::Rect>(id)).unwrap();
+    let search = rect(egui::Id::new("test-question-search"));
+    let filter = rect(egui::Id::new("test-inbox-filter"));
+    assert!(filter.left() >= search.right() && (filter.center().y - search.center().y).abs() < 2.0);
+    let _ = draw(&mut app, click_events(filter.center()));
+    let _ = draw(&mut app, vec![]);
+    let option = rect(egui::Id::new(("test-section-filter-option", "Inbox filtern", "Probleme")));
+    let _ = draw(&mut app, click_events(option.center()));
+    assert!(app.show_inbox_problems);
 }
 
 #[test]
@@ -2868,7 +3070,7 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     for shape in &output.shapes {
         shape_text(&shape.shape, &mut text);
     }
-    assert!(text.iter().any(|s| s == crate::tr!("Draft")));
+    assert!(text.iter().any(|s| s == crate::tr!("Entwurf")));
     assert!(text.iter().any(|s| s == "Bearbeiten"));
     let (action, _) = ctx
         .data_mut(|d| {
@@ -3946,7 +4148,7 @@ fn session_rows_match_task_style_and_keep_actions_at_bottom_right_in_an_icon_men
         assert!(text
             .iter()
             .any(|t| t == &format!("Zuletzt aktiv {}", timestamp(activity))));
-        assert!(text.iter().any(|t| t == "Offen"));
+        assert!(text.iter().any(|t| t == "Braucht Antwort"));
         for removed in [
             "Verwaltung …",
             "Rolle:",
@@ -3983,7 +4185,7 @@ fn session_rows_match_task_style_and_keep_actions_at_bottom_right_in_an_icon_men
     for shape in &output.shapes {
         shape_text(&shape.shape, &mut text);
     }
-    assert!(text.iter().any(|t| t == "Working"));
+    assert!(text.iter().any(|t| t == "In Bearbeitung"));
     let pos = rect("test-session-row-menu").center();
     let _ = draw(
         &mut app,
@@ -4217,7 +4419,7 @@ fn pages_keep_the_breadcrumb_without_repeating_the_page_heading() {
     let mut app = fixture();
     let ctx = app.backend.context().clone();
     let repeated = [
-        "Aufgaben",
+        "Intents",
         "Fragen",
         "Sessions",
         "Orchestrator",

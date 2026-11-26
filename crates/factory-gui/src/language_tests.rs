@@ -132,7 +132,7 @@ fn confirmed_language_save_applies_even_after_settings_close_and_failure_keeps_o
     assert_eq!(app.settings.language, Language::English);
     assert!(app.settings_dirty);
     assert_eq!(Page::Tasks.title(), "Intents");
-    assert_eq!(Page::Questions.title(), "Questions");
+    assert_eq!(Page::Questions.title(), "Inbox");
     assert_eq!(app.notices.last().unwrap().0, "Language saved.");
 
     let (tx, rx) = std::sync::mpsc::channel();

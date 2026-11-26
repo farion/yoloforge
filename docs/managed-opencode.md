@@ -100,6 +100,20 @@ bleiben auf dem Server.
   `FACTORY_OLLAMA_URL` als Vorgabe nutzen. Ollama zeigt nur Modelle mit
   Tool-Unterstützung.
 
+**OpenCode (kostenlos):** Ohne Anmeldung oder API-Schlüssel unter **Modell-Anbieter**
+hinzufügen. Factory übernimmt die verfügbaren kostenlosen Chat-Modelle mit
+Tool-Unterstützung aus dem nativen OpenCode-Katalog. Verwaltete Runner verwenden
+diesen Zugang direkt in ihrem eigenen OpenCode; sie brauchen dafür ausgehenden
+Zugriff auf OpenCode. Kein automatischer Wechsel zu kostenpflichtigen Modellen.
+Gratisangebote können sich ändern und manche behalten Eingaben zur
+Modellverbesserung; siehe [OpenCode-Datenschutzhinweise](https://opencode.ai/docs/console/models#privacy).
+
+**OpenCode Console:** Separater, kostenpflichtiger Zugang. In der
+[OpenCode Console](https://opencode.ai/console) anmelden, Guthaben hinterlegen und
+den API-Schlüssel in Factory eintragen. Der Schlüssel bleibt auf dem Server.
+Factory listet die kostenpflichtigen Chat-Modelle des Console-Workspaces mit
+Tool-Unterstützung auf; OpenCode Go ist ein separates Abo und nicht enthalten.
+
 **GitHub Copilot:** Unter **Modell-Anbieter** direkt **GitHub Copilot** auswählen,
 einen Zugang benennen und im Browser den angezeigten Gerätecode bestätigen.
 Factory nutzt die GitHub.com-Anmeldung von OpenCode. Das GitHub-Konto braucht
@@ -156,4 +170,5 @@ Modellaufrufen steht noch aus; siehe
 Die automatische OAuth-Token-Erneuerung für ChatGPT fehlt; abgelaufene Zugänge
 blockieren ohne Kontowechsel.
 Die zentrale OpenCode-Datenbank bleibt der Credential-Speicher. API-Schlüssel
-und OAuth-Tokens werden nicht an Runner übergeben.
+und OAuth-Tokens werden nicht an Runner übergeben. Der native Gratiszugang
+braucht keinen Eintrag im Credential-Speicher.

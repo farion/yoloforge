@@ -23,19 +23,6 @@ pub const AMBER: Color32 = Color32::from_rgb(244, 190, 84);
 pub(crate) enum ToastKind { Info, Success, Warning, Error }
 
 impl ToastKind {
-    fn from_notification(notification: &Notification) -> Self {
-        if notification.question_id.is_some() || matches!(notification.kind.as_str(), "question.created" | "question.updated" | "scheduler.blocked") {
-            return Self::Warning;
-        }
-        // The current server uses one event kind for all command outcomes.
-        match (notification.kind.as_str(), notification.title.as_str()) {
-            ("command.updated", "Aufgabe abgeschlossen") => Self::Success,
-            ("command.updated", "Sessionzustand ungeklärt") => Self::Warning,
-            ("command.updated", "Aufgabe fehlgeschlagen" | "Orchestrator-Auswertung fehlgeschlagen" | "Orchestrator: Vorbereitung fehlgeschlagen") => Self::Error,
-            _ => Self::Info,
-        }
-    }
-
     fn color(self) -> Color32 {
         match self {
             Self::Info => BLUE,
@@ -128,6 +115,7 @@ pub struct App {
     pub query: String,
     pub task_filter: usize,
     pub show_answered: bool,
+    pub show_inbox_problems: bool,
     pub sessions_closed: bool,
     pub diagnostics_project: bool,
     pub responses: BTreeMap<u64, Result<Value, Failure>>,
@@ -148,6 +136,7 @@ struct ViewState {
     query: String,
     filter: usize,
     answered: bool,
+    inbox_problems: bool,
     sessions_closed: bool,
     detail: Option<TicketId>,
 }
@@ -247,6 +236,7 @@ impl App {
             query: String::new(),
             task_filter: 0,
             show_answered: false,
+            show_inbox_problems: false,
             sessions_closed: false,
             diagnostics_project: false,
             skill_settings: BTreeMap::new(),
@@ -441,11 +431,13 @@ impl App {
             Target::Questions(project, session) => {
                 self.set_project(Some(project));
                 self.set_page(Page::Questions);
+                self.show_inbox_problems = false;
                 self.question_focus = Some(session.clone());
                 if let Some(s) = &self.snapshot {
-                    let qs = question_groups_for_tab(s, project, false)
+                    let mut qs = question_groups_for_tab(s, project, false)
                         .remove(&session)
                         .unwrap_or_default();
+                    qs.retain(inbox_question);
                     if !qs.is_empty() {
                         self.show_answered = false;
                         self.dialog = Some(Dialog::questions(qs));
@@ -455,13 +447,15 @@ impl App {
                     }
                 }
             }
-            Target::Session(project, root) => self.open_session(project, root),
-            Target::Orchestrator(project) => {
+            Target::IntentProblem(project, ticket) => {
                 self.set_project(Some(project));
-                self.set_page(Page::Orchestrator);
-                self.sessions_closed = false;
+                self.set_page(Page::Questions);
+                self.show_inbox_problems = true;
                 self.query.clear();
+                self.view_task(ticket);
             }
+            Target::Session(project, root) => self.open_session(project, root),
+            Target::RunDetails(id) => self.read(crate::tr!("Laufdetails …"), format!("/v1/commands/{id}")),
             Target::Diagnose(project) => {
                 if let Some(p) = project {
                     self.set_project(Some(p));
@@ -511,6 +505,7 @@ impl App {
                 query: self.query.clone(),
                 filter: self.task_filter,
                 answered: self.show_answered,
+                inbox_problems: self.show_inbox_problems,
                 sessions_closed: self.sessions_closed,
                 detail: self.detail,
             },
@@ -525,6 +520,7 @@ impl App {
         self.query = state.query;
         self.task_filter = state.filter;
         self.show_answered = state.answered;
+        self.show_inbox_problems = state.inbox_problems;
         self.sessions_closed = state.sessions_closed;
         self.detail = state.detail;
     }
@@ -626,7 +622,9 @@ impl App {
         if let Some(index) = self.tabs.iter().position(|tab| tab.direct_id == Some(direct.id)) {
             self.active_tab = index + 1;
         } else {
-            self.push_session_tab(direct.project_id, direct.root_command_id.unwrap_or(direct.id), "Direct".into(), Some(direct.id));
+            let title = self.snapshot.as_ref().map(|s| crate::directs::title(s, direct))
+                .unwrap_or_else(|| crate::tr!("Manuelle Session").into());
+            self.push_session_tab(direct.project_id, direct.root_command_id.unwrap_or(direct.id), title, Some(direct.id));
         }
     }
     fn push_session_tab(&mut self, project: ProjectId, root: CommandId, title: String, direct_id: Option<CommandId>) {
@@ -1144,7 +1142,27 @@ impl App {
                     |key| crate::tr!("{key} abgeschlossen", key = key));
             }
         }
+        if n.kind == INTENT_ATTENTION_EVENT {
+            return format!("{}: {}", key.unwrap_or(project_name), crate::tr!("Intent braucht Aufmerksamkeit"));
+        }
         format!("{project_name}: {}", n.title)
+    }
+
+    fn notification_needs_attention(&self, n: &Notification) -> bool {
+        if n.read { return false; }
+        match n.kind.as_str() {
+            INTENT_ATTENTION_EVENT => n.ticket_id.is_some_and(|id|
+                self.snapshot.as_ref().and_then(|s| s.tickets.iter().find(|t| t.id == id))
+                    .is_none_or(|t| !t.draft && t.execution_command == n.command_id
+                        && matches!(t.status, TicketState::Blocked | TicketState::InProgress)
+                        || !t.draft && t.execution_command.is_none() && t.requested_session == n.command_id
+                            && matches!(t.status, TicketState::Backlog | TicketState::Ready))),
+            "scheduler.blocked" => true,
+            "question.created" | "question.updated" => n.question_id.is_some_and(|id|
+                self.snapshot.as_ref().and_then(|s| s.questions.iter().find(|q| q.id == id))
+                    .is_none_or(inbox_question)),
+            _ => false,
+        }
     }
 
     pub fn notification_target(&self, n: &Notification) -> Option<Target> {
@@ -1163,14 +1181,18 @@ impl App {
         if let Some(t) = n.ticket_id
             .filter(|id| self.snapshot.as_ref().is_some_and(|s| s.tickets.iter().any(|t| t.id == *id)))
         {
-            return Some(Target::Task(project, t));
+            return Some(if n.kind == INTENT_ATTENTION_EVENT {
+                Target::IntentProblem(project, t)
+            } else { Target::Task(project, t) });
         }
         if let Some(id) = n.command_id {
             let snapshot = self.snapshot.as_ref()?;
             let c = snapshot.commands.iter().find(|c| c.id == id)?;
             if c.kind != CommandKind::RunAgent {
-                if snapshot.streams.iter().any(|w| w.id == c.stream_id && w.goal == "Orchestrator") {
-                    return Some(Target::Orchestrator(project));
+                if c.kind == CommandKind::PrepareWorkspace
+                    && snapshot.streams.iter().any(|w| w.id == c.stream_id && w.goal == "Orchestrator")
+                {
+                    return Some(Target::RunDetails(c.id));
                 }
                 return Some(Target::Diagnose(Some(project)));
             }
@@ -1272,7 +1294,7 @@ impl App {
                         !s.tickets.iter().any(|ticket| ticket.id == confirmed.id));
                     self.snapshot = Some(std::sync::Arc::new(s));
                     if direct_preparation_failed {
-                        self.notice(crate::tr!("Direct konnte nicht gestartet werden. Details stehen in der Diagnose."));
+                        self.notice(crate::tr!("Manuelle Session konnte nicht gestartet werden. Details stehen in der Diagnose."));
                     }
                     self.updated = Some(Instant::now());
                     self.online = true;
@@ -1329,20 +1351,9 @@ impl App {
                                     .rev()
                                     .filter(|n| n.id > latest)
                                 {
+                                    if !self.notification_needs_attention(n) { continue; }
                                     let label = self.notification_label(n);
-                                    let kind = match self.publication_notification_status(n) {
-                                        Some(status) if status == crate::tr!("Übernahme blockiert") => ToastKind::Error,
-                                        Some(_) => ToastKind::Warning,
-                                        None => ToastKind::from_notification(n),
-                                    };
-                                    self.project_notice(kind, n.project_id, label.clone());
-                                    if self.settings.desktop_notifications {
-                                        self.backend.desktop_notification(
-                                            n.id,
-                                            label,
-                                            self.notification_target(n).unwrap_or(Target::Diagnose(n.project_id)),
-                                        );
-                                    }
+                                    self.project_notice(ToastKind::Warning, n.project_id, label);
                                 }
                             }
                             self.latest_notification = self
@@ -1480,14 +1491,49 @@ impl App {
                         }
                     }
                     let mut task_notice = None;
-                    if let Some(request) = self.settings.pending.iter().find(|r| r.id == id
-                        && r.method == "POST" && r.path.starts_with("/v1/tasks/") && r.path.ends_with("/retry")).cloned()
+                    if let Some(request) = self.settings.pending.iter().find(|r| r.id == id && r.method == "POST"
+                        && r.path.starts_with("/v1/tasks/") && r.path.ends_with("/return-to-draft")).cloned()
                     {
                         if let Ok(value) = &result {
+                            match serde_json::from_value::<DraftReset>(value.clone()) {
+                                Ok(reset) if request.path == format!("/v1/tasks/{}/return-to-draft", reset.ticket_id)
+                                    && request.body["previous_command"] == serde_json::json!(reset.command_id)
+                                    && request.body["request_id"] == serde_json::json!(reset.request_id) =>
+                                {
+                                    if request.server == self.server {
+                                        if let Some(s) = &mut self.snapshot {
+                                            let s = std::sync::Arc::make_mut(s);
+                                            if s.tickets.iter().any(|t| t.id == reset.ticket_id && t.execution_command == Some(reset.command_id))
+                                                && !s.draft_resets.iter().any(|d| d.request_id == reset.request_id)
+                                            {
+                                                s.draft_resets.push(reset);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => result = Err(Failure { message: crate::tr!("Zurück zum Entwurf konnte nicht angefordert werden. Details stehen in der Diagnose.").into(), uncertain: true }),
+                            }
+                        }
+                        if let Err(error) = &result {
+                            self.project_notice(ToastKind::Error, toast_project,
+                                crate::tr!("Zurück zum Entwurf konnte nicht angefordert werden. Details stehen in der Diagnose."));
+                            self.action_errors.push((crate::overview::now_ms(), format!("{}: {}", request.label, error.message)));
+                        }
+                    }
+                    if let Some(request) = self.settings.pending.iter().find(|r| r.id == id
+                        && r.method == "POST" && r.path.starts_with("/v1/tasks/")
+                        && (r.path.ends_with("/retry") || r.path.ends_with("/accept-solution"))).cloned()
+                    {
+                        let accept = request.path.ends_with("/accept-solution");
+                        let action = if accept { "accept-solution" } else { "retry" };
+                        if let Ok(value) = &result {
                             match serde_json::from_value::<Ticket>(value.clone()) {
-                                Ok(ticket) if request.path == format!("/v1/tasks/{}/retry", ticket.id)
-                                    && ticket.execution_command.is_some()
-                                    && serde_json::to_value(ticket.execution_command).ok().as_ref() != Some(&request.body["previous_command"]) =>
+                                Ok(ticket) if request.path == format!("/v1/tasks/{}/{action}", ticket.id)
+                                    && ((ticket.execution_command.is_some()
+                                        && serde_json::to_value(ticket.execution_command).ok().as_ref() != Some(&request.body["previous_command"]))
+                                        || (accept && !ticket.draft && ticket.execution_command.is_none()
+                                            && ticket.requested_session.is_none()
+                                            && matches!(ticket.status, TicketState::Backlog | TicketState::Ready))) =>
                                 {
                                     if request.server == self.server {
                                         if let Some(snapshot) = &mut self.snapshot {
@@ -1496,13 +1542,15 @@ impl App {
                                             { *current = ticket; }
                                         }
                                     }
-                                    task_notice = Some(crate::tr!("Intent erneut eingereiht.").into());
+                                    task_notice = Some(if accept { crate::tr!("Lösung angenommen.") } else { crate::tr!("Intent erneut eingereiht.") }.into());
                                 }
                                 _ => result = Err(Failure { message: crate::tr!("Erneutes Einreihen nicht eindeutig bestätigt.").into(), uncertain: true }),
                             }
                         }
                         if let Err(error) = &result {
-                             self.project_notice(ToastKind::Error, toast_project, crate::tr!("Intent konnte nicht erneut eingereiht werden. Details stehen in der Diagnose."));
+                             self.project_notice(ToastKind::Error, toast_project, if accept {
+                                 crate::tr!("Lösung konnte nicht angenommen werden. Details stehen in der Diagnose.")
+                             } else { crate::tr!("Intent konnte nicht erneut eingereiht werden. Details stehen in der Diagnose.") });
                             self.action_errors.push((crate::overview::now_ms(), format!("{}: {}", request.label, error.message)));
                         }
                     }
@@ -1584,8 +1632,11 @@ impl App {
                                         directs.retain(|previous| previous.id != direct.id);
                                         directs.insert(0, direct.clone());
                                     }
-                                    if request.path == "/v1/directs" {
-                                        self.open_direct(&direct);
+                                     if request.path == "/v1/directs" {
+                                         if self.page() == Page::Sessions && self.settings.project == Some(direct.project_id) {
+                                             self.sessions_closed = false;
+                                         }
+                                         self.open_direct(&direct);
                                     } else if request.path.ends_with("/prompt") {
                                         self.settings.session_prompts.retain(|saved|
                                             saved.draft.server != request.server || serde_json::json!(saved.id) != request.body["request_id"]);
@@ -1593,7 +1644,7 @@ impl App {
                                 }
                             }
                             Err(error) => {
-                                self.notice(crate::tr!("Direct-Aktion nicht bestätigt. Details stehen in der Diagnose."));
+                                 self.notice(crate::tr!("Aktion für die manuelle Session nicht bestätigt. Details stehen in der Diagnose."));
                                 self.action_errors.push((crate::overview::now_ms(), error.message.clone()));
                             }
                         }
@@ -1943,7 +1994,6 @@ impl App {
                     Ok(v) => self.notice_success(crate::tr!("Gespeichert: {v}", v = v)),
                     Err(e) => self.notice_error(e),
                 },
-                Event::OpenNotification(id, target) => self.open_notification(id, target),
                 Event::LocalRunners(report) => {
                     let crate::local_runners::Report { runners, result, user_error } = report;
                     self.local_runners_busy = false;
@@ -2116,12 +2166,12 @@ impl App {
         crate::model_settings::tick(self);
         if let Some(snapshot) = &self.snapshot {
             for tab in &mut self.tabs {
-                if let Some(root) = tab.direct_id.and_then(|id|
-                    snapshot.directs.iter().find(|direct| direct.id == id)?.root_command_id)
+                if let Some(direct) = tab.direct_id.and_then(|id|
+                    snapshot.directs.iter().find(|direct| direct.id == id))
                 {
-                    tab.root = root;
-                }
-                if let Some(command) = snapshot
+                    if let Some(root) = direct.root_command_id { tab.root = root; }
+                    tab.title = crate::directs::title(snapshot, direct);
+                } else if let Some(command) = snapshot
                     .commands
                     .iter()
                     .find(|c| c.session_root() == tab.root)

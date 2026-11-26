@@ -182,6 +182,106 @@ fn recovery_retries_once_durably_and_resumes_original_task() {
 }
 
 #[test]
+fn return_to_draft_fences_the_session_until_the_original_runner_confirms_cleanup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let (s, id, failed, evaluation) = fixture(&path);
+    let original = s.task_payload(id).unwrap();
+    let retried = s.retry_task(id, RetryTask {
+        request_id: RequestId::new(), expected_revision: original.revision, previous_command: failed.id,
+    }).unwrap();
+    let prepare = s.pending(failed.runner_id).unwrap().into_iter()
+        .find(|c| Some(c.id) == retried.execution_command).unwrap();
+    prepared(&s, &prepare);
+    decision(&s, &evaluation, r#"{"action":"escalate","reason":"Superseded"}"#);
+    s.scheduler_tick().unwrap();
+    let worker = s.pending(failed.runner_id).unwrap().into_iter()
+        .find(|c| c.stream_id == failed.stream_id && c.kind == CommandKind::RunAgent).unwrap();
+    let followup = s.prompt_session(worker.session_root(), PromptSession {
+        request_id: RequestId::new(), prompt: "Later work".into(), images: vec![], files: vec![],
+    }).unwrap();
+    complete(&s, &worker, CommandOutput::Agent { agent: AgentProgress {
+        session_id: worker.session_id(), message_id: agent_message_id(worker.id),
+        phase: AgentPhase::Failed, summary: "Work incomplete".into(),
+    }});
+    let before = s.task_payload(id).unwrap();
+    let request = ReturnIntentToDraft {
+        request_id: RequestId::new(), expected_revision: before.revision, previous_command: worker.id,
+    };
+    assert!(s.return_intent_to_draft(id, request.clone()).is_err(), "No final archive");
+    s.report_archive(worker.runner_id, worker.id, ReportArchive {
+        ownership_epoch: worker.ownership_epoch,
+        batch: ArchiveBatch { session_id: worker.session_id(), revision: 1, captured_unix_ms: 1,
+            final_scan_complete: true, messages: vec![] },
+    }).unwrap();
+    let reset = s.return_intent_to_draft(id, request.clone()).unwrap();
+    assert!(!s.task_payload(id).unwrap().draft);
+    let later = s.task_payload(followup.id).unwrap();
+    assert_eq!(later.requested_session, None);
+    assert_eq!(later.session_prompt_request, None);
+    assert_eq!(later.prompt, followup.prompt);
+    assert_eq!(s.session_closure(worker.id).unwrap().unwrap().reason, DISCARDED_SESSION_REASON);
+    assert!(s.prompt_session(worker.session_root(), PromptSession {
+        request_id: RequestId::new(), prompt: "Must not reopen".into(), images: vec![], files: vec![],
+    }).is_err());
+    assert!(s.confirm_draft_reset(RunnerId::new(), reset.request_id).is_err());
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.return_intent_to_draft(id, request).unwrap(), reset);
+    assert_eq!(s.pending_draft_reset(worker.runner_id).unwrap(), Some(reset.clone()));
+    let draft = s.confirm_draft_reset(worker.runner_id, reset.request_id).unwrap();
+    assert_eq!(s.confirm_draft_reset(worker.runner_id, reset.request_id).unwrap(), draft);
+    assert!(s.pending_draft_reset(worker.runner_id).unwrap().is_none());
+    assert!(draft.draft);
+    assert_eq!(draft.status, TicketState::Backlog);
+    assert_eq!(draft.execution_command, None);
+    assert_eq!(draft.requested_session, None);
+    assert_eq!((&draft.prompt, &draft.images, &draft.files), (&before.prompt, &before.images, &before.files));
+    assert!(s.snapshot().unwrap().commands.iter().any(|c| c.id == worker.id));
+}
+
+#[test]
+fn proposed_workspace_solution_waits_for_current_operator_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let (s, tid, failed, evaluation) = fixture(&path);
+    decision(&s, &evaluation, r#"{"action":"propose","reason":"Retry once after the operator confirms the network is back."}"#);
+    for _ in 0..3 { s.scheduler_tick().unwrap(); }
+    assert!(s.pending(failed.runner_id).unwrap().is_empty());
+    let snapshot = s.desktop_snapshot().unwrap();
+    assert_eq!(snapshot.intent_problems[0].solution, Some(IntentSolution::RetryWorkspace));
+    let ticket = s.task_payload(tid).unwrap();
+    assert_eq!(ticket.status, TicketState::Blocked);
+    let approval = AcceptIntentSolution {
+        request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: failed.id,
+    };
+    assert!(s.accept_intent_solution(tid, AcceptIntentSolution {
+        request_id: RequestId::new(), expected_revision: Revision(ticket.revision.0 - 1),
+        ..approval.clone()
+    }).is_err());
+    assert!(s.accept_intent_solution(tid, AcceptIntentSolution {
+        request_id: RequestId::new(), previous_command: evaluation.id, ..approval.clone()
+    }).is_err());
+    assert!(s.pending(failed.runner_id).unwrap().is_empty());
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    let accepted = s.accept_intent_solution(tid, approval.clone()).unwrap();
+    assert_ne!(accepted.execution_command, Some(failed.id));
+    assert_eq!(s.accept_intent_solution(tid, approval.clone()).unwrap(), accepted);
+    assert!(s.accept_intent_solution(tid, AcceptIntentSolution {
+        request_id: RequestId::new(), ..approval
+    }).is_err());
+    assert!(s.desktop_snapshot().unwrap().intent_problems.is_empty());
+    let pending = s.pending(failed.runner_id).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].workspace_spec, failed.workspace_spec);
+    assert_eq!(pending[0].kind, CommandKind::PrepareWorkspace);
+    prepared(&s, &pending[0]);
+    s.scheduler_tick().unwrap();
+    assert!(s.pending(failed.runner_id).unwrap().iter().any(|c| c.kind == CommandKind::RunAgent && c.stream_id == failed.stream_id));
+}
+
+#[test]
 fn recovery_commissions_one_scoped_repair_and_does_not_recursively_repair_it() {
     let dir = tempfile::tempdir().unwrap();
     let (s, tid, _, evaluation) = fixture(&dir.path().join("db"));
@@ -741,6 +841,101 @@ fn manual_retry_wins_over_an_already_pending_automatic_decision() {
         s.pending(failed.runner_id).unwrap()[0].id,
         requeued.execution_command.unwrap()
     );
+}
+
+#[test]
+fn orchestrator_continues_a_failed_intent_once_without_replaying_its_prompt() {
+    check_agent_recovery(false);
+}
+
+#[test]
+fn proposed_agent_solution_continues_the_same_session_only_after_approval() {
+    check_agent_recovery(true);
+}
+
+fn check_agent_recovery(needs_approval: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let (s, tid, failed, old_evaluation) = fixture(&path);
+    let ticket = s.task_payload(tid).unwrap();
+    let retry = s.retry_task(tid, RetryTask {
+        request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: failed.id,
+    }).unwrap();
+    let prepare = s.pending(failed.runner_id).unwrap().into_iter()
+        .find(|c| Some(c.id) == retry.execution_command).unwrap();
+    prepared(&s, &prepare);
+    decision(&s, &old_evaluation, r#"{"action":"escalate","reason":"Superseded"}"#);
+    s.scheduler_tick().unwrap();
+    let worker = s.pending(failed.runner_id).unwrap().into_iter()
+        .find(|c| c.stream_id == failed.stream_id && c.kind == CommandKind::RunAgent).unwrap();
+    let fail = |s: &Store, c: &RunnerCommand| complete(s, c, CommandOutput::Agent {
+        agent: AgentProgress {
+            session_id: c.session_id(), message_id: agent_message_id(c.id),
+            phase: AgentPhase::Failed, summary: "Local validation stopped after a tool error".into(),
+        },
+    });
+    let archive = |s: &Store, c: &RunnerCommand| {
+        s.report_archive(c.runner_id, c.id, ReportArchive {
+            ownership_epoch: c.ownership_epoch,
+            batch: ArchiveBatch {
+                session_id: c.session_id(), revision: 1, captured_unix_ms: 1,
+                final_scan_complete: true, messages: vec![],
+            },
+        }).unwrap();
+    };
+    fail(&s, &worker);
+    s.scheduler_tick().unwrap();
+    assert!(s.pending(worker.runner_id).unwrap().is_empty());
+    archive(&s, &worker);
+    s.scheduler_tick().unwrap();
+    let evaluation = s.pending(worker.runner_id).unwrap().pop().unwrap();
+    let spec = evaluation.agent_spec.as_ref().unwrap();
+    assert!(spec.read_only);
+    assert!(spec.prompt.contains("Local validation stopped after a tool error"));
+    decision(&s, &evaluation, if needs_approval {
+        r#"{"action":"propose","reason":"Only local validation remains, but it is expensive"}"#
+    } else {
+        r#"{"action":"continue","reason":"Only local validation remains"}"#
+    });
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    for _ in 0..3 { s.scheduler_tick().unwrap(); }
+    if needs_approval {
+        assert!(s.pending(worker.runner_id).unwrap().is_empty());
+        assert_eq!(s.desktop_snapshot().unwrap().intent_problems[0].solution, Some(IntentSolution::ContinueSession));
+        let ticket = s.task_payload(tid).unwrap();
+        s.accept_intent_solution(tid, AcceptIntentSolution {
+            request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: worker.id,
+        }).unwrap();
+        assert!(s.desktop_snapshot().unwrap().intent_problems.is_empty());
+    }
+    let pending = s.pending(worker.runner_id).unwrap();
+    assert_eq!(pending.len(), 1);
+    let continued = &pending[0];
+    assert!(is_intent_recovery(continued));
+    assert_eq!(continued.session_id(), worker.session_id());
+    assert_eq!(continued.workspace_spec, worker.workspace_spec);
+    let spec = continued.agent_spec.as_ref().unwrap();
+    assert_eq!(spec.continuation.as_ref().unwrap().previous_command_id, worker.id);
+    assert!(spec.images.is_empty() && spec.files.is_empty());
+    assert_eq!(s.task_payload(tid).unwrap().execution_command, Some(continued.id));
+    fail(&s, continued);
+    archive(&s, continued);
+    for _ in 0..3 { s.scheduler_tick().unwrap(); }
+    assert!(s.pending(worker.runner_id).unwrap().is_empty());
+    let ticket = s.task_payload(tid).unwrap();
+    assert_eq!(ticket.status, TicketState::Blocked);
+    assert!(ticket.routing_note.contains("kein weiterer Versuch"));
+    let problems = s.desktop_snapshot().unwrap().intent_problems;
+    assert_eq!(problems.len(), 1);
+    assert_eq!((problems[0].ticket_id, problems[0].command_id), (tid, continued.id));
+    let notifications = s.notifications("test-operator", None).unwrap();
+    assert_eq!(notifications.entries.iter().filter(|n| n.kind == INTENT_ATTENTION_EVENT).count(), 1 + usize::from(needs_approval));
+    assert!(!notifications.entries.iter().any(|n| n.kind == "command.updated"));
+    s.retry_task(tid, RetryTask {
+        request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: continued.id,
+    }).unwrap();
+    assert!(s.desktop_snapshot().unwrap().intent_problems.is_empty());
 }
 
 #[test]

@@ -22,12 +22,39 @@ pub struct Settings {
     pub server: String,
     pub credential_file: Option<PathBuf>,
     pub project: Option<ProjectId>,
+    #[serde(deserialize_with = "desktop_page")]
     pub page: crate::model::Page,
     pub desktop_notifications: bool,
     pub task_drafts: Vec<TaskDraft>,
     pub pending: Vec<PendingWrite>,
     pub question_drafts: Vec<QuestionDraft>,
     pub form_drafts: Vec<FormDraft>,
+}
+fn desktop_page<'de, D: serde::Deserializer<'de>>(d: D) -> Result<crate::model::Page, D::Error> {
+    use crate::model::Page;
+    Ok(match Page::deserialize(d)? {
+        Page::Orchestrator | Page::Reviewer | Page::Merger => Page::Tasks,
+        Page::Supervisor | Page::Memorizer => Page::ProjectActivity,
+        page => page,
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn retired_sidebar_pages_restore_to_their_replacements() {
+    use crate::model::Page;
+    for (legacy, page) in [
+        ("Orchestrator", Page::Tasks),
+        ("Reviewer", Page::Tasks),
+        ("Merger", Page::Tasks),
+        ("Supervisor", Page::ProjectActivity),
+        ("Memorizer", Page::ProjectActivity),
+        ("Directs", Page::Sessions),
+        ("Sessions", Page::Sessions),
+    ] {
+        let settings: Settings = serde_json::from_value(serde_json::json!({"page": legacy})).unwrap();
+        assert_eq!(settings.page, page);
+    }
 }
 impl Settings {
     pub fn startup_server(&self, requested: String) -> String {

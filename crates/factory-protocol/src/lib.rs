@@ -222,8 +222,60 @@ pub struct RunnerRestartStatus {
     pub ready: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentProblem {
+    pub ticket_id: TicketId,
+    pub command_id: CommandId,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solution: Option<IntentSolution>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentSolution {
+    ContinueSession,
+    RetryWorkspace,
+    ReassignSession,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptIntentSolution {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub previous_command: CommandId,
+}
+
+pub const DRAFT_RESET_CAPABILITY: &str = "intent-draft-reset-v1";
+pub const DISCARDED_SESSION_REASON: &str = "intent returned to draft";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReturnIntentToDraft {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub previous_command: CommandId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftReset {
+    pub request_id: RequestId,
+    pub ticket_id: TicketId,
+    pub command_id: CommandId,
+    pub root_id: CommandId,
+    pub stream_id: StreamId,
+    pub ownership_epoch: u64,
+}
+
+pub const INTENT_ATTENTION_EVENT: &str = "intent.attention_required";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_resets: Vec<DraftReset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intent_problems: Vec<IntentProblem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub directs: Vec<directs::Direct>,
     /// Optional feature metadata; an older server may omit this entirely.

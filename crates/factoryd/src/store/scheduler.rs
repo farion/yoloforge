@@ -1399,6 +1399,7 @@ impl Store {
     pub fn scheduler_tick(&self) -> Result<()> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::question_orchestrator::expire_checks(&tx, super::super::unix_ms())?;
         let mut stmt = tx.prepare("SELECT data FROM scheduler_policies ORDER BY rowid")?;
         let rows = stmt
             .query_map([], |r| r.get::<_, String>(0))?
@@ -1642,9 +1643,6 @@ impl Store {
                 }
             }
             active += super::validation::dispatch(&tx, p.project_id, (p.max_parallel as usize).saturating_sub(active))?;
-            if p.runner_ids.is_empty() {
-                continue;
-            }
             let mut ready = all
                 .values()
                 .filter(|t| {
@@ -1658,8 +1656,11 @@ impl Store {
                 .collect::<Vec<_>>();
             ready.sort_by_key(|t| (std::cmp::Reverse(t.priority), t.created_unix_ms, t.id));
             for mut t in ready {
-                if active >= p.max_parallel as usize {
-                    break;
+                if t.execution_command.is_none() && !super::routing::check_fixed_session(&tx, &mut t)? {
+                    continue;
+                }
+                if p.runner_ids.is_empty() || active >= p.max_parallel as usize {
+                    continue;
                 }
                 let assigned: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM stream_tickets WHERE ticket_id=?1)",

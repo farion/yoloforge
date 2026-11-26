@@ -51,6 +51,20 @@ pub(super) async fn retry_task(
     db_call(body.request_id, move || app.store.retry_task(id, body)).await
 }
 
+pub(super) async fn accept_intent_solution(
+    State(app): State<App>, Path(id): Path<TicketId>,
+    Json(body): Json<AcceptIntentSolution>,
+) -> Response {
+    db_call(body.request_id, move || app.store.accept_intent_solution(id, body)).await
+}
+
+pub(super) async fn return_intent_to_draft(
+    State(app): State<App>, Path(id): Path<TicketId>,
+    Json(body): Json<ReturnIntentToDraft>,
+) -> Response {
+    db_call(body.request_id, move || app.store.return_intent_to_draft(id, body)).await
+}
+
 pub(super) async fn delete_failed_task(
     State(app): State<App>, Path(id): Path<TicketId>, Json(body): Json<DeleteFailedTask>,
 ) -> Response {

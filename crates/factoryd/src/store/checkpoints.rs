@@ -463,6 +463,7 @@ impl Store {
                     return Err(StoreError::RevisionConflict(owner.revision));
                 }
                 if body.target_runner == owner.runner_id
+                    || super::draft_resets::retired(tx, id)?
                     || super::controls::load(tx, id)?
                         .is_some_and(|c| c.state != PauseState::Released)
                     || super::termination::active(tx, id)?

@@ -39,6 +39,8 @@ impl ModelTransport {
 
 pub const COPILOT_INTEGRATION: &str = "github-copilot";
 pub const COPILOT_ACCESS_PREFIX: &str = "factory-github-copilot-";
+/// The signed-out tier must use OpenCode's native provider on the runner.
+pub const OPENCODE_FREE_ACCESS: &str = "opencode";
 
 pub fn is_copilot_access(id: &str) -> bool {
     id.strip_prefix(COPILOT_ACCESS_PREFIX).is_some_and(|suffix| {
@@ -55,15 +57,17 @@ pub enum KeyModelProvider {
     Anthropic,
     LiteLlm,
     Ollama,
+    OpenCodeConsole,
 }
 
 impl KeyModelProvider {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Gemini,
         Self::OpenRouter,
         Self::Anthropic,
         Self::LiteLlm,
         Self::Ollama,
+        Self::OpenCodeConsole,
     ];
 
     pub fn label(self) -> &'static str {
@@ -73,6 +77,7 @@ impl KeyModelProvider {
             Self::Anthropic => "Anthropic (Claude)",
             Self::LiteLlm => "LiteLLM",
             Self::Ollama => "Ollama",
+            Self::OpenCodeConsole => "OpenCode Console",
         }
     }
 
@@ -83,6 +88,9 @@ impl KeyModelProvider {
             Self::Anthropic => "anthropic",
             Self::LiteLlm => "litellm",
             Self::Ollama => "ollama",
+            // The credential store activates the first key of an integration
+            // even with activate:false. Keep it out of native OpenCode.
+            Self::OpenCodeConsole => "factory-opencode-console",
         }
     }
 
@@ -93,6 +101,7 @@ impl KeyModelProvider {
             Self::Anthropic => "factory-anthropic-",
             Self::LiteLlm => "factory-litellm-",
             Self::Ollama => "factory-ollama-",
+            Self::OpenCodeConsole => "factory-opencode-console-",
         }
     }
 
@@ -115,7 +124,9 @@ impl KeyModelProvider {
             Self::Gemini => "@opencode/ai/providers/google",
             Self::OpenRouter => "@opencode/ai/providers/openrouter",
             Self::Anthropic => "@opencode/ai/providers/anthropic",
-            Self::LiteLlm | Self::Ollama => "@opencode/ai/providers/openai-compatible",
+            Self::LiteLlm | Self::Ollama | Self::OpenCodeConsole => {
+                "@opencode/ai/providers/openai-compatible"
+            }
         }
     }
 

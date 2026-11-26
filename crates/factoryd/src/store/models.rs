@@ -391,6 +391,19 @@ impl Store {
         access: ModelAccess,
         credential: &str,
     ) -> Result<Option<ModelSelection>> {
+        self.add_model_access(access, Some(credential))
+    }
+
+    pub(crate) fn add_opencode_free_access(&self, access: ModelAccess) -> Result<Option<ModelSelection>> {
+        debug_assert_eq!(access.id, OPENCODE_FREE_ACCESS);
+        self.add_model_access(access, None)
+    }
+
+    fn add_model_access(
+        &self,
+        access: ModelAccess,
+        credential: Option<&str>,
+    ) -> Result<Option<ModelSelection>> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut settings = factory(&tx)?.ok_or(StoreError::Internal)?;
@@ -401,11 +414,8 @@ impl Store {
         {
             return Err(StoreError::WorkConflict);
         }
-        let already_connected: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM model_access_bindings)",
-            [],
-            |r| r.get(0),
-        )?;
+        let already_connected = settings.accesses.iter().any(|a| a.id == OPENCODE_FREE_ACCESS)
+            || tx.query_row("SELECT EXISTS(SELECT 1 FROM model_access_bindings)", [], |r| r.get::<_, bool>(0))?;
         let automatic_default = if !already_connected && settings.default_model.is_none() {
             access.models.first().map(|model_id| ModelSelection {
                 access_id: access.id.clone(),
@@ -418,10 +428,12 @@ impl Store {
             settings.default_model = Some(default.clone());
             pin_legacy_tasks(&tx, default)?;
         }
-        tx.execute(
-            "INSERT INTO model_access_bindings(access_id,credential_id) VALUES(?1,?2)",
-            params![access.id, credential],
-        )?;
+        if let Some(credential) = credential {
+            tx.execute(
+                "INSERT INTO model_access_bindings(access_id,credential_id) VALUES(?1,?2)",
+                params![access.id, credential],
+            )?;
+        }
         settings.revision.0 = settings
             .revision
             .0
@@ -521,10 +533,16 @@ impl Store {
             if next.revision != revision { return Err(StoreError::RevisionConflict(revision)); }
             let mut ids = HashSet::new();
             let mut names = HashSet::new();
+            let free_access = |settings: &FactoryModelSettings| {
+                settings.accesses.iter().find(|a| a.id == OPENCODE_FREE_ACCESS).cloned()
+            };
+            if free_access(&next) != previous.as_ref().and_then(free_access) {
+                return Err(StoreError::Invalid("Den kostenlosen OpenCode-Zugang über Modell-Anbieter verwalten."));
+            }
             if next.accesses.len() > 64 { return Err(StoreError::Invalid("Zu viele Modellzugänge")); }
             for access in &next.accesses {
-                if !access.id.strip_prefix("factory-").is_some_and(|id|
-                    !id.is_empty() && id.len() <= 80 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+                if !(access.id == OPENCODE_FREE_ACCESS || access.id.strip_prefix("factory-").is_some_and(|id|
+                    !id.is_empty() && id.len() <= 80 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')))
                     || !ids.insert(&access.id) || !names.insert(access.name.trim().to_lowercase())
                     || !super::super::valid_text(&access.name, 120) || access.models.len() > 256
                 {

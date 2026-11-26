@@ -26,7 +26,6 @@ pub enum Event {
     Attachment(RequestId, Result<InputAttachment, String>),
     Preview(String, Result<egui::ColorImage, String>),
     Saved(Result<String, String>),
-    OpenNotification(u64, crate::model::Target),
     Local(Result<crate::persistence::LocalConnection, String>),
     LocalRunners(crate::local_runners::Report),
     Access(Result<AccessView, String>),
@@ -543,15 +542,6 @@ impl Backend {
                 }
             })();
             s.send(Event::Saved(result.map_err(|e| e.to_string())));
-        });
-    }
-    pub fn desktop_notification(&self, id: u64, title: String, target: crate::model::Target) {
-        let s = self.sender();
-        self.runtime.spawn_blocking(move || {
-            match notify_rust::Notification::new().summary("YoloForge").body(&title).appname("YoloForge").action("default", target.notification_label()).timeout(8000).show() {
-                Ok(handle) => handle.wait_for_action(|action| { if action == "default" { s.send(Event::OpenNotification(id, target.clone())); } }),
-                Err(_) => s.send(Event::Saved(Err(crate::tr!("Desktop-Benachrichtigungen nicht verfügbar; alle Meldungen bleiben in der App.").into()))),
-            }
         });
     }
     pub fn start_local(&self) {

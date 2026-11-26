@@ -38,6 +38,8 @@ pub struct TaskHistoryEntry {
     pub created_unix_ms: u64,
     pub message: String,
     pub level: TaskHistoryLevel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<CommandId>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -117,6 +117,10 @@ pub fn router_with_shutdown(
             post(model_gateway::key_provider::connect),
         )
         .route(
+            "/v1/model-settings/opencode-free",
+            post(model_gateway::opencode_free::connect),
+        )
+        .route(
             "/v1/model-settings/accesses/{access}/{provider}/oauth",
             post(model_gateway::begin),
         )
@@ -212,6 +216,8 @@ pub fn router_with_shutdown(
         )
         .route("/v1/tasks/{id}/edit", post(desktop::begin_task_edit))
         .route("/v1/tasks/{id}/retry", post(desktop::retry_task))
+        .route("/v1/tasks/{id}/accept-solution", post(desktop::accept_intent_solution))
+        .route("/v1/tasks/{id}/return-to-draft", post(desktop::return_intent_to_draft))
         .route("/v1/runners/{id}/restart",
             get(desktop::runner_restart_status).put(desktop::hold_runner_restart).delete(desktop::release_runner_restart))
         .route("/v1/commands/{id}", get(desktop::command_payload))
@@ -404,6 +410,8 @@ pub fn router_with_shutdown(
         )
         .route("/v1/streams/{id}/commands", post(enqueue))
         .route("/v1/runners/{id}/commands", get(pending_commands))
+        .route("/v1/runners/{id}/draft-reset", get(work_routes::pending_draft_reset))
+        .route("/v1/runners/{runner}/draft-reset/{request}", post(work_routes::confirm_draft_reset))
         .route(
             "/v1/runners/{runner}/commands/{command}/ack",
             post(ack_command),
@@ -635,7 +643,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 20
+        || body.capabilities.len() > 22
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(
@@ -866,8 +874,10 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
     };
     let registry = app.registry.read().await;
     Json(Snapshot {
+        draft_resets: durable.draft_resets,
+        intent_problems: durable.intent_problems,
         directs: durable.directs,
-        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into(), DELETE_TASK_CAPABILITY.into()],
+        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into(), DELETE_TASK_CAPABILITY.into(), DRAFT_RESET_CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
         editable_tasks: durable.editable_tasks,

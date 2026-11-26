@@ -1344,6 +1344,16 @@ impl FactoryClient {
             .header(RUNNER_HEADER, registration.to_string()).json(&PublicationRecoveryClaim { grant_id }).send().await).await
     }
 
+    pub async fn pending_draft_reset(&self, runner: RunnerId, registration: RegistrationId) -> Result<Option<DraftReset>, ClientError> {
+        Self::decode(self.http.get(format!("{}/v1/runners/{runner}/draft-reset", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).send().await).await
+    }
+
+    pub async fn confirm_draft_reset(&self, runner: RunnerId, registration: RegistrationId, request: RequestId) -> Result<(), ClientError> {
+        Self::decode(self.http.post(format!("{}/v1/runners/{runner}/draft-reset/{request}", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).send().await).await
+    }
+
     pub async fn release_publication_recovery(
         &self, runner: RunnerId, registration: RegistrationId, id: CommandId, grant_id: RequestId,
     ) -> Result<(), ClientError> {

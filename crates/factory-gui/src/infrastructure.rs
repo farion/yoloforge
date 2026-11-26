@@ -52,6 +52,7 @@ struct Node {
 struct Graph {
     columns: Vec<(&'static str, Vec<Node>)>,
     edges: Vec<(String, String, Color32)>,
+    internet: bool,
     internet_client: Option<String>,
     internet_runners: std::collections::BTreeSet<String>,
 }
@@ -142,7 +143,8 @@ fn infrastructure(app: &App, now: u64) -> Graph {
     use egui_phosphor::regular as icons;
     // The server sees the reverse proxy's private address. Only this desktop's
     // outbound HTTP peer tells us whether its connection crosses the internet.
-    let internet_client = if !crate::connection_info::via_internet(app) {
+    let internet = crate::connection_info::via_internet(app);
+    let internet_client = if !internet {
         None
     } else if app.clients.is_empty() {
         Some("this-desktop".into())
@@ -201,6 +203,7 @@ fn infrastructure(app: &App, now: u64) -> Graph {
             (crate::tr!("Remote"), vec![]),
         ],
         edges,
+        internet,
         internet_client,
         internet_runners: Default::default(),
     }
@@ -354,6 +357,7 @@ fn workers(app: &App, project: Option<ProjectId>, unassigned: bool, now: u64) ->
     Graph {
         columns: vec![("Runner", runners), (crate::tr!("OpenCode-Instanzen"), nodes)],
         edges,
+        internet: false,
         internet_client: None,
         internet_runners: Default::default(),
     }
@@ -551,7 +555,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             let (route, center) = if from_server && *dest_col == 0 {
                 let route = local_runner_route(*a, *b, *dest_row - client_rows,
                     graph.columns[0].1.len() - client_rows);
-                (route.to_vec(), route[1].lerp(route[2], 0.5))
+                (route.to_vec(), route[2].lerp(route[3], 0.5))
             } else {
                 let (row, rows) = if from_server {
                     (*dest_row, graph.columns[*dest_col].1.len())
@@ -601,8 +605,9 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
     for (center, id) in internet_badges {
         crate::connection_info::internet_link_badge(ui, ui.painter(), center, id);
     }
-    for (node, rect, ..) in placements {
+    for (node, rect, column, ..) in placements {
         let is_restarting = restarting == Some(node.id.as_str());
+        let cloud = column == 2 || node.id == "server" && graph.internet;
         let response = ui.interact(rect, ui.id().with((id, &node.id)), Sense::hover());
         let hovered = response.hovered() && !is_restarting;
         let border = if is_restarting { BLUE } else { node.color };
@@ -653,7 +658,9 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             node.title.clone(),
             FontId::proportional(16.0),
             ui.visuals().text_color(),
-            rect.width() - 60.0 - if removable.iter().any(|(key, _)| key == &node.id) { 34.0 } else { 0.0 },
+            rect.width() - 60.0
+                - if removable.iter().any(|(key, _)| key == &node.id) { 34.0 } else { 0.0 }
+                - if cloud { 30.0 } else { 0.0 },
             1,
         );
         let title = ui.painter().layout_job(title_job);
@@ -667,6 +674,21 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                 title,
                 ui.visuals().text_color(),
             );
+        if cloud {
+            let center = rect.right_top() + Vec2::new(-16.0, 18.0);
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                egui_phosphor::regular::CLOUD,
+                FontId::proportional(20.0),
+                MUTED,
+            );
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(
+                egui::Id::new(("test-infrastructure-cloud", &node.id)),
+                Rect::from_center_size(center, Vec2::splat(24.0)),
+            ));
+        }
         for (text, size, color, y) in node
             .address
             .as_ref()
@@ -910,6 +932,15 @@ mod tests {
         assert!(local.right() < server.left());
         assert!(server.right() < card(&remote_key).left());
         assert_eq!(card(&remote_key).center().x, card(&hosted_key).center().x);
+        let cloud = |key: &String| ctx.data_mut(|d| d.get_temp::<Rect>(
+            egui::Id::new(("test-infrastructure-cloud", key)),
+        ));
+        assert!(cloud(&remote_key).is_some());
+        assert!(cloud(&hosted_key).is_some());
+        assert!(cloud(&desktop_key).is_none());
+        assert!(ctx.data_mut(|d| d.get_temp::<Rect>(
+            egui::Id::new(("test-infrastructure-cloud", "server")),
+        )).is_some());
         let direct = route(&hosted_key);
         let remote = route(&remote_key);
         let local_route = route(&desktop_key);
@@ -928,7 +959,7 @@ mod tests {
         ));
         assert_eq!(globe(&hosted_key), None);
         assert_eq!(globe(&remote_key), None);
-        assert_eq!(globe(&desktop_key), Some(local_route[1].lerp(local_route[2], 0.5)));
+        assert_eq!(globe(&desktop_key), Some(local_route[2].lerp(local_route[3], 0.5)));
     }
 
     #[test]

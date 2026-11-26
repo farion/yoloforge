@@ -528,6 +528,10 @@ async fn advance(
                 .agent
                 .as_ref()
                 .context("Predecessor execution missing")?;
+            let recovering_failure = spec.prompt == INTENT_RECOVERY_PROMPT
+                && matches!(&previous.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Failed)
+                && !previous.command.requires_target_git()
+                && previous.command.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && spec.role.is_empty());
             ensure!(
                 previous.command.stream_id == command.stream_id
                     && previous.command.runner_id == command.runner_id
@@ -535,7 +539,8 @@ async fn advance(
                     && previous.command.session_root() == command.session_root()
                     && previous.archive.finished
                     && (matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Interrupted))
-                        || session_stopped_without_result(&previous.result))
+                        || session_stopped_without_result(&previous.result)
+                        || recovering_failure)
                     && prior.endpoint == execution.endpoint
                     && prior.workspace == execution.workspace
                     && prior.runtime == execution.runtime,
@@ -568,7 +573,8 @@ async fn advance(
             ensure!(
                 previous_assistant.is_some()
                     || matches!(&previous.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted)
-                    || session_stopped_without_result(&previous.result),
+                    || session_stopped_without_result(&previous.result)
+                    || recovering_failure,
                 "Previous assistant missing"
             );
             record.agent.as_mut().unwrap().previous_assistant = previous_assistant;

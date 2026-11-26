@@ -1,4 +1,58 @@
 use super::*;
+
+pub(super) fn require_intent_attention(tx: &Transaction<'_>, ticket: &Ticket, reason: &str) -> Result<()> {
+    report_intent_problem(tx, ticket, reason, None)
+}
+
+pub(super) fn report_intent_problem(
+    tx: &Transaction<'_>, ticket: &Ticket, reason: &str, solution: Option<IntentSolution>,
+) -> Result<()> {
+    let Some(command_id) = ticket.execution_command.or_else(||
+        (solution == Some(IntentSolution::ReassignSession)).then_some(ticket.requested_session).flatten())
+    else { return Ok(()); };
+    let existing: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE kind=?1 AND aggregate_id=?2 AND json_extract(payload,'$.command_id')=?3)",
+        params![INTENT_ATTENTION_EVENT, ticket.id.to_string(), command_id.to_string()], |row| row.get(0),
+    )?;
+    if existing { return Ok(()); }
+    let problem = IntentProblem { ticket_id: ticket.id, command_id, reason: reason.into(), solution };
+    event(tx, INTENT_ATTENTION_EVENT, ticket.id.to_string(), &problem)
+}
+
+pub(super) fn require_execution_attention(tx: &Transaction<'_>, owner: &Workstream, command: CommandId, reason: &str) -> Result<()> {
+    for id in &owner.ticket_ids {
+        let raw: Option<String> = tx.query_row(
+            "SELECT data FROM tickets t WHERE id=?1 AND json_extract(data,'$.execution_command')=?2
+                AND json_extract(data,'$.status')='blocked'
+                AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)",
+            params![id.to_string(), command.to_string()], |row| row.get(0),
+        ).optional()?;
+        if let Some(raw) = raw {
+            require_intent_attention(tx, &serde_json::from_str::<Ticket>(&raw)?, reason)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn intent_problems(tx: &Transaction<'_>) -> Result<Vec<IntentProblem>> {
+    let mut query = tx.prepare(
+        "SELECT e.payload FROM events e JOIN tickets t ON t.id=e.aggregate_id
+         JOIN active_projects p ON p.id=t.project_id
+         WHERE e.kind=?1 AND (
+           (json_extract(t.data,'$.execution_command')=json_extract(e.payload,'$.command_id')
+            AND json_extract(t.data,'$.status') IN ('blocked','in_progress'))
+           OR (json_extract(e.payload,'$.solution')='reassign_session'
+            AND json_extract(t.data,'$.execution_command') IS NULL
+            AND json_extract(t.data,'$.requested_session')=json_extract(e.payload,'$.command_id')
+            AND json_extract(t.data,'$.status') IN ('backlog','ready')))
+           AND COALESCE(json_extract(t.data,'$.draft'),0)=0
+           AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+         ORDER BY e.sequence DESC",
+    )?;
+    let rows = query.query_map([INTENT_ATTENTION_EVENT], |row| row.get::<_, String>(0))?;
+    rows.map(|raw| Ok(serde_json::from_str(&raw?)?)).collect()
+}
+
 /// Preserve names/types and all nonbinary fields; raw bytes remain in the original event.
 fn defer_binary(value: &mut serde_json::Value) {
     match value {
@@ -28,11 +82,11 @@ fn defer_binary(value: &mut serde_json::Value) {
 
 pub(super) fn record_notification(
     tx: &Transaction<'_>,
+    sequence: u64,
     kind: &str,
     id: &str,
     payload: &serde_json::Value,
 ) -> Result<()> {
-    let sequence = tx.last_insert_rowid() as u64;
     let mut command_id = None;
     let mut question_id = None;
     let mut ticket_id: Option<TicketId> = None;
@@ -45,65 +99,21 @@ pub(super) fn record_notification(
             [q.command_id.to_string()], |row| row.get(0),
         )?;
         if direct { return Ok(()); }
-        if !matches!(q.state, QuestionState::Pending | QuestionState::Rejected) {
+        if !matches!(q.state, QuestionState::Pending | QuestionState::Rejected)
+            || (q.state == QuestionState::Pending && q.orchestration_note == QUESTION_AUTOMATION_PENDING)
+        {
             return Ok(());
         }
         command_id = Some(q.command_id);
         question_id = Some(q.id);
         title = "Antwort erforderlich";
         dedup = format!("question/{}", q.id);
-    } else if kind == "command.updated" {
-        let c: RunnerCommand = serde_json::from_value(payload.clone())?;
-        if c.agent_spec.as_ref().is_some_and(|agent| agent.role == factory_protocol::directs::ROLE) { return Ok(()); }
-        let uncertain = c
-            .agent_progress
-            .as_ref()
-            .is_some_and(|p| p.phase == AgentPhase::Unknown);
-        if c.kind == CommandKind::PrepareWorkspace && c.state == CommandState::Failed {
-            let controller: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM orchestrators WHERE stream_id=?1)",
-                [c.stream_id.to_string()],
-                |r| r.get(0),
-            )?;
-            if !controller {
-                return Ok(());
-            }
-            command_id = Some(c.id);
-            title = "Orchestrator: Vorbereitung fehlgeschlagen";
-            // Persistent failures stay visible in history without a toast every minute.
-            dedup = format!("orchestrator-prepare/{}", c.stream_id);
-        } else {
-            if c.kind != CommandKind::RunAgent
-                || (!uncertain && !matches!(c.state, CommandState::Succeeded | CommandState::Failed))
-            {
-                return Ok(());
-            }
-            let internal = c.agent_spec.as_ref().is_some_and(|s| s.read_only);
-            let orchestrator = c.agent_spec.as_ref()
-                .is_some_and(|s| s.read_only && s.role.starts_with("orchestrator"));
-            if internal && (!orchestrator || c.state != CommandState::Failed) {
-                return Ok(());
-            }
-            command_id = Some(c.id);
-            title = if orchestrator {
-                "Orchestrator-Auswertung fehlgeschlagen"
-            } else if uncertain {
-                "Sessionzustand ungeklärt"
-            } else if command_publication_blocked(&c) {
-                "Intent: Übernahme blockiert"
-            } else if command_publication_unconfirmed(&c) {
-                "Intent: Übernahme noch nicht bestätigt"
-            } else if c.state == CommandState::Succeeded {
-                "Aufgabe abgeschlossen"
-            } else {
-                "Aufgabe fehlgeschlagen"
-            };
-            dedup = if orchestrator {
-                format!("orchestrator-evaluation/{}", c.stream_id)
-            } else {
-                format!("command/{}/{:?}/{uncertain}", c.id, c.state)
-            };
-        }
+    } else if kind == INTENT_ATTENTION_EVENT {
+        let problem: IntentProblem = serde_json::from_value(payload.clone())?;
+        command_id = Some(problem.command_id);
+        ticket_id = Some(problem.ticket_id);
+        title = "Intent braucht Aufmerksamkeit";
+        dedup = format!("intent-attention/{}/{}", problem.ticket_id, problem.command_id);
     } else if kind == "scheduler.blocked" {
         ticket_id = id.parse().ok();
         if payload["missing_model"] == true {

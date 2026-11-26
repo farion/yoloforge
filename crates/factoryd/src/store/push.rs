@@ -24,7 +24,7 @@ impl Store {
         if now < next {
             return Ok(None);
         }
-        let latest:u64=tx.query_row("SELECT COALESCE(MAX(e.sequence),0) FROM events e JOIN questions q ON q.id=e.aggregate_id WHERE e.kind IN ('question.created','question.updated') AND e.sequence>?1 AND json_extract(q.data,'$.state') IN ('pending','rejected') AND NOT EXISTS(SELECT 1 FROM commands c JOIN directs d ON d.stream_id=c.stream_id WHERE c.id=q.command_id)",[cursor],|r|r.get(0))?;
+        let latest:u64=tx.query_row("SELECT COALESCE(MAX(e.sequence),0) FROM events e JOIN questions q ON q.id=e.aggregate_id WHERE e.kind IN ('question.created','question.updated') AND e.sequence>?1 AND json_extract(q.data,'$.state') IN ('pending','rejected') AND COALESCE(json_extract(q.data,'$.orchestration_note'),'')<>?2 AND NOT EXISTS(SELECT 1 FROM commands c JOIN directs d ON d.stream_id=c.stream_id WHERE c.id=q.command_id)",params![cursor,QUESTION_AUTOMATION_PENDING],|r|r.get(0))?;
         if latest == 0 {
             // An answered question no longer needs a notification, even after an uncertain POST.
             tx.execute("UPDATE push_delivery SET cursor=MAX(cursor,pending),pending=0,attempts=0,next_attempt=0 WHERE id=1",[])?;

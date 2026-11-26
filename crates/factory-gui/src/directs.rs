@@ -1,6 +1,6 @@
-use crate::{app::App, design, dialogs::TaskDialog, model::*};
+use crate::{app::{App, AMBER, BLUE, GREEN, MUTED, RED}, design, dialogs::TaskDialog, model::*};
 use factory_core::*;
-use factory_protocol::{directs::*, models::ModelSelection, AnswerQuestion};
+use factory_protocol::{directs::*, models::ModelSelection, AnswerQuestion, Snapshot};
 use serde_json::json;
 
 #[derive(Default)]
@@ -14,54 +14,49 @@ fn pending(app: &App, path: &str) -> bool {
     app.settings.pending.iter().any(|r| r.server == app.server && r.path == path)
 }
 
-pub(crate) fn list(ui: &mut egui::Ui, app: &mut App) {
-    let (Some(s), Some(project)) = (app.snapshot.clone(), app.settings.project) else { return; };
-    let supported = s.server_capabilities.iter().any(|cap| cap == CAPABILITY);
-    let can_create = app.online && supported && !pending(app, "/v1/directs");
-    let mut create = false;
-    let mut selected = usize::from(app.show_answered);
-    let directs = s.directs.iter().filter(|d| d.project_id == project).collect::<Vec<_>>();
-    let archived = directs.iter().filter(|d| d.state == DirectState::Archived).count();
-    design::section_toolbar_with(ui, "directs", &mut app.query, crate::tr!("Directs durchsuchen …"),
-        &[(crate::tr!("Offen"), directs.len() - archived), (crate::tr!("Archiv"), archived)], &mut selected,
-        |ui| {
-            let height = ui.text_style_height(&egui::TextStyle::Body)
-                + f32::from(design::INPUT_MARGIN.top + design::INPUT_MARGIN.bottom);
-            ui.allocate_ui_with_layout(
-                egui::vec2(design::ICON_BUTTON_SIZE, height.max(design::ICON_BUTTON_SIZE)),
-                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                |ui| create = design::icon_button(ui, egui_phosphor::regular::PLUS, crate::tr!("Neues Direct"), can_create).clicked(),
-            );
-        });
-    app.show_answered = selected == 1;
-    if create {
-        app.write(crate::tr!("Neues Direct"), "POST", "/v1/directs".into(), json!(CreateDirect {
-            request_id: RequestId::new(), project_id: project,
-        }));
-    }
-    if !supported {
-        design::list_empty_state(ui, Page::Directs.icon(), crate::tr!("Diese Factory unterstützt keine Directs."));
-        return;
-    }
-    let query = app.query.trim().to_lowercase();
-    let rows = directs.into_iter().filter(|d| (d.state == DirectState::Archived) == app.show_answered)
-        .filter_map(|d| {
-            let title = d.root_command_id.and_then(|id| s.commands.iter().find(|c| c.id == id))
-                .map(|c| session_title(&s, c)).unwrap_or_else(|| crate::tr!("Neues Direct").into());
-            (query.is_empty() || title.to_lowercase().contains(&query)).then_some((d, title))
-        }).collect::<Vec<_>>();
-    if rows.is_empty() {
-        design::list_empty_state(ui, Page::Directs.icon(), crate::tr!("Keine passenden Directs"));
-    }
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (direct, title) in rows {
-            ui.push_id(direct.id, |ui| {
-                if design::navigation_row(ui, &title, false, None).on_hover_text(&title).clicked() {
-                    app.open_direct(direct);
+pub(crate) fn can_create(app: &App, s: &Snapshot) -> bool {
+    app.online && s.server_capabilities.iter().any(|cap| cap == CAPABILITY)
+        && !pending(app, "/v1/directs")
+}
+
+pub(crate) fn create(app: &mut App, project: ProjectId) {
+    app.write(crate::tr!("Neue manuelle Session"), "POST", "/v1/directs".into(), json!(CreateDirect {
+        request_id: RequestId::new(), project_id: project,
+    }));
+}
+
+pub(crate) fn title(s: &Snapshot, direct: &Direct) -> String {
+    direct.root_command_id.and_then(|root| {
+        s.session_titles.get(&agent_session_id(root))
+            .map(|title| title.trim())
+            .filter(|title| !title.is_empty() && *title != format!("Factory {root}"))
+    }).unwrap_or(crate::tr!("Manuelle Session")).into()
+}
+
+pub(crate) fn last_activity(s: &Snapshot, direct: &Direct) -> u64 {
+    direct.root_command_id.and_then(|id| s.commands.iter().find(|c| c.id == id))
+        .map(|c| session_last_activity(s, c)).unwrap_or(direct.created_unix_ms)
+}
+
+pub(crate) fn status(s: &Snapshot, direct: &Direct) -> (&'static str, egui::Color32) {
+    match direct.state {
+        DirectState::Archived => (crate::tr!("Archiviert"), MUTED),
+        DirectState::Archiving => (crate::tr!("Archiviert nach der Antwort"), AMBER),
+        DirectState::Open if direct.preparation_failed => (crate::tr!("Fehlgeschlagen"), RED),
+        DirectState::Open => {
+            if let Some(c) = direct.current_command_id.and_then(|id| s.commands.iter().find(|c| c.id == id)) {
+                if c.state == CommandState::Failed {
+                    return (crate::tr!("Fehlgeschlagen"), RED);
                 }
-            });
+                if matches!(c.state, CommandState::Pending | CommandState::Accepted) {
+                    let status = session_status(s, c);
+                    let color = if status == crate::tr!("In Bearbeitung") { GREEN } else { crate::views::status_color(status) };
+                    return (status, color);
+                }
+            }
+            (crate::tr!("Offen"), BLUE)
         }
-    });
+    }
 }
 
 pub(crate) fn tab_controls(ui: &mut egui::Ui, app: &mut App, index: usize, direct: &Direct) {
@@ -73,9 +68,9 @@ pub(crate) fn tab_controls(ui: &mut egui::Ui, app: &mut App, index: usize, direc
     let archive_pending = pending(app, &archive_path);
     ui.horizontal(|ui| {
         let label = match direct.state {
-            DirectState::Open => crate::tr!("Direct archivieren"),
+            DirectState::Open => crate::tr!("Session archivieren"),
             DirectState::Archiving => crate::tr!("Archiviert nach der Antwort"),
-            DirectState::Archived => crate::tr!("Direct reaktivieren"),
+            DirectState::Archived => crate::tr!("Session reaktivieren"),
         };
         if ui.add_enabled(app.online && !archive_pending && direct.state != DirectState::Archiving,
             egui::Button::new(label)).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
@@ -173,6 +168,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sessions_lists_manual_and_automatic_work_and_plus_opens_the_confirmed_session() {
+        let mut app = crate::tests::fixture();
+        let project = app.settings.project.unwrap();
+        let snapshot = std::sync::Arc::make_mut(app.snapshot.as_mut().unwrap());
+        let worker = sessions_for_page(snapshot, project, Page::Sessions).into_iter()
+            .find(|c| !session_closed(snapshot, c)).unwrap();
+        snapshot.server_capabilities.push(CAPABILITY.into());
+        let manual = Direct {
+            id: CommandId::new(), project_id: project, state: DirectState::Open,
+            created_unix_ms: 1, stream_id: None, selection: None,
+            root_command_id: None, current_command_id: None, preparation_failed: false,
+        };
+        let archived = Direct { id: CommandId::new(), state: DirectState::Archived, ..manual.clone() };
+        snapshot.directs.extend([manual.clone(), archived.clone(),
+            Direct { id: CommandId::new(), project_id: ProjectId::new(), ..manual.clone() }]);
+        app.set_page(Page::Sessions);
+        let ctx = app.backend.context().clone();
+        let draw = |app: &mut App, events| ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+            events,
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        for _ in 0..3 { let _ = draw(&mut app, vec![]); }
+        let rect = |name, id| ctx.data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new((name, id))));
+        assert!(rect("test-session-row-open", worker.session_root()).is_some());
+        assert!(rect("test-manual-session-open", manual.id).is_some());
+        assert!(rect("test-manual-session-open", archived.id).is_none());
+        let add = || ctx.data_mut(|d| d.get_temp::<(egui::Rect, bool)>(egui::Id::new("test-session-add-manual"))).unwrap();
+        assert!(add().1);
+        let _ = draw(&mut app, crate::tests::click_events(add().0.center()));
+        let request = app.settings.pending.iter().find(|r| r.path == "/v1/directs").unwrap();
+        assert_eq!(request.body["project_id"], json!(project));
+        let request_id = request.id;
+        let _ = draw(&mut app, vec![]);
+        assert!(!add().1);
+        let created = Direct { id: CommandId::new(), ..manual };
+        app.backend.emit_for_test(crate::backend::Event::Request(request_id, Ok(json!(created))));
+        app.receive();
+        assert_eq!(app.tabs[app.active_tab - 1].direct_id, Some(created.id));
+        app.active_tab = 0;
+        app.sessions_closed = true;
+        let _ = draw(&mut app, vec![]);
+        assert!(rect("test-manual-session-open", archived.id).is_some());
+    }
+
+    #[test]
     fn direct_intent_is_visible_in_its_tab_but_not_in_questions() {
         let mut app = crate::tests::fixture();
         app.online = true;
@@ -206,7 +247,7 @@ mod tests {
         }, |ctx| app.draw_shell(ctx));
         let mut text = Vec::new();
         for shape in &output.shapes { crate::tests::shape_text(&shape.shape, &mut text); }
-        for expected in ["OpenCode · Direct", "Neuer Entwurf", "Wichtiger Inhalt", "Intent einreihen"] {
+        for expected in ["OpenCode · Manuelle Session", "Neuer Entwurf", "Wichtiger Inhalt", "Intent einreihen"] {
             assert!(text.iter().any(|line| line.contains(expected)), "{expected:?}: {text:?}");
         }
         assert!(!text.iter().any(|line| line.contains("erweiterte Freigabe")));

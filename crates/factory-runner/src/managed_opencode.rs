@@ -260,7 +260,7 @@ async fn write_config(settings: &Settings, output: &Path, factory_url: &str) -> 
 }
 
 async fn add_gateway_config(factory_url: &str, key_file: &Path, config: &mut Value) -> Result<()> {
-    use factory_protocol::models::ModelAccess;
+    use factory_protocol::models::{ModelAccess, OPENCODE_FREE_ACCESS};
     let url = reqwest::Url::parse(factory_url)?;
     ensure!(
         url.username().is_empty()
@@ -311,6 +311,16 @@ async fn add_gateway_config(factory_url: &str, key_file: &Path, config: &mut Val
     rules_list.push(serde_json::json!({"action":"provider.use","resource":"*","effect":"deny"}));
     let mut providers = serde_json::Map::new();
     for access in accesses {
+        if access.id == OPENCODE_FREE_ACCESS {
+            // Free chat is only supported through OpenCode's signed-out native
+            // integration. Do not configure a proxy or a credential for it.
+            rules_list.extend([
+                serde_json::json!({"action":"provider.use","resource":OPENCODE_FREE_ACCESS,"effect":"allow"}),
+                serde_json::json!({"action":"integration.connect","resource":OPENCODE_FREE_ACCESS,"effect":"deny"}),
+                serde_json::json!({"action":"integration.use","resource":"opencode#*","effect":"deny"}),
+            ]);
+            continue;
+        }
         ensure!(
             access.id.starts_with("factory-")
                 && access
@@ -751,6 +761,8 @@ mod tests {
         use factory_protocol::models::KeyModelProvider;
         let providers = KeyModelProvider::ALL.map(|p| (p, p.new_access_id()));
         let mut catalog = vec![serde_json::json!({"id":"factory-test","name":"Factory Test","models":["sample"]})];
+        catalog.push(serde_json::json!({"id":factory_protocol::models::OPENCODE_FREE_ACCESS,
+            "name":"OpenCode Free","models":["big-pickle"]}));
         catalog.extend(providers.iter().map(|(provider, id)| {
             serde_json::json!({"id":id,"name":provider.label(),"models":["sample"]})
         }));
@@ -797,6 +809,14 @@ mod tests {
                 .unwrap();
             if resource == "config" {
                 let entries = result.as_array().unwrap();
+                assert!(entries.iter().any(|entry| {
+                    let info = &entry["info"];
+                    info["providers"]["opencode"].is_null()
+                        && info["policies"].as_array().is_some_and(|rules| {
+                            rules.contains(&serde_json::json!({"action":"provider.use","resource":"opencode","effect":"allow"}))
+                                && rules.contains(&serde_json::json!({"action":"integration.use","resource":"opencode#*","effect":"deny"}))
+                        })
+                }));
                 assert!(result
                     .as_array()
                     .unwrap()

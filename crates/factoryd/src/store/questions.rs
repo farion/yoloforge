@@ -64,6 +64,7 @@ impl Store {
         }
         let mut seen = std::collections::HashSet::new();
         let mut existing = list(&tx, id)?;
+        let mut can_check = None;
         for external in &body.questions {
             let kind = match external.kind {
                 QuestionKind::Form => "form",
@@ -105,8 +106,18 @@ impl Store {
                     save(&tx, value)?;
                 }
             } else {
+                let try_automatic = match can_check {
+                    Some(enabled) => enabled,
+                    None => {
+                        let enabled = super::question_orchestrator::can_check(&tx, &command)?;
+                        can_check = Some(enabled);
+                        enabled
+                    }
+                };
                 let mut value = Question {
-                    orchestration_note: String::new(),
+                    orchestration_note: if try_automatic && external.kind == QuestionKind::Permission {
+                        QUESTION_AUTOMATION_PENDING.into()
+                    } else { String::new() },
                     id: QuestionId::new(),
                     command_id: id,
                     session_id: command.session_id(),
@@ -117,7 +128,13 @@ impl Store {
                     answer_request: None,
                 };
                 tx.execute("INSERT INTO questions(id,command_id,kind,external_id,data) VALUES(?1,?2,?3,?4,?5)",params![value.id.to_string(),id.to_string(),kind,external.external_id,serde_json::to_string(&value)?])?;
-                event(&tx, "question.created", value.id.to_string(), &value)?;
+                let sequence = append_event(&tx, "question.created", &value.id.to_string(), &value)?;
+                if try_automatic && external.kind == QuestionKind::Form {
+                    super::question_orchestrator::try_documented_form(&tx, &value)?;
+                    value = load(&tx, value.id)?;
+                }
+                super::desktop::record_notification(&tx, sequence, "question.created",
+                    &value.id.to_string(), &serde_json::to_value(&value)?)?;
                 if let Some(intent) = super::directs::intent_request(&tx, &command, &value)? {
                     if !intent.enqueue {
                         super::directs::save_intent(&tx, &command, &value, &intent)?;
@@ -142,6 +159,9 @@ impl Store {
             }
         }
         tx.commit()?;
+        if can_check == Some(true) {
+            self.wake_scheduler();
+        }
         Ok(existing)
     }
 

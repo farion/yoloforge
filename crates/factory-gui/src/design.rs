@@ -8,6 +8,7 @@ pub const DIALOG_PADDING: i8 = 24;
 pub const DIALOG_OUTER_GAP: f32 = 32.0;
 const DIALOG_LOADING_SCRIM: Color32 = Color32::from_black_alpha(200);
 pub const LIST_ROW_HEIGHT: f32 = 44.0;
+pub const PICKER_ROW_HEIGHT: f32 = 38.0;
 pub const MAIN_MENU_ITEM_GAP: f32 = 4.0;
 pub const RUNNER_ICON: &str = egui_phosphor::regular::CPU;
 pub const HOVER_FILL: Color32 = Color32::from_rgb(54, 65, 81);
@@ -232,6 +233,46 @@ pub fn section_toolbar_with(
     selected: &mut usize,
     leading: impl FnOnce(&mut egui::Ui),
 ) {
+    section_toolbar_extras(ui, id, query, hint, tabs, selected, leading, 0.0, |_| {});
+}
+
+pub(crate) const SECTION_FILTER_WIDTH: f32 = 140.0;
+
+pub(crate) fn section_filter<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    label: &str,
+    selected: &mut T,
+    options: &[(T, &str)],
+) -> egui::Response {
+    let text = options.iter().find(|(value, _)| value == selected).map_or("", |(_, text)| *text);
+    let response = egui::ComboBox::from_id_salt("section-filter")
+        .selected_text(text)
+        .width(SECTION_FILTER_WIDTH)
+        .show_ui(ui, |ui| {
+            for &(value, text) in options {
+                let option = navigation_row(ui, text, *selected == value, None);
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-section-filter-option", label, text)), option.rect));
+                if option.clicked() {
+                    *selected = value;
+                    ui.close();
+                }
+            }
+        }).response;
+    response.on_hover_text(label).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub(crate) fn section_toolbar_extras(
+    ui: &mut egui::Ui,
+    id: &str,
+    query: &mut String,
+    hint: &str,
+    tabs: &[(&str, usize)],
+    selected: &mut usize,
+    leading: impl FnOnce(&mut egui::Ui),
+    filter_width: f32,
+    filter: impl FnOnce(&mut egui::Ui),
+) {
     ui.push_id(id, |ui| {
         let _row = ui.horizontal(|ui| {
             leading(ui);
@@ -249,7 +290,8 @@ pub fn section_toolbar_with(
                         + 24.0
                 })
                 .fold(SECTION_TAB_WIDTH, f32::max);
-            let reserved = tabs.len() as f32 * (tab_width + ui.spacing().item_spacing.x);
+            let reserved = tabs.len() as f32 * (tab_width + ui.spacing().item_spacing.x)
+                + if filter_width > 0.0 { filter_width + ui.spacing().item_spacing.x } else { 0.0 };
             let width = (ui.available_width() - reserved).clamp(80.0, 280.0)
                 - f32::from(INPUT_MARGIN.left + INPUT_MARGIN.right);
             let _search = ui.add(singleline(query).hint_text(input_hint(hint)).desired_width(width));
@@ -257,6 +299,7 @@ pub fn section_toolbar_with(
             ui.ctx().data_mut(|d| {
                 d.insert_temp(egui::Id::new(format!("test-{id}-search")), _search.rect)
             });
+            filter(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 for (index, (title, count)) in tabs.iter().enumerate().rev() {
                     let active = *selected == index;
@@ -830,6 +873,11 @@ pub fn navigation_row(
     navigation_row_with_icon(ui, None, title, selected, count)
 }
 
+pub fn picker_row(ui: &mut egui::Ui, title: &str, selected: bool) -> egui::Response {
+    navigation_row_content(ui, None, title, selected, &[], None, None, PICKER_ROW_HEIGHT)
+        .on_hover_text(title)
+}
+
 pub fn navigation_row_with_icon(
     ui: &mut egui::Ui,
     icon: Option<&str>,
@@ -843,7 +891,7 @@ pub fn navigation_row_with_icon(
 pub fn navigation_row_with_badges(
     ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool, counts: &[(usize, Color32)],
 ) -> egui::Response {
-    navigation_row_content(ui, icon, title, selected, counts, None, None)
+    navigation_row_content(ui, icon, title, selected, counts, None, None, LIST_ROW_HEIGHT)
 }
 
 pub fn navigation_row_with_activity(
@@ -855,7 +903,7 @@ pub fn navigation_row_with_activity(
     } else {
         0.0
     };
-    navigation_row_content(ui, Some(icon), title, selected, &[], Some(angle), None)
+    navigation_row_content(ui, Some(icon), title, selected, &[], Some(angle), None, LIST_ROW_HEIGHT)
         .on_hover_text(crate::tr!("Factory arbeitet"))
 }
 
@@ -876,6 +924,7 @@ pub fn navigation_row_with_status_icon(
         &[],
         None,
         Some((status_icon, status_color)),
+        LIST_ROW_HEIGHT,
     )
     .on_hover_text(status_label)
 }
@@ -884,10 +933,11 @@ fn navigation_row_content(
     ui: &mut egui::Ui, icon: Option<&str>, title: &str, selected: bool,
     counts: &[(usize, Color32)], activity_angle: Option<f32>,
     status_icon: Option<(&str, Color32)>,
+    height: f32,
 ) -> egui::Response {
     const BADGE_MIN_WIDTH: f32 = 24.0;
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), LIST_ROW_HEIGHT),
+        egui::vec2(ui.available_width(), height),
         egui::Sense::click(),
     );
     response.widget_info(|| {

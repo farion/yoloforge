@@ -61,6 +61,15 @@ pub(super) fn save_command(tx: &Transaction<'_>, value: &RunnerCommand, state: &
 }
 
 impl Store {
+    pub(crate) fn require_intent_recovery_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool) -> Result<()> {
+        if supported { return Ok(()); }
+        let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
+        let tx = db.transaction()?;
+        if is_intent_recovery(&command(&tx, id, runner, epoch)?) {
+            return Err(StoreError::Invalid("Runner does not support intent recovery"));
+        }
+        Ok(())
+    }
     pub(crate) fn require_merger_support(&self, runner: RunnerId, id: CommandId, epoch: u64, supported: bool, recovery: bool) -> Result<()> {
         if supported && recovery { return Ok(()); }
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
@@ -374,7 +383,15 @@ impl Store {
         target_git: Option<TargetGitPlan>,
         verbatim: bool,
     ) -> Result<RunnerCommand> {
-        Self::enqueue_with_result_origin(tx, id, body, previous, role, pinned, integrations, target_git, None, verbatim)
+        Self::enqueue_with_result_origin(tx, id, body, previous, role, pinned, integrations, target_git, None, verbatim, false)
+    }
+
+    pub(super) fn enqueue_intent_recovery(
+        tx: &Transaction<'_>, id: StreamId, body: &EnqueueCommand, previous: CommandId,
+        pinned: Option<&factory_protocol::models::ModelSelection>,
+        integrations: (&super::skills::SkillProfile, &McpProfile),
+    ) -> Result<RunnerCommand> {
+        Self::enqueue_with_result_origin(tx, id, body, Some(previous), "", pinned, Some(integrations), None, None, true, true)
     }
 
     pub(super) fn enqueue_portable_result(
@@ -383,7 +400,7 @@ impl Store {
         Self::enqueue_with_result_origin(tx, owner.id, &EnqueueCommand {
             request_id: RequestId::new(), expected_revision: owner.revision,
             kind: CommandKind::Checkpoint, prompt: None,
-        }, None, "", None, None, None, Some(origin), false)
+        }, None, "", None, None, None, Some(origin), false, false)
     }
 
     pub(super) fn enqueue_portable_return(
@@ -407,10 +424,14 @@ impl Store {
         role: &str, pinned: Option<&factory_protocol::models::ModelSelection>,
         integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
         target_git: Option<TargetGitPlan>, result_origin: Option<ProjectCheckpointOrigin>, verbatim: bool,
+        intent_recovery: bool,
     ) -> Result<RunnerCommand> {
         let direct = role == factory_protocol::directs::ROLE;
         let supervised = !role.is_empty() && !direct && role != MERGER_ROLE;
         let mut owner = stream(tx, id)?;
+        if super::draft_resets::retired(tx, owner.id)? {
+            return Err(StoreError::WorkConflict);
+        }
         super::tasks::require_no_publication_recovery(tx, owner.project_id)?;
         if !direct && tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM directs WHERE stream_id=?1)",
@@ -624,7 +645,7 @@ impl Store {
                         || (parent.state == CommandState::Failed
                             && (session_stopped_without_result(&parent.result)
                                 || matches!(&parent.result, Some(CommandOutput::Agent { agent })
-                                    if agent.phase == AgentPhase::Interrupted || (direct && agent.phase == AgentPhase::Failed)))))
+                                     if agent.phase == AgentPhase::Interrupted || ((direct || intent_recovery) && agent.phase == AgentPhase::Failed)))))
                     || parent.runner_id != owner.runner_id
                     || parent.ownership_epoch != owner.ownership_epoch
                     || parent
@@ -985,6 +1006,11 @@ impl Store {
                 } else if session_stopped_without_result(&value.result) {
                     super::tasks::set_publication_state(tx, &owner, value.id, TicketState::Blocked,
                         "OpenCode-Session ohne Ergebnis gestoppt; Arbeitsstand bleibt erhalten.")?;
+                }
+                if publication_blocked {
+                    if let Some(reason) = super::merger::publication_attention_reason(tx, &value)? {
+                        super::desktop::require_execution_attention(tx, &owner, value.id, reason)?;
+                    }
                 }
                 let exported_result = value.kind == CommandKind::Checkpoint
                     && super::checkpoints::load(tx, id)?.is_some_and(|spec| spec.project_result.is_some());

@@ -446,6 +446,13 @@ impl OpenCodeClient {
             .await?
             .map(|v| v["data"].clone()))
     }
+
+    pub async fn delete_session(&self, id: &str) -> Result<()> {
+        safe_id(id)?;
+        self.request(Method::DELETE, &format!("/api/session/{id}"), None).await?;
+        ensure!(self.session(id).await?.is_none(), "OpenCode session removal not confirmed");
+        Ok(())
+    }
     /// Open the original terminal client on an existing, location-checked session.
     /// Credentials are inherited through the child environment, never command-line arguments.
     pub async fn terminal_command(

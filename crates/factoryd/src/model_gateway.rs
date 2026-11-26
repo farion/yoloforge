@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use factory_protocol::models::{is_copilot_access, COPILOT_INTEGRATION};
+use factory_protocol::models::{is_copilot_access, COPILOT_INTEGRATION, OPENCODE_FREE_ACCESS};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
@@ -19,6 +19,7 @@ use url::Url;
 
 pub(super) mod key_provider;
 mod copilot;
+pub(super) mod opencode_free;
 
 const CODEX: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -156,6 +157,9 @@ impl Gateway {
     }
 
     pub(super) async fn access_status(&self, store: Store, alias: String) -> &'static str {
+        if alias == OPENCODE_FREE_ACCESS {
+            return opencode_free::status(self, store).await;
+        }
         let provider = factory_protocol::models::KeyModelProvider::from_access_id(&alias);
         let copilot = is_copilot_access(&alias);
         let Some(credential_id) = self.binding(store, alias).await else {
@@ -257,7 +261,7 @@ async fn catalog(State((gateway, store)): State<(Gateway, Store)>, headers: Head
     let accesses: Vec<_> = settings
         .accesses
         .into_iter()
-        .filter(|a| bound.contains(&a.id))
+        .filter(|a| a.id == OPENCODE_FREE_ACCESS || bound.contains(&a.id))
         .collect();
     Json(accesses).into_response()
 }
@@ -1054,6 +1058,40 @@ mod tests {
     use factory_protocol::models::{
         FactoryModelSettings, ModelAccess, RoleModels, SetFactoryModels,
     };
+
+    #[tokio::test]
+    async fn opencode_free_access_uses_the_native_catalog_without_a_credential() {
+        let (central, central_task) = serve(Router::new().route("/api/model", get(|| async {
+            Json(json!({"data":[{"id":"big-pickle","providerID":"opencode","type":"chat","enabled":true,
+                "capabilities":{"tools":true},"cost":[{"input":0,"output":0}]}]}))
+        }))).await;
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        store.enable_model_settings().unwrap();
+        let key = "factory-model-gateway-test-key-only";
+        let admin = "factory-admin-test-key-at-least-thirty-two";
+        let gateway = Gateway::managed(central, "test-password-at-least-thirty-two".into(), key.into()).unwrap();
+        let (base, factory_task) = serve(crate::router_with_model_gateway(
+            admin, store.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)), Some(gateway),
+        )).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let add = |token| client.post(format!("{base}/v1/model-settings/opencode-free")).bearer_auth(token)
+            .header(factory_protocol::VERSION_HEADER, "1").json(&json!({"name":"OpenCode Free"})).send();
+        assert_eq!(add(key).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let added: Value = add(admin).await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(added["automatic_default"], json!({"access_id":"opencode","model_id":"big-pickle"}));
+        assert!(store.model_binding(OPENCODE_FREE_ACCESS).unwrap().is_none());
+        let accesses: Vec<ModelAccess> = client.get(format!("{base}/v1/model-gateway/catalog"))
+            .bearer_auth(key).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(accesses[0].id, OPENCODE_FREE_ACCESS);
+        assert_eq!(accesses[0].models, ["big-pickle"]);
+        let status: Value = client.get(format!("{base}/v1/model-settings/accesses/opencode/status"))
+            .bearer_auth(admin).header(factory_protocol::VERSION_HEADER, "1")
+            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(status["state"], "ready");
+        assert_eq!(store.remove_model_access(OPENCODE_FREE_ACCESS).unwrap().1, None);
+        factory_task.abort();
+        central_task.abort();
+    }
 
     #[tokio::test]
     async fn copilot_device_login_binds_the_account_and_relays_its_native_protocol() {
