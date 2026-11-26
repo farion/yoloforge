@@ -459,6 +459,26 @@ fn is_local_repository(repository: &str) -> bool {
         || matches!(repository.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
 }
 
+pub(super) fn has_runner_repository_source(
+    tx: &Transaction<'_>, project: &Project, runner: RunnerId,
+) -> Result<bool> {
+    if !is_local_repository(&project.repository)
+        || project.runner_bindings.get(&runner).is_some_and(|binding| !binding.repository_path.is_empty())
+    {
+        return Ok(true);
+    }
+    let registration: Option<(bool, bool)> = tx.query_row(
+        "SELECT local_source,server_runner FROM live_automatic_runners WHERE runner_id=?1",
+        [runner.to_string()], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional()?;
+    Ok(match registration {
+        Some((local_source, server_runner)) => !server_runner && local_source,
+        // Preserve explicit offline/local bindings when no newer registration
+        // is known; an unknown host cannot claim someone else's local path.
+        None => project.setup.as_ref().is_none_or(|setup| setup.runner_id == runner),
+    })
+}
+
 fn refresh_automatic_runner(tx: &Transaction<'_>, policy: &mut SchedulerPolicy, ticket: &Ticket) -> Result<()> {
     let data: String = tx.query_row(
         "SELECT data FROM active_projects WHERE id=?1",
@@ -485,7 +505,7 @@ fn refresh_automatic_runner(tx: &Transaction<'_>, policy: &mut SchedulerPolicy, 
     let mut replacement = None;
     for (id, local_source) in candidates {
         let id = id.parse().map_err(|_| StoreError::Internal)?;
-        if (local_repository && !local_source && !project.runner_bindings.contains_key(&id))
+        if (local_repository && !local_source && !has_runner_repository_source(tx, &project, id)?)
             || !super::mcp::runner_ready(tx, id, &mcps)?
         {
             continue;
@@ -535,6 +555,23 @@ fn portable_source(tx: &Transaction<'_>, project: ProjectId, since: u64) -> Resu
 #[cfg(test)]
 mod automatic_runner_tests {
     use super::*;
+
+    #[test]
+    fn server_runner_does_not_inherit_a_desktop_path_from_an_empty_binding() {
+        let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+        let runner = RunnerId::new();
+        let mut project = store.create_project(CreateProject {
+            request_id: RequestId::new(), name: "Remote source".into(), key: None, logo: None,
+            repository: "/opt/repos/worldofai".into(), base_branch: "main".into(),
+            runner_mapping: Some(ProjectRunnerMapping::Runner(runner)),
+        }).unwrap();
+        store.observe_automatic_runner_location(runner, true, true, true, true).unwrap();
+        let mut db = store.0.lock().unwrap();
+        let tx = db.transaction().unwrap();
+        assert!(!has_runner_repository_source(&tx, &project, runner).unwrap());
+        project.runner_bindings.get_mut(&runner).unwrap().repository_path = "/data/repos/worldofai".into();
+        assert!(has_runner_repository_source(&tx, &project, runner).unwrap());
+    }
 
     #[test]
     fn automatic_work_moves_until_the_runner_has_obtained_start_authorization() {
@@ -1034,6 +1071,10 @@ mod automatic_runner_tests {
             prompt: "Run on an available host".into(), images: vec![],
         }).unwrap();
         store.autostart_runner(old).unwrap();
+        // A legacy project could be pinned to its server even though the path
+        // belongs to a desktop. Stop sending it there and recover when the
+        // checkpoint-capable source runner comes online.
+        store.observe_automatic_runner_location(old, true, false, true, true).unwrap();
         let snapshot = store.snapshot().unwrap();
         assert_eq!(snapshot.projects.iter().find(|p| p.id == project.id).unwrap().repository, repository);
         let assert_runner = |runner| {
@@ -1042,7 +1083,8 @@ mod automatic_runner_tests {
         store.observe_automatic_runner(remote, true, false, false).unwrap();
         store.scheduler_tick().unwrap();
         assert_runner(old);
-        store.observe_automatic_runner(local, true, true, false).unwrap();
+        assert!(store.pending(old).unwrap().is_empty());
+        store.observe_automatic_runner(local, true, true, true).unwrap();
         store.scheduler_tick().unwrap();
         assert_runner(local);
         assert!(store.pending(local).unwrap().iter().any(|c| c.kind == CommandKind::PrepareWorkspace));
@@ -1376,6 +1418,7 @@ impl Store {
             if paused {
                 continue;
             }
+            super::tasks::recover_stopped(&tx, p.project_id)?;
             super::validation::resolve(&tx, p.project_id)?;
             tx.execute_batch("SAVEPOINT validation_start")?;
             match super::validation::start(&tx, &p) {
@@ -1678,10 +1721,18 @@ impl Store {
                         "Bearbeite die Aufgabe anhand der angehängten Bilder und Dateien.".into();
                 }
                 let goal = t.title.chars().take(60).collect::<String>();
-                let mut routing_policy = p.clone();
-                if seed.is_some() {
-                    routing_policy.runner_ids = vec![runner];
+                if seed.is_none() {
+                    let raw: String = tx.query_row("SELECT data FROM active_projects WHERE id=?1",
+                        [p.project_id.to_string()], |row| row.get(0))?;
+                    let project: Project = serde_json::from_str(&raw)?;
+                    if !has_runner_repository_source(&tx, &project, runner)? {
+                        super::routing::note(&tx, &mut t,
+                            "Orchestrator wartet: Kein Repository für den ausgewählten Runner verfügbar")?;
+                        continue;
+                    }
                 }
+                let mut routing_policy = p.clone();
+                routing_policy.runner_ids = vec![runner];
                 tx.execute_batch("SAVEPOINT routing_evaluation")?;
                 let routed = match super::routing::route(&tx, &routing_policy, &mut t, seed.as_ref()) {
                     Ok(route) => route,

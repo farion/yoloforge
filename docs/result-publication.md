@@ -47,6 +47,13 @@ Intent offen; es startet keine automatische Wiederholung. Neue Intent-Arbeit
 nach einer Übernahme beginnt in einer neuen Session vom Zielbranch, nicht im
 alten Ausführungs-Worktree.
 
+Meldet OpenCode eine normale Intent-Session wiederholt als inaktiv, ohne
+Abschlussantwort und ohne ausstehende Eingaben, archiviert der Runner den
+gestoppten Lauf. Die Factory hängt danach automatisch einen `Continue`-Auftrag
+an genau dieselbe Session und denselben Worktree. Der ursprüngliche Prompt
+wird nicht erneut gesendet. Stoppt auch die Fortsetzung, bleibt der Intent
+sichtbar stehen, statt weitere Fortsetzungen in einer Schleife zu starten.
+
 Die automatische Kombination ist keine erneute Testausführung des Gesamtstands.
 Für verpflichtende Tests vor Integration bleibt der getrennte Review-Ablauf vorgesehen.
 
@@ -62,6 +69,13 @@ CAS-Mechanismus direkt auf ihrem verwalteten Basisbranch. Ihr erfolgreicher
 Stand wird anschließend als verifizierter Projekt-Checkpoint exportiert. Damit
 können Folgeaufträge und registrierte lokale Spiegelkopien denselben
 maßgeblichen Stand beziehen, ohne Git-Hosting oder ein gemeinsames Dateisystem.
+
+Ein absoluter Pfad auf dem Desktop ist keine Repository-Quelle für einen
+Server-Runner. Für die Ausführung dort braucht die Factory eine explizite
+Checkout-Bindung auf diesem Runner, eine erreichbare Git-Quelle oder einen
+verifizierten Projekt-Checkpoint. Fehlt eine dieser Quellen, bleibt der Intent
+eingereiht und wartet auf die Projektquelle; die Factory initialisiert kein
+leeres Ersatz-Repository.
 
 Für bereits vor dieser Funktion abgeschlossene Aufgaben existiert die
 Wartungsoption `factory-runner --publish-result COMMAND_ID` mit den bisherigen

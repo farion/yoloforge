@@ -95,6 +95,7 @@ pub fn router_with_shutdown(
         .route("/v1/desktop/events/stream", get(live::desktop_event_stream))
         .route("/v1/events/{id}", get(desktop::event_payload))
         .route("/v1/tasks/{id}", get(desktop::task_payload).delete(desktop::delete_failed_task))
+        .route("/v1/tasks/{id}/inactive", axum::routing::delete(desktop::delete_inactive_task))
         .route("/v1/tasks/{id}/history", get(desktop::task_history))
         .route("/v1/tasks/{id}/models", get(model_routes::task))
         .route(
@@ -581,6 +582,29 @@ fn observed_ip(request: &Request) -> Option<std::net::IpAddr> {
         .map(|peer| peer.0.ip().to_canonical())
 }
 
+fn local_project_source(
+    principal: &Principal, runner: RunnerId, location: RunnerLocation,
+    capable: bool, peer: ObservedIp,
+) -> bool {
+    // Native desktop sources are reached over HTTPS too. A device
+    // credential bound to this runner is stronger than proxy topology.
+    capable && location == RunnerLocation::Local
+        && ((principal.role == DeviceRole::Runner && principal.runner_id == Some(runner))
+            || peer.0.is_some_and(|ip| ip.is_loopback()))
+}
+
+#[cfg(test)]
+#[test]
+fn enrolled_desktop_can_supply_a_project_checkpoint_over_https() {
+    let runner = RunnerId::new();
+    let principal = Principal { role: DeviceRole::Runner, runner_id: Some(runner), device_id: None };
+    let remote = ObservedIp(Some("192.0.2.10".parse().unwrap()));
+    assert!(local_project_source(&principal, runner, RunnerLocation::Local, true, remote));
+    assert!(!local_project_source(&principal, RunnerId::new(), RunnerLocation::Local, true, remote));
+    assert!(!local_project_source(&principal, runner, RunnerLocation::Server, true, remote));
+    assert!(!local_project_source(&principal, runner, RunnerLocation::Local, false, remote));
+}
+
 async fn register(
     State(app): State<App>,
     axum::Extension(principal): axum::Extension<Principal>,
@@ -604,7 +628,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 18
+        || body.capabilities.len() > 19
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(
@@ -651,8 +675,7 @@ async fn register(
                 .any(|c| c == mcp::LOCAL_MCP_CAPABILITY))
             && matches!(body.opencode, OpenCodeStatus::Ready { .. });
         let ready = matches!(body.opencode, OpenCodeStatus::Ready { .. });
-        let local_source = local && body.location == RunnerLocation::Local
-            && peer.0.is_some_and(|ip| ip.is_loopback());
+        let local_source = local_project_source(&principal, runner, body.location, local, peer);
         let checkpoint = body.capabilities.iter().any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY);
         let server_runner = body.location == RunnerLocation::Server;
         let native_boot = (checkpoint && body.location == RunnerLocation::Local
@@ -691,6 +714,7 @@ async fn register(
 }
 async fn heartbeat(
     State(app): State<App>,
+    axum::Extension(principal): axum::Extension<Principal>,
     axum::Extension(peer): axum::Extension<ObservedIp>,
     Path(id): Path<String>,
     body: Result<Json<Heartbeat>, JsonRejection>,
@@ -753,8 +777,7 @@ async fn heartbeat(
                 .any(|c| c == mcp::LOCAL_MCP_CAPABILITY))
             && matches!(entry.input.opencode, OpenCodeStatus::Ready { .. });
         let ready = matches!(entry.input.opencode, OpenCodeStatus::Ready { .. });
-        let local_source = local && entry.input.location == RunnerLocation::Local
-            && peer.0.is_some_and(|ip| ip.is_loopback());
+        let local_source = local_project_source(&principal, id, entry.input.location, local, peer);
         let checkpoint = entry.input.capabilities.iter().any(|c| c == AUTOMATIC_CHECKPOINT_CAPABILITY);
         let server_runner = entry.input.location == RunnerLocation::Server;
         if !matches!(
@@ -790,7 +813,7 @@ async fn runner_snapshot(State(app): State<App>, Path(id): Path<RunnerId>) -> Re
             || p.runner_bindings.contains_key(&id) || p.setup.as_ref().is_some_and(|setup| setup.runner_id == id));
         Ok(serde_json::json!({
             "protocol_version": PROTOCOL_VERSION, "server_version": env!("CARGO_PKG_VERSION"),
-            "server_capabilities": [TARGET_GIT_CAPABILITY, RUNNER_RESTART_CAPABILITY, factory_protocol::directs::CAPABILITY, DELETE_FAILED_TASK_CAPABILITY],
+            "server_capabilities": [TARGET_GIT_CAPABILITY, RUNNER_RESTART_CAPABILITY, factory_protocol::directs::CAPABILITY, DELETE_FAILED_TASK_CAPABILITY, DELETE_INACTIVE_TASK_CAPABILITY],
             "boot_id": boot, "revision": 0, "runners": [],
             "projects": snapshot.projects, "streams": snapshot.streams, "commands": snapshot.commands,
         }))
@@ -837,7 +860,7 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
     let registry = app.registry.read().await;
     Json(Snapshot {
         directs: durable.directs,
-        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into()],
+        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
         editable_tasks: durable.editable_tasks,

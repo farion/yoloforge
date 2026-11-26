@@ -28,6 +28,22 @@ pub struct Execution {
     mcp_retry_after_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_mcp_registration: Option<RegistrationId>,
+    #[serde(default)]
+    idle_without_result_since_ms: Option<u64>,
+}
+
+const INACTIVE_RESULT_GRACE_MS: u64 = 10_000;
+
+fn record_idle_observation(journal: &Journal, record: &mut Record, idle: bool) -> Result<bool> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+    let execution = record.agent.as_mut().context("Execution record missing")?;
+    let previous = execution.idle_without_result_since_ms;
+    let observed = idle.then(|| previous.filter(|since| *since <= now).unwrap_or(now));
+    if observed != previous {
+        execution.idle_without_result_since_ms = observed;
+        tokio::task::block_in_place(|| journal.save(record))?;
+    }
+    Ok(observed.is_some_and(|since| now.saturating_sub(since) >= INACTIVE_RESULT_GRACE_MS))
 }
 
 fn progress(
@@ -117,6 +133,7 @@ pub async fn step(journal: &Journal, record: &mut Record, args: &Args, factory: 
             previous_assistant: None,
             mcp_retry_after_ms: 0,
             remote_mcp_registration: None,
+            idle_without_result_since_ms: None,
         });
         tokio::task::block_in_place(|| journal.save(record))?;
     }
@@ -517,7 +534,8 @@ async fn advance(
                     && previous.command.ownership_epoch == command.ownership_epoch
                     && previous.command.session_root() == command.session_root()
                     && previous.archive.finished
-                    && matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Interrupted))
+                    && (matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Interrupted))
+                        || session_stopped_without_result(&previous.result))
                     && prior.endpoint == execution.endpoint
                     && prior.workspace == execution.workspace
                     && prior.runtime == execution.runtime,
@@ -549,7 +567,8 @@ async fn advance(
                 .map(String::from);
             ensure!(
                 previous_assistant.is_some()
-                    || matches!(&previous.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted),
+                    || matches!(&previous.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted)
+                    || session_stopped_without_result(&previous.result),
                 "Previous assistant missing"
             );
             record.agent.as_mut().unwrap().previous_assistant = previous_assistant;
@@ -651,6 +670,7 @@ async fn advance(
     record.question_snapshot = Some(questions);
     let waiting = forms.as_array().unwrap().len() + permissions.as_array().unwrap().len();
     if waiting > 0 {
+        record_idle_observation(journal, record, false)?;
         return Ok(progress(
             &command,
             AgentPhase::WaitingInput,
@@ -658,6 +678,7 @@ async fn advance(
         ));
     }
     if client.active(&session_id).await? {
+        record_idle_observation(journal, record, false)?;
         return Ok(progress(
             &command,
             AgentPhase::Running,
@@ -672,33 +693,22 @@ async fn advance(
         .session_items(&session_id, "message?type=assistant&order=desc&limit=1")
         .await?;
     let last = messages.as_array().unwrap().first();
-    if spec.continuation.is_some() {
-        ensure!(
-            last.is_some_and(
+    let current_reply = spec.continuation.is_none()
+        || last.is_some_and(
                 |m| m["id"].as_str() != execution.previous_assistant.as_deref()
                     && m.pointer("/time/created")
                         .and_then(|v| v.as_f64())
                         .zip(prompt_created)
                         .is_some_and(|(reply, prompt)| reply >= prompt)
-            ),
-            "No response belonging to continuation observed"
-        );
-    }
-    if session["outcome"] == "interrupted" {
-        return Ok(progress(
-            &command,
-            AgentPhase::Unknown,
-            "Execution interrupted; process quiescence not verified, no automatic resume",
-        ));
-    }
-    if session["outcome"] == "failed" {
+            );
+    if current_reply && session["outcome"] == "failed" {
         return Ok(progress(
             &command,
             AgentPhase::Failed,
             "OpenCode execution failed; inspect session history",
         ));
     }
-    if let Some(last) = last {
+    if let Some(last) = last.filter(|_| current_reply) {
         if session["outcome"] == "succeeded"
             && last["finish"] == "stop"
             && last
@@ -714,12 +724,7 @@ async fn advance(
                 .collect::<Vec<_>>()
                 .join("\n");
             if !final_response_follows_form(last, &summary, crate::questions::last_form_reply_boundary(record)) {
-                let (phase, reason) = if crate::questions::recently_answered(record) {
-                    (AgentPhase::Running, "Waiting for OpenCode to continue after the form reply")
-                } else {
-                    (AgentPhase::Unknown, "No final OpenCode response confirmed after the form reply")
-                };
-                return Ok(progress(&command, phase, reason));
+                return settle_inactive(journal, record, client, &command).await;
             }
             // Byte-bound the wire result without splitting UTF-8 characters.
             let mut end = summary.len().min(24000);
@@ -733,18 +738,37 @@ async fn advance(
             ));
         }
     }
-    // A confirmed answer can make the question disappear before OpenCode
-    // reports active execution or a terminal outcome. Never replay the answer.
-    if crate::questions::recently_answered(record) {
-        return Ok(progress(&command, AgentPhase::Running, "OpenCode resuming after a confirmed answer"));
-    }
-    Ok(progress(
-        &command,
-        AgentPhase::Unknown,
-        "Session inactive without confirmed final result; no automatic resume",
-    ))
+    settle_inactive(journal, record, client, &command).await
 }
 
+async fn settle_inactive(
+    journal: &Journal, record: &mut Record, client: &OpenCodeClient, command: &RunnerCommand,
+) -> Result<AgentProgress> {
+    // A confirmed answer can briefly disappear before execution becomes active.
+    if crate::questions::recently_answered(record) {
+        record_idle_observation(journal, record, false)?;
+        return Ok(progress(command, AgentPhase::Running, "OpenCode resuming after a confirmed answer"));
+    }
+    if record_idle_observation(journal, record, true)? {
+        let session = command.session_id();
+        for kind in ["inbox", "form", "permission"] {
+            if !client.session_items(&session, kind).await?
+                .as_array().context("Invalid session items")?.is_empty()
+            {
+                record_idle_observation(journal, record, false)?;
+                return Ok(progress(command, AgentPhase::Finalizing,
+                    "OpenCode has pending session items; checking their status"));
+            }
+        }
+        if client.active(&session).await? {
+            record_idle_observation(journal, record, false)?;
+            return Ok(progress(command, AgentPhase::Running, "OpenCode execution active"));
+        }
+        return Ok(progress(command, AgentPhase::Failed,
+            format!("{SESSION_STOPPED_PREFIX}\nOpenCode session stopped without a final response; worktree retained.")));
+    }
+    Ok(progress(command, AgentPhase::Finalizing, "OpenCode session is idle; checking for a final response"))
+}
 fn final_response_follows_form(message: &serde_json::Value, summary: &str, boundary: Option<u64>) -> bool {
     boundary.is_none_or(|boundary| {
         !summary.trim().is_empty() && message.pointer("/time/created").and_then(|v| v.as_f64())
@@ -955,6 +979,7 @@ mod tests {
             previous_assistant: None,
             mcp_retry_after_ms: 0,
             remote_mcp_registration: None,
+            idle_without_result_since_ms: None,
             workspace: Workspace {
                 path: "/prepared".into(),
                 branch: format!("factory/{stream}"),
@@ -1013,8 +1038,15 @@ mod tests {
         mode.store(4, Ordering::SeqCst);
         assert_eq!(
             step(&journal, &mut record, &args, None).await.unwrap().phase,
-            AgentPhase::Unknown
+            if automatic_model { AgentPhase::Unknown } else { AgentPhase::Finalizing }
         );
+        if !automatic_model {
+            record.agent.as_mut().unwrap().idle_without_result_since_ms = Some(1);
+            let stopped = step(&journal, &mut record, &args, None).await.unwrap();
+            assert_eq!(stopped.phase, AgentPhase::Failed);
+            assert!(stopped.summary.contains("worktree retained"));
+            assert_eq!(posts.load(Ordering::SeqCst), 0);
+        }
         mode.store(2, Ordering::SeqCst);
         let result = step(&journal, &mut record, &args, None).await.unwrap();
         if automatic_model {

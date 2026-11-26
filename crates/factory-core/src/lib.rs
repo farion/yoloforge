@@ -412,6 +412,12 @@ pub const REVIEW_CAPABILITY: &str = "git-review-v1";
 pub const PUBLICATION_CONFLICT_PREFIX: &str = "[yoloforge:publication-conflict]";
 pub const PUBLICATION_BLOCKED_PREFIX: &str = "[yoloforge:publication-blocked]";
 pub const PUBLICATION_CONFIRMED_PREFIX: &str = "[yoloforge:publication-confirmed]";
+pub const SESSION_STOPPED_PREFIX: &str = "[yoloforge:session-stopped]";
+
+pub fn session_stopped_without_result(result: &Option<CommandOutput>) -> bool {
+    matches!(result, Some(CommandOutput::Agent { agent })
+        if agent.phase == AgentPhase::Failed && agent.summary.starts_with(SESSION_STOPPED_PREFIX))
+}
 pub const MERGER_ROLE: &str = "merger";
 pub const MERGER_CAPABILITY: &str = "merger-v1";
 pub const MERGE_PARENT_PREFIX: &str = "factory_merge_parent=";

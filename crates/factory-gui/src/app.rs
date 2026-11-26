@@ -1636,7 +1636,8 @@ impl App {
                         }
                     }
                     if let Some(ticket_id) = self.settings.pending.iter().find(|r| r.id == id && r.method == "DELETE")
-                        .and_then(|r| r.path.strip_prefix("/v1/tasks/")).and_then(|raw| raw.parse::<TicketId>().ok())
+                        .and_then(|r| r.path.strip_prefix("/v1/tasks/"))
+                        .and_then(|raw| raw.strip_suffix("/inactive").unwrap_or(raw).parse::<TicketId>().ok())
                     {
                         if result.as_ref().is_ok_and(|value|
                             value["id"] == serde_json::json!(ticket_id) && value["status"] == "cancelled")
@@ -1942,10 +1943,11 @@ impl App {
                 },
                 Event::OpenNotification(id, target) => self.open_notification(id, target),
                 Event::LocalRunners(report) => {
+                    let crate::local_runners::Report { runners, result, user_error } = report;
                     self.local_runners_busy = false;
                     self.restarting_runner = None;
-                    if let Some(runners) = report.runners { self.local_runners = runners; }
-                    match report.result {
+                    if let Some(runners) = runners { self.local_runners = runners; }
+                    match result {
                         Ok(Some(message)) => self.notice(message),
                         Ok(None) => {},
                         Err(error) => {
@@ -1953,7 +1955,9 @@ impl App {
                             if self.action_errors.len() > 50 {
                                 self.action_errors.remove(0);
                             }
-                            self.notice_error(crate::tr!("Lokale Runner-Aktion fehlgeschlagen. Details stehen in der Diagnose."));
+                            self.notice_error(user_error.unwrap_or_else(|| crate::tr!(
+                                "Lokale Runner-Aktion fehlgeschlagen. Details stehen in der Diagnose."
+                            ).into()));
                         }
                     }
                 },

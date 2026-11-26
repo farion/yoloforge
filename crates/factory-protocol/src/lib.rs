@@ -260,6 +260,15 @@ pub struct RetryTask {
 }
 
 pub const DELETE_FAILED_TASK_CAPABILITY: &str = "delete-failed-intent-v1";
+pub const DELETE_INACTIVE_TASK_CAPABILITY: &str = "delete-inactive-intent-v1";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteInactiveTask {
+    pub request_id: RequestId,
+    pub expected_revision: Revision,
+    pub execution_command: Option<CommandId>,
+}
 
 /// Operator attestation after reconciling an old result in Git.
 #[derive(Clone, Debug, Serialize, Deserialize)]

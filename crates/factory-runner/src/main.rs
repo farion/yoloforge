@@ -639,6 +639,14 @@ fn registration_capabilities(managed: bool) -> Vec<String> {
     .collect()
 }
 
+fn legacy_registration_capabilities(capabilities: &mut Vec<String>) {
+    capabilities.retain(|capability| {
+        capability != AUTOMATIC_CHECKPOINT_CAPABILITY
+            && capability != factory_protocol::directs::CAPABILITY
+            && capability != MERGER_CAPABILITY
+    });
+}
+
 fn native_runner_boot(args: &Args) -> Option<NativeRunnerBoot> {
     #[cfg(target_os = "linux")]
     {
@@ -854,10 +862,7 @@ async fn run(mut args: Args) -> Result<()> {
             let mut result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400) {
                 // Older servers cap registration at 16 capability strings.
-                input.capabilities.pop();
-                input
-                    .capabilities
-                    .retain(|capability| capability != factory_protocol::directs::CAPABILITY);
+                legacy_registration_capabilities(&mut input.capabilities);
                 result = client.register(&input).await;
             }
             if result.is_ok() {
@@ -955,6 +960,17 @@ async fn run(mut args: Args) -> Result<()> {
                 was_connected = false;
                 delay = Duration::from_millis(100);
             }
+            Err(ClientError::Http { status, code: None, .. })
+                if registration.is_some() && status.as_u16() == 404 =>
+            {
+                // A proxy or older Factory can lose the registration without
+                // returning the structured NotFound error. Discard the lease,
+                // not the process or its journal.
+                eprintln!("Factory heartbeat returned an unstructured 404; renewing runner registration");
+                registration = None;
+                was_connected = false;
+                delay = Duration::from_secs(3);
+            }
             Err(ClientError::Http { status, .. }) if status.is_server_error() => {
                 was_connected = false;
                 delay = Duration::from_secs(3);
@@ -1004,19 +1020,19 @@ mod startup_identity_tests {
     #[test]
     fn managed_runner_registration_fits_server_limit_without_losing_git_recovery() {
         for managed in [false, true] {
-            let capabilities = registration_capabilities(managed);
+            let mut capabilities = registration_capabilities(managed);
             assert!(capabilities.len() <= 18);
             assert!(capabilities.iter().any(|cap| cap == TARGET_GIT_CAPABILITY));
             assert!(capabilities.iter().any(|cap| cap == MERGER_CAPABILITY));
             assert!(!capabilities.iter().any(|cap| cap == RUNNER_RESTART_CAPABILITY));
-            assert!(
-                capabilities
-                    .iter()
-                    .filter(|capability| *capability != factory_protocol::directs::CAPABILITY
-                        && *capability != MERGER_CAPABILITY)
-                    .count()
-                    <= 16
-            );
+            capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
+            legacy_registration_capabilities(&mut capabilities);
+            assert!(capabilities.len() <= 16);
+            assert!(capabilities.iter().any(|cap| cap == TARGET_GIT_CAPABILITY));
+            assert!(capabilities.iter().any(|cap| cap == CHECKPOINT_CAPABILITY));
+            assert!(!capabilities.iter().any(|cap| cap == MERGER_CAPABILITY));
+            assert!(!capabilities.iter().any(|cap| cap == factory_protocol::directs::CAPABILITY));
+            assert!(!capabilities.iter().any(|cap| cap == AUTOMATIC_CHECKPOINT_CAPABILITY));
         }
     }
 

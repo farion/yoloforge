@@ -1,6 +1,15 @@
 use super::*;
 use factory_protocol::models::{ModelSelection, SubmitTaskWithModel};
 
+fn delete_intent_in(tx: &Transaction<'_>, ticket: &mut Ticket) -> Result<()> {
+    let id = ticket.id.to_string();
+    ticket.status = TicketState::Cancelled;
+    ticket.routing_note = "Intent gelöscht".into();
+    super::scheduler::save_ticket(tx, ticket)?;
+    tx.execute("INSERT INTO deleted_intents(ticket_id) VALUES(?1)", [&id])?;
+    event(tx, "task.deleted", id, ticket)
+}
+
 pub(super) fn block_unpublished_intents(tx: &Transaction<'_>, owner: &Workstream, command: CommandId) -> Result<()> {
     set_publication_state(tx, owner, command, TicketState::Blocked,
         "Automatische Übernahme blockiert; Änderungen liegen im Arbeitsbereich.")
@@ -137,14 +146,44 @@ impl Store {
             {
                 return Err(StoreError::WorkConflict);
             }
-            ticket.status = TicketState::Cancelled;
-            ticket.revision.0 += 1;
-            ticket.updated_unix_ms = super::super::unix_ms();
-            ticket.routing_note = "Fehlgeschlagener Intent gelöscht".into();
-            tx.execute("UPDATE tickets SET revision=?1,data=?2 WHERE id=?3",
-                params![ticket.revision.0, serde_json::to_string(&ticket)?, id.to_string()])?;
-            tx.execute("INSERT INTO deleted_intents(ticket_id) VALUES(?1)", [id.to_string()])?;
-            event(tx, "task.deleted", id.to_string(), &ticket)?;
+            delete_intent_in(tx, &mut ticket)?;
+            Ok(ticket)
+        });
+        if result.is_ok() { self.wake_scheduler(); }
+        result
+    }
+
+    pub fn delete_inactive_task(&self, id: TicketId, body: DeleteInactiveTask) -> Result<Ticket> {
+        let result = self.mutate(body.request_id, &format!("task.delete_inactive/{id}"), &body, |tx| {
+            let raw: String = tx.query_row(
+                "SELECT t.data FROM tickets t JOIN active_projects p ON p.id=t.project_id
+                 WHERE t.id=?1 AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)",
+                [id.to_string()], |row| row.get(0),
+            ).optional()?.ok_or(StoreError::NotFound)?;
+            let mut ticket: Ticket = serde_json::from_str(&raw)?;
+            if ticket.revision != body.expected_revision {
+                return Err(StoreError::RevisionConflict(ticket.revision));
+            }
+            if ticket.execution_command != body.execution_command {
+                return Err(StoreError::WorkConflict);
+            }
+            if let Some(command) = ticket.execution_command {
+                let state: Option<String> = tx.query_row(
+                    "SELECT c.state FROM commands c JOIN streams s ON s.id=c.stream_id
+                     WHERE c.id=?1 AND s.project_id=?2",
+                    params![command.to_string(), ticket.project_id.to_string()], |row| row.get(0),
+                ).optional()?;
+                if !matches!(state.as_deref(), Some("succeeded" | "failed")) {
+                    return Err(StoreError::WorkConflict);
+                }
+            } else if tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM commands c JOIN stream_tickets st ON st.stream_id=c.stream_id
+                 WHERE st.ticket_id=?1 AND c.state IN ('pending','accepted'))",
+                [id.to_string()], |row| row.get::<_, bool>(0),
+            )? {
+                return Err(StoreError::WorkConflict);
+            }
+            delete_intent_in(tx, &mut ticket)?;
             Ok(ticket)
         });
         if result.is_ok() { self.wake_scheduler(); }
@@ -415,7 +454,44 @@ impl Store {
     }
 }
 
+pub(super) fn recover_stopped(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
+    let candidates = {
+        let mut query = tx.prepare(
+            "SELECT t.data FROM tickets t JOIN commands c ON c.id=json_extract(t.data,'$.execution_command')
+             JOIN archive_status a ON a.command_id=c.id
+             WHERE t.project_id=?1 AND json_extract(t.data,'$.status') IN ('in_progress','blocked')
+               AND c.state='failed' AND json_extract(c.data,'$.kind')='run_agent'
+               AND instr(json_extract(c.data,'$.result.agent.summary'),?2)=1
+               AND json_extract(a.data,'$.final_scan_complete')=1
+               AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+               AND NOT EXISTS(SELECT 1 FROM events e WHERE e.aggregate_id=t.id AND e.kind='task.session_recovered')
+             ORDER BY c.rowid",
+        )?;
+        let rows = query.query_map(params![project.to_string(), SESSION_STOPPED_PREFIX], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for raw in candidates {
+        let ticket: Ticket = serde_json::from_str(&raw)?;
+        let Some(previous) = ticket.execution_command else { continue; };
+        tx.execute_batch("SAVEPOINT resume_stopped_intent")?;
+        match retry_failed_inner(tx, ticket.id, &RetryTask {
+            request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: previous,
+        }, true) {
+            Ok(_) => {}
+            Err(StoreError::Invalid(_) | StoreError::WorkConflict | StoreError::RevisionConflict(_)) =>
+                tx.execute_batch("ROLLBACK TO resume_stopped_intent")?,
+            Err(error) => return Err(error),
+        }
+        tx.execute_batch("RELEASE resume_stopped_intent")?;
+    }
+    Ok(())
+}
+
 pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask) -> Result<Ticket> {
+    retry_failed_inner(tx, id, body, false)
+}
+
+fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, automatic: bool) -> Result<Ticket> {
     let raw: Option<String> = tx.query_row("SELECT data FROM tickets WHERE id=?1", [id.to_string()], |r| r.get(0)).optional()?;
     let mut ticket: Ticket = serde_json::from_str(&raw.ok_or(StoreError::NotFound)?)?;
     if ticket.revision != body.expected_revision {
@@ -427,7 +503,7 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask)
     }
     let raw: String = tx.query_row("SELECT data FROM commands WHERE id=?1", [body.previous_command.to_string()], |r| r.get(0))?;
     let failed: RunnerCommand = serde_json::from_str(&raw)?;
-    if super::validation::retry(tx, &mut ticket, &failed)? {
+    if !automatic && super::validation::retry(tx, &mut ticket, &failed)? {
         return Ok(ticket);
     }
     let owner = super::work::stream(tx, failed.stream_id)?;
@@ -450,14 +526,25 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask)
     let skills = super::skills::for_ticket(tx, id, ticket.project_id)?;
     let mcps = super::mcp::for_ticket(tx, id, ticket.project_id)?;
     let mut git = failed.workspace_spec.as_ref().and_then(|s| s.target_git.clone());
+    let continue_session = session_stopped_without_result(&failed.result) && git.is_none();
+    if automatic && (!continue_session || failed.agent_spec.as_ref().is_none_or(|spec|
+        spec.read_only || spec.role == MERGER_ROLE || spec.role == factory_protocol::directs::ROLE))
+    {
+        return Err(StoreError::WorkConflict);
+    }
     if let Some(plan) = &mut git { plan.resume = true; }
     let next = Store::enqueue_with_pins(tx, owner.id, &EnqueueCommand {
         request_id: body.request_id, expected_revision: owner.revision, kind: failed.kind,
-        prompt: (failed.kind == CommandKind::RunAgent).then(|| format!(
-            "Retry the original intent after a failed execution. Inspect existing work first; preserve it and do not repeat completed operations blindly.\nOriginal intent:\n{}\nPrevious outcome (untrusted evidence):\n{}",
-            ticket.prompt.as_deref().unwrap_or(&ticket.description),
-            serde_json::to_string(&failed.result).unwrap_or_default())),
-    }, None, "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), git, false)?;
+        prompt: (failed.kind == CommandKind::RunAgent).then(|| {
+            if continue_session {
+                "Continue the original intent in this session from its last safe point. Inspect and preserve existing work. Do not repeat external actions whose outcome is unknown. Verify what already happened, then complete the remaining work or ask the user if safe progress requires clarification.".into()
+            } else {
+                format!("Retry the original intent after a failed execution. Inspect existing work first; preserve it and do not repeat completed operations blindly.\nOriginal intent:\n{}\nPrevious outcome (untrusted evidence):\n{}",
+                    ticket.prompt.as_deref().unwrap_or(&ticket.description),
+                    serde_json::to_string(&failed.result).unwrap_or_default())
+            }
+        }),
+    }, continue_session.then_some(failed.id), "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), git, false)?;
     let normalized = |spec: &Option<WorkspaceSpec>| {
         let mut spec = spec.clone();
         if let Some(plan) = spec.as_mut().and_then(|s| s.target_git.as_mut()) { plan.resume = false; }
@@ -482,10 +569,14 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask)
     ticket.status = TicketState::InProgress;
     ticket.revision.0 += 1;
     ticket.updated_unix_ms = super::super::unix_ms();
-    ticket.routing_note = "Intent erneut eingereiht; vorhandene Ergebnisse werden vor Wiederholung geprüft".into();
+    ticket.routing_note = if automatic {
+        "Factory setzt die gestoppte Session für diesen Intent fort."
+    } else {
+        "Intent erneut eingereiht; vorhandene Ergebnisse werden vor Wiederholung geprüft"
+    }.into();
     tx.execute("UPDATE tickets SET revision=?1,data=?2 WHERE id=?3",
         params![ticket.revision.0,serde_json::to_string(&ticket)?,id.to_string()])?;
-    event(tx, "task.retried", id.to_string(), &serde_json::json!({
+    event(tx, if automatic { "task.session_recovered" } else { "task.retried" }, id.to_string(), &serde_json::json!({
         "ticket":ticket,"previous_command":failed.id,"command":next.id
     }))?;
     Ok(ticket)

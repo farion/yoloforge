@@ -374,7 +374,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         if start.clicked() {
             app.manage_local_runners(crate::local_runners::Action::Add);
         }
-        if app.local_runners_busy { ui.spinner(); }
+        if start_action_loading(app) { ui.spinner(); }
     });
         });
     ui.add_space(12.0);
@@ -454,6 +454,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         });
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs(1));
+}
+
+fn start_action_loading(app: &App) -> bool {
+    app.local_runners_busy && app.restarting_runner.is_none()
 }
 
 #[derive(Clone, Copy)]
@@ -1200,6 +1204,7 @@ mod tests {
         for result in [Ok(None), Err("restart timed out".into())] {
             app.local_runners_busy = true;
             app.restarting_runner = Some(id);
+            assert!(!start_action_loading(&app));
             let (card, labels, spinner) = draw(&mut app);
             assert!((card.center() - idle_card.center()).length() < 1.0);
             assert_eq!(card.size(), idle_card.size());
@@ -1213,6 +1218,7 @@ mod tests {
             app.backend.emit_for_test(crate::backend::Event::LocalRunners(crate::local_runners::Report {
                 runners: Some(vec![target.clone(), other.clone()]),
                 result,
+                user_error: None,
             }));
             app.receive();
             let (card, labels, spinner) = draw(&mut app);

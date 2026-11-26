@@ -289,6 +289,10 @@ fn task_routing_status(note: &str) -> Option<&'static str> {
         || note.starts_with("Ausgewaehlte Session nicht mehr")
     {
         Some(crate::tr!("Blockiert"))
+    } else if note == "Orchestrator wartet: Kein Repository für den ausgewählten Runner verfügbar" {
+        Some(crate::tr!("Projektquelle für diesen Runner fehlt"))
+    } else if note == "Orchestrator wartet: Runner hat keinen Zugriff auf den Projektpfad" {
+        Some(crate::tr!("Runner hat keinen Zugriff auf den Projektpfad"))
     } else if note.starts_with("Orchestrator wartet:") {
         Some(crate::tr!("Orchestrator wartet"))
     } else if note.starts_with("Wartet auf erfolgreichen Abschluss")

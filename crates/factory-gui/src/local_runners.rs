@@ -54,6 +54,7 @@ pub enum Action {
 pub struct Report {
     pub runners: Option<Vec<LocalRunner>>,
     pub result: Result<Option<String>, String>,
+    pub user_error: Option<String>,
 }
 
 fn config_dir() -> Result<PathBuf> {
@@ -584,6 +585,7 @@ async fn remove(
 }
 
 pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Report {
+    let starts_runner = matches!(&action, Action::Add | Action::Restore | Action::Restart(_));
     let result = async {
         let dir = config_dir()?;
         let _lock = lock(&dir)?;
@@ -669,10 +671,21 @@ pub async fn perform(client: &FactoryClient, server: &str, action: Action) -> Re
         Ok::<_, anyhow::Error>(message)
     }
     .await;
+    let user_error = result.as_ref().err().and_then(|error| {
+        (starts_runner && incompatible_registration(error)).then(|| {
+            crate::tr!("Runner kann nicht gestartet werden: Serverversion inkompatibel.").into()
+        })
+    });
     Report {
         runners: load().ok(),
         result: result.map_err(|e| e.to_string()),
+        user_error,
     }
+}
+
+fn incompatible_registration(error: &anyhow::Error) -> bool {
+    let diagnostic = format!("{error:#}");
+    diagnostic.contains("Factory rejected the runner registration")
 }
 
 /// Register the original local-Factory runner in the same durable catalog.
@@ -804,6 +817,16 @@ mod tests {
         assert!(diagnostic.contains("Error: konkrete Startursache"));
         assert!(diagnostic.contains(&path.display().to_string()));
         assert!(diagnostic.len() < 17_000);
+    }
+
+    #[test]
+    fn registration_rejection_is_classified_as_server_incompatibility() {
+        assert!(incompatible_registration(&anyhow::anyhow!(
+            "Runner wurde beim Start beendet: Factory rejected the runner registration"
+        )));
+        assert!(!incompatible_registration(&anyhow::anyhow!(
+            "Gespeicherter Runner-Zugang fehlt"
+        )));
     }
 
     #[test]

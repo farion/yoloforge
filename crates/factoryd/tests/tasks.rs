@@ -178,6 +178,18 @@ fn skills_reach_only_the_implementer_and_are_pinned_before_routing() {
 
 #[test]
 fn orchestrator_retries_failed_preparation_after_cooldown_and_restart() {
+    check_preparation_retry("OpenCode unavailable", false);
+}
+
+#[test]
+fn inaccessible_project_path_waits_on_its_assigned_runner_and_recovers() {
+    check_preparation_retry(
+        "Cannot create project parent folder on the runner: Permission denied (os error 13); path: /opt/repos",
+        true,
+    );
+}
+
+fn check_preparation_retry(error: &str, access_denied: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let s = Store::open(&path).unwrap();
@@ -206,17 +218,29 @@ fn orchestrator_retries_failed_preparation_after_cooldown_and_restart() {
     let first = s.pending(runner).unwrap().pop().unwrap();
     assert_eq!(first.kind, CommandKind::PrepareWorkspace);
     complete(&s, &first, CommandOutput::WorkspaceError {
-        workspace_error: "OpenCode unavailable".into(),
+        workspace_error: error.into(),
     });
     s.scheduler_tick().unwrap();
     assert!(s.pending(runner).unwrap().is_empty());
     assert_eq!(s.notifications("test", None).unwrap().entries[0].command_id, Some(first.id));
     let history = s.task_history(ticket.id, None).unwrap();
-    assert!(history.entries.iter().any(|entry| {
-        entry.level == TaskHistoryLevel::Error
-            && entry.message.starts_with("Orchestrator-Vorbereitung fehlgeschlagen")
-            && entry.created_unix_ms > 0
-    }));
+    if access_denied {
+        assert_eq!(s.task_payload(ticket.id).unwrap().routing_note,
+            "Orchestrator wartet: Runner hat keinen Zugriff auf den Projektpfad");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("UPDATE events SET created_unix_ms=?1 WHERE aggregate_id=?2 AND kind='command.updated'",
+            rusqlite::params![now - 120_000, first.id.to_string()]).unwrap();
+        drop(db);
+        s.scheduler_tick().unwrap();
+        assert!(s.pending(runner).unwrap().is_empty(), "Do not retry a permission error every minute");
+    } else {
+        assert!(history.entries.iter().any(|entry| {
+            entry.level == TaskHistoryLevel::Error
+                && entry.message.starts_with("Orchestrator-Vorbereitung fehlgeschlagen")
+                && entry.created_unix_ms > 0
+        }));
+    }
     assert!(history.entries.iter().any(|entry| entry.message == "Aufgabe eingereiht"));
     assert!(history.entries.windows(2).all(|pair| pair[0].sequence > pair[1].sequence));
     drop(s);
@@ -769,6 +793,92 @@ fn final_archive(s: &Store, c: &RunnerCommand) {
         batch: ArchiveBatch { session_id: c.session_id(), revision: 1,
             captured_unix_ms: 1, final_scan_complete: true, messages: vec![] },
     }).unwrap();
+}
+
+#[test]
+fn inactive_delete_accepts_unstarted_and_publication_blocked_intents_but_not_active_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(&dir.path().join("db")).unwrap();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Delete inactive".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let create = || s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: "Work".into(),
+        description: "Preserve worktree".into(), acceptance_criteria: String::new(), priority: 1,
+    }).unwrap();
+    let delete = |ticket: &Ticket| s.delete_inactive_task(ticket.id, DeleteInactiveTask {
+        request_id: RequestId::new(), expected_revision: ticket.revision,
+        execution_command: ticket.execution_command,
+    });
+    let unstarted = create();
+    assert_eq!(delete(&unstarted).unwrap().status, TicketState::Cancelled);
+    assert!(s.task_payload(unstarted.id).is_err());
+    let intent = create();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let run = s.pending(runner).unwrap().pop().unwrap();
+    let running = s.task_payload(intent.id).unwrap();
+    assert_eq!(running.execution_command, Some(run.id));
+    assert!(delete(&running).is_err());
+    agent_reply(&s, &run, &format!("{PUBLICATION_BLOCKED_PREFIX}\nProject checkout dirty"));
+    let blocked = s.task_payload(intent.id).unwrap();
+    assert_eq!(blocked.status, TicketState::Blocked);
+    assert_eq!(delete(&blocked).unwrap().status, TicketState::Cancelled);
+    assert!(s.task_payload(intent.id).is_err());
+    assert!(command_publication_blocked(&s.command_payload(run.id).unwrap()));
+}
+
+#[test]
+fn stopped_intent_recovers_once_in_the_same_archived_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let s = Store::open(&path).unwrap();
+    let project = s.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Continue stopped session".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&s);
+    let intent = s.create_ticket(CreateTicket {
+        request_id: RequestId::new(), project_id: project.id, title: "Finish the work".into(),
+        description: "Keep existing work".into(), acceptance_criteria: String::new(), priority: 1,
+    }).unwrap();
+    let runner = RunnerId::new();
+    s.autostart_runner(runner).unwrap();
+    s.scheduler_tick().unwrap();
+    prepare(&s, &s.pending(runner).unwrap()[0]);
+    s.scheduler_tick().unwrap();
+    let first = s.pending(runner).unwrap().pop().unwrap();
+    let stopped = |s: &Store, cmd: &RunnerCommand| {
+        complete(s, cmd, CommandOutput::Agent { agent: AgentProgress {
+            session_id: cmd.session_id(), message_id: agent_message_id(cmd.id),
+            phase: AgentPhase::Failed, summary: format!("{SESSION_STOPPED_PREFIX}\nNo final response"),
+        }});
+    };
+    stopped(&s, &first);
+    s.scheduler_tick().unwrap();
+    assert!(s.pending(runner).unwrap().is_empty());
+    final_archive(&s, &first);
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    s.scheduler_tick().unwrap();
+    s.scheduler_tick().unwrap();
+    let pending = s.pending(runner).unwrap();
+    assert_eq!(pending.len(), 1);
+    let next = &pending[0];
+    assert_eq!(next.session_id(), first.session_id());
+    assert_eq!(next.workspace_spec, first.workspace_spec);
+    assert_eq!(next.agent_spec.as_ref().unwrap().continuation.as_ref().unwrap().previous_command_id, first.id);
+    assert_eq!(s.task_payload(intent.id).unwrap().execution_command, Some(next.id));
+    stopped(&s, next);
+    final_archive(&s, next);
+    s.scheduler_tick().unwrap();
+    assert!(s.pending(runner).unwrap().is_empty());
+    assert_eq!(s.task_payload(intent.id).unwrap().execution_command, Some(next.id));
 }
 
 #[test]

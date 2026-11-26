@@ -469,7 +469,7 @@ impl Store {
                 |r| r.get(0),
             )?;
             let project: Project = serde_json::from_str(&data)?;
-            let setup = if let Some(mut setup) = project.setup {
+            let setup = if let Some(mut setup) = project.setup.clone() {
                 let binding = project.runner_bindings.get(&owner.runner_id);
                 let from_checkpoint = if let Some(import) = &owner.checkpoint {
                     super::checkpoints::load(tx, import.command_id)?
@@ -483,6 +483,9 @@ impl Store {
                     setup.repository_path.clear();
                     setup.service_registration.clear();
                 } else {
+                    if !super::scheduler::has_runner_repository_source(tx, &project, owner.runner_id)? {
+                        return Err(StoreError::Invalid("No runner-local repository or verified checkpoint configured"));
+                    }
                     let binding = binding.ok_or(StoreError::Invalid(
                         "Configure project setup for the target runner before preparing new work",
                     ))?;
@@ -611,8 +614,9 @@ impl Store {
                 if parent.id != previous
                     || !(parent.state == CommandState::Succeeded
                         || (parent.state == CommandState::Failed
-                            && matches!(&parent.result, Some(CommandOutput::Agent { agent })
-                                if agent.phase == AgentPhase::Interrupted || (direct && agent.phase == AgentPhase::Failed))))
+                            && (session_stopped_without_result(&parent.result)
+                                || matches!(&parent.result, Some(CommandOutput::Agent { agent })
+                                    if agent.phase == AgentPhase::Interrupted || (direct && agent.phase == AgentPhase::Failed)))))
                     || parent.runner_id != owner.runner_id
                     || parent.ownership_epoch != owner.ownership_epoch
                     || parent
@@ -969,6 +973,9 @@ impl Store {
                     super::tasks::set_publication_state(tx, &owner, value.id, state, note)?;
                 } else if publication_blocked {
                     super::tasks::block_unpublished_intents(tx, &owner, value.id)?;
+                } else if session_stopped_without_result(&value.result) {
+                    super::tasks::set_publication_state(tx, &owner, value.id, TicketState::Blocked,
+                        "OpenCode-Session ohne Ergebnis gestoppt; Arbeitsstand bleibt erhalten.")?;
                 }
                 let exported_result = value.kind == CommandKind::Checkpoint
                     && super::checkpoints::load(tx, id)?.is_some_and(|spec| spec.project_result.is_some());

@@ -47,6 +47,15 @@ fn clip(s: &str, max: usize) -> String {
     }
     s[..end].into()
 }
+fn project_path_access_denied(error: &str) -> bool {
+    // Older runners report these failures as text. Match the operation and
+    // OS code, not the localized message or the user-controlled path.
+    error.split_once("; path:").is_some_and(|(reason, _)| {
+        reason.starts_with("Cannot create project parent folder on the runner:")
+            && (reason.ends_with("(os error 13)") || reason.ends_with("(os error 5)"))
+    })
+}
+
 pub(super) fn note(tx: &Transaction<'_>, t: &mut Ticket, text: &str) -> Result<()> {
     let text = clip(text, 1024);
     if t.routing_note == text {
@@ -309,20 +318,24 @@ pub(super) fn route(
     }
     let prepared:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state='succeeded' AND json_extract(data,'$.kind')='prepare_workspace' AND json_extract(data,'$.ownership_epoch')=?2)",params![owner.id.to_string(),owner.ownership_epoch],|r|r.get(0))?;
     if !prepared {
-        let last: Option<(String, u64)> = tx.query_row(
+        let last: Option<(String, u64, Option<String>)> = tx.query_row(
             "SELECT c.state, COALESCE(
                 (SELECT MAX(e.created_unix_ms) FROM events e
                  WHERE e.aggregate_id=c.id AND e.kind='command.updated'),
-                json_extract(c.data,'$.created_unix_ms'))
+                json_extract(c.data,'$.created_unix_ms')),
+                json_extract(c.data,'$.result.workspace_error')
              FROM commands c WHERE c.stream_id=?1
                 AND json_extract(c.data,'$.kind')='prepare_workspace'
                 AND json_extract(c.data,'$.ownership_epoch')=?2
              ORDER BY c.rowid DESC LIMIT 1",
             params![owner.id.to_string(), owner.ownership_epoch],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).optional()?;
-        let retry = last.as_ref().is_none_or(|(state, finished)| {
-            state == "failed" && now >= finished.saturating_add(60_000)
+        let path_denied = last.as_ref().is_some_and(|(state, _, error)| state == "failed"
+            && error.as_deref().is_some_and(project_path_access_denied));
+        let retry = last.as_ref().is_none_or(|(state, finished, _)| {
+            let delay = if path_denied { 900_000 } else { 60_000 };
+            state == "failed" && now >= finished.saturating_add(delay)
         });
         if retry {
             Store::enqueue_in(
@@ -343,7 +356,9 @@ pub(super) fn route(
             t,
             if retry {
                 "Orchestrator wird vorbereitet"
-            } else if last.is_some_and(|(state, _)| state == "cancelled") {
+            } else if path_denied {
+                "Orchestrator wartet: Runner hat keinen Zugriff auf den Projektpfad"
+            } else if last.is_some_and(|(state, _, _)| state == "cancelled") {
                 "Orchestrator-Vorbereitung wurde abgebrochen"
             } else {
                 "Orchestrator-Vorbereitung fehlgeschlagen; erneuter Versuch folgt automatisch"

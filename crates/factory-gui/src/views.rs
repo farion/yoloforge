@@ -799,8 +799,15 @@ impl App {
                                     vec![crate::tr!("Anzeigen")]
                                  };
                                   let retryable = retryable_task(&s, t);
-                                  let deletable = retryable && t.execution_command.is_some()
-                                      && s.server_capabilities.iter().any(|cap| cap == DELETE_FAILED_TASK_CAPABILITY);
+                                  let inactive_delete = s.server_capabilities.iter().any(|cap| cap == DELETE_INACTIVE_TASK_CAPABILITY);
+                                  let deletable = if inactive_delete {
+                                      task_command(&s, t).is_none_or(|c| matches!(c.state, CommandState::Succeeded | CommandState::Failed))
+                                  } else {
+                                      t.execution_command.is_some() && task_command(&s, t).is_some_and(|c|
+                                          c.state == CommandState::Failed && matches!(c.kind, CommandKind::PrepareWorkspace | CommandKind::RunAgent | CommandKind::TargetGit))
+                                          && matches!(t.status, TicketState::InProgress | TicketState::Blocked) && !t.draft
+                                          && s.server_capabilities.iter().any(|cap| cap == DELETE_FAILED_TASK_CAPABILITY)
+                                  };
                                  if retryable { labels.push(crate::tr!("Erneut einreihen")); }
                                 let reserved = labels
                                     .iter()
@@ -921,20 +928,26 @@ impl App {
                                          if view.clicked() {
                                              self.view_task(t.id);
                                          }
-                                         if let Some(command) = t.execution_command.filter(|_| deletable) {
+                                         if deletable {
                                              let retry_path = format!("/v1/tasks/{}/retry", t.id);
-                                             let busy = self.settings.pending.iter().any(|r| r.server == self.server && r.path == retry_path);
+                                             let path = format!("/v1/tasks/{}", t.id);
+                                             let delete_path = if inactive_delete { format!("{path}/inactive") } else { path.clone() };
+                                             let busy = self.settings.pending.iter().any(|r| r.server == self.server && (r.path == retry_path || (r.method == "DELETE" && r.path == delete_path)));
                                              let delete = design::icon_button(ui, egui_phosphor::regular::TRASH, crate::tr!("Intent löschen"), self.online && !busy)
                                                  .on_hover_cursor(egui::CursorIcon::PointingHand);
                                              #[cfg(test)]
                                              ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-delete", t.id)), delete.rect));
                                              if delete.clicked() {
+                                                 let request_id = RequestId::new();
+                                                 let body = if inactive_delete {
+                                                     json!(DeleteInactiveTask { request_id, expected_revision: t.revision, execution_command: t.execution_command })
+                                                 } else {
+                                                     json!(DeleteFailedTask { request_id, expected_revision: t.revision, failed_command: t.execution_command.expect("Legacy delete requires execution") })
+                                                 };
                                                  self.dialog = Some(Dialog::form(
                                                      crate::tr!("Intent löschen"),
-                                                     &crate::tr!("Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t)),
-                                                     "DELETE", format!("/v1/tasks/{}", t.id), json!(DeleteFailedTask {
-                                                         request_id: RequestId::new(), expected_revision: t.revision, failed_command: command,
-                                                     }),
+                                                     &crate::tr!("Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t)),
+                                                     "DELETE", delete_path, body,
                                                  ));
                                              }
                                          }

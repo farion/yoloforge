@@ -914,9 +914,10 @@ fn runner_failures_remain_in_diagnostics_after_successful_factory_polls() {
     let mut app = fixture();
     let snapshot = app.snapshot.as_ref().unwrap().as_ref().clone();
     let error = "Lokaler Test-Runner wurde beendet.\nProtokoll: /private/factory-runner.log\n\nError: Konfiguration ungültig";
+    let user_error = "Runner kann nicht gestartet werden: Serverversion inkompatibel.";
     app.local_runners_busy = true;
     app.backend.emit_for_test(crate::backend::Event::LocalRunners(crate::local_runners::Report {
-        runners: None, result: Err(error.into()),
+        runners: None, result: Err(error.into()), user_error: Some(user_error.into()),
     }));
     app.backend.emit_for_test(crate::backend::Event::Snapshot(Ok(snapshot)));
     app.receive();
@@ -924,6 +925,7 @@ fn runner_failures_remain_in_diagnostics_after_successful_factory_polls() {
     assert!(app.error.is_none());
     assert_eq!(app.action_errors.len(), 1);
     assert_eq!(app.action_errors[0].1, error);
+    assert_eq!(app.notices.last().unwrap().0, user_error);
     assert!(!app.notices.last().unwrap().0.contains("Konfiguration ungültig"));
     app.settings.page = Page::Diagnostics;
     app.query.clear();
@@ -2856,13 +2858,36 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
 
 #[test]
 fn failed_intent_trash_is_left_of_view_and_opens_confirmation_without_sending() {
+    check_intent_trash(false);
+}
+
+#[test]
+fn blocked_publication_offers_delete_without_retry() {
+    check_intent_trash(true);
+}
+
+fn check_intent_trash(publication_blocked: bool) {
     let mut app = fixture();
     app.online = true;
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
     s.server_capabilities.push(factory_protocol::DELETE_FAILED_TASK_CAPABILITY.into());
-    s.commands[0].state = CommandState::Failed;
+    if publication_blocked {
+        s.server_capabilities.push(factory_protocol::DELETE_INACTIVE_TASK_CAPABILITY.into());
+        let command = &mut s.commands[0];
+        command.state = CommandState::Succeeded;
+        let mut agent = command.agent_progress.clone().unwrap();
+        agent.phase = AgentPhase::Succeeded;
+        agent.summary = format!("{PUBLICATION_BLOCKED_PREFIX}\nProject checkout dirty");
+        command.result = Some(CommandOutput::Agent { agent: agent.clone() });
+        command.agent_progress = Some(agent);
+    } else {
+        s.commands[0].state = CommandState::Failed;
+    }
     s.tickets[0].status = TicketState::Blocked;
     s.tickets[0].execution_command = Some(s.commands[0].id);
+    if publication_blocked {
+        assert!(!retryable_task(s, &s.tickets[0]));
+    }
     let id = s.tickets[0].id;
     let ctx = app.backend.context().clone();
     ctx.style_mut(|style| style.animation_time = 0.0);

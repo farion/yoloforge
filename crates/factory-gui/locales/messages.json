@@ -1,4 +1,8 @@
 {
+  "Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.": ["Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", "Delete intent “{}”? OpenCode history and files will be kept."],
+  "Factory setzt die gestoppte Session fort": ["Factory setzt die gestoppte Session fort", "Factory is continuing the stopped session"],
+  "Projektquelle für diesen Runner fehlt": ["Projektquelle für diesen Runner fehlt", "Project source missing for this runner"],
+  "Runner hat keinen Zugriff auf den Projektpfad": ["Runner hat keinen Zugriff auf den Projektpfad", "Runner cannot access the project path"],
   "Gespeicherte Factory-Verbindung konnte nicht geladen werden.": ["Gespeicherte Factory-Verbindung konnte nicht geladen werden.", "Could not load the saved Factory connection."],
   "Änderungen liegen im Worktree, nicht im Zielbranch.": ["Änderungen liegen im Worktree, nicht im Zielbranch.", "Changes are in the worktree, not on the target branch."],
   "{key} abgeschlossen": ["{key} abgeschlossen", "{key} completed"],
@@ -2863,6 +2867,10 @@
   "Lokalen Runner starten": [
     "Lokalen Runner starten",
     "Start local Runner"
+  ],
+  "Runner kann nicht gestartet werden: Serverversion inkompatibel.": [
+    "Runner kann nicht gestartet werden: Serverversion inkompatibel.",
+    "Runner cannot be started: incompatible server version."
   ],
   "Einen zusätzlichen Runner auf diesem Rechner starten und an die verbundene Factory hängen (Admin-Zugang erforderlich).": [
     "Einen zusätzlichen Runner auf diesem Rechner starten und an die verbundene Factory hängen (Admin-Zugang erforderlich).",
