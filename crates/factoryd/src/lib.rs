@@ -300,6 +300,7 @@ pub fn router_with_shutdown(
         )
         .route("/v1/projects/{id}/context", get(knowledge_routes::context))
         .route("/healthz", get(health))
+        .route("/v1/health", get(health))
         .route(
             "/v1/devices",
             post(issue_device)
@@ -423,6 +424,10 @@ pub fn router_with_shutdown(
         .route(
             "/v1/runners/{runner}/commands/{command}/result",
             post(command_result),
+        )
+        .route(
+            "/v1/runners/{runner}/publication-recovery",
+            get(work_routes::pending_publication_recoveries),
         )
         .route(
             "/v1/runners/{runner}/commands/{command}/publication-recovery",
@@ -641,7 +646,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 24
+        || body.capabilities.len() > 32
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(

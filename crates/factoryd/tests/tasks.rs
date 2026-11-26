@@ -949,6 +949,8 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
     s.merger_tick().unwrap();
     assert_eq!(s.task_payload(intent.id).unwrap().routing_note, SNAPSHOT_RETRY_NOTE);
     assert_eq!(s.pending_review_snapshot_recoveries(runner).unwrap(), vec![run.id]);
+    assert!(s.pending_publication_recoveries(runner).unwrap().is_empty(),
+        "Neither the current unreviewed snapshot nor older results may enter publication recovery");
     assert!(s.pending_review_snapshot_recoveries(RunnerId::new()).unwrap().is_empty());
     db.execute("DELETE FROM commands WHERE rowid BETWEEN -31 AND -1", []).unwrap();
     assert!(!s.claim_publication_recovery(runner, run.id, grant_id).unwrap());

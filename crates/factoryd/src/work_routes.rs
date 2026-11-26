@@ -524,6 +524,17 @@ pub(super) async fn command_result(
     db_call(body.request_id, move || store.complete(runner, id, body)).await
 }
 
+pub(super) async fn pending_publication_recoveries(
+    State(app): State<App>, Path(runner): Path<RunnerId>, headers: HeaderMap,
+) -> Response {
+    let _guard = match runner_access(&app, runner, &headers).await {
+        Ok(g) => g,
+        Err(e) => return *e,
+    };
+    let store = app.store.clone();
+    db_call(RequestId::new(), move || store.pending_publication_recoveries(runner)).await
+}
+
 pub(super) async fn publication_recovery(
     State(app): State<App>,
     Path((runner, id)): Path<(RunnerId, CommandId)>,

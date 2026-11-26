@@ -1327,6 +1327,13 @@ impl FactoryClient {
         )
         .await
     }
+    pub async fn pending_publication_recoveries(
+        &self, runner: RunnerId, registration: RegistrationId,
+    ) -> Result<Vec<CommandId>, ClientError> {
+        Self::decode(self.http.get(format!("{}/v1/runners/{runner}/publication-recovery", self.base))
+            .header(RUNNER_HEADER, registration.to_string()).send().await).await
+    }
+
     pub async fn publication_recovery(
         &self, runner: RunnerId, registration: RegistrationId, id: CommandId, grant_id: RequestId,
     ) -> Result<bool, ClientError> {

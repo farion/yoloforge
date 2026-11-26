@@ -209,7 +209,9 @@ async fn restart_api_requires_admin_and_reports_the_exact_startup_instance() {
             name: "Local".into(),
             location: RunnerLocation::Local,
             version: "test".into(),
-            capabilities: vec![],
+            capabilities: (0..23).map(|i| format!("runner-test-capability-{i}"))
+                .chain([REVIEWED_PUBLICATION_CAPABILITY.into(), REVIEWED_MERGER_CAPABILITY.into()])
+                .collect(),
             opencode: OpenCodeStatus::Ready {
                 version: "test".into(),
             },

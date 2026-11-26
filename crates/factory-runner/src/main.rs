@@ -1073,29 +1073,42 @@ async fn run(mut args: Args) -> Result<()> {
                     }
                     let position = next_publication_recovery;
                     next_publication_recovery = next_publication_recovery.wrapping_add(1);
-                    let _ = tokio::time::timeout(Duration::from_secs(8), async {
-                        let Some(candidate) = tokio::task::block_in_place(|| publication::recovery_candidate(&journal, position))? else {
-                            return Ok::<_, anyhow::Error>(());
-                        };
-                        // Older factories lack this endpoint; absence is not a runner failure.
+                    let registration = current.registration_id;
+                    let pending = tokio::time::timeout(Duration::from_secs(8),
+                        client.pending_publication_recoveries(args.id, registration)).await;
+                    let candidates = match pending {
+                        Ok(Ok(ids)) => ids,
+                        Ok(Err(ClientError::Http { status: reqwest::StatusCode::NOT_FOUND, .. })) =>
+                            tokio::task::block_in_place(|| publication::recovery_candidate(&journal, position))?
+                                .into_iter().collect(),
+                        Ok(Err(error)) => {
+                            eprintln!("Publication recovery queue unavailable: {error}");
+                            Vec::new()
+                        }
+                        Err(_) => Vec::new(),
+                    };
+                    for candidate in candidates {
                         let grant = RequestId::new();
-                        if !matches!(client.publication_recovery(args.id, current.registration_id, candidate, grant).await, Ok(true)) {
-                            return Ok(());
-                        }
-                        match tokio::task::block_in_place(|| publication::recover_prepared(&journal, candidate, grant)) {
-                            Ok(Some(proof)) => {
-                                client.report_recovered_publication(args.id, current.registration_id, candidate, &proof).await?;
+                        let recovery = async {
+                            if !client.publication_recovery(args.id, registration, candidate, grant).await? {
+                                return Ok::<_, anyhow::Error>(true);
+                            }
+                            if let Some(proof) = tokio::task::block_in_place(|| publication::recover_prepared(&journal, candidate, grant))? {
+                                client.report_recovered_publication(args.id, registration, candidate, &proof).await?;
                                 tokio::task::block_in_place(|| publication::acknowledge_recovery(&journal, candidate))?;
+                                return Ok(true);
                             }
-                            result => {
-                                client.release_publication_recovery(args.id, current.registration_id, candidate, grant).await?;
-                                result?;
+                            Ok(false)
+                        };
+                        let outcome = tokio::time::timeout(Duration::from_secs(8), recovery).await;
+                        if !matches!(outcome, Ok(Ok(true))) {
+                            if let Ok(Err(error)) = outcome {
+                                eprintln!("Publication recovery deferred for {candidate}: {error:#}");
                             }
+                            let _ = tokio::time::timeout(Duration::from_secs(4),
+                                client.release_publication_recovery(args.id, registration, candidate, grant)).await;
                         }
-                        Ok(())
-                    }).await.map(|result| {
-                        if let Err(error) = result { eprintln!("Publication recovery deferred: {error}"); }
-                    });
+                    }
                 }
                 registration = Some(current);
                 if let Err(error) = command_result {
