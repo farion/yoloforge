@@ -1529,7 +1529,7 @@ fn overview_navigation_warns_for_waiting_and_blocked_intents() {
 
 #[test]
 fn sidebar_renders_all_current_status_colors_for_every_project_page() {
-    use crate::app::{AMBER, BLUE, GREEN, RED};
+    use crate::app::{AMBER, BLUE, GREEN, MUTED};
 
     let mut app = fixture();
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
