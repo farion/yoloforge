@@ -216,7 +216,7 @@ fn enqueue_turn(tx: &Transaction<'_>, direct: &mut Direct, turn: Turn) -> Result
         expected_revision: owner.revision,
         kind: CommandKind::RunAgent,
         prompt: Some(if turn.prompt.trim().is_empty() { "See attached files.".into() } else { turn.prompt }),
-    }, previous, ROLE, selection.model.as_ref(), Some((&skills, &mcps)), None)?;
+    }, previous, ROLE, selection.model.as_ref(), Some((&skills, &mcps)), None, false)?;
     let agent = command.agent_spec.as_mut().ok_or(StoreError::Internal)?;
     agent.files = turn.files;
     agent.images = turn.images;
@@ -310,7 +310,7 @@ pub(super) fn save_intent(
         prompt: Some(format!("{}\n\n{}", intent.title, intent.prompt)),
         priority: 1, status: TicketState::Backlog, draft: !intent.enqueue,
         created_unix_ms: now, updated_unix_ms: now, depends_on: vec![], images: vec![], files: vec![],
-        execution_command: None, requested_session: None,
+        execution_command: None, requested_session: None, session_prompt_request: None,
         routing_note: if intent.enqueue { "Wartet auf Orchestrator" } else { "Entwurf — noch nicht freigegeben" }.into(),
     };
     let models = super::models::for_task(tx, ticket.id, owner.project_id, None, ticket.draft)?;

@@ -342,7 +342,6 @@ fn offline_task_editor_prepares_locally_with_attachments_and_keeps_closed_edits(
     app.online = false;
     app.new_task();
     let Some(Dialog::Task(task)) = &mut app.dialog else { panic!("Expected local task editor") };
-    let task_id = task.id;
     task.draft.prompt = "Offline vorbereiten".into();
     let file = PromptFile::from_bytes("notizen.txt".into(), b"offline notes").unwrap();
     task.draft.files = vec![file.clone()];
@@ -361,8 +360,9 @@ fn offline_task_editor_prepares_locally_with_attachments_and_keeps_closed_edits(
     let mut text = vec![];
     for shape in output.shapes { shape_text(&shape.shape, &mut text); }
     assert!(!text.iter().any(|t| t == "Entwurf" || t == "Entwurf & neu" || t == egui_phosphor::regular::FLOPPY_DISK));
-    let submit: egui::Rect = ctx.data_mut(|d| d.get_temp(egui::Id::new(("test-task-action", task_id, false)))).unwrap();
-    let _ = render(&mut app, click_events(submit.center()));
+    let _ = render(&mut app, vec![egui::Event::Key {
+        key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+    }]);
     let _ = render(&mut app, vec![]);
     assert!(app.dialog.is_none());
     assert!(app.settings.pending.is_empty());
@@ -640,7 +640,45 @@ fn question_answer_receipt_updates_intent_status_before_the_next_snapshot() {
 }
 
 #[test]
+fn new_intent_sdl_shift_enter_inserts_newline_and_enter_queues_the_full_prompt() {
+    use sdl3::keyboard::{Keycode, Mod};
+    let mut app = fixture();
+    app.online = true;
+    app.new_task();
+    let ctx = app.backend.context().clone();
+    let render = |app: &mut App, events| ctx.run(egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+        events, ..Default::default()
+    }, |ctx| {
+        app.draw_shell(ctx);
+        if let Some(mut dialog) = app.dialog.take() {
+            if !dialog.show(ctx, app) { app.dialog = Some(dialog); }
+        }
+    });
+    for _ in 0..3 { let _ = render(&mut app, vec![]); }
+    let target = app.clipboard_image_target().unwrap();
+    let prompt = format!("{}Letzte Anforderung.", "Details: ä, ö, ü.\n".repeat(3_000));
+    let _ = render(&mut app, crate::native::clipboard_text_events(target, prompt.clone()));
+    let enter = |mods, repeat| crate::native::enter_key_events(Keycode::Return, mods, repeat);
+    let _ = render(&mut app, enter(Mod::LSHIFTMOD, false));
+    let prompt = format!("{prompt}\n");
+    assert!(matches!(&app.dialog, Some(Dialog::Task(task)) if task.draft.prompt == prompt));
+    let _ = render(&mut app, enter(Mod::NOMOD, true));
+    assert!(app.settings.pending.is_empty(), "Shift+Enter and orphaned auto-repeat must not submit");
+    let _ = render(&mut app, enter(Mod::NOMOD, false));
+    let [request] = app.settings.pending.as_slice() else { panic!("Expected one queued intent") };
+    let body = match request.path.as_str() {
+        "/v1/tasks/submit" => &request.body,
+        "/v1/tasks/submit-with-model" => &request.body["submission"],
+        path => panic!("Unexpected intent endpoint {path}"),
+    };
+    assert_eq!(body["task"]["prompt"].as_str(), Some(prompt.as_str()));
+    assert_eq!(body["draft"], false);
+}
+
+#[test]
 fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup() {
+    use sdl3::keyboard::{Keycode, Mod};
     let mut app = fixture();
     app.online = true;
     let snapshot = app.snapshot.clone().unwrap();
@@ -663,12 +701,15 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     }
     let target = app.clipboard_image_target().unwrap();
     assert_eq!(target, app.session_prompts[&root].id);
+    let editor_id = ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new("test-task-prompt-id"))).unwrap();
+    let tab_index = app.active_tab - 1;
     let prompt = format!("Bitte direkt hier fortsetzen\n{}Letzte Anforderung.", "Details: ä, ö, ü.\n".repeat(3_000));
     app.session_prompts.get_mut(&root).unwrap().draft.prompt = prompt.clone();
     let file = PromptFile::from_bytes("notes.txt".into(), b"Session attachment").unwrap();
     app.backend.emit_for_test(crate::backend::Event::Attachment(target, Ok(crate::backend::InputAttachment::File(file.clone()))));
     app.receive();
     for _ in 0..3 { let _ = render(&mut app, vec![]); }
+    assert!(ctx.memory(|m| m.has_focus(editor_id)));
     assert_eq!(app.session_prompts[&root].draft.files, vec![file.clone()]);
     assert_eq!(app.settings.session_prompts.len(), 1);
     let restored = crate::dialogs::TaskDialog::session(&app, project, root);
@@ -690,7 +731,7 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     let prompt_with_newline = app.session_prompts[&root].draft.prompt.clone();
     assert_eq!(prompt_with_newline.len(), prompt.len() + 1);
     assert_eq!(prompt_with_newline.matches('\n').count(), prompt.matches('\n').count() + 1);
-    let _ = render(&mut app, enter_events(egui::Modifiers::NONE));
+    let _ = render(&mut app, crate::native::enter_key_events(Keycode::KpEnter, Mod::NUMMOD, false));
     assert_eq!(app.settings.pending.len(), 1, "One Enter press must submit the prompt");
     let _ = render(&mut app, enter_events(egui::Modifiers::NONE));
     assert_eq!(app.settings.pending.len(), 1, "Enter must not submit again while waiting");
@@ -720,9 +761,14 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     let mut ticket = snapshot.tickets[0].clone();
     ticket.id = TicketId::new();
     ticket.requested_session = Some(root);
+    ticket.session_prompt_request = Some(target);
+    ticket.prompt = Some(prompt.clone());
+    let execution = CommandId::new();
+    ticket.execution_command = Some(execution);
     app.backend.emit_for_test(crate::backend::Event::Request(pending.id, Ok(json!(ticket))));
     app.receive();
     assert!(app.settings.pending.is_empty());
+    assert_eq!(app.queued_session_entries(tab_index).len(), 1, "Keep the row while waiting for the next snapshot");
     let composer = app.session_prompts.remove(&root).unwrap();
     composer.persist(&mut app);
     assert!(app.settings.session_prompts.is_empty(), "Closing before the next render must not restore an acknowledged draft");
@@ -733,6 +779,37 @@ fn open_session_prompt_uses_the_task_editor_and_submits_a_durable_fixed_followup
     assert_ne!(app.session_prompts[&root].id, target);
     assert!(app.settings.session_prompts.is_empty());
     assert_eq!(app.notices.last().unwrap().0, "Prompt in die Session eingereiht.");
+    std::sync::Arc::make_mut(app.snapshot.as_mut().unwrap()).tickets.push(ticket);
+    assert_eq!(app.queued_session_entries(tab_index).len(), 1, "Do not double-list the confirmed receipt and snapshot");
+    app.tabs[tab_index].archives.insert(execution, vec![std::sync::Arc::new(ArchivedMessage {
+        sequence: 1, sample_revision: 1, captured_unix_ms: 1,
+        message: json!({"id": agent_message_id(execution), "type":"user", "text":prompt}),
+    })]);
+    assert!(app.queued_session_entries(tab_index).is_empty(), "The OpenCode message replaces the queued copy");
+}
+
+#[test]
+fn queued_session_prompt_is_rendered_in_the_transcript_before_archive_arrives() {
+    let mut app = fixture();
+    app.online = true;
+    let root = app.snapshot.as_ref().unwrap().commands[0].session_root();
+    let project = app.settings.project.unwrap();
+    app.open_session(project, root);
+    let prompt = "Direkter Eintrag im Verlauf";
+    app.write("Session prompten", "POST", format!("/v1/commands/{root}/prompt"), json!(PromptSession {
+        request_id: RequestId::new(), prompt: prompt.into(), images: vec![], files: vec![],
+    }));
+    let ctx = app.backend.context().clone();
+    let mut drawn = Vec::new();
+    for _ in 0..3 {
+        let out = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        drawn.clear();
+        for shape in out.shapes { shape_text(&shape.shape, &mut drawn); }
+    }
+    assert_eq!(drawn.iter().filter(|text| text.as_str() == prompt).count(), 1);
 }
 
 #[test]
@@ -2182,7 +2259,7 @@ fn reviewer_has_its_own_open_list_and_archive() {
     let reviews = sessions_for_page(s, project, Page::Reviewer);
     assert_eq!(reviews.len(), 3);
     assert_eq!(reviews.iter().filter(|c| controller_archived(s, c)).count(), 2);
-    assert!(reviews.iter().all(|c| session_title(s, c) == task_summary(&ticket)));
+    assert!(reviews.iter().all(|c| session_title(s, c) == task_summary(s, &ticket)));
     assert!(sessions_for_page(s, project, Page::Orchestrator).is_empty());
     assert_eq!(sessions_for_page(s, project, Page::Sessions).len(), 1);
 }

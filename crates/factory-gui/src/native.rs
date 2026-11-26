@@ -103,7 +103,9 @@ pub fn run(server: String, screenshot: Option<PathBuf>, exit_after_ms: Option<u6
             }
             if let Some(text_only) = paste_shortcut(&event, window.id()) {
                 let target = (!text_only).then(|| app.clipboard_image_target()).flatten();
-                if let Some((target, image)) = input.paste(
+                if let Some((target, paths)) = target.and_then(|target| clipboard_files().map(|paths| (target, paths))) {
+                    app.backend.load_attachments(target, paths);
+                } else if let Some((target, image)) = input.paste(
                     target,
                     clipboard_image,
                     || video.clipboard().clipboard_text().ok(),
@@ -251,6 +253,42 @@ struct ClipboardImage {
     bytes: Vec<u8>,
 }
 
+fn clipboard_file_paths(text: &str) -> Vec<PathBuf> {
+    text.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.starts_with('#') { return None; }
+        url::Url::parse(line).ok()?.to_file_path().ok()
+    }).take(20).collect()
+}
+
+#[cfg(test)]
+#[test]
+fn clipboard_file_list_decodes_local_paths_only() {
+    assert_eq!(clipboard_file_paths("copy\r\n# comment\r\nfile:///tmp/zwei%20Worte.txt\r\nhttps://example.org/file\r\n"),
+        [PathBuf::from("/tmp/zwei Worte.txt")]);
+}
+
+fn clipboard_files() -> Option<Vec<PathBuf>> {
+    use sdl3::sys::{clipboard::*, stdinc::SDL_free};
+    // Access clipboard data on the SDL video thread and free the returned buffer.
+    for mime in [c"text/uri-list", c"x-special/gnome-copied-files"] {
+        let mut len = 0;
+        unsafe {
+            if !SDL_HasClipboardData(mime.as_ptr()) { continue; }
+            let data = SDL_GetClipboardData(mime.as_ptr(), &mut len);
+            if data.is_null() { continue; }
+            let paths = if len <= 64 * 1024 {
+                std::str::from_utf8(std::slice::from_raw_parts(data.cast::<u8>(), len))
+                    .ok().map(|text| clipboard_file_paths(text.trim_end_matches('\0')))
+                    .filter(|paths| !paths.is_empty())
+            } else { None };
+            SDL_free(data);
+            if paths.is_some() { return paths; }
+        }
+    }
+    None
+}
+
 fn clipboard_image() -> Result<Option<ClipboardImage>, String> {
     use sdl3::sys::{clipboard::*, stdinc::SDL_free};
     let mut error = None;
@@ -323,6 +361,35 @@ struct NativeInput {
     raw: egui::RawInput,
     dragging: bool,
     composing: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn clipboard_text_events(target: factory_core::RequestId, text: String) -> Vec<egui::Event> {
+    let mut input = NativeInput::default();
+    assert!(input.paste(Some(target), || Ok(None), || Some(text)).is_none());
+    input.raw.take().events
+}
+
+#[cfg(test)]
+pub(crate) fn enter_key_events(
+    keycode: Keycode,
+    keymod: Mod,
+    repeat: bool,
+) -> Vec<egui::Event> {
+    let mut input = NativeInput::default();
+    let down = Event::KeyDown {
+        timestamp: 0, window_id: 1, keycode: Some(keycode), scancode: None,
+        keymod, repeat, which: 0, raw: 0,
+    };
+    input.event(&down, 1, 1.0);
+    if !repeat {
+        let up = Event::KeyUp {
+            timestamp: 0, window_id: 1, keycode: Some(keycode), scancode: None,
+            keymod, repeat: false, which: 0, raw: 0,
+        };
+        input.event(&up, 1, 1.0);
+    }
+    input.raw.take().events
 }
 
 impl NativeInput {
@@ -418,6 +485,14 @@ impl NativeInput {
                 self.raw.modifiers = modifiers(*keymod);
                 let pressed = matches!(event, Event::KeyDown { .. });
                 if let Some(key) = keycode.and_then(key) {
+                    // Enter confirms an IME composition, not the form. Drop
+                    // native unshifted repeats before egui recomputes `repeat`
+                    // (e.g. when the first keydown occurred outside our window).
+                    if key == egui::Key::Enter && pressed
+                        && (self.composing || (*repeat && !self.raw.modifiers.shift))
+                    {
+                        return;
+                    }
                     self.raw.events.push(egui::Event::Key {
                         key,
                         physical_key: None,
@@ -435,6 +510,14 @@ impl NativeInput {
                 }
             }
             Event::TextEditing { text, .. } => {
+                if text.is_empty() {
+                    if self.composing {
+                        self.raw.events.push(egui::Event::Ime(egui::ImeEvent::Preedit(String::new())));
+                        self.raw.events.push(egui::Event::Ime(egui::ImeEvent::Disabled));
+                        self.composing = false;
+                    }
+                    return;
+                }
                 if !self.composing {
                     self.raw
                         .events
@@ -477,6 +560,10 @@ impl NativeInput {
             } => {
                 self.raw.focused = false;
                 self.raw.modifiers = egui::Modifiers::NONE;
+                if self.composing {
+                    self.raw.events.push(egui::Event::Ime(egui::ImeEvent::Disabled));
+                    self.composing = false;
+                }
                 self.raw.events.push(egui::Event::WindowFocused(false));
             }
             _ => {}
@@ -591,6 +678,34 @@ mod tests {
         assert_eq!(paste_shortcut(&event(1, command | Mod::LSHIFTMOD, false), 1), Some(true));
         assert_eq!(paste_shortcut(&event(2, command, false), 1), None);
         assert_eq!(paste_shortcut(&event(1, command, true), 1), None);
+    }
+
+    #[test]
+    fn enter_during_ime_composition_is_not_forwarded_as_a_submit_key() {
+        let mut input = NativeInput::default();
+        let preedit = |text: &str| Event::TextEditing {
+            timestamp: 0, window_id: 1, text: text.into(), start: 0, length: 0,
+        };
+        let enter = Event::KeyDown {
+            timestamp: 0, window_id: 1, keycode: Some(Keycode::Return), scancode: None,
+            keymod: Mod::NOMOD, repeat: false, which: 0, raw: 0,
+        };
+        input.event(&preedit("ka"), 1, 1.0);
+        input.raw.take();
+        input.event(&enter, 1, 1.0);
+        input.event(&Event::TextInput { timestamp: 0, window_id: 1, text: "か".into() }, 1, 1.0);
+        assert_eq!(input.raw.take().events, [
+            egui::Event::Ime(egui::ImeEvent::Commit("か".into())),
+            egui::Event::Ime(egui::ImeEvent::Disabled),
+        ]);
+
+        input.event(&preedit("a"), 1, 1.0);
+        input.event(&preedit(""), 1, 1.0);
+        input.raw.take();
+        input.event(&enter, 1, 1.0);
+        assert!(matches!(input.raw.take().events.as_slice(), [egui::Event::Key {
+            key: egui::Key::Enter, pressed: true, ..
+        }]));
     }
 
     #[test]

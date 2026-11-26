@@ -562,6 +562,11 @@ Vorrang. Details und festgelegte Quellversion: `vendor/sdl3-sys/YOLOFORGE-PATCH.
 
 - **Entwurf auf Server speichern** startet keine Arbeit.
 - **Einreihen** gibt die Aufgabe ausdrücklich zur Bearbeitung frei.
+- Im Prompt löst Enter die aktuelle Hauptaktion aus, Shift+Enter fügt eine
+  neue Zeile ein. Strg+V hängt kopierte Dateien an und setzt den Fokus zurück
+  in den Prompt. Das gilt auch für den Prompt in der OpenCode-Ansicht.
+- Direkt in der OpenCode-Ansicht gesendete Prompts erscheinen sofort im Verlauf
+  und werden ohne zusätzlichen Text in genau diese Session eingereiht.
 - Automatische Verteilung oder eine konkrete bestehende Arbeitssession auswählen.
 - Bilder und Dateien über Dateiauswahl oder Drag-and-drop hinzufügen; Bilder auch
   aus der Zwischenablage. Anhänge können vor dem Senden entfernt werden.

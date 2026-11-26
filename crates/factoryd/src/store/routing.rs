@@ -465,6 +465,7 @@ pub(super) fn continue_task(
         pins.as_ref().and_then(|m| m.implementer.as_ref()),
         Some((&repo_skills, &local_mcps)),
         None,
+        t.session_prompt_request.is_some(),
     ) {
         Ok(mut c) => {
             c.agent_spec.as_mut().ok_or(StoreError::Internal)?.images = t.images.clone();

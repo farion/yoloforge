@@ -2,6 +2,20 @@ use factory_core::*;
 use factory_protocol::*;
 use factoryd::store::Store;
 
+async fn post_prompt(store: &Store, path: &str, body: &impl serde::Serialize) -> Ticket {
+    const TOKEN: &str = "test-only-credential-0123456789abcdef";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let router = factoryd::router(TOKEN, store.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = factory_protocol::client::FactoryClient::new(&url, TOKEN).unwrap();
+    let result = client
+        .management_request("POST", path, &serde_json::to_value(body).unwrap())
+        .await;
+    server.abort();
+    serde_json::from_value(result.unwrap()).unwrap()
+}
+
 fn configure_models(s: &Store) {
     for p in s.snapshot().unwrap().projects {
         if p.profile.provider_id.is_empty() {
@@ -20,6 +34,48 @@ fn configure_models(s: &Store) {
             .unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn long_http_prompt_reaches_orchestrator_and_worker_without_truncation() {
+    let store = Store::open(std::path::Path::new(":memory:")).unwrap();
+    let project = store.create_project(CreateProject {
+        logo: None, runner_mapping: None, key: None, request_id: RequestId::new(),
+        name: "Long prompt".into(), repository: "factory:managed".into(), base_branch: "main".into(),
+    }).unwrap();
+    configure_models(&store);
+    let runner = RunnerId::new();
+    let prompt = format!("Implement changes\n{}Do not push.", "Details: ä, ö, ü.\n".repeat(3_000));
+    let ticket = post_prompt(&store, "/v1/tasks/submit-with-model", &models::SubmitTaskWithModel {
+        submission: SubmitTask {
+            task: SaveTask {
+                request_id: RequestId::new(), id: None, expected_revision: Revision(0),
+                project_id: project.id, requested_session: None, prompt: prompt.clone(), images: vec![],
+            },
+            edit_token: None,
+            draft: false,
+            files: vec![],
+        },
+        implementer: None,
+        local_mcps: None,
+    }).await;
+    assert_eq!(ticket.prompt.as_deref(), Some(prompt.as_str()));
+    store.autostart_runner(runner).unwrap();
+    store.scheduler_tick().unwrap();
+    prepare(&store, &store.pending(runner).unwrap()[0]);
+    store.scheduler_tick().unwrap();
+    let routing = store.pending(runner).unwrap().pop().unwrap();
+    let spec = routing.agent_spec.as_ref().unwrap();
+    assert_eq!(spec.role, "orchestrator");
+    assert!(spec.prompt.contains(&format!("\nTask: {}\n", serde_json::to_string(&prompt).unwrap())));
+    decide(&store, &routing, r#"{"action":"new","reason":"New workspace"}"#);
+    store.scheduler_tick().unwrap();
+    prepare(&store, &store.pending(runner).unwrap()[0]);
+    store.scheduler_tick().unwrap();
+    let worker = store.pending(runner).unwrap().pop().unwrap();
+    let spec = worker.agent_spec.unwrap();
+    assert!(!spec.read_only);
+    assert!(spec.prompt.starts_with(&prompt));
 }
 
 #[test]
@@ -1014,8 +1070,8 @@ fn archived_session_with_new_skill_grants_queues_and_sends_to_same_root() {
     assert!(spec.factory_skills.is_empty());
 }
 
-#[test]
-fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
+#[tokio::test]
+async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let s = Store::open(&path).unwrap();
@@ -1070,7 +1126,9 @@ fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart() {
     };
     let routing_count = s.snapshot().unwrap().commands.iter()
         .filter(|c| c.agent_spec.as_ref().is_some_and(|a| a.role == "orchestrator")).count();
-    let follow = s.prompt_session(c.id, direct.clone()).unwrap();
+    let follow = post_prompt(&s, &format!("/v1/commands/{}/prompt", c.id), &direct).await;
+    assert_eq!(follow.prompt.as_deref(), Some(direct.prompt.as_str()));
+    assert_eq!(follow.session_prompt_request, Some(direct.request_id));
     assert_eq!(follow.requested_session, Some(c.id));
     assert_eq!(follow.project_id, p.id);
     assert_eq!(s.prompt_session(c.id, direct.clone()).unwrap().id, follow.id);

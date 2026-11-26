@@ -99,6 +99,7 @@ impl Store {
                 Some(&model),
                 Some((&Default::default(), &McpProfile::default())),
                 None,
+                false,
             );
             match result {
                 Ok(merge) => {

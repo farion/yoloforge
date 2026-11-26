@@ -73,6 +73,7 @@ pub struct SessionTab {
 pub struct App {
     pub session_prompts: BTreeMap<CommandId, Box<crate::dialogs::TaskDialog>>,
     pub(crate) queued_session_prompts: BTreeMap<(CommandId, u64), (TicketId, Option<CommandId>, crate::conversation::SubmittedPrompt)>,
+    pub confirmed_session_prompts: BTreeMap<RequestId, Ticket>,
     pub local_runners: Vec<crate::local_runners::LocalRunner>,
     pub local_runners_busy: bool,
     pub(crate) restarting_runner: Option<RunnerId>,
@@ -194,6 +195,7 @@ impl App {
             local_runners: vec![],
             session_prompts: BTreeMap::new(),
             queued_session_prompts: BTreeMap::new(),
+            confirmed_session_prompts: BTreeMap::new(),
             local_runners_busy: false,
             restarting_runner: None,
             action_errors: vec![],
@@ -340,6 +342,7 @@ impl App {
         self.server_peer = None;
         self.restore_local_runners = true;
         self.snapshot = None;
+        self.confirmed_session_prompts.clear();
         self.updated = None;
         self.online = false;
         self.access = None;
@@ -617,6 +620,7 @@ impl App {
             })
             .unwrap_or_else(|| root.to_string());
         self.push_session_tab(project, root, title, None);
+        self.tabs.last_mut().unwrap().selected_execution = execution;
     }
     pub(crate) fn open_direct(&mut self, direct: &directs::Direct) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.direct_id == Some(direct.id)) {
@@ -630,7 +634,7 @@ impl App {
             direct_id,
             direct_options: Default::default(),
             scroll_to_start: false,
-            selected_execution: execution,
+            selected_execution: None,
             initialized: BTreeSet::new(),
             older: BTreeMap::new(),
             message_positions: BTreeMap::new(),
@@ -1262,6 +1266,8 @@ impl App {
                         }
                     }
                     self.cache_projects(&s.projects);
+                    self.confirmed_session_prompts.retain(|_, confirmed|
+                        !s.tickets.iter().any(|ticket| ticket.id == confirmed.id));
                     self.snapshot = Some(std::sync::Arc::new(s));
                     if direct_preparation_failed {
                         self.notice(crate::tr!("Direct konnte nicht gestartet werden. Details stehen in der Diagnose."));
@@ -1595,8 +1601,16 @@ impl App {
                     {
                         if let Ok(value) = &result {
                             match serde_json::from_value::<Ticket>(value.clone()) {
-                                Ok(ticket) if ticket.requested_session.is_some_and(|root|
-                                    request.path == format!("/v1/commands/{root}/prompt")) => {
+                                 Ok(mut ticket) if ticket.requested_session.is_some_and(|root|
+                                     request.path == format!("/v1/commands/{root}/prompt")) => {
+                                     if request.server == self.server && !self.snapshot.as_ref().is_some_and(|s|
+                                         s.tickets.iter().any(|current| current.id == ticket.id && current.session_prompt_request.is_some())) {
+                                         if let Ok(request_id) = serde_json::from_value(request.body["request_id"].clone()) {
+                                             for image in &mut ticket.images { image.data.clear(); }
+                                             for file in &mut ticket.files { file.data.clear(); }
+                                             self.confirmed_session_prompts.insert(request_id, ticket);
+                                         }
+                                     }
                                     self.settings.session_prompts.retain(|saved|
                                         saved.draft.server != request.server || serde_json::json!(saved.id) != request.body["request_id"]);
                                     if request.server == self.server {

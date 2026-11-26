@@ -16,6 +16,17 @@ const HEADER_LOGO_HEIGHT: f32 =
     (design::SECTION_TAB_HEIGHT + 2.0 * HEADER_PADDING as f32) * 4.0 / 3.0
     - 2.0 * HEADER_PADDING as f32;
 
+fn queued_prompt_row<'a>(
+    command: CommandId, id: String, created: u64, text: &str,
+    names: impl Iterator<Item = &'a str>,
+) -> (CommandId, std::sync::Arc<ArchivedMessage>) {
+    let parts = names.map(|name| json!({"type":"file","name":name})).collect::<Vec<_>>();
+    (command, std::sync::Arc::new(ArchivedMessage {
+        sequence: 0, sample_revision: 0, captured_unix_ms: created,
+        message: json!({"id":id,"type":"user","text":text,"parts":parts}),
+    }))
+}
+
 impl App {
     pub fn draw_shell(&mut self, ctx: &egui::Context) {
         if !self.online {
@@ -920,7 +931,7 @@ impl App {
                                              if delete.clicked() {
                                                  self.dialog = Some(Dialog::form(
                                                      crate::tr!("Intent löschen"),
-                                                     &crate::tr!("Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(t)),
+                                                     &crate::tr!("Fehlgeschlagenen Intent „{}“ löschen? Der OpenCode-Verlauf und Dateien bleiben erhalten.", task_text(&s, t)),
                                                      "DELETE", format!("/v1/tasks/{}", t.id), json!(DeleteFailedTask {
                                                          request_id: RequestId::new(), expected_revision: t.revision, failed_command: command,
                                                      }),
@@ -1201,7 +1212,7 @@ impl App {
             );
             self.sessions_closed = selected == 1;
             let needle = self.query.to_lowercase();
-            awaiting_review.retain(|t| !self.sessions_closed && task_summary(t).to_lowercase().contains(&needle));
+            awaiting_review.retain(|t| !self.sessions_closed && task_summary(&s, t).to_lowercase().contains(&needle));
             sessions.retain(|c| {
                 archived(c) == self.sessions_closed
                     && (needle.is_empty()
@@ -1243,7 +1254,7 @@ impl App {
                     design::task_row_frame().show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            let title = task_summary(ticket);
+                            let title = task_summary(&s, ticket);
                             let width = (ui.available_width() - 220.0).max(1.0);
                             let job = design::elided_text_job(title.clone(), egui::FontId::proportional(18.0), ui.visuals().text_color(), width, 1);
                             ui.add(egui::Label::new(job)).on_hover_text(title);
@@ -1837,13 +1848,12 @@ impl App {
             });
         }
         // Clone references' backing values only for this view's interaction, not the snapshot.
-        let entries = entries
+        let mut entries = entries
             .iter()
             .map(|(id, e)| (*id, (*e).clone()))
             .collect::<Vec<_>>();
         let follow = tab.follow;
         let show_versions = tab.show_versions;
-        let project = tab.project;
         let direct = tab.direct_id.and_then(|id| self.snapshot.as_ref()?.directs.iter().find(|d| d.id == id)).cloned();
         let mut rows = conversation::transcript_rows(entries, self.snapshot.as_deref(), root, tab.selected_execution);
         if direct.is_some() {
@@ -1854,7 +1864,12 @@ impl App {
             crate::directs::tab_controls(ui, self, index, direct);
         }
         let submitted = self.submitted_session_prompts(index);
-        if self.online && rows.is_empty() && !working && direct.is_none() && outcome.is_none() && submitted.is_empty() {
+        let restored = if submitted.is_empty() && self.tabs[index].selected_execution.is_none() {
+            self.queued_session_entries(index)
+        } else {
+            vec![]
+        };
+        if self.online && rows.is_empty() && !working && direct.is_none() && outcome.is_none() && submitted.is_empty() && restored.is_empty() {
             ui.label(crate::tr!("Noch keine archivierten Nachrichten verfügbar."));
         }
         let list_key = format!("archive/{root}");
@@ -1917,6 +1932,13 @@ impl App {
                 let response = prompt.show(ui, status, color);
                 if Some(id) == new_prompt { response.scroll_to_me(Some(egui::Align::BOTTOM)); }
             }
+            for (command, entry) in restored {
+                ui.add_space(conversation::line_height(ui));
+                conversation::message(ui, self, command, &entry, false);
+            }
+            if submitted {
+                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+            }
         });
         if toggled_activity {
             // Keep the clicked group in view instead of following a new bottom.
@@ -1944,6 +1966,50 @@ impl App {
             }
         }
         self.put_list(list_key, list);
+    }
+
+    pub(crate) fn queued_session_entries(&self, index: usize) -> Vec<(CommandId, std::sync::Arc<ArchivedMessage>)> {
+        let tab = &self.tabs[index];
+        let root = tab.root;
+        let archived: std::collections::BTreeSet<_> = tab.archives.values().flatten()
+            .filter_map(|entry| entry.message["id"].as_str()).collect();
+        let mut rows = BTreeMap::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut add_ticket = |request, ticket: &Ticket| {
+            if ticket.requested_session != Some(root) || ticket.draft || !seen.insert(request) {
+                return;
+            }
+            let id = ticket.execution_command.map(agent_message_id).unwrap_or_else(|| format!("queued/{request}"));
+            if !archived.contains(id.as_str()) {
+                let names = ticket.images.iter().map(|image| image.name.as_str())
+                    .chain(ticket.files.iter().map(|file| file.name.as_str()));
+                rows.insert(request, queued_prompt_row(ticket.execution_command.unwrap_or(root),
+                    id, ticket.created_unix_ms, ticket.prompt.as_deref().unwrap_or_default(), names));
+            }
+        };
+        if let Some(snapshot) = &self.snapshot {
+            for ticket in &snapshot.tickets {
+                if let Some(request) = ticket.session_prompt_request {
+                    add_ticket(request, ticket);
+                }
+            }
+        }
+        for (&request, ticket) in &self.confirmed_session_prompts {
+            add_ticket(request, ticket);
+        }
+        let path = format!("/v1/commands/{root}/prompt");
+        for pending in &self.settings.pending {
+            if pending.server != self.server || pending.path != path { continue; }
+            let Ok(request) = serde_json::from_value::<RequestId>(pending.body["request_id"].clone()) else { continue; };
+            if seen.insert(request) {
+                let names = ["images", "files"].into_iter().flat_map(|key| {
+                    pending.body[key].as_array().into_iter().flatten().filter_map(|v| v["name"].as_str())
+                });
+                rows.insert(request, queued_prompt_row(root, format!("queued/{request}"),
+                    u64::MAX, pending.body["prompt"].as_str().unwrap_or_default(), names));
+            }
+        }
+        rows.into_values().collect()
     }
     pub(super) fn command_menu(&mut self, ui: &mut egui::Ui, c: &RunnerCommand) {
         let Some(s) = self.snapshot.clone() else {

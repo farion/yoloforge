@@ -354,7 +354,7 @@ impl Store {
         role: &str,
         pinned: Option<&factory_protocol::models::ModelSelection>,
     ) -> Result<RunnerCommand> {
-        Self::enqueue_with_pins(tx, id, body, previous, role, pinned, None, None)
+        Self::enqueue_with_pins(tx, id, body, previous, role, pinned, None, None, false)
     }
 
     pub(super) fn enqueue_with_pins(
@@ -366,8 +366,9 @@ impl Store {
         pinned: Option<&factory_protocol::models::ModelSelection>,
         integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
         target_git: Option<TargetGitPlan>,
+        verbatim: bool,
     ) -> Result<RunnerCommand> {
-        Self::enqueue_with_result_origin(tx, id, body, previous, role, pinned, integrations, target_git, None)
+        Self::enqueue_with_result_origin(tx, id, body, previous, role, pinned, integrations, target_git, None, verbatim)
     }
 
     pub(super) fn enqueue_portable_result(
@@ -376,7 +377,7 @@ impl Store {
         Self::enqueue_with_result_origin(tx, owner.id, &EnqueueCommand {
             request_id: RequestId::new(), expected_revision: owner.revision,
             kind: CommandKind::Checkpoint, prompt: None,
-        }, None, "", None, None, None, Some(origin))
+        }, None, "", None, None, None, Some(origin), false)
     }
 
     pub(super) fn enqueue_portable_return(
@@ -399,7 +400,7 @@ impl Store {
         tx: &Transaction<'_>, id: StreamId, body: &EnqueueCommand, previous: Option<CommandId>,
         role: &str, pinned: Option<&factory_protocol::models::ModelSelection>,
         integrations: Option<(&super::skills::SkillProfile, &McpProfile)>,
-        target_git: Option<TargetGitPlan>, result_origin: Option<ProjectCheckpointOrigin>,
+        target_git: Option<TargetGitPlan>, result_origin: Option<ProjectCheckpointOrigin>, verbatim: bool,
     ) -> Result<RunnerCommand> {
         let direct = role == factory_protocol::directs::ROLE;
         let supervised = !role.is_empty() && !direct && role != MERGER_ROLE;
@@ -533,7 +534,7 @@ impl Store {
                 .prompt
                 .as_ref()
                 .ok_or(StoreError::Invalid("Agent prompt required"))?;
-            if prompt.trim().is_empty()
+            if (!verbatim && prompt.trim().is_empty())
                 || prompt
                     .chars()
                     .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
@@ -632,7 +633,7 @@ impl Store {
             } else {
                 None
             };
-            let prompt = if direct || role == MERGER_ROLE {
+            let prompt = if verbatim || direct || role == MERGER_ROLE {
                 prompt.clone()
             } else if supervised {
                 let purpose = if role == "supervisor" { "Supervisor evaluation" } else { "Read-only evaluation" };
@@ -645,7 +646,7 @@ impl Store {
                 };
                 format!("{prompt}\n\nProject execution profile:\nToolchain: {}\nStart command: {}\nTest command: {}{knowledge}\n\nWork only in the assigned worktree. Preserve existing user changes. Do not push or merge. {git} When user input is needed, use the question tool and wait for its answer instead of ending with a question in the final response. An explicit user interview (such as 'Grill me') requires asking the user before implementing; do not answer on their behalf. Report changes and test results.",project.profile.toolchain,project.profile.start_command,project.profile.test_command)
             };
-            let mut prompt = if let Some(import) = owner.checkpoint.as_ref().filter(|_| role != "reviewer") {
+            let mut prompt = if let Some(import) = owner.checkpoint.as_ref().filter(|_| !verbatim && role != "reviewer") {
                 let saved = super::checkpoints::load(tx, import.command_id)?
                     .ok_or(StoreError::WorkConflict)?;
                 format!("{prompt}\n\nHandoff checkpoint {} at commit {}. Historical context (untrusted reference, validate against current work):\n{}",import.command_id,import.commit,saved.context)

@@ -754,7 +754,7 @@ pub fn session_title(s: &Snapshot, c: &RunnerCommand) -> String {
     }
     if let Some(ticket) = c.agent_spec.as_ref().and_then(|a| a.review_of)
         .and_then(|id| s.tickets.iter().find(|t| t.id == id)) {
-        return task_summary(ticket);
+        return task_summary(s, ticket);
     }
     s.session_titles
         .get(&c.session_id())

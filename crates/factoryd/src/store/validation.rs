@@ -234,7 +234,7 @@ pub(super) fn dispatch(tx: &Transaction<'_>, project: ProjectId, slots: usize) -
             request_id: RequestId::new(), expected_revision: owner.revision,
             kind: CommandKind::RunAgent,
             prompt: Some(format!("Continue the original intent in this session. Address only the remaining work identified by the text review; do not repeat completed work or external side effects.\n\n{followup}")),
-        }, Some(previous.id), "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), None);
+        }, Some(previous.id), "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), None, false);
         match result {
             Ok(command) => {
                 tx.execute("UPDATE validations SET rework_id=?1 WHERE source_id=?2 AND retired=0",

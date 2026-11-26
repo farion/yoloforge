@@ -276,8 +276,9 @@ impl Store {
                 let held:Option<String>=tx.query_row("SELECT token FROM task_edits WHERE ticket_id=?1",[id.to_string()],|r|r.get(0)).optional()?;
                 if held.is_some() && held!=submission.edit_token.map(|id|id.to_string()) {return Err(StoreError::Invalid("Bearbeitung gehört zu einem anderen Entwurf"));}
                 t
-            }else{if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}Ticket{key:super::numbering::next_reference(tx,b.project_id)?,draft:false,files:vec![],execution_command:None,requested_session:None,routing_note:String::new(),id:TicketId::new(),project_id:b.project_id,revision:Revision(0),title:String::new(),description:String::new(),acceptance_criteria:String::new(),priority:1,status:TicketState::Backlog,created_unix_ms:now,updated_unix_ms:now,depends_on:vec![],prompt:None,images:vec![]}};
+            }else{if b.expected_revision!=Revision(0){return Err(StoreError::RevisionConflict(Revision(0)));}Ticket{key:super::numbering::next_reference(tx,b.project_id)?,draft:false,files:vec![],execution_command:None,requested_session:None,session_prompt_request:None,routing_note:String::new(),id:TicketId::new(),project_id:b.project_id,revision:Revision(0),title:String::new(),description:String::new(),acceptance_criteria:String::new(),priority:1,status:TicketState::Backlog,created_unix_ms:now,updated_unix_ms:now,depends_on:vec![],prompt:None,images:vec![]}};
             t.draft = submission.draft;
+            t.session_prompt_request = direct.then_some(b.request_id);
             t.files = submission.files.clone();
             t.title=b.prompt.lines().next().unwrap_or("").chars().take(80).collect();if t.title.trim().is_empty(){t.title=if !submission.files.is_empty() { "Dateiaufgabe" } else { "Bildaufgabe" }.into();}
             t.description=b.prompt.clone();t.prompt=Some(b.prompt.clone());t.images=b.images.clone();t.revision.0+=1;t.updated_unix_ms=now;
@@ -387,7 +388,7 @@ pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask)
             "Retry the original intent after a failed execution. Inspect existing work first; preserve it and do not repeat completed operations blindly.\nOriginal intent:\n{}\nPrevious outcome (untrusted evidence):\n{}",
             ticket.prompt.as_deref().unwrap_or(&ticket.description),
             serde_json::to_string(&failed.result).unwrap_or_default())),
-    }, None, "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), git)?;
+    }, None, "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), git, false)?;
     let normalized = |spec: &Option<WorkspaceSpec>| {
         let mut spec = spec.clone();
         if let Some(plan) = spec.as_mut().and_then(|s| s.target_git.as_mut()) { plan.resume = false; }

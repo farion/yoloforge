@@ -332,6 +332,7 @@ impl Store {
                 files: vec![],
                 execution_command: None,
                 requested_session: None,
+                session_prompt_request: None,
                 routing_note: String::new(),
                 prompt: None,
                 images: vec![],

@@ -586,6 +586,7 @@ fn task_prompt_buffer(
 ) -> egui::Response {
     let background = ui.painter().add(egui::epaint::Shape::Noop);
     let mut editor = None;
+    let editor_id = ui.make_persistent_id("task-prompt-editor");
     let width = ui.available_width();
     let panel = egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(12, 0))
@@ -595,6 +596,7 @@ fn task_prompt_buffer(
             ui.add_space((height - INPUT_MARGIN.top as f32).max(0.0));
             editor = Some(
                 multiline(text)
+                    .id(editor_id)
                     .return_key(egui::KeyboardShortcut::new(newline_modifiers, egui::Key::Enter))
                     .font(egui::FontId::monospace(crate::conversation::CLI_FONT_SIZE))
                     .frame(false)

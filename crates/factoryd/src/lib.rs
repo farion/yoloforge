@@ -414,7 +414,11 @@ pub fn router_with_shutdown(
         .route("/v1/runners/register", post(register))
         .route("/v1/runners/{id}/heartbeat", post(heartbeat))
         .route("/v1/runners/{id}/snapshot", get(runner_snapshot))
-        .route("/v1/commands/{root}/prompt", post(review_routes::prompt_session))
+        .route(
+            "/v1/commands/{root}/prompt",
+            post(review_routes::prompt_session)
+                .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
         .fallback(|| async {
             error(
                 StatusCode::NOT_FOUND,
