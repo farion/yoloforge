@@ -1130,6 +1130,11 @@ pub fn settings_footer<R>(ui: &mut egui::Ui, bottom: f32, draw: impl FnOnce(&mut
     if gap > 0.0 {
         ui.add_space(gap);
     }
+    dialog_footer(ui, draw)
+}
+
+/// Draw a right-aligned action row without filling unused vertical space.
+pub fn dialog_footer<R>(ui: &mut egui::Ui, draw: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.add_space(SETTINGS_FOOTER_TOP_GAP);
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), SETTINGS_FOOTER_ACTION_HEIGHT),

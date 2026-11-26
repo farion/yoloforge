@@ -458,8 +458,25 @@ impl Dialog {
                    });
                    return;
               }
-              let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body")).max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
-            match self {
+             match self {
+                 Self::Form(form) if form.is_project_delete() => {
+                     let body = egui::ScrollArea::vertical().id_salt((modal_id, "body"))
+                         .max_height((body_height - design::SETTINGS_FOOTER_HEIGHT - 12.0).max(0.0))
+                         .auto_shrink([false, true])
+                         .show(ui, |ui| form.show(ui, app, height));
+                     close = body.inner;
+                     if form.request.is_none() {
+                         ui.separator();
+                         form.show_delete_footer(ui, app);
+                     }
+                     #[cfg(test)]
+                     ui.ctx().data_mut(|data| data.insert_temp(modal_id.with("test-body-scroll"), (body.inner_rect, body.content_size)));
+                     return;
+                 }
+                 _ => {}
+             }
+             let _body = egui::ScrollArea::vertical().id_salt((modal_id, "body")).max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+             match self {
                  Self::About => unreachable!("About uses its own full-bleed layout"),
                  Self::RestartLocalRunner { .. } => unreachable!("Restart uses a fixed footer"),
                 Self::ConnectionInfo=>crate::connection_info::show(ui,app),
@@ -2091,6 +2108,26 @@ impl FormDialog {
         (self.method == "POST" && self.path == "/v1/projects") || self.is_project_update()
     }
 
+    fn is_project_delete(&self) -> bool {
+        self.method == "DELETE" && self.body.get("confirm_name").is_some()
+    }
+
+    fn show_delete_footer(&mut self, ui: &mut egui::Ui, app: &mut App) {
+        let confirmed = self.path.strip_prefix("/v1/projects/")
+            .and_then(|id| id.parse::<ProjectId>().ok())
+            .and_then(|id| app.snapshot.as_ref()?.projects.iter().find(|project| project.id == id))
+            .is_some_and(|project| self.body["confirm_name"].as_str() == Some(project.name.as_str()));
+        let button = design::dialog_footer(ui, |ui| {
+            design::accent_button(ui, egui::Button::new(crate::tr!("Projekt löschen")),
+                app.online && confirmed, RED.gamma_multiply(0.7))
+        });
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new("test-project-delete-button"), (button.rect, button.enabled())));
+        if button.clicked() {
+            self.request = Some(app.write(&self.title, &self.method, self.path.clone(), self.body.clone()));
+        }
+    }
+
     fn project_fields(&mut self, ui: &mut egui::Ui, app: &mut App) -> bool {
         use std::sync::mpsc::TryRecvError;
 
@@ -2547,7 +2584,14 @@ impl FormDialog {
             ui.label(crate::i18n::label(&self.help));
         }
         let mut valid = true;
-        if self.path.starts_with("/v1/projects/") && self.path.ends_with("/mirror") {
+        let deleting_project = self.is_project_delete();
+        if deleting_project {
+            let mut name = self.body["confirm_name"].as_str().unwrap_or_default().to_owned();
+            ui.label(crate::tr!("Projektname zur Bestätigung"));
+            if ui.add_enabled(self.request.is_none(), design::singleline(&mut name).desired_width(f32::INFINITY)).changed() {
+                self.body["confirm_name"] = json!(name);
+            }
+        } else if self.path.starts_with("/v1/projects/") && self.path.ends_with("/mirror") {
             valid = self.project_mirror_fields(ui, app);
         } else if self.path.starts_with("/v1/projects/") && self.path.ends_with("/supervisor") {
             let seconds = self.body["interval_seconds"].as_u64().unwrap_or(300);
@@ -2733,6 +2777,9 @@ impl FormDialog {
                     }
                 }
             }
+        }
+        if deleting_project {
+            return self.request.is_some() && ui.button(crate::tr!("Schließen")).clicked();
         }
         let submit = if let Some(bottom) = settings_bottom {
             design::settings_footer(ui, bottom, |ui|
