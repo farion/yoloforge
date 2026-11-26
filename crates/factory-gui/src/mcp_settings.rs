@@ -82,13 +82,13 @@ impl<T: Clone + DeserializeOwned> Editor<T> {
                         self.draft = Some(value.clone());
                         self.saved = Some(value);
                         if writing {
-                            app.notice(crate::tr!("MCP-Einstellungen gespeichert."));
+                            app.notice_success(crate::tr!("MCP-Einstellungen gespeichert."));
                             saved = true;
                         }
                     }
                     None => {
                         self.load_failed = !writing;
-                        app.notice(if writing {
+                        app.notice_error(if writing {
                             crate::tr!("MCP-Einstellungen konnten nicht gespeichert werden. Der Entwurf bleibt erhalten.")
                         } else {
                             crate::tr!("MCP-Einstellungen konnten nicht geladen werden.")
@@ -154,10 +154,10 @@ pub fn show_catalog(ui: &mut egui::Ui, app: &mut App, bottom: f32) {
                     state.edit_remote.remove(&id);
                     state.modal = None;
                     state.invalidate_choices(app);
-                    app.notice(crate::tr!("MCP gelöscht."));
+                    app.notice_success(crate::tr!("MCP gelöscht."));
                 }
-                Err(error) => app.notice(error.message),
-                _ => app.notice(crate::tr!("MCP konnte nicht gelöscht werden.")),
+                Err(error) => app.notice_error(error.message),
+                _ => app.notice_error(crate::tr!("MCP konnte nicht gelöscht werden.")),
             }
         }
     }
@@ -588,11 +588,11 @@ impl LocalProbe {
                     self.job = None;
                     self.result = Some(view.status);
                     match view.status {
-                        LocalMcpProbeStatus::ProgramMissing => app.notice(
+                        LocalMcpProbeStatus::ProgramMissing => app.notice_error(
                             crate::tr!("Das MCP-Programm fehlt auf dem Runner oder ist nicht ausführbar."),
                         ),
                         LocalMcpProbeStatus::Unavailable => {
-                            app.notice(crate::tr!("Der lokale MCP hat nicht erfolgreich geantwortet."))
+                            app.notice_error(crate::tr!("Der lokale MCP hat nicht erfolgreich geantwortet."))
                         }
                         _ => {}
                     }
@@ -600,7 +600,7 @@ impl LocalProbe {
                 None => {
                     self.job = None;
                     self.result = None;
-                    app.notice(crate::tr!("Der lokale MCP-Test konnte nicht abgeschlossen werden."));
+                    app.notice_error(crate::tr!("Der lokale MCP-Test konnte nicht abgeschlossen werden."));
                 }
             }
         }
@@ -1331,7 +1331,7 @@ impl RemoteEditor {
                                     *entry = new.clone();
                                 }
                                 self.draft = Some(RemoteDraft::from_entry(&new));
-                                app.notice(crate::tr!("OAuth-Anmeldung gespeichert. Verbindung kann jetzt getestet werden."));
+                                app.notice_success(crate::tr!("OAuth-Anmeldung gespeichert. Verbindung kann jetzt getestet werden."));
                             } else {
                                 app.notice(crate::tr!("OAuth-Anmeldung abgeschlossen, aber der MCP-Eintrag wurde geändert."));
                             }
@@ -1400,7 +1400,7 @@ impl RemoteEditor {
                     items.sort_by(|a, b| a.reference.id.cmp(&b.reference.id));
                     self.draft = Some(RemoteDraft::from_entry(&entry));
                     self.status = None;
-                    app.notice(crate::tr!("Remote-MCP gespeichert."));
+                    app.notice_success(crate::tr!("Remote-MCP gespeichert."));
                     self.verified_attempt = None;
                     changed = true;
                 }
@@ -1408,7 +1408,7 @@ impl RemoteEditor {
                     if self.verified_attempt.take().is_some() {
                         self.status = Some(false);
                     }
-                    app.notice(crate::tr!("Remote-MCP konnte nicht gespeichert werden. Bei unklarer Zustellung zuerst neu laden."));
+                    app.notice_error(crate::tr!("Remote-MCP konnte nicht gespeichert werden. Bei unklarer Zustellung zuerst neu laden."));
                 }
             }
         }

@@ -19,6 +19,36 @@ pub const RED: Color32 = Color32::from_rgb(248, 116, 107);
 pub const MUTED: Color32 = Color32::from_rgb(173, 180, 192);
 pub const AMBER: Color32 = Color32::from_rgb(244, 190, 84);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToastKind { Info, Success, Warning, Error }
+
+impl ToastKind {
+    fn from_notification(notification: &Notification) -> Self {
+        if notification.question_id.is_some() || matches!(notification.kind.as_str(), "question.created" | "question.updated" | "scheduler.blocked") {
+            return Self::Warning;
+        }
+        // The current server uses one event kind for all command outcomes.
+        match (notification.kind.as_str(), notification.title.as_str()) {
+            ("command.updated", "Aufgabe abgeschlossen") => Self::Success,
+            ("command.updated", "Sessionzustand ungeklärt") => Self::Warning,
+            ("command.updated", "Aufgabe fehlgeschlagen" | "Orchestrator-Auswertung fehlgeschlagen" | "Orchestrator: Vorbereitung fehlgeschlagen") => Self::Error,
+            _ => Self::Info,
+        }
+    }
+
+    fn color(self) -> Color32 {
+        match self {
+            Self::Info => BLUE,
+            Self::Success => GREEN,
+            Self::Warning => AMBER,
+            Self::Error => RED,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Toast(pub String, pub Instant, pub ToastKind, pub Option<ProjectLogo>);
+
 pub struct SessionTab {
     pub direct_id: Option<CommandId>,
     pub direct_options: crate::directs::Options,
@@ -42,6 +72,7 @@ pub struct SessionTab {
 
 pub struct App {
     pub session_prompts: BTreeMap<CommandId, Box<crate::dialogs::TaskDialog>>,
+    pub(crate) queued_session_prompts: BTreeMap<(CommandId, u64), (TicketId, Option<CommandId>, crate::conversation::SubmittedPrompt)>,
     pub local_runners: Vec<crate::local_runners::LocalRunner>,
     pub local_runners_busy: bool,
     pub(crate) restarting_runner: Option<RunnerId>,
@@ -100,7 +131,7 @@ pub struct App {
     pub diagnostics_project: bool,
     pub responses: BTreeMap<u64, Result<Value, Failure>>,
     pub in_flight: BTreeSet<u64>,
-    pub notices: Vec<(String, Instant)>,
+    pub(crate) notices: Vec<Toast>,
     pub next_request: u64,
     pub settings_dirty: bool,
     pub language_save: Option<(crate::i18n::Language, std::sync::mpsc::Receiver<bool>)>,
@@ -162,6 +193,7 @@ impl App {
             factory_flow: crate::overview::FlowState::default(),
             local_runners: vec![],
             session_prompts: BTreeMap::new(),
+            queued_session_prompts: BTreeMap::new(),
             local_runners_busy: false,
             restarting_runner: None,
             action_errors: vec![],
@@ -239,7 +271,7 @@ impl App {
                 Ok(runners) => app.local_runners = runners,
                 Err(e) => {
                     app.error = Some(e.to_string());
-                    app.notice(crate::tr!("Gespeicherte lokale Runner konnten nicht geladen werden."));
+                    app.notice_error(crate::tr!("Gespeicherte lokale Runner konnten nicht geladen werden."));
                 }
             }
         }
@@ -257,7 +289,7 @@ impl App {
                     match std::fs::read_to_string(path) {
                         Ok(token) => Some(token.trim_end_matches(['\r', '\n']).to_owned()),
                         Err(_) => {
-                            app.notice(crate::tr!("Gespeichertes Zugangstoken konnte nicht gelesen werden."));
+                            app.notice_error(crate::tr!("Gespeichertes Zugangstoken konnte nicht gelesen werden."));
                             None
                         }
                     }
@@ -267,7 +299,7 @@ impl App {
             (Ok(_), Some(_)) => {
                 let error = crate::tr!("Nur FACTORY_TOKEN oder FACTORY_TOKEN_FILE setzen, nicht beides.");
                 app.error = Some(error.into());
-                app.notice(error);
+                app.notice_error(error);
                 (None, None)
             }
         };
@@ -277,7 +309,7 @@ impl App {
             }
             if let Err(error) = app.connect_with_credential(server, token, credential_file) {
                 app.error = Some(error);
-                app.notice(crate::tr!("Factory-Verbindung konnte nicht eingerichtet werden."));
+                app.notice_error(crate::tr!("Factory-Verbindung konnte nicht eingerichtet werden."));
             }
         } else {
             app.dialog = None;
@@ -328,6 +360,7 @@ impl App {
         self.events.clear();
         self.event_cursor = 0;
         self.tabs.clear();
+        self.queued_session_prompts.clear();
         for (_, composer) in std::mem::take(&mut self.session_prompts) { composer.persist(self); }
         self.active_tab = 0;
         self.detail = None;
@@ -501,6 +534,52 @@ impl App {
         }
     }
     pub fn open_session(&mut self, project: ProjectId, root: CommandId) {
+        self.open_session_view(project, root, None);
+    }
+
+    pub(crate) fn open_intent_execution(&mut self, project: ProjectId, root: CommandId, execution: CommandId) {
+        self.open_session_view(project, root, Some(execution));
+    }
+
+    pub(crate) fn submitted_session_prompts(&mut self, index: usize) -> BTreeMap<u64, (crate::conversation::SubmittedPrompt, &'static str, Color32)> {
+        let tab = &self.tabs[index];
+        let mut prompts = BTreeMap::new();
+        if tab.selected_execution.is_some() { return prompts; }
+
+        let path = format!("/v1/commands/{}/prompt", tab.root);
+        for request in self.settings.pending.iter().filter(|r| r.server == self.server && r.method == "POST" && r.path == path) {
+            if let Some(prompt) = crate::conversation::SubmittedPrompt::from_request(&request.body) {
+                let (status, color) = if self.in_flight.contains(&request.id) {
+                    (crate::tr!("Wird gesendet …"), BLUE)
+                } else {
+                    (crate::tr!("Zustellung prüfen"), AMBER)
+                };
+                prompts.insert(request.id, (prompt, status, color));
+            }
+        }
+        let mut archived = Vec::new();
+        for (&key, (ticket_id, execution, prompt)) in self.queued_session_prompts.range((tab.root, 0)..=(tab.root, u64::MAX)) {
+            let ticket = self.snapshot.as_ref().and_then(|s| s.tickets.iter().find(|t| t.id == *ticket_id));
+            let command = ticket.and_then(|t| t.execution_command).or(*execution);
+            if command.is_some_and(|id| tab.message_positions.contains_key(&agent_message_id(id))) {
+                archived.push(key);
+                continue;
+            }
+            let (status, color) = if ticket.is_some_and(|t| t.status == TicketState::Cancelled) {
+                (crate::tr!("Abgebrochen"), AMBER)
+            } else if command.is_some_and(|id| self.snapshot.as_ref().is_some_and(|s|
+                s.commands.iter().any(|c| c.id == id && c.state == CommandState::Failed))) {
+                (crate::tr!("Fehlgeschlagen"), RED)
+            } else {
+                (crate::tr!("Eingereiht"), GREEN)
+            };
+            prompts.insert(key.1, (prompt.clone(), status, color));
+        }
+        for key in archived { self.queued_session_prompts.remove(&key); }
+        prompts
+    }
+
+    fn open_session_view(&mut self, project: ProjectId, root: CommandId, execution: Option<CommandId>) {
         if !self.online { return; }
         if let Some(direct) = self.snapshot.as_ref().and_then(|s|
             s.directs.iter().find(|d| d.project_id == project && d.root_command_id == Some(root))).cloned()
@@ -517,6 +596,13 @@ impl App {
             return;
         }
         if let Some(index) = self.tabs.iter().position(|t| t.root == root) {
+            let tab = &mut self.tabs[index];
+            if tab.selected_execution != execution {
+                tab.selected_execution = execution;
+                tab.scroll_to_start = false;
+                tab.follow = true;
+                tab.next_poll = Instant::now();
+            }
             self.active_tab = index + 1;
             return;
         }
@@ -544,7 +630,7 @@ impl App {
             direct_id,
             direct_options: Default::default(),
             scroll_to_start: false,
-            selected_execution: None,
+            selected_execution: execution,
             initialized: BTreeSet::new(),
             older: BTreeMap::new(),
             message_positions: BTreeMap::new(),
@@ -629,14 +715,81 @@ impl App {
         }
     }
     pub fn notice(&mut self, message: impl Into<String>) {
-        self.notices.push((message.into(), Instant::now()));
+        self.project_notice(ToastKind::Info, None, message);
+    }
+
+    pub(crate) fn notice_error(&mut self, message: impl Into<String>) {
+        self.project_notice(ToastKind::Error, None, message);
+    }
+
+    pub(crate) fn notice_success(&mut self, message: impl Into<String>) {
+        self.project_notice(ToastKind::Success, None, message);
+    }
+
+    pub(crate) fn project_notice(&mut self, kind: ToastKind, project: Option<ProjectId>, message: impl Into<String>) {
+        self.notices.push(Toast(message.into(), Instant::now(), kind, self.toast_logo(project)));
+    }
+
+    fn toast_logo(&self, project: Option<ProjectId>) -> Option<ProjectLogo> {
+        let id = project?;
+        self.available_projects().iter().find(|p| p.id == id)?.logo.clone()
+    }
+
+    fn request_project(&self, request: &PendingWrite) -> Option<ProjectId> {
+        if let Some(task) = crate::model_settings::pending_task(&request.path, &request.body) {
+            return task["project_id"].as_str()?.parse().ok();
+        }
+        let mut path = request.path.strip_prefix("/v1/")?.split('/');
+        let (collection, id) = (path.next()?, path.next()?);
+        if collection == "projects" { return id.parse().ok(); }
+        let snapshot = self.snapshot.as_ref()?;
+        if collection == "tasks" {
+            let id: TicketId = id.parse().ok()?;
+            return snapshot.tickets.iter().find(|ticket| ticket.id == id).map(|ticket| ticket.project_id);
+        }
+        let command = match collection {
+            "commands" => id.parse().ok()?,
+            "questions" => {
+                let id: QuestionId = id.parse().ok()?;
+                snapshot.questions.iter().find(|q| q.id == id)?.command_id
+            }
+            _ => return None,
+        };
+        let stream = snapshot.commands.iter().find(|c| c.id == command)?.stream_id;
+        snapshot.streams.iter().find(|s| s.id == stream).map(|s| s.project_id)
+    }
+
+    pub(crate) fn draw_toasts(&self, ctx: &egui::Context) {
+        if self.notices.is_empty() { return; }
+        egui::Area::new("notifications-toast".into())
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                for Toast(message, _, kind, logo) in self.notices.iter().rev().take(3) {
+                    let color = kind.color();
+                    egui::Frame::popup(ui.style())
+                        .fill(ui.visuals().window_fill().lerp_to_gamma(color, 0.18))
+                        .stroke(egui::Stroke::new(1.0_f32, color))
+                        .inner_margin(14)
+                        .show(ui, |ui| {
+                            ui.set_max_width((ctx.content_rect().width() - 68.0).clamp(80.0, 400.0));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                if let Some(logo) = logo {
+                                    crate::project_logo::show_image(ui, logo, 24.0);
+                                }
+                                ui.add(egui::Label::new(message).wrap());
+                            });
+                        });
+                }
+            });
     }
     fn connection_lost(&mut self, error: String) {
         egui::Popup::close_all(self.backend.context());
         if self.online {
-            self.notice(crate::tr!("Verbindung zur Factory unterbrochen."));
+            self.project_notice(ToastKind::Warning, None, crate::tr!("Verbindung zur Factory unterbrochen."));
         } else if self.error.is_none() {
-            self.notice(crate::tr!("Verbindung zur Factory fehlgeschlagen."));
+            self.notice_error(crate::tr!("Verbindung zur Factory fehlgeschlagen."));
         }
         self.online = false;
         self.error = Some(error);
@@ -1122,7 +1275,7 @@ impl App {
                     match self.remember_confirmed_connection(crate::persistence::save_connection_token, save_connection) {
                         Ok(true) if !cfg!(test) => self.backend.persist(self.settings.clone()),
                         Ok(_) => {},
-                        Err(_) => self.notice(crate::tr!("Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden.")),
+                        Err(_) => self.project_notice(ToastKind::Warning, None, crate::tr!("Verbunden, aber die Verbindung konnte nicht für den nächsten Start gespeichert werden.")),
                     }
                     self.sync_offline_tasks(reconnected);
                     if self.restore_local_runners && !self.local_runners_busy && !cfg!(test) {
@@ -1130,7 +1283,7 @@ impl App {
                         self.manage_local_runners(crate::local_runners::Action::Restore);
                     }
                     if reconnected {
-                        self.notice(crate::tr!("Wieder mit der Factory verbunden."));
+                        self.notice_success(crate::tr!("Wieder mit der Factory verbunden."));
                     }
                 }
                 Event::Snapshot(Err(e)) => {
@@ -1161,14 +1314,20 @@ impl App {
                     Ok(page) => {
                         if !append {
                             if self.notifications_initialized {
+                                let latest = self.latest_notification;
                                 for n in page
                                     .entries
                                     .iter()
                                     .rev()
-                                    .filter(|n| n.id > self.latest_notification)
+                                    .filter(|n| n.id > latest)
                                 {
                                     let label = self.notification_label(n);
-                                    self.notices.push((label.clone(), Instant::now()));
+                                    let kind = match self.publication_notification_status(n) {
+                                        Some(status) if status == crate::tr!("Übernahme blockiert") => ToastKind::Error,
+                                        Some(_) => ToastKind::Warning,
+                                        None => ToastKind::from_notification(n),
+                                    };
+                                    self.project_notice(kind, n.project_id, label.clone());
                                     if self.settings.desktop_notifications {
                                         self.backend.desktop_notification(
                                             n.id,
@@ -1212,7 +1371,7 @@ impl App {
                                 }
                             }
                         }
-                        Err(e) => self.notice(e),
+                        Err(e) => self.notice_error(e),
                     }
                 }
                 Event::NotificationStates(result) => {
@@ -1231,11 +1390,14 @@ impl App {
                             self.notification_states_updated = Some(Instant::now());
                         }
                         Err(e) => {
-                            self.notice(crate::tr!("Lesestatus konnte nicht aktualisiert werden: {e}", e = e))
+                            self.notice_error(crate::tr!("Lesestatus konnte nicht aktualisiert werden: {e}", e = e))
                         }
                     }
                 }
                 Event::Request(id, result) => {
+                    let toast_project = self.settings.pending.iter().find(|r| r.id == id && r.server == self.server)
+                        .and_then(|r| self.request_project(r));
+                    let toast_logo = self.toast_logo(toast_project);
                     self.next_events_poll = Instant::now();
                     self.in_flight.remove(&id);
                     let mut result = result;
@@ -1254,7 +1416,7 @@ impl App {
                                 }
                                 self.unread = if read.read { self.unread.saturating_sub(changed) } else { self.unread + changed };
                             }
-                            Err(error) => self.notice(crate::tr!("Lesestatus nicht bestätigt: {}", error.message)),
+                            Err(error) => self.notice_error(crate::tr!("Lesestatus nicht bestätigt: {}", error.message)),
                         }
                     }
                     if let Some(request) = self
@@ -1298,13 +1460,13 @@ impl App {
                                             *current = project;
                                         }
                                     }
-                                    self.notice(if paused { crate::tr!("Projekt pausiert.") } else { crate::tr!("Projekt fortgesetzt.") });
+                                     self.project_notice(ToastKind::Success, toast_project, if paused { crate::tr!("Projekt pausiert.") } else { crate::tr!("Projekt fortgesetzt.") });
                                 }
                                 _ => result = Err(Failure { message: crate::tr!("Projektpause nicht eindeutig bestätigt.").into(), uncertain: true }),
                             }
                         }
                         if let Err(error) = &result {
-                            self.notice(if error.uncertain {
+                             self.project_notice(ToastKind::Error, toast_project, if error.uncertain {
                                 crate::tr!("{} In der Diagnose über „Zustellungen prüfen“ abgleichen.", error.message)
                             } else { error.message.clone() });
                         }
@@ -1326,13 +1488,13 @@ impl App {
                                             { *current = ticket; }
                                         }
                                     }
-                                    task_notice = Some(crate::tr!("Intent erneut eingereiht."));
+                                    task_notice = Some(crate::tr!("Intent erneut eingereiht.").into());
                                 }
                                 _ => result = Err(Failure { message: crate::tr!("Erneutes Einreihen nicht eindeutig bestätigt.").into(), uncertain: true }),
                             }
                         }
                         if let Err(error) = &result {
-                            self.notice(crate::tr!("Intent konnte nicht erneut eingereiht werden. Details stehen in der Diagnose."));
+                             self.project_notice(ToastKind::Error, toast_project, crate::tr!("Intent konnte nicht erneut eingereiht werden. Details stehen in der Diagnose."));
                             self.action_errors.push((crate::overview::now_ms(), format!("{}: {}", request.label, error.message)));
                         }
                     }
@@ -1351,7 +1513,7 @@ impl App {
                                             self.set_project(None);
                                         }
                                     }
-                                    task_notice = Some(crate::tr!("Projekt gelöscht."));
+                                    task_notice = Some(crate::tr!("Projekt gelöscht.").into());
                                 }
                                 _ => result = Err(Failure {
                                     message: crate::tr!("Löschen des Projekts nicht eindeutig bestätigt.").into(),
@@ -1360,7 +1522,7 @@ impl App {
                             }
                         }
                         if let Err(error) = &result {
-                            self.notice(if error.uncertain {
+                             self.project_notice(ToastKind::Error, toast_project, if error.uncertain {
                                 crate::tr!("Löschen nicht bestätigt. Bitte die Zustellung prüfen.")
                             } else {
                                 crate::tr!("Projekt konnte nicht gelöscht werden. Bitte den aktuellen Projektstand prüfen.")
@@ -1393,13 +1555,13 @@ impl App {
                                             }
                                         }
                                     }
-                                    task_notice = Some(crate::tr!("Gerätezugang widerrufen."));
+                                    task_notice = Some(crate::tr!("Gerätezugang widerrufen.").into());
                                 }
                                 _ => result = Err(Failure { message: crate::tr!("Gerätewiderruf nicht eindeutig bestätigt.").into(), uncertain: true }),
                             }
                         }
                         if let Err(error) = &result {
-                            self.notice(crate::tr!("Gerätezugang konnte nicht bestätigt widerrufen werden. Details stehen in der Diagnose."));
+                             self.notice_error(crate::tr!("Gerätezugang konnte nicht bestätigt widerrufen werden. Details stehen in der Diagnose."));
                             self.action_errors.push((crate::overview::now_ms(), crate::tr!("Gerätezugang: {}", error.message)));
                         }
                     }
@@ -1437,13 +1599,22 @@ impl App {
                                     request.path == format!("/v1/commands/{root}/prompt")) => {
                                     self.settings.session_prompts.retain(|saved|
                                         saved.draft.server != request.server || serde_json::json!(saved.id) != request.body["request_id"]);
-                                    task_notice = Some(crate::tr!("Prompt in die Session eingereiht."));
+                                    if request.server == self.server {
+                                        let root = ticket.requested_session.unwrap();
+                                        if let Some(prompt) = crate::conversation::SubmittedPrompt::from_request(&request.body) {
+                                            self.queued_session_prompts.insert((root, id), (ticket.id, ticket.execution_command, prompt));
+                                        }
+                                        if let Some(tab) = self.tabs.iter_mut().find(|tab| Some(tab.root) == ticket.requested_session) {
+                                            tab.next_poll = Instant::now();
+                                        }
+                                    }
+                                    task_notice = Some(crate::tr!("Prompt in die Session eingereiht.").into());
                                 }
                                 _ => result = Err(Failure { message: crate::tr!("Session-Prompt nicht eindeutig bestätigt.").into(), uncertain: true }),
                             }
                         }
                         if let Err(error) = &result {
-                            self.notice(if error.uncertain {
+                             self.project_notice(ToastKind::Error, toast_project, if error.uncertain {
                                 crate::tr!("Prompt-Zustellung unklar. Bitte dieselbe Anfrage in der Diagnose über „Zustellungen prüfen“ abgleichen.")
                             } else { crate::tr!("Prompt konnte nicht eingereiht werden. Der Entwurf bleibt erhalten.") });
                             self.action_errors.push((crate::overview::now_ms(), format!("Session-Prompt ({} · {}): {}", request.server, request.path, error.message)));
@@ -1478,7 +1649,7 @@ impl App {
                         if self.settings.pending.iter().any(|r| r.id == id
                             && r.method == "POST" && r.path.starts_with("/v1/questions/") && r.path.ends_with("/answer"))
                         {
-                            self.notice(if error.uncertain {
+                             self.project_notice(ToastKind::Error, toast_project, if error.uncertain {
                                 crate::tr!("Antwort nicht bestätigt. Bitte die Zustellung in der Diagnose prüfen.")
                             } else {
                                 crate::tr!("Antwort konnte nicht abgegeben werden. Der Entwurf bleibt erhalten.")
@@ -1500,10 +1671,10 @@ impl App {
                                         *current = project;
                                     }
                                 }
-                                if !batch_update { self.notice(crate::tr!("Projekteinstellungen gespeichert.")); }
+                                 if !batch_update { self.project_notice(ToastKind::Success, toast_project, crate::tr!("Projekteinstellungen gespeichert.")); }
                             }
-                            Err(error) if !batch_update && error.uncertain => self.notice(crate::tr!("Speichern nicht bestätigt. Bitte Anfrage abgleichen.")),
-                            Err(_) if !batch_update => self.notice(crate::tr!("Projekteinstellungen konnten nicht gespeichert werden.")),
+                             Err(error) if !batch_update && error.uncertain => self.project_notice(ToastKind::Warning, toast_project, crate::tr!("Speichern nicht bestätigt. Bitte Anfrage abgleichen.")),
+                             Err(_) if !batch_update => self.project_notice(ToastKind::Error, toast_project, crate::tr!("Projekteinstellungen konnten nicht gespeichert werden.")),
                             Err(_) => {}
                         }
                     }
@@ -1528,9 +1699,11 @@ impl App {
                                          && d.local_mcps == local_mcps)
                                     });
                                     task_notice = Some(if submitted.draft {
-                                        crate::tr!("Entwurf gespeichert.")
+                                        crate::tr!("Entwurf gespeichert.").into()
+                                    } else if let Some(key) = value["key"].as_str().filter(|key| !key.trim().is_empty()) {
+                                        crate::tr!("Intent {key} eingereiht.", key = key)
                                     } else {
-                                        crate::tr!("Aufgabe eingereiht.")
+                                        crate::tr!("Aufgabe eingereiht.").into()
                                     });
                             }
                             if request.path.starts_with("/v1/questions/") && request.path.ends_with("/answer") {
@@ -1565,7 +1738,7 @@ impl App {
                                     let snapshot = std::sync::Arc::make_mut(snapshot);
                                     if !snapshot.tickets.iter().any(|t| t.id == ticket.id) { snapshot.tickets.push(ticket); }
                                 }
-                                task_notice = Some(crate::tr!("Offline-Aufgabe als Server-Entwurf übertragen."));
+                                task_notice = Some(crate::tr!("Offline-Aufgabe als Server-Entwurf übertragen.").into());
                             }
                             Err(error) => {
                                 if let Some(task) = self.settings.offline_tasks.iter_mut().find(|t| t.id == local.id) {
@@ -1573,13 +1746,13 @@ impl App {
                                     if !error.uncertain { task.sync_request = None; }
                                 }
                                 self.action_errors.push((crate::overview::now_ms(), crate::tr!("Offline-Aufgabe ({}): {}", local.project_name, error.message)));
-                                self.notice(crate::tr!("Offline-Aufgabe konnte noch nicht übertragen werden. Sie bleibt lokal erhalten."));
+                                 self.project_notice(ToastKind::Error, toast_project, crate::tr!("Offline-Aufgabe konnte noch nicht übertragen werden. Sie bleibt lokal erhalten."));
                             }
                         }
                         self.settings_dirty = true;
                     }
                     if let Some(message) = task_notice {
-                        self.notice(message);
+                         self.notices.push(Toast(message, Instant::now(), ToastKind::Success, toast_logo));
                     }
                     if result.is_ok() || result.as_ref().is_err_and(|e| !e.uncertain) {
                         self.settings.pending.retain(|r| r.id != id);
@@ -1672,11 +1845,12 @@ impl App {
                                 .err()
                                 .map(str::to_string);
                             task.dirty = true;
+                            task.refocus_prompt();
                         } else {
                             self.notice(crate::tr!("Anhang gehört zu einem anderen oder bereits gesendeten Entwurf und wurde nicht übernommen."));
                         }
                     }
-                    Err(e) => self.notice(e),
+                    Err(e) => self.notice_error(e),
                 },
                 Event::TaskHistory(dialog, before, result) => {
                     if let Some(Dialog::Task(task)) = &mut self.dialog {
@@ -1749,8 +1923,8 @@ impl App {
                     );
                 }
                 Event::Saved(result) => match result {
-                    Ok(v) => self.notice(crate::tr!("Gespeichert: {v}", v = v)),
-                    Err(e) => self.notice(e),
+                    Ok(v) => self.notice_success(crate::tr!("Gespeichert: {v}", v = v)),
+                    Err(e) => self.notice_error(e),
                 },
                 Event::OpenNotification(id, target) => self.open_notification(id, target),
                 Event::LocalRunners(report) => {
@@ -1765,14 +1939,14 @@ impl App {
                             if self.action_errors.len() > 50 {
                                 self.action_errors.remove(0);
                             }
-                            self.notice(crate::tr!("Lokale Runner-Aktion fehlgeschlagen. Details stehen in der Diagnose."));
+                            self.notice_error(crate::tr!("Lokale Runner-Aktion fehlgeschlagen. Details stehen in der Diagnose."));
                         }
                     }
                 },
                 Event::Local(result) => match result {
                     Ok(c) => {
                         if let Err(e) = self.connect_with_credential(c.server, c.token, Some(c.credential_file)) {
-                            self.notice(e);
+                            self.notice_error(e);
                         } else {
                             self.dialog = None;
                         }
@@ -1781,7 +1955,7 @@ impl App {
                         if let Some(Dialog::LocalFactory { starting }) = &mut self.dialog {
                             *starting = false;
                         }
-                        self.notice(e);
+                        self.notice_error(e);
                     }
                 },
                 Event::Access(result) => {
@@ -1800,7 +1974,7 @@ impl App {
                             }
                             self.events.sort_by_key(|v| v.sequence);
                         }
-                        Err(e) => self.notice(e),
+                        Err(e) => self.notice_error(e),
                     }
                 }
             }
@@ -1899,9 +2073,9 @@ impl App {
                 crate::i18n::set_language(language);
                 // Persist the latest drafts too, in case another write was queued while saving.
                 self.settings_dirty = true;
-                self.notice(crate::tr!("Language saved."));
+                self.notice_success(crate::tr!("Language saved."));
             } else {
-                self.notice(crate::tr!("Could not save language. Please try again."));
+                self.notice_error(crate::tr!("Could not save language. Please try again."));
             }
         }
     }
@@ -1980,23 +2154,8 @@ impl App {
             self.settings_dirty = false;
             self.next_save = Instant::now() + Duration::from_millis(500);
         }
-        self.notices
-            .retain(|(_, t)| t.elapsed() < Duration::from_secs(12));
-        if !self.notices.is_empty() {
-            egui::Area::new("notifications-toast".into())
-                .anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0])
-                .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
-                    for (text, _) in self.notices.iter().rev().take(3) {
-                        egui::Frame::popup(ui.style())
-                            .inner_margin(14)
-                            .show(ui, |ui| {
-                                ui.set_max_width(400.0);
-                                ui.label(text);
-                            });
-                    }
-                });
-        }
+        self.notices.retain(|toast| toast.1.elapsed() < Duration::from_secs(12));
+        self.draw_toasts(ctx);
         ctx.request_repaint_after(Duration::from_millis(500));
         if self.screenshot.is_some()
             && !self.screenshot_requested

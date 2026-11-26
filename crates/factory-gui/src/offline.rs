@@ -133,7 +133,7 @@ impl App {
                 crate::tr!("Aufgabe konnte nicht lokal gespeichert werden. Bitte erneut versuchen.").into(),
             );
         }
-        self.notice(crate::tr!("Aufgabe lokal vorbereitet. Sie wird nach Wiederverbindung als Server-Entwurf übertragen."));
+        self.project_notice(crate::app::ToastKind::Success, Some(draft.project), crate::tr!("Aufgabe lokal vorbereitet. Sie wird nach Wiederverbindung als Server-Entwurf übertragen."));
         Ok(id)
     }
 
@@ -216,7 +216,7 @@ impl App {
                     crate::tr!("Das ursprüngliche Projekt existiert auf dieser Factory nicht mehr.").into(),
                 );
                 self.settings_dirty = true;
-                self.notice(crate::tr!("Eine Offline-Aufgabe konnte keinem Projekt zugeordnet werden. Sie bleibt lokal erhalten."));
+                self.project_notice(crate::app::ToastKind::Warning, None, crate::tr!("Eine Offline-Aufgabe konnte keinem Projekt zugeordnet werden. Sie bleibt lokal erhalten."));
                 continue;
             }
             let request = self.write(

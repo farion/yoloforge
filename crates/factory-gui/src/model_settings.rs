@@ -122,15 +122,15 @@ impl Models {
                             self.factory.value = Some(saved);
                             self.factory.request = None;
                             self.projects.clear();
-                            app.notice(if value["credential_removed"] == true {
+                            app.notice_success(if value["credential_removed"] == true {
                                 crate::tr!("Modellzugang gelöscht.")
                             } else {
                                 crate::tr!("Modellzugang entfernt. Die Zugangsdaten konnten nicht gelöscht werden.")
                             });
                         }
-                        Err(_) => app.notice(crate::tr!("Das Löschen wurde nicht bestätigt.")),
+                        Err(_) => app.notice_error(crate::tr!("Das Löschen wurde nicht bestätigt.")),
                     },
-                    Err(error) => app.notice(error.message),
+                    Err(error) => app.notice_error(error.message),
                 }
             }
             if let Some(settings) = &self.factory.value {
@@ -461,11 +461,11 @@ pub fn show_add_dialog(ctx: &egui::Context, app: &mut App) {
                         model: format!("{} · {}", name.trim(), model.model_id),
                     });
                 } else {
-                    app.notice(crate::tr!("Modellzugang verbunden."));
+                    app.notice_success(crate::tr!("Modellzugang verbunden."));
                 }
             }
-            Ok(_) => app.notice(crate::tr!("Der Modellzugang wurde nicht bestätigt.")),
-            Err(error) => app.notice(error.message),
+            Ok(_) => app.notice_error(crate::tr!("Der Modellzugang wurde nicht bestätigt.")),
+            Err(error) => app.notice_error(error.message),
         }
     }
     if pane.remove_access.is_some() {
@@ -749,9 +749,9 @@ impl FactoryPane {
                         factory.request = None;
                         *next_refresh = None;
                     }
-                    Err(_) => app.notice(crate::tr!("Speichern nicht eindeutig bestätigt.")),
+                    Err(_) => app.project_notice(crate::app::ToastKind::Warning, None, crate::tr!("Speichern nicht eindeutig bestätigt.")),
                 },
-                Err(_) => app.notice(crate::tr!("Die Default-Modelle konnten nicht gespeichert werden.")),
+                Err(_) => app.notice_error(crate::tr!("Die Default-Modelle konnten nicht gespeichert werden.")),
             }
         }
     }
@@ -939,7 +939,7 @@ impl FactoryPane {
                 },
                 Err(error) => {
                     if !login.cancelling {
-                        app.notice(error.message);
+                        app.notice_error(error.message);
                     }
                     return;
                 }
@@ -972,15 +972,15 @@ impl FactoryPane {
                             },
                         });
                     } else {
-                        app.notice(if copilot { crate::tr!("GitHub Copilot verbunden.") }
+                        app.notice_success(if copilot { crate::tr!("GitHub Copilot verbunden.") }
                             else { crate::tr!("ChatGPT-Zugang verbunden.") });
                     }
                 }
-                Ok(_) => app.notice(if copilot { crate::tr!("Die GitHub-Anmeldung wurde nicht bestätigt.") }
+                Ok(_) => app.notice_error(if copilot { crate::tr!("Die GitHub-Anmeldung wurde nicht bestätigt.") }
                     else { crate::tr!("Die ChatGPT-Anmeldung wurde nicht bestätigt.") }),
                 Err(error) => {
                     self.status.remove(&login.access);
-                    app.notice(error.message);
+                    app.notice_error(error.message);
                 }
             }
             return;
@@ -1112,7 +1112,7 @@ fn settled_save(
         .is_some_and(|r| r.as_ref().is_err_and(|e| e.uncertain))
     {
         app.responses.remove(&id);
-        app.notice(crate::tr!("Speichern nicht bestätigt. Bitte dieselbe Anfrage abgleichen."));
+        app.project_notice(crate::app::ToastKind::Warning, None, crate::tr!("Speichern nicht bestätigt. Bitte dieselbe Anfrage abgleichen."));
         return None;
     }
     app.responses.remove(&id)
@@ -1145,7 +1145,7 @@ impl ProjectPane {
         load_project(app, project);
         let load_error = app.models.projects.get(&project).is_some_and(|load| load.error.is_some());
         if load_error && !had_load_error {
-            app.notice(crate::tr!("Projektmodelle konnten nicht geladen werden."));
+            app.project_notice(crate::app::ToastKind::Error, Some(project), crate::tr!("Projektmodelle konnten nicht geladen werden."));
         }
         let ready = app.models.ready_catalog();
         let Some(factory) = app.models.factory.value.as_ref() else {

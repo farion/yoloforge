@@ -264,6 +264,7 @@ impl Dialog {
             return show_about(ctx);
         }
         if let Self::Task(task) = self {
+            task.restore_submission(app);
             if !task.read_only
                 && (task.local_done || task.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)))
             {
@@ -488,7 +489,7 @@ impl Dialog {
                         if design::accent_button(ui,egui::Button::new(crate::tr!("Verbinden")),!app.connection_active(),BLUE.gamma_multiply(0.7)).clicked() {
                             match app.connect(server.clone(), token.clone()) {
                                 Ok(()) => close = true,
-                                Err(e) => app.notice(e),
+                                Err(e) => app.notice_error(e),
                             }
                         }
                     });
@@ -667,7 +668,7 @@ fn usage_load_failed(ui: &mut egui::Ui, app: &mut App, modal_id: egui::Id) {
         !notified
     });
     if first {
-        app.notice(crate::tr!("Verbrauch konnte nicht geladen werden."));
+        app.notice_error(crate::tr!("Verbrauch konnte nicht geladen werden."));
     }
     ui.label(crate::tr!("Keine Verbrauchsdaten verfügbar."));
 }
@@ -727,8 +728,26 @@ fn german_count(value: u128) -> String {
 }
 
 impl TaskDialog {
+    pub(crate) fn refocus_prompt(&mut self) {
+        self.focused = false;
+    }
+
     fn is_transferring(&self, app: &App) -> bool {
         !self.read_only && self.request.is_some_and(|id| app.in_flight.contains(&id))
+    }
+
+    fn restore_submission(&mut self, app: &App) {
+        if self.read_only || self.request.is_some() || self.session_prompt || self.local_task.is_some() {
+            return;
+        }
+        self.request = app.settings.pending.iter().find(|r| {
+            r.server == app.server
+                && crate::model_settings::pending_task(&r.path, &r.body).is_some_and(|task|
+                    task["project_id"] == json!(self.draft.project) && task["id"] == json!(self.draft.ticket)
+                        && !app.settings.offline_tasks.iter().any(|local| task["request_id"] == json!(local.id))
+                        && (self.draft.ticket.is_some() || task["prompt"] == json!(self.draft.prompt)
+                            && task["images"] == json!(self.draft.images)))
+        }).map(|r| r.id);
     }
 
     fn has_prompt_content(&self) -> bool {
@@ -766,7 +785,7 @@ impl TaskDialog {
                 self.dirty = false;
                 if app.online { app.sync_offline_tasks(false); }
             }
-            Err(error) => app.notice(error),
+            Err(error) => app.project_notice(crate::app::ToastKind::Error, Some(self.draft.project), error),
         }
     }
     pub(crate) fn session(app: &App, project: ProjectId, root: CommandId) -> Box<Self> {
@@ -782,14 +801,14 @@ impl TaskDialog {
         composer
     }
 
-    pub(crate) fn show_session_prompt(&mut self, ui: &mut egui::Ui, app: &mut App) {
-        self.show_prompt_in_session(ui, app, None);
+    pub(crate) fn show_session_prompt(&mut self, ui: &mut egui::Ui, app: &mut App) -> Option<u64> {
+        self.show_prompt_in_session(ui, app, None)
     }
 
     pub(crate) fn show_prompt_in_session(
         &mut self, ui: &mut egui::Ui, app: &mut App,
         direct: Option<(bool, Option<factory_protocol::directs::DirectSelection>)>,
-    ) {
+    ) -> Option<u64> {
         let root = self.draft.requested_session.expect("Session composer target");
         let path = if direct.is_some() { format!("/v1/directs/{root}/prompt") } else { format!("/v1/commands/{root}/prompt") };
         if self.request.is_none() {
@@ -824,6 +843,7 @@ impl TaskDialog {
             .min_scrolled_height(editor_height)
             .auto_shrink([false, true])
             .show(ui, |ui| self.show_body(ui, app)).inner;
+        let mut submitted = None;
         ui.horizontal(|ui| {
             let editable = self.request.is_none();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -849,6 +869,12 @@ impl TaskDialog {
                              images: self.draft.images.clone(), files: self.draft.files.clone(),
                          }) };
                          self.request = Some(app.write(crate::tr!("Session prompten"), "POST", path.clone(), body));
+                        submitted = self.request;
+                        if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.root == root) {
+                            tab.selected_execution = None;
+                            tab.scroll_to_start = false;
+                            tab.follow = true;
+                        }
                         self.dirty = true;
                     }
                 }
@@ -864,6 +890,7 @@ impl TaskDialog {
             self.persist(app);
             self.dirty = false;
         }
+        submitted
     }
 
     pub(crate) fn receive_history(&mut self, before: Option<u64>, result: Result<TaskHistoryPage, String>) {
@@ -1177,21 +1204,6 @@ impl TaskDialog {
                 });
             }
         }
-        if self.request.is_none() && !self.session_prompt && self.local_task.is_none() {
-            self.request = app
-                .settings
-                .pending
-                .iter()
-                .find(|r| {
-                    r.server == app.server
-                        && crate::model_settings::pending_task(&r.path, &r.body).is_some_and(|task|
-                            task["project_id"] == json!(self.draft.project) && task["id"] == json!(self.draft.ticket)
-                                && !app.settings.offline_tasks.iter().any(|local| task["request_id"] == json!(local.id))
-                                && (self.draft.ticket.is_some() || task["prompt"] == json!(self.draft.prompt)
-                                    && task["images"] == json!(self.draft.images)))
-                })
-                .map(|r| r.id);
-        }
         let locked = self.request.is_some();
         if self.image_keys.len() != self.draft.images.len() {
             self.image_keys = self
@@ -1246,7 +1258,10 @@ impl TaskDialog {
                 self.dirty = true;
             }
             let (prompt, submit) = design::task_prompt(ui, &mut self.draft.prompt, 3);
-            if !self.focused {
+            if !self.focused && prompt.enabled() && ui.is_visible() && !ui.is_sizing_pass()
+                && (!self.session_prompt || app.dialog.is_none())
+                && ui.memory(|memory| memory.allows_interaction(ui.layer_id()))
+            {
                 prompt.request_focus();
                 self.focused = true;
             }
@@ -1383,7 +1398,7 @@ impl TaskDialog {
         if self.read_only {
             let execution = app.snapshot.as_ref().and_then(|s| {
                 let ticket = s.tickets.iter().find(|t| Some(t.id) == self.draft.ticket)?;
-                task_session_command(s, ticket).map(|c| c.session_root())
+                task_session_command(s, ticket).map(|c| (c.session_root(), c.id))
             });
             return ui
                 .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1398,12 +1413,12 @@ impl TaskDialog {
                         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-retry", ticket.id)), retry.rect));
                         if retry.clicked() { app.requeue_task(&ticket); }
                     }
-                    if let Some(root) = execution {
+                    if let Some((root, id)) = execution {
                         let open = ui.button(crate::tr!("OpenCode anzeigen"));
                         #[cfg(test)]
                         ui.ctx().data_mut(|data| data.insert_temp(egui::Id::new(("test-task-dialog-opencode", self.id)), open.rect));
                         if open.clicked() {
-                            app.open_session(self.draft.project, root);
+                            app.open_intent_execution(self.draft.project, root, id);
                             close = true;
                         }
                     }
@@ -1860,7 +1875,7 @@ impl QuestionDialog {
                 if !app.snapshot.as_ref().is_some_and(|s| s.questions.iter().any(|current|
                     current.id == q.question.id && current.external == q.question.external && needs_answer(current)))
                 {
-                    app.notice(crate::tr!("Die Frage ist nicht mehr offen. Dein Entwurf bleibt erhalten."));
+                    app.project_notice(crate::app::ToastKind::Warning, None, crate::tr!("Die Frage ist nicht mehr offen. Dein Entwurf bleibt erhalten."));
                     bodies.clear();
                     break;
                 }
@@ -2285,7 +2300,7 @@ impl FormDialog {
             });
         }
         if let Some(error) = self.logo_picker.show(ui, &mut self.body, editing) {
-            app.notice(error);
+            app.notice_error(error);
         }
         if changed {
             self.error = None;

@@ -1,6 +1,6 @@
 //! A native CLI-style transcript, not an archive-card inspector or terminal emulator.
 use crate::{
-    app::{App, AMBER, BLUE, MUTED, RED},
+    app::{App, AMBER, BLUE, GREEN, MUTED, RED},
     design,
     dialogs::{json_read, read_text, Dialog},
     model::timestamp,
@@ -20,6 +20,52 @@ const TOOL_OUTPUT: Color32 = Color32::from_rgb(145, 151, 161);
 const USER_BACKGROUND: Color32 = Color32::from_rgb(30, 35, 43);
 const USER_MARKER_WIDTH: f32 = 6.0;
 const ANSWER_BACKGROUND: Color32 = Color32::from_rgb(29, 36, 45);
+
+#[derive(Clone)]
+pub(crate) struct SubmittedPrompt {
+    text: String,
+    attachments: Vec<String>,
+}
+
+impl SubmittedPrompt {
+    pub(crate) fn from_request(body: &Value) -> Option<Self> {
+        Some(Self {
+            text: body["prompt"].as_str()?.to_owned(),
+            attachments: ["images", "files"].into_iter()
+                .flat_map(|key| body[key].as_array().into_iter().flatten())
+                .filter_map(|file| file["name"].as_str().map(str::to_owned))
+                .collect(),
+        })
+    }
+
+    pub(crate) fn show(&self, ui: &mut egui::Ui, status: &str, color: Color32) -> egui::Response {
+        let width = ui.available_width();
+        let background = ui.painter().add(egui::epaint::Shape::Noop);
+        let response = egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0)).show(ui, |ui| {
+            ui.set_min_width((width - 44.0).max(1.0));
+            let height = line_height(ui);
+            ui.add_space(height);
+            if !self.text.is_empty() { read_text(ui, &self.text, true); }
+            for name in &self.attachments {
+                ui.colored_label(MUTED, crate::tr!("Anhang: {}", name));
+            }
+            ui.colored_label(color, status);
+            ui.add_space(height);
+        }).response;
+        paint_user_background(ui, background, response.rect);
+        response
+    }
+}
+
+fn paint_user_background(ui: &egui::Ui, background: egui::layers::ShapeIdx, rect: egui::Rect) {
+    ui.painter().set(background, egui::epaint::Shape::Vec(vec![
+        egui::epaint::Shape::rect_filled(rect, 0, USER_BACKGROUND),
+        egui::epaint::Shape::rect_filled(
+            egui::Rect::from_min_size(rect.left_top(), egui::vec2(USER_MARKER_WIDTH, rect.height())),
+            0, BLUE,
+        ),
+    ]));
+}
 
 #[derive(Clone)]
 pub enum TranscriptRow {
@@ -473,6 +519,62 @@ pub fn current_turn_ended(entries: &[std::sync::Arc<ArchivedMessage>]) -> bool {
         .is_some_and(|(_, ended)| ended)
 }
 
+pub(crate) struct ExecutionOutcome {
+    label: &'static str,
+    color: Color32,
+    fallback: Option<String>,
+}
+
+impl ExecutionOutcome {
+    pub(crate) fn show(self, ui: &mut egui::Ui, app: &mut App) {
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(22, 0)).show(ui, |ui| {
+            if let Some(summary) = self.fallback {
+                markdown(ui, app, &summary);
+                let height = line_height(ui);
+                ui.add_space(height);
+            }
+            ui.label(RichText::new(self.label).monospace().color(self.color));
+        });
+    }
+}
+
+pub(crate) fn execution_outcome(
+    command: &RunnerCommand,
+    entries: &[std::sync::Arc<ArchivedMessage>],
+) -> Option<ExecutionOutcome> {
+    let progress = match &command.result {
+        Some(CommandOutput::Agent { agent }) => Some(agent),
+        _ => command.agent_progress.as_ref(),
+    };
+    let (label, color) = match command.state {
+        CommandState::Pending | CommandState::Accepted => return None,
+        _ if progress.is_some_and(|p| p.phase == AgentPhase::Interrupted) => (crate::tr!("Unterbrochen"), AMBER),
+        _ if progress.is_some_and(|p| p.phase == AgentPhase::Failed) => (crate::tr!("Fehlgeschlagen"), RED),
+        CommandState::Failed => (crate::tr!("Fehlgeschlagen"), RED),
+        CommandState::Succeeded => (crate::tr!("Abgeschlossen"), GREEN),
+    };
+    // The result and the transcript arrive separately. Use the confirmed answer
+    // until the same completed assistant text is available in the archive.
+    let fallback = progress.filter(|p| command.state == CommandState::Succeeded && p.phase == AgentPhase::Succeeded)
+        .map(|p| p.summary.trim())
+        .filter(|summary| !summary.is_empty() && !entries.iter().any(|entry| {
+            let message = &entry.message;
+            if message["type"].as_str().or(message["role"].as_str()) != Some("assistant")
+                || message["finish"] != "stop" || !message["error"].is_null()
+            {
+                return false;
+            }
+            let text = parts(message).into_iter().filter_map(|part| match part {
+                Part::Text(text) => Some(text),
+                _ => None,
+            }).collect::<Vec<_>>().join("\n");
+            let text = text.trim();
+            !text.is_empty() && (summary.contains(text) || text.starts_with(summary))
+        }))
+        .map(str::to_owned);
+    Some(ExecutionOutcome { label, color, fallback })
+}
+
 pub fn empty_assistant(message: &Value) -> bool {
     message["type"].as_str().or(message["role"].as_str()) == Some("assistant")
         && message["error"].is_null()
@@ -833,20 +935,7 @@ fn message_content(
         })
         .response;
     if let Some(background) = background {
-        ui.painter().set(
-            background,
-            egui::epaint::Shape::Vec(vec![
-                egui::epaint::Shape::rect_filled(response.rect, 0, USER_BACKGROUND),
-                egui::epaint::Shape::rect_filled(
-                    egui::Rect::from_min_size(
-                        response.rect.left_top(),
-                        egui::vec2(USER_MARKER_WIDTH, response.rect.height()),
-                    ),
-                    0,
-                    BLUE,
-                ),
-            ]),
-        );
+        paint_user_background(ui, background, response.rect);
     }
     response
 }
@@ -1018,7 +1107,7 @@ fn attachments(ui: &mut egui::Ui, app: &mut App, command: CommandId, entry: &Arc
                             Ok(Some(_)) => {
                                 app.backend.save_input_file(file.name.clone(), data.clone())
                             }
-                            _ => app.notice(
+                            _ => app.notice_error(
                                 crate::tr!("Anhang nicht verfügbar oder Integritätsprüfung fehlgeschlagen."),
                             ),
                         }

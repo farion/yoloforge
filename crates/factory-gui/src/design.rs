@@ -6,6 +6,7 @@ pub const ICON_BUTTON_SIZE: f32 = 36.0;
 pub const FOOTER_MARGIN: egui::Margin = egui::Margin::symmetric(10, 10);
 pub const DIALOG_PADDING: i8 = 24;
 pub const DIALOG_OUTER_GAP: f32 = 32.0;
+const DIALOG_LOADING_SCRIM: Color32 = Color32::from_black_alpha(200);
 pub const LIST_ROW_HEIGHT: f32 = 44.0;
 pub const MAIN_MENU_ITEM_GAP: f32 = 4.0;
 pub const RUNNER_ICON: &str = egui_phosphor::regular::CPU;
@@ -623,7 +624,10 @@ fn task_prompt_buffer(
     let response = editor.expect("Prompt editor rendered");
     #[cfg(test)]
     ui.ctx()
-        .data_mut(|data| data.insert_temp(egui::Id::new("test-task-prompt"), response.rect));
+        .data_mut(|data| {
+            data.insert_temp(egui::Id::new("test-task-prompt"), response.rect);
+            data.insert_temp(egui::Id::new("test-task-prompt-id"), response.id);
+        });
     response
 }
 
@@ -1058,16 +1062,18 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, label: &str, enabled: bool) ->
     response.on_hover_text(label)
 }
 
-pub fn dialog_loading_overlay(dialog: &egui::Response, corners: egui::CornerRadius) {
+/// Paint on the dialog's layer without affecting its size or position.
+pub fn dialog_loading_overlay(dialog: &egui::Response, corner_radius: egui::CornerRadius) {
     const SPINNER_SIZE: f32 = 32.0;
     let rect = dialog.rect;
     let mut ui = egui::Ui::new(
-        dialog.ctx.clone(), dialog.id.with("loading-overlay"),
+        dialog.ctx.clone(),
+        dialog.id.with("loading-overlay"),
         egui::UiBuilder::new().layer_id(dialog.layer_id).max_rect(rect),
     );
-    ui.painter().rect_filled(rect, corners, Color32::from_black_alpha(200));
-    ui.put(egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(SPINNER_SIZE)),
-        egui::Spinner::new().size(SPINNER_SIZE));
+    ui.painter().rect_filled(rect, corner_radius, DIALOG_LOADING_SCRIM);
+    let spinner = egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(SPINNER_SIZE));
+    ui.put(spinner, egui::Spinner::new().size(SPINNER_SIZE));
 }
 
 pub fn dialog_content_size(viewport: egui::Vec2) -> egui::Vec2 {

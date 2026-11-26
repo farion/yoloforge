@@ -215,7 +215,7 @@ fn image_source(ctx: &egui::Context, image: &ProjectLogo) -> Option<(String, Arc
     Some((format!("bytes://project-logo-{}.png", id.value()), bytes))
 }
 
-fn show_image(ui: &mut Ui, image: &ProjectLogo, side: f32) -> Option<Rect> {
+pub(crate) fn show_image(ui: &mut Ui, image: &ProjectLogo, side: f32) -> Option<Rect> {
     let (uri, bytes) = image_source(ui.ctx(), image)?;
     Some(
         ui.add(
@@ -462,7 +462,7 @@ mod tests {
         assert!(app
             .notices
             .iter()
-            .any(|(message, _)| message == "test-image-error"));
+            .any(|toast| toast.0 == "test-image-error"));
         let mut text = vec![];
         for shape in output.shapes {
             crate::tests::shape_text(&shape.shape, &mut text);

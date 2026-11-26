@@ -154,6 +154,10 @@
     "OpenCode arbeitet",
     "OpenCode is working"
   ],
+  "Wird gesendet …": [
+    "Wird gesendet …",
+    "Sending …"
+  ],
   "ChatGPT hat keinen Modell-Stream geliefert.": [
     "ChatGPT hat keinen Model-Stream geliefert.",
     "ChatGPT did not return a model stream."
@@ -405,6 +409,10 @@
   "Aufgabe eingereiht.": [
     "Intent eingereiht.",
     "Intent queued."
+  ],
+  "Intent {key} eingereiht.": [
+    "Intent {key} eingereiht.",
+    "Intent {key} queued."
   ],
   "Offline-Aufgabe als Server-Entwurf übertragen.": [
     "Offline-Intent als Server-Entwurf übertragen.",
@@ -1595,6 +1603,10 @@
   "Abgeschlossen": [
     "Abgeschlossen",
     "Completed"
+  ],
+  "Gesamte Session anzeigen": [
+    "Gesamte Session anzeigen",
+    "Show full session"
   ],
   "Abgebrochen": [
     "Abgebrochen",

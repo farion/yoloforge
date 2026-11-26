@@ -516,10 +516,10 @@ pub fn session_status(s: &Snapshot, c: &RunnerCommand) -> &'static str {
 }
 
 pub fn working_session_command(s: &Snapshot, root: CommandId, selected: Option<CommandId>) -> Option<CommandId> {
-    let latest = s.commands.iter().rev().find(|c| c.kind == CommandKind::RunAgent && c.session_root() == root);
+    let latest = s.commands.iter().rev().find(|c| c.kind == CommandKind::RunAgent
+        && c.session_root() == root && selected.is_none_or(|id| id == c.id));
     latest.filter(|c| {
-        selected.is_none_or(|id| id == c.id)
-            && c.state == CommandState::Accepted
+        c.state == CommandState::Accepted
             && c.agent_progress.as_ref().is_some_and(|p| matches!(p.phase, AgentPhase::Starting | AgentPhase::Running))
             && [crate::tr!("Wird gestartet"), crate::tr!("In Bearbeitung")].contains(&session_status(s, c))
     }).map(|c| c.id)

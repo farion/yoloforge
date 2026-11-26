@@ -438,7 +438,7 @@ impl App {
                     self.notice(crate::tr!("Diese Aufgabenansicht ist schreibgeschützt. Zum Anhängen einen bearbeitbaren Auftrag öffnen."));
                 } else if task.request.is_none() {
                     self.backend.load_attachments(task.id, paths);
-                    self.notice(crate::tr!("Anhänge werden geladen …"));
+                    self.project_notice(crate::app::ToastKind::Info, Some(task.draft.project), crate::tr!("Anhänge werden geladen …"));
                 } else {
                     self.notice(
                         crate::tr!("Diese Aufgabe wurde bereits gesendet. Bitte einen neuen Entwurf öffnen."),
@@ -446,7 +446,8 @@ impl App {
                 }
             } else if let Some(target) = self.clipboard_image_target() {
                 self.backend.load_attachments(target, paths);
-                self.notice(crate::tr!("Anhänge werden geladen …"));
+                let project = self.session_prompts.values().find(|task| task.id == target).map(|task| task.draft.project);
+                self.project_notice(crate::app::ToastKind::Info, project, crate::tr!("Anhänge werden geladen …"));
             } else {
                 self.notice(crate::tr!("Zum Anhängen bitte einen bearbeitbaren Aufgaben- oder Session-Prompt öffnen."));
             }
@@ -878,7 +879,7 @@ impl App {
                                                 )
                                             });
                                             if action.clicked() {
-                                                self.open_session(project, command.session_root());
+                                                self.open_intent_execution(project, command.session_root(), command.id);
                                             }
                                         } else if editable {
                                             let action = ui.add_enabled(
@@ -1032,7 +1033,7 @@ impl App {
                         if c.kind == CommandKind::RunAgent
                             && ui.button(crate::tr!("OpenCode anzeigen")).clicked()
                         {
-                            self.open_session(t.project_id, c.session_root());
+                            self.open_intent_execution(t.project_id, c.session_root(), c.id);
                         }
                         if ui.button(crate::tr!("Diagnose")).clicked() {
                             self.navigate(Target::Diagnose(Some(t.project_id)));
@@ -1733,6 +1734,14 @@ impl App {
         }
         let title = self.tabs[index].title.clone();
         let root = self.tabs[index].root;
+        if self.tabs[index].selected_execution.is_some()
+            && ui.button(crate::tr!("Gesamte Session anzeigen")).clicked()
+        {
+            let tab = &mut self.tabs[index];
+            tab.selected_execution = None;
+            tab.follow = true;
+            tab.next_poll = std::time::Instant::now();
+        }
         let _title = ui.add(egui::Label::new(design::elided_text_job(
             title.clone(),egui::FontId::monospace(20.0),ui.visuals().text_color(),
             ui.available_width(),1,
@@ -1750,14 +1759,33 @@ impl App {
         }
         #[cfg(test)]
         ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new("test-opencode-title"),_title.rect));
+        let project = self.tabs[index].project;
+        let mut new_prompt = None;
+        if self.snapshot.as_ref().is_some_and(|s| can_prompt_session(s, project, root)) {
+            let _panel = egui::TopBottomPanel::bottom(egui::Id::new(("session-prompt", root)))
+                .show_separator_line(false)
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8)))
+                .show_inside(ui, |ui| {
+                    let mut composer = self.session_prompts.remove(&root)
+                        .unwrap_or_else(|| crate::dialogs::TaskDialog::session(self, project, root));
+                    new_prompt = ui.push_id(root, |ui| composer.show_session_prompt(ui, self)).inner;
+                    self.session_prompts.insert(root, composer);
+                });
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-prompt-panel", root)), _panel.response.rect));
+        }
         let jump_to_start = self.tabs[index].scroll_to_start;
         self.tabs[index].scroll_to_start = false;
         let tab = &self.tabs[index];
+        let outcome = self.snapshot.as_ref()
+            .and_then(|s| viewed_execution(s, root, tab.selected_execution))
+            .and_then(|command| conversation::execution_outcome(command, tab.archives.get(&command.id).map_or(&[], Vec::as_slice)));
         let working = self.online && self.snapshot.as_ref().is_some_and(|s| {
             let preparing = tab.direct_id.and_then(|id| s.directs.iter().find(|d| d.id == id))
                 .is_some_and(|d| d.root_command_id.is_none() && d.current_command_id.is_some() && !d.preparation_failed);
             preparing || working_session_command(s, root, tab.selected_execution)
-                .is_some_and(|id| tab.archives.get(&id)
+                .is_some_and(|id| !tab.statuses.get(&id).is_some_and(|status| status.final_scan_complete)
+                    && tab.archives.get(&id)
                     .is_none_or(|entries| !conversation::current_turn_ended(entries)))
         });
         #[cfg(test)]
@@ -1817,8 +1845,6 @@ impl App {
         let show_versions = tab.show_versions;
         let project = tab.project;
         let direct = tab.direct_id.and_then(|id| self.snapshot.as_ref()?.directs.iter().find(|d| d.id == id)).cloned();
-        let can_prompt = self.snapshot.as_ref().is_some_and(|s|
-            can_prompt_session(s, project, root));
         let mut rows = conversation::transcript_rows(entries, self.snapshot.as_deref(), root, tab.selected_execution);
         if direct.is_some() {
             rows.retain(|row| !matches!(row, conversation::TranscriptRow::Question(q)
@@ -1827,22 +1853,8 @@ impl App {
         if let Some(direct) = direct.as_ref() {
             crate::directs::tab_controls(ui, self, index, direct);
         }
-        if can_prompt {
-            let panel = egui::TopBottomPanel::bottom(egui::Id::new(("session-prompt", root)))
-                .show_separator_line(false)
-                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8)))
-                .show_inside(ui, |ui| {
-                    let mut composer = self.session_prompts.remove(&root)
-                        .unwrap_or_else(|| crate::dialogs::TaskDialog::session(self, project, root));
-                    ui.push_id(root, |ui| composer.show_session_prompt(ui, self));
-                    self.session_prompts.insert(root, composer);
-                });
-            #[cfg(test)]
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-prompt-panel", root)), panel.response.rect));
-            #[cfg(not(test))]
-            let _ = panel;
-        }
-        if self.online && rows.is_empty() && !working && direct.is_none() {
+        let submitted = self.submitted_session_prompts(index);
+        if self.online && rows.is_empty() && !working && direct.is_none() && outcome.is_none() && submitted.is_empty() {
             ui.label(crate::tr!("Noch keine archivierten Nachrichten verfügbar."));
         }
         let list_key = format!("archive/{root}");
@@ -1856,7 +1868,7 @@ impl App {
             ),
         );
         let mut scroll = egui::ScrollArea::vertical()
-            .id_salt(("session-archive", root))
+            .id_salt(("session-archive", root, self.tabs[index].selected_execution))
             .stick_to_bottom(follow);
         if jump_to_start {
             scroll = scroll.vertical_scroll_offset(0.0);
@@ -1896,6 +1908,14 @@ impl App {
             });
             if working {
                 conversation::working_indicator(ui);
+            } else if let Some(outcome) = outcome {
+                outcome.show(ui, self);
+            }
+            for (id, (prompt, status, color)) in submitted {
+                let height = conversation::line_height(ui);
+                ui.add_space(height);
+                let response = prompt.show(ui, status, color);
+                if Some(id) == new_prompt { response.scroll_to_me(Some(egui::Align::BOTTOM)); }
             }
         });
         if toggled_activity {
@@ -1913,7 +1933,8 @@ impl App {
             && (jump_to_start || !self.tabs[index].follow || (over_transcript && wheel > 0.0))
         {
             if let Some((command,before)) = self.tabs[index].older.iter()
-                .filter(|(id,_)| !self.tabs[index].loading.contains_key(id))
+                .filter(|(id,_)| !self.tabs[index].loading.contains_key(id)
+                    && self.tabs[index].selected_execution.is_none_or(|selected| selected == **id))
                 .find_map(|(id,before)|before.map(|before|(*id,before)))
             {
                 let request = self.next_request;
