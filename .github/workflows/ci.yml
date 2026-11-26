@@ -27,8 +27,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Install Android SDK packages
-        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Verify preinstalled Android SDK packages
+        run: |
+          test -f "${ANDROID_HOME:?Android SDK not found}/platforms/android-36/android.jar"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/aapt2"
       - name: Build and lint the Android debug APK
         working-directory: android
         run: ./gradlew :app:assembleDebug :app:lintDebug
