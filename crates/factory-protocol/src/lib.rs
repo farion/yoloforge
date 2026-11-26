@@ -269,6 +269,25 @@ pub struct DeleteFailedTask {
     pub failed_command: CommandId,
 }
 
+impl Snapshot {
+    /// Use only the intent's own execution, not the latest run in a shared session.
+    pub fn task_result_summary(&self, ticket: &Ticket) -> Option<&str> {
+        let id = ticket.execution_command.filter(|_| !ticket.draft)?;
+        let command = self.commands.iter().find(|command| command.id == id)?;
+        if command.kind != CommandKind::RunAgent
+            || command.state != CommandState::Succeeded
+            || command.agent_spec.as_ref().is_some_and(|spec| spec.read_only)
+        {
+            return None;
+        }
+        let Some(CommandOutput::Agent { agent }) = &command.result else {
+            return None;
+        };
+        let summary = agent.summary.trim();
+        (agent.phase == AgentPhase::Succeeded && !summary.is_empty()).then_some(summary)
+    }
+}
+
 /// A user-directed follow-up. All execution settings come from the target session.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

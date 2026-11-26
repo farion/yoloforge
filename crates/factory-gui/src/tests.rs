@@ -1201,8 +1201,8 @@ fn ticket_numbers_are_neutral_pills_searchable_and_never_change_the_prompt() {
     snapshot.projects[0].key="WOAI".into();
     snapshot.tickets[0].key="WOAI-7".into();
     let original=snapshot.tickets[0].clone();
-    assert!(task_summary(&original).starts_with("WOAI-7 "));
-    assert!(!task_text(&original).contains("WOAI-7"));
+    assert!(task_summary(snapshot, &original).starts_with("WOAI-7 "));
+    assert!(!task_text(snapshot, &original).contains("WOAI-7"));
     app.query="woai-7".into();
     let ctx=app.backend.context().clone();
     let draw=|app:&mut App|ctx.run(egui::RawInput {
@@ -1235,7 +1235,7 @@ fn ticket_numbers_are_neutral_pills_searchable_and_never_change_the_prompt() {
         egui::Id::new(("test-task-row-title",original.id)),
     )).unwrap();
     assert!(number.pos.x<title.left(),"Ticket pill must precede task text");
-    let summary = task_text(&original);
+    let summary = task_text(app.snapshot.as_ref().unwrap(), &original);
     let title_center = output.shapes.iter().find_map(|shape| match &shape.shape {
         egui::epaint::Shape::Text(text) if text.galley.job.text == summary => {
             Some(text.pos.y + text.galley.size().y / 2.0)
@@ -2816,17 +2816,99 @@ fn read_only_task_shows_prompt_offline_and_loads_deferred_attachments_without_wr
 #[test]
 fn prompt_summary_marks_truncated_prefixes_without_changing_original_content() {
     let app = fixture();
-    let mut ticket = app.snapshot.as_ref().unwrap().tickets[0].clone();
+    let snapshot = app.snapshot.as_ref().unwrap();
+    let mut ticket = snapshot.tickets[0].clone();
     ticket.title = "Grüße 界".repeat(10);
     let original = format!("{} und noch mehr Auftragstext", ticket.title);
     ticket.prompt = Some(original.clone());
-    assert_eq!(task_summary(&ticket), format!("{}…", ticket.title));
+    assert_eq!(task_summary(snapshot, &ticket), format!("{}…", ticket.title));
     assert_eq!(ticket.prompt.as_deref(), Some(original.as_str()));
     ticket.title = "Kurzer Auftrag".into();
     ticket.prompt = Some("Kurzer Auftrag".into());
-    assert_eq!(task_summary(&ticket), "Kurzer Auftrag");
+    assert_eq!(task_summary(snapshot, &ticket), "Kurzer Auftrag");
     ticket.prompt = Some("Kurzer Auftrag\nWeitere Bedingungen".into());
-    assert_eq!(task_summary(&ticket), "Kurzer Auftrag…");
+    assert_eq!(task_summary(snapshot, &ticket), "Kurzer Auftrag…");
+}
+
+#[test]
+fn intent_result_is_used_in_the_list_overview_and_dialog_without_replacing_the_prompt() {
+    let mut app = fixture();
+    app.settings.page = Page::Tasks;
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let ticket = &mut snapshot.tickets[0];
+    ticket.title = "Originalauftrag".into();
+    ticket.prompt = Some("Originalauftrag mit Details".into());
+    let id = ticket.id;
+    assert_eq!(task_text(snapshot, &snapshot.tickets[0]), "Originalauftrag…");
+
+    let command = &mut snapshot.commands[0];
+    let mut agent = command.agent_progress.clone().unwrap();
+    agent.phase = AgentPhase::Succeeded;
+    agent.summary = "\n Ergebnis der Arbeit\nEindeutiges Suchwort \n".into();
+    command.state = CommandState::Succeeded;
+    command.result = Some(CommandOutput::Agent { agent });
+    let mut unrelated = snapshot.tickets[0].clone();
+    unrelated.id = TicketId::new();
+    unrelated.execution_command = None;
+    snapshot.streams[0].ticket_ids.push(unrelated.id);
+    assert_eq!(task_text(snapshot, &unrelated), "Originalauftrag…");
+
+    let ctx = app.backend.context().clone();
+    let draw = |app: &mut App| {
+        let mut text = Vec::new();
+        for _ in 0..4 {
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+                ..Default::default()
+            }, |ctx| {
+                app.draw_shell(ctx);
+                if let Some(mut dialog) = app.dialog.take() {
+                    if !dialog.show(ctx, app) {
+                        app.dialog = Some(dialog);
+                    }
+                }
+            });
+            text.clear();
+            for shape in &output.shapes { shape_text(&shape.shape, &mut text); }
+        }
+        text
+    };
+    app.query = "eindeutiges suchwort".into();
+    assert!(draw(&mut app).iter().any(|text| text == "Ergebnis der Arbeit…"));
+    app.settings.page = Page::Overview;
+    assert!(draw(&mut app).iter().any(|text| text == "Ergebnis der Arbeit…"));
+    app.view_task(id);
+    let text = draw(&mut app);
+    assert!(text.iter().any(|text| text.contains("Eindeutiges Suchwort")));
+    assert!(text.iter().any(|text| text.contains("Originalauftrag mit Details")));
+}
+
+#[test]
+fn intent_preview_ignores_status_only_empty_failed_and_controller_results() {
+    let app = fixture();
+    let mut snapshot = (**app.snapshot.as_ref().unwrap()).clone();
+    let ticket = snapshot.tickets[0].clone();
+    let mut agent = snapshot.commands[0].agent_progress.clone().unwrap();
+    agent.phase = AgentPhase::Finalizing;
+    agent.summary = "Final session archive pending".into();
+    snapshot.commands[0].agent_progress = Some(agent.clone());
+    assert_eq!(snapshot.task_result_summary(&ticket), None);
+    agent.phase = AgentPhase::Succeeded;
+    agent.summary = "\n \t".into();
+    snapshot.commands[0].state = CommandState::Succeeded;
+    snapshot.commands[0].result = Some(CommandOutput::Agent { agent: agent.clone() });
+    assert_eq!(snapshot.task_result_summary(&ticket), None);
+    agent.phase = AgentPhase::Failed;
+    agent.summary = "OpenCode execution failed".into();
+    snapshot.commands[0].state = CommandState::Failed;
+    snapshot.commands[0].result = Some(CommandOutput::Agent { agent: agent.clone() });
+    assert_eq!(snapshot.task_result_summary(&ticket), None);
+    agent.phase = AgentPhase::Succeeded;
+    agent.summary = "Controller decision".into();
+    snapshot.commands[0].state = CommandState::Succeeded;
+    snapshot.commands[0].result = Some(CommandOutput::Agent { agent });
+    snapshot.commands[0].agent_spec.as_mut().unwrap().read_only = true;
+    assert_eq!(snapshot.task_result_summary(&ticket), None);
 }
 
 #[test]
@@ -4023,6 +4105,84 @@ fn empty_project_lists_center_the_matching_icon_and_short_message_below_the_tool
             assert!((bounds.center() - state.center()).length() < 1.0, "{bounds:?} {state:?}");
         }
     }
+}
+
+#[test]
+fn overview_menu_shows_activity_in_the_badge_slot_across_projects() {
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let mut other = snapshot.projects[0].clone();
+    other.id = ProjectId::new();
+    app.settings.project = Some(other.id);
+    app.settings.page = Page::Tasks;
+    snapshot.projects.push(other);
+
+    let ctx = app.backend.context().clone();
+    let mut time = 0.5;
+    let mut draw = |app: &mut App| {
+        time += 0.03;
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            time: Some(time),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let row = ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-factory-navigation", Page::Overview)))).unwrap();
+        let slot = egui::Rect::from_center_size(egui::pos2(row.right() - 26.0, row.center().y), egui::vec2(22.0, 22.0));
+        let spinner = output.shapes.iter().find_map(|shape| {
+            let egui::Shape::Text(text) = &shape.shape else { return None };
+            (text.galley.job.text == egui_phosphor::regular::GEAR_SIX
+                && slot.contains(text.pos)).then_some(text.angle)
+        });
+        (row, spinner)
+    };
+    let _ = draw(&mut app);
+    let (idle_row, spinner) = draw(&mut app);
+    assert!(spinner.is_none(), "Waiting for input is not active work");
+
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    snapshot.questions.clear();
+    snapshot.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Running;
+    let (busy_row, spinner) = draw(&mut app);
+    assert_eq!(busy_row, idle_row);
+    let spinner = spinner.expect("Active work in another project must show the spinner");
+    assert_ne!(draw(&mut app).1.unwrap(), spinner, "The spinner should animate");
+    assert_eq!(app.settings.page, Page::Tasks);
+
+    app.online = false;
+    assert!(draw(&mut app).1.is_none(), "Cached work must not animate offline");
+}
+
+#[test]
+fn factory_activity_distinguishes_running_work_from_queue_health_checks_and_pauses() {
+    use crate::overview::factory_is_working;
+    let app = fixture();
+    let mut snapshot = (**app.snapshot.as_ref().unwrap()).clone();
+    snapshot.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Finalizing;
+    assert!(factory_is_working(&snapshot));
+    snapshot.commands[0].agent_progress = None;
+    snapshot.commands[0].kind = CommandKind::PrepareWorkspace;
+    assert!(factory_is_working(&snapshot));
+    snapshot.commands[0].state = CommandState::Pending;
+    assert!(!factory_is_working(&snapshot));
+    snapshot.commands[0].state = CommandState::Accepted;
+    snapshot.commands[0].kind = CommandKind::CheckOpenCode;
+    assert!(!factory_is_working(&snapshot));
+    snapshot.commands[0].kind = CommandKind::PrepareWorkspace;
+    snapshot.runners[0].connection = ConnectionState::Unreachable;
+    assert!(!factory_is_working(&snapshot));
+    snapshot.runners[0].connection = ConnectionState::Online;
+    snapshot.controls.push(StreamControl {
+        stream_id: snapshot.commands[0].stream_id,
+        request_id: RequestId::new(),
+        command_id: Some(snapshot.commands[0].id),
+        state: PauseState::Frozen,
+        action: ControlAction::Pause,
+        retry: None,
+        proof: None,
+        summary: String::new(),
+        previous_status: StreamState::Running,
+    });
+    assert!(!factory_is_working(&snapshot));
 }
 
 #[test]

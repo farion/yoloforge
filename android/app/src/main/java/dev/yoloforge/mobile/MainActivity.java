@@ -181,9 +181,25 @@ public final class MainActivity extends Activity {
         text("Maximal arbeitende Sessions: "+p.optInt("max_sessions",1));
         JSONArray tasks=array("tickets");for(int i=0;i<tasks.length();i++){JSONObject t=tasks.optJSONObject(i);if(t==null || !t.optString("project_id").equals(projectId))continue;
             JSONObject c=find("commands",t.optString("execution_command"));String detail=c==null?t.optString("routing_note","Wartet"):c.optString("state");
-            text(t.optString("prompt",t.optString("title"))+"\n"+detail);
+            text(taskLabel(t, c)+"\n"+detail);
         }
         JSONArray streams=array("streams");for(int i=0;i<streams.length();i++){JSONObject s=streams.optJSONObject(i);if(s!=null && s.optString("project_id").equals(projectId))button("Session: "+s.optString("goal")+" · "+s.optString("status"),()->session(s));}
+    }
+    static String taskLabel(JSONObject task, JSONObject command) {
+        if (!task.optBoolean("draft") && command != null
+                && "run_agent".equals(command.optString("kind"))
+                && "succeeded".equals(command.optString("state"))) {
+            JSONObject spec = command.optJSONObject("agent_spec");
+            JSONObject result = command.optJSONObject("result");
+            JSONObject agent = result == null ? null : result.optJSONObject("agent");
+            if ((spec == null || !spec.optBoolean("read_only")) && agent != null
+                    && "succeeded".equals(agent.optString("phase")) && !agent.isNull("summary")) {
+                String summary = agent.optString("summary").trim();
+                if (!summary.isEmpty()) return summary;
+            }
+        }
+        String prompt = task.isNull("prompt") ? "" : task.optString("prompt");
+        return prompt.trim().isEmpty() ? task.optString("title") : prompt;
     }
     private void compose() {
         screen("Prompt");images.clear();button("Zurueck",this::project);

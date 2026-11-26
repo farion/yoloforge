@@ -20,6 +20,20 @@ import org.json.JSONObject;
 /** Real Rust-server acceptance supplied by scripts/smoke-android.py; no model calls. */
 @RunWith(AndroidJUnit4.class)
 public final class AppFlowTest {
+    @Test public void intentLabelPrefersItsPublishedAgentResult() throws Exception {
+        JSONObject task = new JSONObject().put("prompt", "Original prompt");
+        JSONObject agent = new JSONObject().put("phase", "succeeded").put("summary", " Result summary \n");
+        JSONObject command = new JSONObject().put("kind", "run_agent").put("state", "succeeded")
+                .put("result", new JSONObject().put("agent", agent));
+        assertEquals("Result summary", MainActivity.taskLabel(task, command));
+        assertEquals("Original prompt", MainActivity.taskLabel(task, null));
+        agent.put("summary", " \n ");
+        assertEquals("Original prompt", MainActivity.taskLabel(task, command));
+        agent.put("phase", "failed").put("summary", "Technical failure");
+        command.put("state", "failed");
+        assertEquals("Original prompt", MainActivity.taskLabel(task, command));
+    }
+
     private Activity activity;
     private final android.app.Instrumentation instrument = InstrumentationRegistry.getInstrumentation();
     private View find(View view, String text, boolean edit) {

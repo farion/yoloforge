@@ -302,12 +302,25 @@ fn task_routing_status(note: &str) -> Option<&'static str> {
     }
 }
 
-pub fn task_summary(ticket: &Ticket) -> String {
-    let text=task_text(ticket);
-    if ticket.key.is_empty() {text}else{format!("{} {text}",ticket.key)}
+pub fn task_summary(snapshot: &Snapshot, ticket: &Ticket) -> String {
+    let text = task_text(snapshot, ticket);
+    if ticket.key.is_empty() {
+        text
+    } else {
+        format!("{} {text}", ticket.key)
+    }
 }
 
-pub fn task_text(ticket: &Ticket) -> String {
+pub fn task_preview_source<'a>(snapshot: &'a Snapshot, ticket: &'a Ticket) -> &'a str {
+    snapshot
+        .task_result_summary(ticket)
+        .unwrap_or_else(|| ticket.prompt.as_deref().unwrap_or(&ticket.description))
+}
+
+pub fn task_text(snapshot: &Snapshot, ticket: &Ticket) -> String {
+    if let Some(summary) = snapshot.task_result_summary(ticket) {
+        return crate::design::elide_first_line(summary, 80);
+    }
     let source = ticket.prompt.as_deref().unwrap_or(&ticket.description);
     if ticket.title.trim().is_empty() {
         return crate::design::elide_first_line(source, 80);
@@ -682,7 +695,7 @@ pub fn question_task_groups(s: &Snapshot, project: ProjectId, archived: bool) ->
         } else {
             let ticket=s.tickets.iter().find(|t| t.execution_command == Some(command.id));
             let task = ticket
-                .map(|t| t.prompt.as_deref().unwrap_or(&t.description).to_string())
+                .map(|t| task_preview_source(s, t).to_string())
                 .filter(|text| !text.trim().is_empty())
                 .or_else(|| command.agent_spec.as_ref().map(|spec| spec.prompt.clone()))
                 .unwrap_or_else(|| session_title(s, command));

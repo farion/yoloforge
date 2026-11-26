@@ -706,7 +706,8 @@ impl App {
                     && (needle.is_empty()
                         || t.title.to_lowercase().contains(&needle)
                         || t.key.to_lowercase().contains(&needle)
-                        || t.description.to_lowercase().contains(&needle))
+                        || t.description.to_lowercase().contains(&needle)
+                        || task_preview_source(&s, t).to_lowercase().contains(&needle))
             })
             .collect::<Vec<_>>();
         tasks.sort_by_key(|t| (t.status != TicketState::ReworkQueued, std::cmp::Reverse(t.created_unix_ms)));
@@ -753,10 +754,10 @@ impl App {
                                     egui::vec2(width, 0.0),
                                     egui::Layout::top_down(egui::Align::LEFT),
                                     |ui| {
-                                        let summary = task_text(t);
+                                         let summary = task_text(&s, t);
                                         let _title = design::ticket_title(ui,&t.key,&summary,
                                             egui::FontId::proportional(18.0),width)
-                                            .on_hover_text(t.prompt.as_deref().unwrap_or(&t.description));
+                                             .on_hover_text(task_preview_source(&s, t));
                                         #[cfg(test)]
                                         ui.ctx().data_mut(|d| {
                                             d.insert_temp(
@@ -959,7 +960,7 @@ impl App {
         let t = payload.as_deref().unwrap_or(t);
         ui.horizontal(|ui| {
             if !t.key.is_empty() {design::ticket_pill(ui,&t.key);}
-            ui.heading(&t.title);
+            ui.heading(task_text(&s, t)).on_hover_text(task_preview_source(&s, t));
         });
         if !complete && self.online {
             if ui
@@ -1283,8 +1284,12 @@ impl App {
                                     if let Some(CommandOutput::WorkspaceError { workspace_error }) = &c.result {
                                         ui.add(egui::Label::new(egui::RichText::new(workspace_error).color(RED)).wrap());
                                     } else {
-                                        let task=session_last_task(&s,&c).map(task_summary).unwrap_or_else(||crate::tr!("Keine zugeordnete Aufgabe").into());
-                                        ui.add(egui::Label::new(egui::RichText::new(crate::tr!("Letzte Aufgabe: {task}", task = task)).color(MUTED)).wrap());
+                                         let ticket = session_last_task(&s, &c);
+                                         let task = ticket.map(|t| task_summary(&s, t)).unwrap_or_else(||crate::tr!("Keine zugeordnete Aufgabe").into());
+                                         let label = ui.add(egui::Label::new(egui::RichText::new(crate::tr!("Letzte Aufgabe: {task}", task = task)).color(MUTED)).wrap());
+                                         if let Some(ticket) = ticket {
+                                             label.on_hover_text(task_preview_source(&s, ticket));
+                                         }
                                     }
                                     let _activity=ui.colored_label(MUTED,crate::tr!("Zuletzt aktiv {}", timestamp(session_last_activity(&s,&c)))).on_hover_text(crate::tr!("Letzte bekannte Änderung an Ausführung, Fragen oder zugeordneter Aufgabe; kein Verbindungs-Heartbeat."));
                                     #[cfg(test)]
@@ -1637,7 +1642,7 @@ impl App {
                         for activity in &activities {
                             let (id, kind, title, status, action) = match activity {
                                 SessionActivity::Task(task) => (
-                                    task.id.to_string(), crate::tr!("Aufgabe").to_string(), task_text(task),
+                                     task.id.to_string(), crate::tr!("Aufgabe").to_string(), task_text(&snapshot, task),
                                     task_status(&snapshot, task), crate::tr!("Anzeigen"),
                                 ),
                                 SessionActivity::Question(question) => (
@@ -1678,8 +1683,12 @@ impl App {
                                         });
                                     });
                                     let width=ui.available_width();
+                                    let full_title = match activity {
+                                        SessionActivity::Task(task) => task_preview_source(&snapshot, task),
+                                        SessionActivity::Question(_) => &title,
+                                    };
                                     design::ticket_title(ui,ticket_key,&title,
-                                        egui::FontId::proportional(16.0),width).on_hover_text(&title);
+                                        egui::FontId::proportional(16.0),width).on_hover_text(full_title);
                                 });
                                 let row = row.response.on_hover_text(action);
                                 row.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,

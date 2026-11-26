@@ -477,7 +477,7 @@ impl Dialog {
             Target::Dependencies(id) => {
                 let t = snapshot.tickets.iter().find(|t| t.id == id)?;
                 (
-                    format!("Abhaengigkeiten: {} (nur Done gibt frei)", t.title),
+                    format!("Abhaengigkeiten: {} (nur Done gibt frei)", super::task_label(snapshot, t)),
                     t.revision,
                     vec![Field::select(
                         "Voraussetzungen (Space: Auswahl)",
@@ -490,7 +490,7 @@ impl Dialog {
                             .tickets
                             .iter()
                             .filter(|other| other.project_id == t.project_id && other.id != id)
-                            .map(|t| (t.id.to_string(), format!("{} [{:?}]", t.title, t.status)))
+                            .map(|t| (t.id.to_string(), format!("{} [{:?}]", super::task_label(snapshot, t), t.status)))
                             .collect(),
                         true,
                     )],
@@ -615,7 +615,7 @@ impl Dialog {
                                 .map(|t| {
                                     (
                                         t.id.to_string(),
-                                        format!("{} | {:?} | {}", t.title, t.status, t.id),
+                                        format!("{} | {:?} | {}", super::task_label(snapshot, t), t.status, t.id),
                                     )
                                 })
                                 .collect(),

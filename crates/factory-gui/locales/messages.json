@@ -100,6 +100,7 @@
   "Runner neu starten": ["Runner neu starten", "Restart runner"],
   "Lokale Runner-Aktion fehlgeschlagen. Details stehen in der Diagnose.": ["Lokale Runner-Aktion fehlgeschlagen. Details stehen in der Diagnose.", "The local runner action failed. See diagnostics for details."],
   "Lokaler Runner wird neu gestartet …": ["Lokaler Runner wird neu gestartet …", "Restarting local runner …"],
+  "Neustart läuft …": ["Neustart läuft …", "Restarting …"],
   "Erneut einreihen": ["Erneut einreihen", "Requeue"],
   "Intent erneut eingereiht": ["Intent erneut eingereiht", "Intent requeued"],
   "Intent erneut einreihen": ["Intent erneut einreihen", "Requeue intent"],
@@ -762,6 +763,10 @@
   "Verbindungsübersicht": [
     "Verbindungsübersicht",
     "Connection overview"
+  ],
+  "Factory arbeitet": [
+    "Factory arbeitet",
+    "Factory is working"
   ],
   "Factory-Einstellungen": [
     "Factory-Settings",

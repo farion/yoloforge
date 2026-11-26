@@ -867,7 +867,7 @@ fn navigation_row_content(
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             selected,
-            title,
+            activity_angle.map_or_else(|| title.to_owned(), |_| format!("{title} · {}", crate::tr!("Factory arbeitet"))),
         )
     });
     let hovered = ui.is_enabled() && ui.rect_contains_pointer(rect);

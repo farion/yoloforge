@@ -439,7 +439,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let removable = if !app.local_runners_busy {
                 managed.iter().map(|r| (runner_key(r.id), r.id)).collect()
             } else { vec![] };
-            if let Some(action) = graph(ui, "all", &infra, &removable) {
+            let restarting = app.restarting_runner
+                .filter(|id| managed.iter().any(|runner| runner.id == *id))
+                .map(runner_key);
+            if let Some(action) = graph(ui, "all", &infra, &removable, restarting.as_deref()) {
                 let id = match action { RunnerNodeAction::Remove(id) | RunnerNodeAction::Restart(id) => id };
                 if let Some(runner) = managed.iter().find(|r| r.id == id) {
                     app.dialog = Some(match action {
@@ -495,7 +498,7 @@ fn local_runner_route(server: Rect, runner: Rect, row: usize, rows: usize) -> [P
         Pos2::new(left, turn_y), Pos2::new(left, end.y), end]
 }
 
-fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)]) -> Option<RunnerNodeAction> {
+fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, RunnerId)], restarting: Option<&str>) -> Option<RunnerNodeAction> {
     let mut remove = None;
     if graph.columns.iter().all(|(_, nodes)| nodes.is_empty()) {
         ui.colored_label(
@@ -540,6 +543,8 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
     let client_rows = graph.edges.iter().filter(|(_, to, _)| to == "server").count();
     let mut internet_badges = Vec::new();
     for (from, to, color) in &graph.edges {
+        let restarting_edge = restarting.is_some_and(|key| key == from || key == to);
+        let color = if restarting_edge { BLUE } else { *color };
         let a = placements.iter().find(|(node, ..)| node.id == *from);
         let b = placements.iter().find(|(node, ..)| node.id == *to);
         if let (Some((source, a, _, source_row)), Some((destination, b, dest_col, dest_row))) = (a, b) {
@@ -569,7 +574,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                 route,
                 Stroke::new(2.0_f32, color.gamma_multiply(0.55)),
             ));
-            ui.painter().circle_filled(target, 5.0, *color);
+            ui.painter().circle_filled(target, 5.0, color);
             let internet = (to == "server" && graph.internet_client.as_ref() == Some(from))
                 || (from_server && graph.internet_runners.contains(to));
             if internet {
@@ -580,7 +585,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                 ));
             }
             let compatibility = if from_server { destination.compatibility.as_ref() } else { source.compatibility.as_ref() };
-            if let Some(compatibility) = compatibility.filter(|_| !internet) {
+            if let Some(compatibility) = compatibility.filter(|_| !internet && !restarting_edge) {
                 ui.painter().circle_filled(center, 13.0, Color32::from_rgb(21, 25, 32));
                 ui.painter().text(center, egui::Align2::CENTER_CENTER, compatibility.icon(),
                     FontId::proportional(19.0), compatibility.color());
@@ -598,8 +603,10 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
         crate::connection_info::internet_link_badge(ui, ui.painter(), center, id);
     }
     for (node, rect, ..) in placements {
+        let is_restarting = restarting == Some(node.id.as_str());
         let response = ui.interact(rect, ui.id().with((id, &node.id)), Sense::hover());
-        let hovered = response.hovered();
+        let hovered = response.hovered() && !is_restarting;
+        let border = if is_restarting { BLUE } else { node.color };
         ui.painter().rect_filled(
             rect,
             10,
@@ -614,10 +621,28 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             10,
             Stroke::new(
                 if hovered { 1.5_f32 } else { 1.0_f32 },
-                node.color.gamma_multiply(if hovered { 1.0 } else { 0.5 }),
+                border.gamma_multiply(if hovered { 1.0 } else { 0.5 }),
             ),
             egui::StrokeKind::Inside,
         );
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new(("test-overview-node", id, &node.id)), rect));
+        if is_restarting {
+            let label = crate::tr!("Neustart läuft …");
+            response.widget_info(|| egui::WidgetInfo::labeled(
+                egui::WidgetType::Label, true, format!("{}: {label}", node.title),
+            ));
+            if ui.is_rect_visible(rect) {
+                let center = rect.center();
+                egui::Spinner::new().color(BLUE).paint_at(ui, Rect::from_center_size(
+                    center - Vec2::new(0.0, 12.0), Vec2::splat(32.0),
+                ));
+                ui.painter().text(center + Vec2::new(0.0, 20.0), egui::Align2::CENTER_CENTER,
+                    label, FontId::proportional(14.0), ui.visuals().text_color());
+            }
+            continue;
+        }
         ui.painter().text(
             rect.left_top() + Vec2::new(14.0, 23.0),
             egui::Align2::LEFT_CENTER,
@@ -745,9 +770,6 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-local-runner-restart", *runner)), restart.rect));
             if restart.clicked() { remove = Some(RunnerNodeAction::Restart(*runner)); }
         }
-        #[cfg(test)]
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(egui::Id::new(("test-overview-node", id, &node.id)), rect));
     }
     remove
 }
@@ -1134,6 +1156,70 @@ mod tests {
         assert!(matches!(app.dialog, Some(crate::dialogs::Dialog::RestartLocalRunner { id: selected, .. }) if selected == id));
         assert!(!app.local_runners_busy);
         assert!(app.settings.pending.is_empty());
+    }
+
+    #[test]
+    fn restart_replaces_only_the_target_card_until_the_local_runner_report() {
+        let mut app = live_fixture();
+        app.settings.page = crate::model::Page::Infrastructure;
+        let id = app.snapshot.as_ref().unwrap().runners[0].id;
+        let mut target = crate::local_runners::fixture(id, &app.server);
+        let mut other = crate::local_runners::fixture(RunnerId::new(), &app.server);
+        other.name = "Anderer Runner".into();
+        app.local_runners = vec![target.clone(), other.clone()];
+
+        let ctx = app.backend.context().clone();
+        let mut time = 0.5;
+        let mut draw = |app: &mut App| {
+            time += 0.03;
+            let frame = ctx.run(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1360.0, 900.0))),
+                time: Some(time),
+                ..Default::default()
+            }, |ctx| app.draw_shell(ctx));
+            let card: Rect = ctx.data(|d| d.get_temp(egui::Id::new(("test-overview-node", "all", runner_key(id))))).unwrap();
+            let mut labels = Vec::new();
+            let mut spinner = None;
+            for shape in frame.shapes {
+                match &shape.shape {
+                    egui::Shape::Text(text) => labels.push(text.galley.job.text.clone()),
+                    egui::Shape::Path(path) if card.contains_rect(shape.shape.visual_bounding_rect()) => {
+                        spinner = Some(path.points.clone());
+                    }
+                    _ => {}
+                }
+            }
+            (card, labels, spinner)
+        };
+
+        let _ = draw(&mut app);
+        let (idle_card, labels, spinner) = draw(&mut app);
+        assert!(labels.iter().any(|label| label == "Test-Runner"));
+        assert!(spinner.is_none());
+
+        for result in [Ok(None), Err("restart timed out".into())] {
+            app.local_runners_busy = true;
+            app.restarting_runner = Some(id);
+            let (card, labels, spinner) = draw(&mut app);
+            assert_eq!(card, idle_card);
+            assert!(labels.iter().any(|label| label == "Neustart läuft …"));
+            assert!(labels.iter().any(|label| label == &other.name));
+            assert!(!labels.iter().any(|label| label == "Test-Runner"));
+            assert_ne!(draw(&mut app).2.unwrap(), spinner.unwrap(), "The spinner should animate");
+
+            // An unsuccessful attempt can still have a durable restart intent.
+            target.restarting = result.is_err().then(RequestId::new);
+            app.backend.emit_for_test(crate::backend::Event::LocalRunners(crate::local_runners::Report {
+                runners: Some(vec![target.clone(), other.clone()]),
+                result,
+            }));
+            app.receive();
+            let (card, labels, spinner) = draw(&mut app);
+            assert_eq!(card, idle_card);
+            assert!(labels.iter().any(|label| label == "Test-Runner"));
+            assert!(!labels.iter().any(|label| label == "Neustart läuft …"));
+            assert!(spinner.is_none());
+        }
     }
 
     #[test]
