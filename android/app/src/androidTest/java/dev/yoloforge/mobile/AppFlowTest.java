@@ -21,6 +21,18 @@ import org.json.JSONObject;
 /** Real Rust-server acceptance supplied by scripts/smoke-android.py; no model calls. */
 @RunWith(AndroidJUnit4.class)
 public final class AppFlowTest {
+    @Test public void overviewShowsIntakeAndExpiresCompletedIntents() throws Exception {
+        JSONObject ticket=new JSONObject().put("status","backlog");
+        assertEquals(0,MainActivity.overviewStage(ticket,null,200_000));
+        ticket.put("draft",true);
+        assertEquals(-1,MainActivity.overviewStage(ticket,null,200_000));
+        ticket.put("draft",false).put("status","done").put("updated_unix_ms",200_000);
+        assertEquals(5,MainActivity.overviewStage(ticket,null,319_999));
+        assertEquals(-1,MainActivity.overviewStage(ticket,null,320_000));
+        ticket.put("status","cancelled");
+        assertEquals(-1,MainActivity.overviewStage(ticket,null,200_000));
+    }
+
     @Test public void intentLabelPrefersItsPublishedAgentResult() throws Exception {
         JSONObject task = new JSONObject().put("prompt", "Original prompt");
         JSONObject agent = new JSONObject().put("phase", "succeeded").put("summary", " Result summary \n");
@@ -164,28 +176,25 @@ public final class AppFlowTest {
             instrument.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK);
             instrument.runOnMainSync(()->assertFalse(option.isAttachedToWindow()));
 
-            click("Projektmenü");click("Neues Projekt …");fill("Name des Projekts","Mobile project");
-            click("Schließen");click("Projektmenü");click("Neues Projekt …");
-            EditText draft=(EditText)waitView("Name des Projekts",true);
-            instrument.runOnMainSync(()->assertEquals("Mobile project",draft.getText().toString()));
-            click("Speichern");waitLabel("Factory  ›  Overview");
-            click("Navigation öffnen");click("Projektmenü");click("Projekt löschen …");
-            var delete=dialogNode("Löschen");
-            assertFalse(delete.isEnabled());
-            var buttonBounds=new android.graphics.Rect();delete.getBoundsInScreen(buttonBounds);
-            var titleBounds=new android.graphics.Rect();dialogNode("Projekt löschen").getBoundsInScreen(titleBounds);
-            var inputBounds=new android.graphics.Rect();dialogNode("Vollständiger Projektname").getBoundsInScreen(inputBounds);
-            assertTrue("Confirmation should be compact",buttonBounds.bottom-titleBounds.top<FactoryStyle.dp(context,360));
-            assertTrue("Actions should sit below the input",buttonBounds.top>=inputBounds.bottom
-                && buttonBounds.top-inputBounds.bottom<FactoryStyle.dp(context,64));
-            var value=new android.os.Bundle();value.putCharSequence(android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,"Mobile project");
-            assertTrue(dialogNode("Vollständiger Projektname").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,value));
-            assertTrue(dialogNode("Löschen").performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK));
-            waitLabel("Factory  ›  Overview");click("Navigation öffnen");click("Projekt auswählen");waitView("Android acceptance",false);
-            JSONObject projects=new Api(endpoint,key).request("GET","/v1/snapshot",null);
-            assertEquals(1,projects.getJSONArray("projects").length());
-            assertNull(vault.get("pending"));
+            click("Projekt auswählen");click("Android acceptance");
+            View pause=waitView("Projekt pausieren",false);
+            instrument.runOnMainSync(pause::performClick);
+            waitForProjectPause(endpoint,key,true);
+            long deadline=System.nanoTime()+5_000_000_000L;
+            while(pause.isAttachedToWindow()&&System.nanoTime()<deadline)Thread.sleep(50);
+            assertFalse(pause.isAttachedToWindow());
+            click("Navigation öffnen");click("Projekt fortsetzen");
+            waitForProjectPause(endpoint,key,false);
         }finally{instrument.runOnMainSync(()->activity.finish());}
+    }
+    private void waitForProjectPause(String endpoint,String key,boolean paused)throws Exception{
+        Api api=new Api(endpoint,key);
+        long deadline=System.nanoTime()+5_000_000_000L;
+        while(System.nanoTime()<deadline){
+            if(api.request("GET","/v1/snapshot",null).getJSONArray("projects").getJSONObject(0).optBoolean("paused")==paused)return;
+            Thread.sleep(50);
+        }
+        fail("Project pause state not updated");
     }
     @Test public void validKeySignsInAndInvalidKeyIsNotSaved()throws Exception {
         var arguments=InstrumentationRegistry.getArguments();String endpoint=arguments.getString("factoryEndpoint"),key=arguments.getString("factoryKey");assumeNotNull(endpoint,key);

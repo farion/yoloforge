@@ -35,6 +35,21 @@ final class Api {
     JSONObject request(String method, String path, JSONObject body) throws Exception {
         return (JSONObject) requestJson(method,path,body);
     }
+    boolean healthy() throws Exception {
+        int status=healthStatus("/v1/health");
+        if(status==404 || status==405){
+            // Older servers still observe authenticated requests on the client registry route.
+            return healthStatus("/v1/desktop/clients")==200;
+        }
+        return status==200;
+    }
+    private int healthStatus(String path) throws Exception {
+        HttpURLConnection connection=open(path);
+        try{
+            connection.setConnectTimeout(3000);connection.setReadTimeout(3000);
+            return connection.getResponseCode();
+        }finally{connection.disconnect();}
+    }
     JSONArray array(String path) throws Exception {
         return (JSONArray) requestJson("GET",path,null);
     }

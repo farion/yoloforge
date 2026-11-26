@@ -3487,6 +3487,10 @@
     "Eingang",
     "Inbox"
   ],
+  "Erledigt": [
+    "Erledigt",
+    "Done"
+  ],
   "Entwürfe & neue Aufgaben": [
     "Entwürfe & neue Intents",
     "Drafts & new Intents"

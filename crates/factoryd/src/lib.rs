@@ -569,7 +569,10 @@ async fn authenticate(State(app): State<App>, mut request: Request, next: Next) 
         );
     }
     let ip = observed_ip(&request);
-    desktop::observe_client(&app, &principal, request.headers(), ip).await;
+    let trusted_proxy = std::env::var("YOLOFORGE_TRUSTED_CLIENT_PROXY").ok()
+        .and_then(|value| value.parse::<std::net::IpAddr>().ok());
+    desktop::observe_client(&app, &principal, request.headers(),
+        client_presence_ip(ip, trusted_proxy, request.headers())).await;
     request.extensions_mut().insert(ObservedIp(ip));
     request.extensions_mut().insert(principal);
     next.run(request).await
@@ -598,6 +601,27 @@ fn observed_ip(request: &Request) -> Option<std::net::IpAddr> {
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|peer| peer.0.ip().to_canonical())
+}
+
+fn client_presence_ip(peer: Option<std::net::IpAddr>, trusted_proxy: Option<std::net::IpAddr>, headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    if peer.is_some() && peer == trusted_proxy.map(|ip| ip.to_canonical()) {
+        // The trusted proxy must overwrite this header, not pass it through.
+        return headers.get("x-real-ip").and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok()).map(|ip| ip.to_canonical());
+    }
+    peer
+}
+
+#[test]
+fn client_presence_only_uses_the_configured_proxy_header() {
+    let proxy = "192.168.64.4".parse().ok();
+    let other = "192.168.64.5".parse().ok();
+    let mut headers = HeaderMap::new();
+    assert_eq!(client_presence_ip(proxy, proxy, &headers), None);
+    headers.insert("x-real-ip", "198.51.100.12".parse().unwrap());
+    assert_eq!(client_presence_ip(proxy, proxy, &headers), "198.51.100.12".parse().ok());
+    assert_eq!(client_presence_ip(other, proxy, &headers), other);
+    assert_eq!(client_presence_ip(proxy, None, &headers), proxy);
 }
 
 fn local_project_source(

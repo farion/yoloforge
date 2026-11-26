@@ -283,6 +283,9 @@ pub fn task_display_status(s: &Snapshot, t: &Ticket) -> &'static str {
     if t.status == TicketState::Cancelled {
         return crate::tr!("Abgebrochen");
     }
+    if delivery_retry_pending(t) {
+        return task_status(s, t);
+    }
     let command = task_command(s, t);
     if let Some(status) = command.and_then(|c| merger_pending_status(s, c)) {
         return status;

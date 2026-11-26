@@ -54,6 +54,7 @@ struct Graph {
     edges: Vec<(String, String, Color32)>,
     internet: bool,
     internet_client: Option<String>,
+    public_clients: std::collections::BTreeSet<String>,
     internet_runners: std::collections::BTreeSet<String>,
 }
 
@@ -141,8 +142,7 @@ fn activity_details(snapshot: &Snapshot, commands: &[&RunnerCommand]) -> String 
 
 fn infrastructure(app: &App, now: u64) -> Graph {
     use egui_phosphor::regular as icons;
-    // The server sees the reverse proxy's private address. Only this desktop's
-    // outbound HTTP peer tells us whether its connection crosses the internet.
+    // This desktop can additionally classify its outbound connection itself.
     let internet = crate::connection_info::via_internet(app);
     let internet_client = if !internet {
         None
@@ -162,7 +162,11 @@ fn infrastructure(app: &App, now: u64) -> Graph {
         let fresh=app.online && now.saturating_sub(client.observed_unix_ms)<30_000;
         Node {version:version_text(client.version.as_deref(),client.protocol_version),
             compatibility:Some(compatibility::client(app.snapshot.as_deref(),client.protocol_version,fresh)),
-            service:None,address:Some(client.ip.map_or_else(||crate::tr!("IP unbekannt").into(),|ip|ip.to_string())),id:format!("client:{}",client.id),icon:if client.name=="Desktop" {icons::DESKTOP} else {icons::TERMINAL_WINDOW},
+            service:None,address:Some(client.ip.map_or_else(||crate::tr!("IP unbekannt").into(),|ip|ip.to_string())),id:format!("client:{}",client.id),icon:match client.name.as_str() {
+                "Desktop"=>icons::DESKTOP,
+                "Android"=>icons::DEVICE_MOBILE,
+                _=>icons::TERMINAL_WINDOW,
+            },
             title:client.name.clone(),status:if fresh {crate::tr!("Kürzlich aktiv")} else {crate::tr!("Kontakt veraltet")}.into(),
             activity:crate::tr!("Kontakt vor {} s", now.saturating_sub(client.observed_unix_ms)/1000),
             detail:crate::tr!("Client: {}\nGerät: {}\nLetzter authentifizierter Kontakt: {}\nKeine dauerhafte Verbindungsgarantie. Clients ohne Präsenzheader sind nicht einzeln erkennbar.", client.id,client.device_id.map_or_else(||crate::tr!("Gemeinsamer Serverzugang").into(),|id|id.to_string()),timestamp(client.observed_unix_ms)),
@@ -205,6 +209,10 @@ fn infrastructure(app: &App, now: u64) -> Graph {
         edges,
         internet,
         internet_client,
+        public_clients: app.clients.iter().filter(|client| app.online
+            && now.saturating_sub(client.observed_unix_ms)<30_000
+            && client.ip.is_some_and(crate::connection_info::public_peer))
+            .map(|client| format!("client:{}",client.id)).collect(),
         internet_runners: Default::default(),
     }
 }
@@ -359,6 +367,7 @@ fn workers(app: &App, project: Option<ProjectId>, unassigned: bool, now: u64) ->
         edges,
         internet: false,
         internet_client: None,
+        public_clients: Default::default(),
         internet_runners: Default::default(),
     }
 }
@@ -580,7 +589,7 @@ fn graph(ui: &mut egui::Ui, id: &str, graph: &Graph, removable: &[(String, Runne
                 Stroke::new(2.0_f32, color.gamma_multiply(0.55)),
             ));
             ui.painter().circle_filled(target, 5.0, color);
-            let internet = (to == "server" && graph.internet_client.as_ref() == Some(from))
+            let internet = (to == "server" && (graph.internet_client.as_ref() == Some(from) || graph.public_clients.contains(from)))
                 || (from_server && graph.internet_runners.contains(to));
             if internet {
                 internet_badges.push((center, ui.id().with(("internet-link", from, to))));

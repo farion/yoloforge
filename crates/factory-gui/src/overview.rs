@@ -63,7 +63,6 @@ pub struct FlowState {
     pub motion: bool,
     expanded: BTreeSet<String>,
     source: Option<(String, BootId)>,
-    previous: BTreeMap<TicketId, bool>,
     deadlines: BTreeMap<TicketId, u64>,
     positions: BTreeMap<TicketId, Motion>,
     layout: Option<(Option<ProjectId>, u32)>,
@@ -79,7 +78,6 @@ impl Default for FlowState {
             motion: true,
             expanded: BTreeSet::new(),
             source: None,
-            previous: BTreeMap::new(),
             deadlines: BTreeMap::new(),
             positions: BTreeMap::new(),
             layout: None,
@@ -124,23 +122,15 @@ impl FlowState {
         self.last_wall = Some(wall);
         self.was_online = online;
         let present: BTreeSet<_> = s.tickets.iter().map(|t| t.id).collect();
-        self.previous.retain(|id, _| present.contains(id));
         self.deadlines.retain(|id, _| present.contains(id));
         self.positions.retain(|id, _| present.contains(id));
         for ticket in &s.tickets {
             let success = ticket.status != TicketState::Cancelled
                 && task_bucket(s, ticket) == TaskBucket::Archive;
-            let previous = self.previous.insert(ticket.id, success);
-            if success && previous != Some(true) {
-                // Don't resurrect an old archive on startup. Newly observed
-                // transitions get the full two minutes, regardless of ticket age.
-                let remaining = if previous.is_some() {
-                    design::FLOW_SUCCESS_MS
-                } else {
-                    design::FLOW_SUCCESS_MS
-                        .saturating_sub(wall.saturating_sub(ticket.updated_unix_ms))
-                };
-                self.deadlines.insert(ticket.id, self.clock + remaining);
+            if success {
+                self.deadlines.entry(ticket.id).or_insert_with(|| {
+                    ticket.updated_unix_ms.min(wall).saturating_add(design::FLOW_SUCCESS_MS)
+                });
             } else if !success {
                 self.deadlines.remove(&ticket.id);
             }
@@ -150,7 +140,7 @@ impl FlowState {
     fn visible(&self, ticket: &Ticket) -> bool {
         self.deadlines
             .get(&ticket.id)
-            .is_none_or(|deadline| self.clock < *deadline)
+            .is_none_or(|deadline| self.last_wall.unwrap_or_default() < *deadline)
     }
 
     fn position(&mut self, id: TicketId, target: Vec2) -> Vec2 {
@@ -173,6 +163,7 @@ impl FlowState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
+    Intake,
     Routing,
     Execution,
     Validation,
@@ -206,7 +197,8 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     }
     let waiting = command.is_some_and(|c| crate::model::command_waits_for_answer(s, c));
     let retry_wait = command.is_none() && task_status(s, ticket) == crate::tr!("Wartet auf Wiederholung");
-    let failed = !retry_wait && (command.is_some_and(|c| {
+    let delivery_retry = delivery_retry_pending(ticket);
+    let failed = !retry_wait && !delivery_retry && (command.is_some_and(|c| {
         c.state == CommandState::Failed || command_publication_blocked(c)
             || c.agent_progress
                 .as_ref()
@@ -221,9 +213,18 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
                     .starts_with("Orchestrator: Lauf fehlgeschlagen"))));
     let stage = if ticket.draft {
         Stage::Routing
-    } else if command.is_some_and(crate::model::is_merger) {
+    } else if ticket.status == TicketState::Backlog && command.is_none()
+        && !failed && !retry_wait && !delivery_retry
+    {
+        Stage::Intake
+    } else if command.is_some_and(|c| crate::model::is_merger(c)
+        || c.agent_spec.as_ref().is_some_and(|spec| spec.role == APPROVED_PUBLICATION_ROLE))
+        || (delivery_retry && ticket.routing_note == INTEGRATION_RETRY_NOTE)
+    {
         Stage::Merge
-    } else if ticket.status == TicketState::Validating || crate::model::validation_blocked(ticket) {
+    } else if ticket.status == TicketState::Validating || crate::model::validation_blocked(ticket)
+        || (delivery_retry && ticket.routing_note == SNAPSHOT_RETRY_NOTE)
+    {
         Stage::Validation
     } else if ticket.status == TicketState::ReworkQueued {
         Stage::Routing
@@ -251,8 +252,6 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
         }
     } else if ticket.status == TicketState::InProgress {
         Stage::Execution
-    } else if ticket.routing_note.is_empty() && ticket.status == TicketState::Backlog {
-        Stage::Routing
     } else {
         Stage::Routing
     };
@@ -431,31 +430,45 @@ fn orchestration_active(s: &Snapshot, project: Option<ProjectId>) -> bool {
 fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> Vec<Lane<'a>> {
     let mut result = vec![
         Lane {
+            key: "intake".into(),
+            icon: icons::TRAY,
+            title: crate::tr!("Eingang").into(),
+            column: 0,
+            cards: vec![],
+        },
+        Lane {
             key: "routing".into(),
             icon: icons::ROBOT,
             title: "Orchestrator".into(),
-            column: 0,
+            column: 1,
             cards: vec![],
         },
         Lane {
             key: "implementation".into(),
             icon: icons::ROBOT,
             title: "Implementer".into(),
-            column: 1,
+            column: 2,
             cards: vec![],
         },
         Lane {
             key: "validation".into(),
             icon: icons::ROBOT,
             title: "Reviewer".into(),
-            column: 2,
+            column: 3,
             cards: vec![],
         },
         Lane {
             key: "merge".into(),
             icon: icons::ROBOT,
             title: "Merger".into(),
-            column: 3,
+            column: 4,
+            cards: vec![],
+        },
+        Lane {
+            key: "completed".into(),
+            icon: icons::CHECK_CIRCLE,
+            title: crate::tr!("Erledigt").into(),
+            column: 5,
             cards: vec![],
         },
     ];
@@ -477,10 +490,12 @@ fn lanes<'a>(s: &'a Snapshot, state: &FlowState, project: Option<ProjectId>) -> 
         }
         let c = card(s, ticket);
         match c.stage {
-            Stage::Routing => result[0].cards.push(c),
-            Stage::Execution => result[1].cards.push(c),
-            Stage::Validation => result[2].cards.push(c),
-            Stage::Merge => result[3].cards.push(c),
+            Stage::Intake => result[0].cards.push(c),
+            Stage::Routing => result[1].cards.push(c),
+            Stage::Execution => result[2].cards.push(c),
+            Stage::Validation => result[3].cards.push(c),
+            Stage::Merge => result[4].cards.push(c),
+            Stage::Result if c.success => result[5].cards.push(c),
             Stage::Result => {}
         }
     }
@@ -549,7 +564,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     }
     let lanes = lanes(&s, &app.factory_flow, project);
     let orchestrating = orchestration_active(&s, project);
-    let routing_active = orchestrating || lanes[0].cards.iter().any(|c| c.active);
+    let routing_active = orchestrating || lanes[1].cards.iter().any(|c| c.active);
+    let gaps = (lanes.len() - 1) as f32;
+    let columns = lanes.len() as f32;
     ui.add_space(12.0);
     let mut task = None;
     egui::ScrollArea::both()
@@ -558,14 +575,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, |ui| {
             let base_width = ui
                 .available_width()
-                .max(design::FLOW_MIN_CARD_WIDTH * 4.0 + design::FLOW_COLUMN_GAP * 3.0 + 64.0);
-            let card_width = ((base_width - 64.0 - design::FLOW_COLUMN_GAP * 3.0) / 4.0)
+                .max(design::FLOW_MIN_CARD_WIDTH * columns + design::FLOW_COLUMN_GAP * gaps + 64.0);
+            let card_width = ((base_width - 64.0 - design::FLOW_COLUMN_GAP * gaps) / columns)
                 .min(design::FLOW_CARD_SIZE.x);
             let card_heights: BTreeMap<_, _> = lanes.iter()
                 .flat_map(|lane| lane.cards.iter())
                 .map(|card| (card.ticket.id, card_height(ui, card, card_width)))
                 .collect();
-            let stride = (base_width - 64.0 - card_width) / 3.0;
+            let stride = (base_width - 64.0 - card_width) / gaps;
             let width = base_width;
             let layout = (project, width.round() as u32);
             if app.factory_flow.layout != Some(layout) {
@@ -608,18 +625,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let animate = app.online && app.factory_flow.motion;
             // Edges connect actual stages and assigned runner branches. Idle edges
             // stay quiet; only observed activity produces moving light packets.
-            let routing = placements.iter().find(|(l, _, _)| l.column == 0).unwrap().1;
-            let validation = placements.iter().find(|(l, _, _)| l.column == 2).unwrap().1;
-            let merger = placements.iter().find(|(l, _, _)| l.column == 3).unwrap().1;
+            let intake = placements[0].1;
+            let routing = placements[1].1;
+            let validation = placements[3].1;
+            let merger = placements[4].1;
             edge(
                 ui,
-                egui::pos2(canvas.left(), routing.y + 26.0),
+                intake + egui::vec2(card_width, 26.0),
                 routing + egui::vec2(0.0, 26.0),
                 BLUE,
                 animate && routing_active,
                 clock,
             );
-            let implementation = placements.iter().find(|(l, _, _)| l.column == 1).unwrap();
+            let implementation = &placements[2];
             let starting = implementation.0.cards.iter().any(Card::starting_execution);
             edge(
                 ui,
@@ -641,14 +659,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             edge(
                 ui,
                 merger + egui::vec2(card_width, 26.0),
-                egui::pos2(canvas.right(), merger.y + 26.0),
+                placements[5].1 + egui::vec2(0.0, 26.0),
                 GREEN,
                 false,
                 clock,
             );
             for (lane, origin, height) in placements {
                 let header = Rect::from_min_size(origin, egui::vec2(card_width, HEADER_HEIGHT));
-                let active = if lane.column == 0 {
+                let active = if lane.column == 1 {
                     routing_active
                 } else {
                     lane.cards.iter().any(|c| c.active)
@@ -787,7 +805,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     if let Some(id) = task {
         app.view_task(id);
     }
-    // A heartbeat while moving; one inexpensive tick otherwise for expiry.
+    if let Some(deadline) = app.factory_flow.deadlines.values()
+        .copied()
+        .filter(|&deadline| deadline > app.factory_flow.last_wall.unwrap_or_default())
+        .min()
+    {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(
+            deadline - app.factory_flow.last_wall.unwrap_or_default(),
+        ));
+    }
+    // A heartbeat while moving.
     if app.online {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(
@@ -1186,6 +1213,31 @@ mod tests {
         assert_eq!(card_actor(&snapshot, &tile), "Test-Runner");
     }
 
+    #[test]
+    fn pending_approved_publication_stays_in_merge_and_snapshot_retry_stays_in_review() {
+        let mut snapshot = (*crate::tests::fixture().snapshot.unwrap()).clone();
+        snapshot.tickets[0].status = TicketState::InProgress;
+        snapshot.tickets[0].execution_command = Some(snapshot.commands[0].id);
+        snapshot.commands[0].state = CommandState::Pending;
+        snapshot.commands[0].agent_spec.as_mut().unwrap().role = APPROVED_PUBLICATION_ROLE.into();
+        assert_eq!(card(&snapshot, &snapshot.tickets[0]).stage, Stage::Merge);
+
+        snapshot.commands[0].agent_spec.as_mut().unwrap().role.clear();
+        snapshot.commands[0].state = CommandState::Succeeded;
+        let command = &mut snapshot.commands[0];
+        command.result = Some(CommandOutput::Agent { agent: AgentProgress {
+            session_id: command.session_id(),
+            message_id: agent_message_id(command.id),
+            phase: AgentPhase::Succeeded,
+            summary: PUBLICATION_BLOCKED_PREFIX.into(),
+        }});
+        snapshot.tickets[0].routing_note = SNAPSHOT_RETRY_NOTE.into();
+        let tile = card(&snapshot, &snapshot.tickets[0]);
+        assert_eq!(tile.stage, Stage::Validation);
+        assert!(!tile.failed);
+        assert_eq!(tile.status(&snapshot), crate::tr!("Review-Snapshot wird erneut gesichert"));
+    }
+
     fn complete(s: &mut Snapshot) {
         s.questions.clear();
         s.commands[0].state = CommandState::Succeeded;
@@ -1248,14 +1300,17 @@ mod tests {
         let still_blocked = other.id;
         s.streams[0].ticket_ids.push(other.id);
         s.tickets.push(other);
-        let flow = FlowState::default();
-        assert_eq!(lanes(&s, &flow, None)[3].cards.len(), 2);
+        let mut flow = FlowState::default();
+        assert_eq!(lanes(&s, &flow, None)[4].cards.len(), 2);
 
         s.tickets[0].status = TicketState::Done;
+        s.tickets[0].updated_unix_ms = 200_000;
+        flow.observe("test", &s, true, 200_000);
         let visible = lanes(&s, &flow, None);
-        assert_eq!(visible[3].cards.len(), 1);
-        assert_eq!(visible[3].cards[0].ticket.id, still_blocked);
-        assert!(!visible.iter().flat_map(|lane| &lane.cards).any(|c| c.ticket.id == completed));
+        assert_eq!(visible[4].cards.len(), 1);
+        assert_eq!(visible[4].cards[0].ticket.id, still_blocked);
+        assert_eq!(visible[5].cards.len(), 1);
+        assert_eq!(visible[5].cards[0].ticket.id, completed);
         let result = card(&s, &s.tickets[0]);
         assert_eq!(result.stage, Stage::Result);
         assert!(result.success && !result.failed && !result.waiting && !result.active);
@@ -1356,12 +1411,14 @@ mod tests {
         let mut state = FlowState::default();
         state.observe("test", &s, true, 100_000);
         complete(&mut s);
+        s.tickets[0].updated_unix_ms = 100_500;
         state.observe("test", &s, true, 101_000);
         assert!(state.visible(&s.tickets[0]));
-        state.observe("test", &s, true, 220_999);
-        assert!(state.visible(&s.tickets[0]));
-        state.observe("test", &s, true, 221_000);
-        assert!(!state.visible(&s.tickets[0]));
+        assert_eq!(lanes(&s, &state, None)[5].cards.len(), 1);
+        state.observe("test", &s, true, 220_499);
+        assert_eq!(lanes(&s, &state, None)[5].cards.len(), 1);
+        state.observe("test", &s, true, 220_500);
+        assert!(lanes(&s, &state, None)[5].cards.is_empty());
         s.commands[0].state = CommandState::Failed;
         state.observe("test", &s, true, 222_000);
         state.observe("test", &s, true, 999_000);
@@ -1377,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn old_archive_is_not_resurrected_and_offline_freezes_time_and_motion() {
+    fn old_archive_stays_hidden_and_only_motion_freezes_offline() {
         let app = crate::tests::fixture();
         let mut s = (*app.snapshot.unwrap()).clone();
         let mut state = FlowState::default();
@@ -1388,6 +1445,7 @@ mod tests {
         s.tickets[0].status = TicketState::InProgress;
         state.observe("test", &s, true, 301_000);
         complete(&mut s);
+        s.tickets[0].updated_unix_ms = 302_000;
         state.observe("test", &s, true, 302_000);
         let id = s.tickets[0].id;
         assert_eq!(state.position(id, Vec2::ZERO), Vec2::ZERO);
@@ -1398,11 +1456,6 @@ mod tests {
         state.observe("test", &s, false, 400_000);
         state.observe("test", &s, false, 900_000);
         assert_eq!(state.position(id, egui::vec2(100.0, 0.0)), position);
-        assert!(state.visible(&s.tickets[0]));
-        state.observe("test", &s, true, 1_000_000);
-        state.observe("test", &s, true, 1_119_799);
-        assert!(state.visible(&s.tickets[0]));
-        state.observe("test", &s, true, 1_119_800);
         assert!(!state.visible(&s.tickets[0]));
         state.motion = false;
         assert_eq!(
@@ -1415,7 +1468,9 @@ mod tests {
     fn cancelled_intents_disappear_from_the_flow_and_remain_in_the_archive() {
         let mut s = (*crate::tests::fixture().snapshot.unwrap()).clone();
         let state = FlowState::default();
-        assert!(lanes(&s, &state, None).iter().any(|lane| !lane.cards.is_empty()));
+        s.commands.clear();
+        s.tickets[0].status = TicketState::Backlog;
+        assert_eq!(lanes(&s, &state, None)[0].cards[0].ticket.id, s.tickets[0].id);
         s.tickets[0].draft = true;
         assert!(
             lanes(&s, &state, None).iter().all(|lane| lane.cards.is_empty()),
@@ -1452,7 +1507,7 @@ mod tests {
         let scoped = lanes(&s, &state, Some(first));
         assert_eq!(global.iter().map(|l| l.cards.len()).sum::<usize>(), 8);
         assert_eq!(scoped.iter().map(|l| l.cards.len()).sum::<usize>(), 7);
-        let executing = scoped.iter().find(|l| l.column == 1).unwrap();
+        let executing = scoped.iter().find(|l| l.key == "implementation").unwrap();
         assert_eq!(executing.cards.len(), 7);
         assert!(executing.cards[0].waiting);
         assert_eq!(executing.key, "implementation");
@@ -1534,13 +1589,15 @@ mod tests {
         assert_eq!(
             lanes.iter().map(|lane| (lane.title.as_str(), lane.icon)).collect::<Vec<_>>(),
             [
+                ("Eingang", icons::TRAY),
                 ("Orchestrator", icons::ROBOT),
                 ("Implementer", icons::ROBOT),
                 ("Reviewer", icons::ROBOT),
                 ("Merger", icons::ROBOT),
+                ("Erledigt", icons::CHECK_CIRCLE),
             ]
         );
-        let execution: Vec<_> = lanes.iter().filter(|lane| lane.column == 1).collect();
+        let execution: Vec<_> = lanes.iter().filter(|lane| lane.key == "implementation").collect();
         assert_eq!(execution.len(), 1);
         assert_eq!(execution[0].key, "implementation");
         assert_eq!(
@@ -1548,7 +1605,7 @@ mod tests {
             BTreeSet::from([ticket, second_ticket, third_ticket])
         );
         let filtered = self::lanes(s, &app.factory_flow, Some(ProjectId::new()));
-        let filtered_execution = filtered.iter().find(|lane| lane.column == 1).unwrap();
+        let filtered_execution = filtered.iter().find(|lane| lane.key == "implementation").unwrap();
         assert!(filtered_execution.cards.is_empty());
 
         for _ in 0..4 {
@@ -1560,10 +1617,10 @@ mod tests {
             egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
             _ => None,
         }).collect();
-        for label in ["Orchestrator (0)", "Implementer (3)", "Reviewer (0)", "Merger (0)"] {
+        for label in ["Eingang (0)", "Orchestrator (0)", "Implementer (3)", "Reviewer (0)", "Merger (0)", "Erledigt (0)"] {
             assert!(labels.contains(&label), "Missing {label}: {labels:?}");
         }
-        for label in ["Eingang", "Eingang (0)", "Done", "Done (0)", "Verteilung", "Ausführung", "Ergebnis", "Test-Runner (2)", "Idle-Runner (0)"] {
+        for label in ["Verteilung", "Ausführung", "Ergebnis", "Test-Runner (2)", "Idle-Runner (0)"] {
             assert!(!labels.contains(&label), "Redundant column heading: {label}");
         }
         for subtitle in [
@@ -1581,7 +1638,8 @@ mod tests {
         let card = |id| ctx.data_mut(|d| d.get_temp::<Rect>(egui::Id::new(("test-flow-task", id)))).unwrap();
         let first = card(ticket);
         let second = card(second_ticket);
-        assert_eq!(first.width(), design::FLOW_CARD_SIZE.x);
+        assert!((design::FLOW_MIN_CARD_WIDTH..=design::FLOW_CARD_SIZE.x).contains(&first.width()));
+        assert_eq!(first.width(), header.width());
         assert!((92.0..=design::FLOW_CARD_SIZE.y).contains(&first.height()));
         assert_eq!(second.size(), first.size());
         assert_eq!(header.left(), first.left());

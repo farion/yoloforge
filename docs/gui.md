@@ -298,8 +298,8 @@ Die Desktop-Version steht neben dem Zahnrad unten rechts.
 Der Zähler zeigt ungelesene Meldungen; der bisherige Meldungsbutton im Kopfbereich entfällt.
 
 **Overview** ist der erste Eintrag unter FACTORY und zeigt den lebenden Aufgabenfluss:
-Eingang, Verteilung, Ausführung und Ergebnis. Die Ausführung verzweigt nach den
-tatsächlich zugeordneten Runnern und Sessions. Standardmäßig werden alle Projekte
+Eingang, Orchestrator, Implementer, Reviewer, Merger und Erledigt.
+Standardmäßig werden alle Projekte
 angezeigt; ein Filter beschränkt die Ansicht auf das aktuell ausgewählte Projekt.
 Rechts im Menüeintrag zeigt ein Ladeindikator aktive Arbeit in der gesamten Factory,
 auch wenn eine andere Seite oder ein anderes Projekt ausgewählt ist. Bloßes Warten
@@ -318,14 +318,14 @@ Rückfragen bleiben an ihrer Ausführungsstation mit gelbem Rückfrage-Icon und
 pulsierendem Rand; Fehler bleiben sichtbar. Bestätigt erfolgreiche Aufgaben
 verschwinden nach zwei Minuten aus der Grafik, nicht aus der Factory. Bereits
 alte Archivaufgaben werden beim Öffnen nicht erneut eingeblendet. Der
-Erfolgszähler bezieht sich auf alle erfolgreichen Aufgaben im gewählten Filter.
+Erledigt-Zähler zeigt nur die noch sichtbaren Abschlüsse im gewählten Filter.
 Ein Kartenklick öffnet die Aufgabe schreibgeschützt; der Kopf einer
 Ausführungsstation öffnet die zugehörige Session.
 
 Lichtimpulse auf aktiven Verbindungen, ein Heartbeat an aktiven Stationen und
 kurze Kartenbewegungen zeigen beobachtete Aktivität, keinen geschätzten
 Fortschritt. Animation lässt sich abschalten. Offline zeigt die Ansicht
-ausdrücklich den letzten Stand und hält Bewegung und Ausblendung an.
+den letzten Stand und hält die Bewegung an. Erledigte Karten laufen auch offline ab.
 
 ### Infrastructure
 

@@ -337,8 +337,8 @@ impl App {
                                           }
                                       } else {
                                          let unread = (page == Page::Notifications).then(|| (
-                                             usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
-                                             AMBER,
+                                              usize::try_from(self.visible_unread_notifications(&self.notification_reads_pending())).unwrap_or(usize::MAX),
+                                              BLUE,
                                          ));
                                          design::navigation_row_with_icon(ui, Some(page.icon()), page.title(), selected, unread)
                                      }
@@ -2503,12 +2503,24 @@ fn project_navigation_badges_with_archive(
         Page::Sessions | Page::ProjectActivity | Page::Orchestrator | Page::Supervisor | Page::Reviewer | Page::Memorizer | Page::Merger => {
             sessions_for_page(s, project, page).iter()
                 .filter(|c| !session_archived_for_page(s, c, page, now, manually_archived))
-                .map(|c| session_list_pill(s, page, c))
+                .map(|c| {
+                    let (status, color) = session_list_pill(s, page, c);
+                    let color = if page != Page::Sessions { color }
+                        else if crate::model::working_session_command(s, c.session_root(), None).is_some() { BLUE }
+                        else { MUTED };
+                    (status, color)
+                })
                 .for_each(&mut count);
             if page == Page::Sessions {
                 s.directs.iter()
                     .filter(|d| d.project_id == project && d.state != factory_protocol::directs::DirectState::Archived)
-                    .map(|d| crate::directs::status(s, d))
+                    .map(|d| {
+                        let (status, _) = crate::directs::status(s, d);
+                        let working = d.current_command_id
+                            .and_then(|id| s.commands.iter().find(|c| c.id == id))
+                            .is_some_and(|c| crate::model::working_session_command(s, c.session_root(), Some(c.id)).is_some());
+                        (status, if working { BLUE } else { MUTED })
+                    })
                     .for_each(&mut count);
             }
         }

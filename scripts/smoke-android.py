@@ -70,7 +70,7 @@ try:
     result=subprocess.run(adb+["shell","am","instrument","-w","-e","class","dev.yoloforge.mobile.AppFlowTest#"+test,"-e","factoryEndpoint","http://127.0.0.1:"+port,"-e","factoryKey",key,"dev.yoloforge.mobile.test/androidx.test.runner.AndroidJUnitRunner"],capture_output=True,text=True,timeout=150)
     print(result.stdout);result.check_returncode();assert "OK (1 test)" in result.stdout,"Android UI acceptance failed"
     checks=("valid and invalid keys" if args.sign_in_only else
-            "project overlay, create, delete" if args.project_management else
+            "project overlay, pause, resume" if args.project_management else
             "key sign-in, question notification, typed answer, prompt")
     print("PASS Android UI -> real Rust API:",checks,"; evidence:",directory)
 finally:

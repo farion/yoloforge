@@ -43,6 +43,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
     private FrameLayout frame;
     private LinearLayout surface;
     private FrameLayout flyout;
+    private boolean flyoutClosing;
     private FrameLayout projectOverlay;
     private Runnable restoreProjectChooser;
     private final Map<String,List<String>> projectDrafts=new HashMap<>();
@@ -55,11 +56,16 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
     private long unreadNotifications;
     private boolean overviewOnlyProject;
     private boolean online;
+    private TextView connectionLabel, factoryConnectionBadge;
+    private ImageView connectionSymbol;
+    private final android.os.Handler connectionHandler=new android.os.Handler(android.os.Looper.getMainLooper());
+    private int connectionWatch;
+    private final Runnable connectionProbe=this::probeConnection;
     private int inboxTab, inboxFilter;
     private String inboxQuery="";
     private final androidx.activity.OnBackPressedCallback drawerBack = new androidx.activity.OnBackPressedCallback(false) {
         @Override public void handleOnBackPressed() {
-            if(projectOverlay!=null)closeProjectDropdown();else closeFlyout();
+            if(projectOverlay!=null)closeProjectDropdown();else dismissFlyout();
         }
     };
     private final androidx.activity.OnBackPressedCallback projectEditorBack = new androidx.activity.OnBackPressedCallback(false) {
@@ -115,8 +121,48 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         try { if (vault.get("credentials") == null) login(); else refresh(); } catch (Exception error) { login(); message(error.getMessage()); }
     }
     @Override public void onNewIntent(Intent intent) { super.onNewIntent(intent);setIntent(intent);readIntent(intent);refresh(); }
-    @Override public void onDestroy() { worker.shutdown(); super.onDestroy(); }
+    @Override protected void onStart(){super.onStart();connectionHandler.post(connectionProbe);}
+    @Override protected void onStop(){connectionWatch++;connectionHandler.removeCallbacks(connectionProbe);super.onStop();}
+    @Override public void onDestroy() { cancelOverviewExpiry(); worker.shutdown(); super.onDestroy(); }
+    private void probeConnection(){
+        int watch=connectionWatch, started=generation;
+        if(snapshot==null||"Anmeldung".equals(screenTitle)){
+            connectionHandler.postDelayed(connectionProbe,10000);return;
+        }
+        worker.execute(()->{
+            boolean reachable;
+            try{reachable=api().healthy();}
+            catch(Exception e){reachable=false;}
+            boolean result=reachable;
+            ui(()->{
+                if(watch!=connectionWatch)return;
+                if(started==generation&&result!=online){setOnline(result);toast(result?"Wieder mit Factory verbunden.":"Factory nicht erreichbar.");}
+                connectionHandler.postDelayed(connectionProbe,10000);
+            });
+        });
+    }
+    private void setOnline(boolean connected){
+        online=connected;
+        if(connectionLabel!=null){
+            String current=connectionLabel.getText().toString();
+            int separator=current.indexOf(" · ");
+            connectionLabel.setText((online?"Verbunden":"Offline")+(separator<0?"":current.substring(separator)));
+            connectionLabel.setTextColor(online?GREEN:MUTED);
+            connectionSymbol.setColorFilter(online?GREEN:MUTED);
+        }
+        if(factoryConnectionBadge!=null){
+            TextView style=pill(this,online?"Online":"Offline",online?GREEN:MUTED);
+            factoryConnectionBadge.setText(style.getText());
+            factoryConnectionBadge.setTextColor(style.getCurrentTextColor());
+            factoryConnectionBadge.setBackground(style.getBackground());
+        }
+        if(flyout!=null){
+            View pause=flyout.findViewWithTag("project-pause");
+            if(pause!=null){pause.setEnabled(online);pause.setAlpha(online?1f:.5f);}
+        }
+    }
     private void screen(String title) {
+        cancelOverviewExpiry();
         if(saveProjectDraft!=null){saveProjectDraft.run();saveProjectDraft=null;}
         projectEditorBack.setEnabled(false);
         try{saveDraft();saveAnswerDraft();}catch(Exception e){android.widget.Toast.makeText(this,"Entwurf konnte nicht gespeichert werden",android.widget.Toast.LENGTH_LONG).show();}
@@ -166,7 +212,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         else if(Arrays.asList("Overview","Intents","Sessions","Projektaktivität","Infrastructure","Diagnose").contains(title))
             iconButton(header,R.drawable.ic_arrow_clockwise,"Aktualisieren",this::refresh);
         divider(surface);
-        loading=null;
+        loading=null;connectionLabel=null;connectionSymbol=null;factoryConnectionBadge=null;
         ScrollView scroll = new ScrollView(this);scroll.setFillViewport(true);surface.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         page = new LinearLayout(this); page.setOrientation(LinearLayout.VERTICAL);page.setPadding(dp(14),dp(14),dp(14),dp(14));scroll.addView(page);
         if(snapshot!=null && !"Anmeldung".equals(title)) connectionFooter(surface);
@@ -190,22 +236,30 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         footer.setPadding(dp(14),0,dp(4),0);target.addView(footer,new LinearLayout.LayoutParams(-1,dp(46)));
         int color=online?GREEN:MUTED;
         ImageView symbol=icon(R.drawable.ic_plugs_connected,color);
+        connectionSymbol=symbol;
         footer.addView(symbol,new LinearLayout.LayoutParams(dp(16),dp(16)));
         String source="";try{source=android.net.Uri.parse(api().base).getAuthority();}catch(Exception ignored){}
         TextView connection=label(this,(online?"Verbunden":"Offline")+(source==null||source.isEmpty()?"":" · "+source),12,color);
+        connectionLabel=connection;
         truncate(connection);connection.setPaddingRelative(dp(8),0,0,0);
         footer.addView(connection,new LinearLayout.LayoutParams(0,-2,1));
     }
     private void openFlyout(){
         if(flyout!=null)return;
         drawerBack.setEnabled(true);
-        flyout=new FrameLayout(this);flyout.setBackgroundColor(0x99000000);flyout.setOnClickListener(v->closeFlyout());
+        flyout=new FrameLayout(this);flyout.setBackgroundColor(0x99000000);flyout.setOnClickListener(v->dismissFlyout());
         frame.addView(flyout,new FrameLayout.LayoutParams(-1,-1));
         surface.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         ScrollView scroll=new ScrollView(this);scroll.setBackgroundColor(SHELL);scroll.setFillViewport(true);scroll.setClickable(true);
         int width=frame.getWidth()-frame.getPaddingLeft()-frame.getPaddingRight();
         if(width<=0)width=dp(getResources().getConfiguration().screenWidthDp);
-        flyout.addView(scroll,new FrameLayout.LayoutParams(Math.min(dp(304),Math.max(dp(160),width-dp(52))),-1,android.view.Gravity.START));
+        int drawerWidth=Math.min(dp(304),Math.max(dp(160),width-dp(52)));
+        flyout.addView(scroll,new FrameLayout.LayoutParams(drawerWidth,-1,Gravity.START));
+        boolean rtl=frame.getLayoutDirection()==View.LAYOUT_DIRECTION_RTL;
+        scroll.setTranslationX(rtl?drawerWidth:-drawerWidth);
+        flyout.setAlpha(0);
+        scroll.animate().translationX(0).setDuration(220).start();
+        flyout.animate().alpha(1).setDuration(220).start();
         LinearLayout rows=new LinearLayout(this);rows.setOrientation(LinearLayout.VERTICAL);rows.setPadding(dp(16),dp(14),dp(16),dp(14));scroll.addView(rows);
         sectionLabel(rows,"PROJEKT");
         JSONObject project=find("projects",projectId);
@@ -215,8 +269,14 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         chooser.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);truncate(chooser);
         LinearLayout controls=new LinearLayout(this);controls.setGravity(Gravity.CENTER_VERTICAL);
         controls.addView(chooser,new LinearLayout.LayoutParams(0,-2,1));
-        ImageButton menu=iconButton(controls,R.drawable.ic_dots_three,"Projektmenü",null);
-        menu.setOnClickListener(v->openProjectMenu(scroll,controls,menu));
+        if(project!=null){
+            boolean paused=project.optBoolean("paused");
+            ImageButton pause=iconButton(controls,paused?R.drawable.ic_play:R.drawable.ic_pause,
+                paused?"Projekt fortsetzen":"Projekt pausieren",()->toggleProjectPause(project));
+            pause.setTag("project-pause");
+            pause.setEnabled(online);
+            if(!online)pause.setAlpha(.5f);
+        }
         addControl(rows,controls,true);
         chooser.setEnabled(array("projects").length()>0);
         chooser.setOnClickListener(v->openProjectDropdown(scroll,chooser));
@@ -231,6 +291,8 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         navigationRow(rows,R.drawable.ic_bell,"Benachrichtigungen",section==Section.NOTIFICATIONS,(int)Math.min(Integer.MAX_VALUE,unreadNotifications),this::factoryNotifications);
         navigationRow(rows,R.drawable.ic_hard_drives,"Infrastructure",section==Section.INFRASTRUCTURE,0,this::infrastructure);
         navigationRow(rows,R.drawable.ic_chart_line,"Diagnose",section==Section.DIAGNOSE,0,this::diagnostics);
+        View appSpace=new View(this);rows.addView(appSpace,new LinearLayout.LayoutParams(-1,dp(12)));divider(rows);
+        sectionLabel(rows,"APP");
         navigationRow(rows,R.drawable.ic_gear,"App-Einstellungen",false,0,this::appSettings);
     }
     private String projectLabel(JSONObject project){
@@ -238,7 +300,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         return key.isEmpty()?project.optString("name"):key+" · "+project.optString("name");
     }
     private void openProjectDropdown(ScrollView navigation,Button chooser){
-        if(projectOverlay!=null)return;
+        if(projectOverlay!=null || flyoutClosing)return;
         JSONArray projects=array("projects");
         LinearLayout options=projectOptions();
         TextView focusOption=null;
@@ -274,7 +336,8 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         return options;
     }
     private void showProjectOverlay(ScrollView navigation,View anchorView,View trigger,LinearLayout options,View focusOption){
-        if(projectOverlay!=null)return;
+        if(projectOverlay!=null || flyoutClosing)return;
+        navigation.animate().cancel();navigation.setTranslationX(0);
         int[] anchor=new int[2], drawer=new int[2];
         anchorView.getLocationInWindow(anchor);flyout.getLocationInWindow(drawer);
         int top=anchor[1]-drawer[1], width=anchorView.getWidth();
@@ -308,16 +371,6 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         if(projectOverlay==null)return;
         flyout.removeView(projectOverlay);projectOverlay=null;
         restoreProjectChooser.run();restoreProjectChooser=null;
-    }
-    private void openProjectMenu(ScrollView navigation,View anchor,View trigger){
-        JSONObject project=find("projects",projectId);
-        LinearLayout options=projectOptions();
-        TextView create=row(options,"Neues Projekt …",false,()->projectEditor(null));
-        if(project!=null){
-            row(options,project.optBoolean("paused")?"Projekt fortsetzen":"Projekt pausieren",false,()->toggleProjectPause(project));
-            row(options,"Projekt löschen …",false,()->confirmProjectDeletion(project));
-        }
-        showProjectOverlay(navigation,anchor,trigger,options,create);
     }
     private static String projectPath(JSONObject project){return "/v1/projects/"+project.optString("id");}
     private void returnToProjectMenu(){
@@ -437,10 +490,23 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
             return android.graphics.BitmapFactory.decodeByteArray(data,0,data.length);
         }catch(IllegalArgumentException ignored){return null;}
     }
+    private void dismissFlyout(){
+        FrameLayout drawer=flyout;
+        if(drawer==null || flyoutClosing)return;
+        flyoutClosing=true;
+        View panel=drawer.getChildAt(0);
+        int direction=frame.getLayoutDirection()==View.LAYOUT_DIRECTION_RTL?1:-1;
+        panel.animate().translationX(direction*panel.getWidth()).setDuration(180).start();
+        drawer.animate().alpha(0).setDuration(180).withEndAction(()->{
+            if(flyout==drawer)closeFlyout();
+        }).start();
+    }
     private void closeFlyout(){
         if(flyout==null)return;
         closeProjectDropdown();
-        frame.removeView(flyout);flyout=null;drawerBack.setEnabled(false);surface.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        flyout.animate().cancel();
+        flyout.getChildAt(0).animate().cancel();
+        frame.removeView(flyout);flyout=null;flyoutClosing=false;drawerBack.setEnabled(false);surface.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
     }
     private void sectionLabel(LinearLayout rows,String title){
         TextView label=label(this,title,12,MUTED);label.setPaddingRelative(0,dp(9),0,dp(6));rows.addView(label);
@@ -549,14 +615,14 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
             try{fresh=verified!=null?verified:api().request("GET","/v1/snapshot",null);}
             catch(Exception failure){
                 android.util.Log.w("YoloForge","Factory refresh failed: "+failure.getClass().getSimpleName());
-                ui(()->{if(generation!=started)return;online=false;
+                ui(()->{if(generation!=started)return;setOnline(false);
                     if(snapshot==null)login();else if(showQuestions){showQuestions=false;questions();}else showSection();
                     toast("Factory nicht erreichbar. Bitte Verbindung prüfen.");
                 });return;
             }
             JSONObject pending=vault.get("pending"); ui(()->{
             if(generation!=started)return;
-            snapshot=fresh;online=true;
+             snapshot=fresh;setOnline(true);
             if(projectId!=null && find("projects",projectId)==null)projectId=null;
             if(projectId==null)try{
                 JSONObject choice=vault.get("project-choice:"+api().base);
@@ -650,7 +716,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         section=Section.INTENTS;screen("Intents");
         JSONObject p=find("projects",projectId); if(p==null){text("Wähle im Menü ein Projekt aus.");return;}
         EditText search=input("Intents durchsuchen …","",InputType.TYPE_CLASS_TEXT);
-        LinearLayout tabs=new LinearLayout(this);page.addView(tabs);
+        LinearLayout tabs=new LinearLayout(this);addTabs(tabs,0);
         LinearLayout list=new LinearLayout(this);list.setOrientation(LinearLayout.VERTICAL);page.addView(list);
         String[] titles={"Queue","Entwurf","Archiv"};
         int[] selected={0};
@@ -667,6 +733,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
             int color="blocked".equals(state)?RED:"done".equals(state)?GREEN:"in_progress".equals(state)?BLUE:MUTED;
             inboxEntry(list,R.drawable.ic_list_checks,t.optString("key"),taskLabel(t,c),detail,badge,color,()->intentDetails(t,c,detail));
         }
+        if(list.getChildCount()==0)emptyList(list,query.isEmpty()?"Keine Intents in dieser Ansicht.":"Keine passenden Intents.");
         };
         for(int i=0;i<titles.length;i++){
             int index=i;Button tab=FactoryStyle.button(this,titles[i],false);
@@ -779,7 +846,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         }
         List<JSONObject> sessions=projectSessions(activity);
         int closed=0;for(JSONObject command:sessions)if(sessionClosed(command))closed++;
-        LinearLayout tabs=new LinearLayout(this);page.addView(tabs);
+        LinearLayout tabs=new LinearLayout(this);addTabs(tabs,0);
         for(int i=0;i<2;i++){
             boolean archive=i==1;
             Button tab=FactoryStyle.button(this,(archive?"Geschlossen ("+closed:"Offen ("+(sessions.size()-closed))+")",false);
@@ -804,52 +871,77 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
                 activity?("supervisor".equals(role)?"Supervisor":"Memorizer"):"direct".equals(role)?"Direct":"OpenCode",
                 badge,color,()->session(command));
         }
-        if(empty)list.addView(label(this,activity?"Keine Einträge zur Projektaktivität.":"Keine Sessions in dieser Ansicht.",15,MUTED));
+        if(empty)emptyList(list,activity?"Keine Einträge zur Projektaktivität.":"Keine Sessions in dieser Ansicht.");
         };
         if(search!=null){EditText field=search;onSearchChanged(field,()->{activityQuery=field.getText().toString();render.run();});}
         render.run();
     }
     private String activityQuery="";
+    private static final long OVERVIEW_COMPLETED_MS=120_000;
+    private Runnable overviewExpiry;
+    private void cancelOverviewExpiry(){
+        if(overviewExpiry!=null){connectionHandler.removeCallbacks(overviewExpiry);overviewExpiry=null;}
+    }
     private void overview(){
         section=Section.OVERVIEW;screen("Overview");
         JSONObject project=find("projects",projectId);
         CheckBox only=new CheckBox(this);only.setText("Nur aktuelles Projekt");
         only.setEnabled(project!=null);only.setChecked(overviewOnlyProject&&project!=null);
         page.addView(only);
-        LinearLayout stages=new LinearLayout(this);boolean wide=getResources().getConfiguration().screenWidthDp>=760;
+        LinearLayout stages=new LinearLayout(this);boolean wide=getResources().getConfiguration().screenWidthDp>=1000;
         stages.setOrientation(wide?LinearLayout.HORIZONTAL:LinearLayout.VERTICAL);page.addView(stages);
         only.setOnCheckedChangeListener((button,checked)->{overviewOnlyProject=checked;renderStages(stages,wide);});
         renderStages(stages,wide);
     }
     private void renderStages(LinearLayout stages,boolean wide){
+        cancelOverviewExpiry();
         stages.removeAllViews();
-        List<List<JSONObject>> lanes=Arrays.asList(new ArrayList<>(),new ArrayList<>(),new ArrayList<>(),new ArrayList<>());
+        String[] titles={"Eingang","Verteilung","Implementierung","Review","Mergen","Erledigt"};
+        List<List<JSONObject>> lanes=new ArrayList<>();
+        for(String title:titles)lanes.add(new ArrayList<>());
+        long now=System.currentTimeMillis(), nextExpiry=Long.MAX_VALUE;
         for(JSONObject t:records(array("tickets"))){
             if(find("projects",t.optString("project_id"))==null)continue;
             if(overviewOnlyProject&&projectId!=null&&!projectId.equals(t.optString("project_id")))continue;
-            String state=t.optString("status");JSONObject command=find("commands",t.optString("execution_command"));
-            int stage=t.optBoolean("draft")||"backlog".equals(state)?0:
-                "done".equals(state)||"cancelled".equals(state)?3:
-                "ready".equals(state)||"orchestrator".equals(role(command))?1:2;
-            lanes.get(stage).add(t);
+            JSONObject command=find("commands",t.optString("execution_command"));
+            int stage=overviewStage(t,command,now);
+            if(stage>=0)lanes.get(stage).add(t);
+            if(stage==5)nextExpiry=Math.min(nextExpiry,t.optLong("updated_unix_ms")+OVERVIEW_COMPLETED_MS);
         }
-        String[] titles={"Eingang","Verteilung","Ausführung","Ergebnis"};
-        for(int i=1;i<=2;i++){
+        if(nextExpiry!=Long.MAX_VALUE){
+            overviewExpiry=()->renderStages(stages,wide);
+            connectionHandler.postDelayed(overviewExpiry,Math.max(0,nextExpiry-System.currentTimeMillis()));
+        }
+        for(int i=0;i<titles.length;i++){
             List<JSONObject> lane=lanes.get(i);
             LinearLayout column=new LinearLayout(this);column.setOrientation(LinearLayout.VERTICAL);
             LinearLayout.LayoutParams layout=wide?new LinearLayout.LayoutParams(0,-2,1):new LinearLayout.LayoutParams(-1,-2);
-            if(wide&&i>1)layout.setMarginStart(dp(8));
+            if(wide&&i>0)layout.setMarginStart(dp(8));
             stages.addView(column,layout);
             sectionLabel(column,titles[i]+" · "+lane.size());
             for(JSONObject ticket:lane){
                 JSONObject command=find("commands",ticket.optString("execution_command"));
                 String state=ticket.optString("status");
-                String badge=ticket.optBoolean("draft")?"Entwurf":"blocked".equals(state)?"Blockiert":"done".equals(state)?"Fertig":"Offen";
+                String badge="blocked".equals(state)?"Blockiert":"done".equals(state)?"Erledigt":"Offen";
                 int color="blocked".equals(state)?RED:"done".equals(state)?GREEN:BLUE;
                 inboxEntry(column,R.drawable.ic_list_checks,ticket.optString("key"),taskLabel(ticket,command),"",badge,color,
                     ()->intentDetails(ticket,command,ticket.optString("routing_note")));
             }
         }
+    }
+    static int overviewStage(JSONObject ticket,JSONObject command,long now){
+        String status=ticket.optString("status");
+        if(ticket.optBoolean("draft")||"cancelled".equals(status))return -1;
+        if("done".equals(status)){
+            long updated=ticket.optLong("updated_unix_ms");
+            return updated>0&&updated<=now&&now-updated<OVERVIEW_COMPLETED_MS?5:-1;
+        }
+        if("backlog".equals(status)&&command==null)return 0;
+        String role=role(command),kind=command==null?"":command.optString("kind");
+        if("merger".equals(role)||"integrate_review".equals(kind))return 4;
+        if("reviewer".equals(role)||"review_checkpoint".equals(kind)||"validating".equals(status)||"review".equals(status))return 3;
+        if("ready".equals(status)||"rework_queued".equals(status)||"orchestrator".equals(role)||"prepare_workspace".equals(kind))return 1;
+        return command!=null||"in_progress".equals(status)?2:1;
     }
     private void factoryNotifications(){
         section=Section.NOTIFICATIONS;screen("Benachrichtigungen");notificationPage(0);
@@ -880,7 +972,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         loadPage("/v1/notifications"+(before==0?"":"?before="+before),"Benachrichtigungen",result->{
             unreadNotifications=result.optLong("unread");
             List<JSONObject> notices=records(result.optJSONArray("entries"));
-            if(notices.isEmpty())text("Keine Benachrichtigungen.");
+            if(notices.isEmpty())emptyList(page,"Keine Benachrichtigungen.");
             for(JSONObject item:notices){
                 JSONObject project=find("projects",item.optString("project_id"));
                 boolean unread=!item.optBoolean("read");
@@ -911,11 +1003,11 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
     private void infrastructure(){
         section=Section.INFRASTRUCTURE;screen("Infrastructure");
         sectionLabel(page,"FACTORY");
-        inboxEntry(page,R.drawable.ic_factory,"","Factory",snapshot.optString("server_version"),
+        factoryConnectionBadge=inboxEntry(page,R.drawable.ic_factory,"","Factory",snapshot.optString("server_version"),
             online?"Online":"Offline",online?GREEN:MUTED,this::diagnostics);
         sectionLabel(page,"RUNNER");
         List<JSONObject> runners=records(array("runners"));
-        if(runners.isEmpty())text("Keine Runner verbunden.");
+        if(runners.isEmpty())emptyList(page,"Keine Runner verbunden.");
         for(JSONObject runner:runners){
             boolean connected="online".equals(runner.optString("connection"));
             JSONObject opencode=runner.optJSONObject("opencode");
@@ -952,7 +1044,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
     }
     private void eventPage(long before){
         loadPage("/v1/events/history"+(before==0?"":"?before="+before),"Diagnose",result->{
-            List<JSONObject> events=records(result.optJSONArray("events"));if(events.isEmpty())text("Keine Ereignisse.");
+            List<JSONObject> events=records(result.optJSONArray("events"));if(events.isEmpty())emptyList(page,"Keine Ereignisse.");
             for(JSONObject event:events){
                 String kind=event.optString("kind");
                 inboxEntry(page,R.drawable.ic_chart_line,"",kind,date(event.optLong("created_unix_ms")),
@@ -1121,7 +1213,9 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         filterButton.setSelected(inboxFilter!=0);
         if(inboxFilter!=0)filterButton.setBackground(interactive(this,SELECTED,4));
         if(tabs.getParent()==null){
-            LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.topMargin=dp(10);page.addView(tabs,params);
+            addTabs(tabs,10);
+        }else{
+            ((LinearLayout.LayoutParams)toolbar.getLayoutParams()).bottomMargin=dp(TAB_LIST_GAP);
         }
         View gap=new View(this);page.addView(gap,new LinearLayout.LayoutParams(-1,dp(14)));
         LinearLayout entries=new LinearLayout(this);entries.setOrientation(LinearLayout.VERTICAL);page.addView(entries,new LinearLayout.LayoutParams(-1,-2));
@@ -1197,11 +1291,23 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
             }
         }
         if(entries.getChildCount()==0){
-            TextView empty=label(this,query.isEmpty()?(archive?"Keine archivierten Einträge":"Keine offenen Einträge"):"Keine passenden Einträge",15,MUTED);
-            empty.setPaddingRelative(dp(12),dp(16),dp(12),dp(16));entries.addView(empty);
+            emptyList(entries,query.isEmpty()?(archive?"Keine archivierten Einträge":"Keine offenen Einträge"):"Keine passenden Einträge");
         }
     }
-    private void inboxEntry(LinearLayout list,int glyph,String key,String title,String details,String status,int color,Runnable action){
+    private static final int TAB_LIST_GAP=12;
+    private void addTabs(LinearLayout tabs,int topMargin){
+        LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);
+        params.topMargin=dp(topMargin);
+        params.bottomMargin=dp(TAB_LIST_GAP);
+        page.addView(tabs,params);
+    }
+    private void emptyList(LinearLayout list,String message){
+        TextView empty=label(this,message,15,MUTED);
+        empty.setGravity(Gravity.CENTER);
+        empty.setPaddingRelative(dp(16),dp(32),dp(16),dp(20));
+        list.addView(empty,new LinearLayout.LayoutParams(-1,-2));
+    }
+    private TextView inboxEntry(LinearLayout list,int glyph,String key,String title,String details,String status,int color,Runnable action){
         LinearLayout card=new LinearLayout(this);card.setOrientation(LinearLayout.VERTICAL);
         card.setPaddingRelative(dp(14),dp(12),dp(14),dp(12));card.setBackground(interactive(this,CELL,2));
         LinearLayout top=new LinearLayout(this);top.setGravity(Gravity.CENTER_VERTICAL);card.addView(top);
@@ -1220,6 +1326,7 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
             truncate(metadata);metadata.setPaddingRelative(dp(28),dp(5),0,0);card.addView(metadata);
         }
         card.setContentDescription(title);card.setFocusable(true);card.setOnClickListener(v->action.run());addControl(list,card,true);
+        return badge;
     }
     private static boolean matchesQuery(String search,String... values){
         if(search.isEmpty())return true;

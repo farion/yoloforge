@@ -1,0 +1,21 @@
+<resources>
+    <color name="factory_panel">#16191F</color>
+    <color name="factory_popup">#1B1F27</color>
+    <color name="factory_text">#E7EAF0</color>
+    <color name="factory_blue">#368BE7</color>
+
+    <style name="FactoryTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:colorBackground">@color/factory_panel</item>
+        <item name="android:colorBackgroundFloating">@color/factory_popup</item>
+        <item name="android:colorAccent">@color/factory_blue</item>
+        <item name="android:textColorPrimary">@color/factory_text</item>
+        <item name="android:alertDialogTheme">@style/FactoryDialogTheme</item>
+    </style>
+
+    <style name="FactoryDialogTheme" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorBackground">@color/factory_panel</item>
+        <item name="android:colorBackgroundFloating">@color/factory_popup</item>
+        <item name="android:colorAccent">@color/factory_blue</item>
+        <item name="android:textColorPrimary">@color/factory_text</item>
+    </style>
+</resources>

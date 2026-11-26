@@ -7,9 +7,8 @@ Sessionauszug, paginiertes Sessionarchiv mit Dateiexport und Frage-/Berechtigung
 
 Das Flyout gliedert sich wie am Desktop in **Projekt** und **Factory**.
 Die Projektauswahl öffnet sich über der Navigation, ohne sie zu verschieben.
-Das Drei-Punkte-Menü daneben öffnet das Projektmenü zum Anlegen,
-Pausieren/Fortsetzen und Löschen von Projekten. Beim Löschen muss der vollständige
-Projektname bestätigt werden; Repository-Dateien und Historie bleiben erhalten.
+Neben der Projektauswahl lässt sich das ausgewählte Projekt direkt pausieren
+oder fortsetzen. Projekte werden am Desktop angelegt und gelöscht.
 Unter der Auswahl stehen Projektlogo und **+ Intent**, gefolgt von Intents, Inbox,
 Sessions und Projektaktivität. Der Factory-Block enthält Overview, den
 Benachrichtigungsverlauf, Infrastructure und Diagnose. Lokale Android-Push-
@@ -71,8 +70,8 @@ bedingte Mehrfachauswahl, Integer-Typen und Update-Transportregeln. Ausfuehren m
 Build; nur einen dedizierten Testemulator verwenden (App-Testdaten werden benutzt).
 `--sign-in-only` prüft die Anmeldung mit gültigem und ungültigem Schlüssel ohne
 Runner- oder Archiv-Testdaten.
-`--project-management` prüft die überlagernde Projektauswahl sowie das Anlegen
-und Löschen eines Testprojekts.
+`--project-management` prüft die überlagernde Projektauswahl sowie Pausieren
+und Fortsetzen.
 Der Test startet keinen Runner und fuehrt keine Modellaufrufe aus.
 Instrumentierung und API/UI-Test werden lokal im Emulator ausgeführt.
 

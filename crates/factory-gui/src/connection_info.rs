@@ -5,7 +5,7 @@ use crate::{
 };
 use std::net::IpAddr;
 
-fn public_peer(ip: IpAddr) -> bool {
+pub(crate) fn public_peer(ip: IpAddr) -> bool {
     match ip.to_canonical() {
         IpAddr::V4(ip) => !matches!(ip.octets(),
             [0 | 10 | 127 | 224..=255, ..]
