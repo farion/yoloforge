@@ -774,9 +774,11 @@ impl App {
                     egui::Frame::popup(ui.style())
                         .fill(ui.visuals().window_fill().lerp_to_gamma(color, 0.18))
                         .stroke(egui::Stroke::new(1.0_f32, color))
-                        .inner_margin(14)
+                        .inner_margin(egui::Margin::symmetric(14, 8))
                         .show(ui, |ui| {
                             ui.set_max_width((ctx.content_rect().width() - 68.0).clamp(80.0, 400.0));
+                            // Passive toast rows size to their contents rather than buttons.
+                            ui.spacing_mut().interact_size.y = 0.0;
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 10.0;
                                 if let Some(logo) = logo {
@@ -2277,6 +2279,38 @@ pub fn card() -> egui::Frame {
         .corner_radius(10)
         .inner_margin(20)
         .outer_margin(egui::Margin::symmetric(0, 6))
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+
+    #[test]
+    fn toast_vertical_padding_is_smaller_than_horizontal_padding() {
+        fn frame(shape: &egui::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Rect(rect) if rect.stroke.color == BLUE => Some(rect.rect),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(frame),
+                _ => None,
+            }
+        }
+        let mut app = crate::tests::fixture();
+        let message = "Global notice";
+        app.notice(message);
+        let ctx = app.backend.context();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.draw_toasts(ctx));
+        let output = ctx.run(egui::RawInput { time: Some(1.0), ..Default::default() }, |ctx| app.draw_toasts(ctx));
+        let outer = output.shapes.iter().find_map(|shape| frame(&shape.shape)).unwrap();
+        let text = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == message =>
+                Some(text.galley.rect.translate(text.pos.to_vec2())),
+            _ => None,
+        }).unwrap();
+        let (left, right) = (text.left() - outer.left(), outer.right() - text.right());
+        let (top, bottom) = (text.top() - outer.top(), outer.bottom() - text.bottom());
+        assert!((left - right).abs() <= 1.0 && (top - bottom).abs() <= 1.0);
+        assert!(top.min(bottom) > 0.0 && top.max(bottom) < left.min(right));
+    }
 }
 
 #[cfg(test)]
