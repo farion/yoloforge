@@ -96,7 +96,7 @@ try:
         session_label='Device archive'
     else:
         session_label=next(n.get('text') for n in hierarchy().iter('node') if n.get('text','').casefold().startswith('session: device archive'))
-    tap(session_label);tap('Vollstaendiges Archiv');tap('Anhang speichern: '+filename)
+    tap(session_label);tap('OpenCode-Aktionen');tap('Archiv und Anhänge');tap('Anhang speichern: '+filename)
     tap('Save');node('Anhang gespeichert und SHA256 geprueft')
     exported=run(*adb,'exec-out','cat','/sdcard/Download/'+filename)
     assert exported==data

@@ -757,6 +757,7 @@ pub(crate) fn intent_run_role(c: &RunnerCommand) -> &'static str {
         Some("orchestrator") => "Orchestrator",
         Some("reviewer") => "Reviewer",
         Some(MERGER_ROLE) => "Merger",
+        Some(APPROVED_PUBLICATION_ROLE) => "Git",
         Some("supervisor") => "Supervisor",
         Some("memorizer" | "orchestrator-memory") => "Memorizer",
         _ if c.kind == CommandKind::RunAgent => "Implementer",
@@ -771,6 +772,14 @@ pub(crate) fn intent_run_summary(
 ) -> (String, Option<TaskHistoryLevel>) {
     use TaskHistoryLevel::*;
     let status = || (command_status(command).into(), None);
+    if is_implementer(command) && command_publication_blocked(command) {
+        return (crate::tr!("Arbeitsstand erhalten · Git-Schritt nicht abgeschlossen").into(), Some(Warning));
+    }
+    if is_implementer(command) && matches!(&command.result, Some(CommandOutput::Agent { agent })
+        if agent.summary.lines().next() == Some(PUBLICATION_PREPARED_PREFIX))
+    {
+        return (crate::tr!("Review-Snapshot gesichert").into(), Some(Success));
+    }
     if command_publication_blocked(command) || command_publication_unconfirmed(command) {
         return status();
     }

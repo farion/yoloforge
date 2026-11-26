@@ -98,7 +98,7 @@ pub(super) fn set_publication_state(
     Ok(())
 }
 
-fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId, review_snapshot: bool) -> Result<Option<(RunnerCommand, Workstream)>> {
+pub(super) fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId, review_snapshot: bool) -> Result<Option<(RunnerCommand, Workstream)>> {
     let row: Option<(String, String, String)> = tx.query_row(
         "SELECT c.data,s.data,p.data FROM commands c JOIN streams s ON s.id=c.stream_id
          JOIN active_projects p ON p.id=s.project_id
@@ -130,7 +130,7 @@ fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId
         || !matches!(owner.status, StreamState::Blocked | StreamState::Review)
         || command.agent_spec.as_ref().is_none_or(|s| s.read_only || (!review_snapshot && s.defer_publication)
             || s.role == factory_protocol::directs::ROLE
-            || (review_snapshot && !s.role.is_empty()))
+             || (review_snapshot && !is_implementer(&command)))
         || command.workspace_spec.as_ref().is_none_or(|w| w.project_id != project.id
             || w.base_branch != project.base_branch
             || w.setup.as_ref().is_none_or(|setup| setup.runner_id != runner
@@ -161,7 +161,7 @@ fn recoverable_publication(tx: &Transaction<'_>, runner: RunnerId, id: CommandId
     {
         return Ok(None);
     }
-    if !review_snapshot && command.agent_spec.as_ref().is_some_and(|s| s.role.is_empty())
+    if !review_snapshot && is_implementer(&command)
         && tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs WHERE agent_id=?1)",
             [id.to_string()], |row| row.get::<_, bool>(0))?
         && !tx.query_row("SELECT EXISTS(SELECT 1 FROM publication_recovery_holds

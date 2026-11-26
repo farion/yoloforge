@@ -15,6 +15,36 @@ import org.json.JSONObject;
 
 @RunWith(AndroidJUnit4.class)
 public final class ContractTest {
+    @Test public void openCodeRendersArchivedMessagesAndCollapsesToolActivity()throws Exception {
+        JSONObject user=new JSONObject("{\"type\":\"user\",\"text\":\"Zeige den Status\"}");
+        JSONObject assistant=new JSONObject("""
+            {"type":"assistant","content":[
+              {"type":"tool","name":"read","state":{"input":{"path":"notes.md"},"content":[{"text":"Dateiinhalt"}]}},
+              {"type":"tool","tool":"list"},
+              {"type":"text","text":"**Ergebnis**"}]}
+            """);
+        Throwable[] failure={null};
+        getInstrumentation().runOnMainSync(()->{
+            try{
+                var rows=new android.widget.LinearLayout(getInstrumentation().getTargetContext());
+                var renderer=new OpenCodeTranscript(rows);
+                renderer.append(user);renderer.append(assistant);renderer.finish();
+                var prompt=(android.widget.LinearLayout)rows.getChildAt(0);
+                assertEquals("\nZeige den Status\n",((android.widget.TextView)prompt.getChildAt(1)).getText().toString());
+                var group=(android.widget.LinearLayout)rows.getChildAt(2);
+                var button=(android.widget.Button)group.getChildAt(0);
+                var details=(android.widget.LinearLayout)group.getChildAt(1);
+                assertEquals("+  Tool-Aktivität (2)",button.getText().toString());
+                assertEquals(android.view.View.GONE,details.getVisibility());
+                button.performClick();
+                assertEquals(2,details.getChildCount());
+                var first=(android.widget.LinearLayout)details.getChildAt(0);
+                assertEquals("Dateiinhalt",((android.widget.TextView)first.getChildAt(1)).getText().toString());
+                assertEquals("<b>Ergebnis</b> &lt;img&gt;",OpenCodeTranscript.markdownHtml("**Ergebnis** <img>"));
+            }catch(Throwable error){failure[0]=error;}
+        });
+        if(failure[0]!=null)throw new AssertionError(failure[0]);
+    }
     @Test public void intentDetailsPreserveOriginalPromptAndFormatModel()throws Exception {
         JSONObject intent=new JSONObject().put("title","Kurztitel").put("description","Alter Prompt")
             .put("prompt","Erste Zeile\n\n  Zweite Zeile");

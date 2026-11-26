@@ -182,7 +182,9 @@ pub(super) fn resolve(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
                 let original: String = tx.query_row("SELECT data FROM commands WHERE id=?1", [&source], |r| r.get(0))?;
                 let original: RunnerCommand = serde_json::from_str(&original)?;
                 let legacy_snapshot = legacy_dirty_checkout(&original);
-                let deferred = original.agent_spec.as_ref().is_some_and(|s| s.defer_publication);
+                let deferred = original.agent_spec.as_ref().is_some_and(|spec| spec.defer_publication)
+                    || (implementer_needs_review_snapshot(&original)
+                        && report.lines().next() == Some(PUBLICATION_PREPARED_PREFIX));
                 if deferred && report.lines().next() != Some(PUBLICATION_PREPARED_PREFIX) {
                     retry_review(tx, &mut ticket, reviewer.id)?;
                     continue;

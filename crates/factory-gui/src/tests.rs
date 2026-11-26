@@ -1385,6 +1385,10 @@ fn intent_history_only_calls_a_confirmed_merge_successful() {
     agent.summary = format!("{PUBLICATION_BLOCKED_PREFIX}\nGit: conflict");
     command.result = Some(CommandOutput::Agent { agent });
     assert_eq!(intent_run_summary(&command, None).0, crate::tr!("Übernahme blockiert"));
+    command.agent_spec.as_mut().unwrap().role.clear();
+    assert_eq!(intent_run_summary(&command, None), (
+        crate::tr!("Arbeitsstand erhalten · Git-Schritt nicht abgeschlossen").into(), Some(TaskHistoryLevel::Warning),
+    ));
 }
 
 #[test]

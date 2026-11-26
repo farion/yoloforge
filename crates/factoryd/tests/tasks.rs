@@ -930,6 +930,11 @@ fn failed_review_snapshot_resumes_validation_without_reimplementation_or_publica
     let grant_id = RequestId::new();
     assert!(!s.claim_review_snapshot_recovery(runner, run.id, grant_id).unwrap());
     assert!(s.pending_review_snapshot_recoveries(runner).unwrap().is_empty());
+    s.merger_tick().unwrap();
+    let blocked = s.task_payload(intent.id).unwrap();
+    assert_eq!(blocked.status, TicketState::Blocked);
+    assert_ne!(blocked.routing_note, SNAPSHOT_RETRY_NOTE,
+        "Do not advertise a retry while no runner can claim it");
     final_archive(&s, &run);
     // Model the deployed legacy state and restart, as with WOAI-4.
     drop(s);

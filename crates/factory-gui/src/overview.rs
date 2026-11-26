@@ -222,8 +222,9 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
         || (delivery_retry && ticket.routing_note == INTEGRATION_RETRY_NOTE)
     {
         Stage::Merge
+    } else if delivery_retry && ticket.routing_note == SNAPSHOT_RETRY_NOTE {
+        Stage::Execution
     } else if ticket.status == TicketState::Validating || crate::model::validation_blocked(ticket)
-        || (delivery_retry && ticket.routing_note == SNAPSHOT_RETRY_NOTE)
     {
         Stage::Validation
     } else if ticket.status == TicketState::ReworkQueued {
@@ -1214,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_approved_publication_stays_in_merge_and_snapshot_retry_stays_in_review() {
+    fn pending_approved_publication_stays_in_merge_and_snapshot_retry_stays_with_implementer() {
         let mut snapshot = (*crate::tests::fixture().snapshot.unwrap()).clone();
         snapshot.tickets[0].status = TicketState::InProgress;
         snapshot.tickets[0].execution_command = Some(snapshot.commands[0].id);
@@ -1233,9 +1234,17 @@ mod tests {
         }});
         snapshot.tickets[0].routing_note = SNAPSHOT_RETRY_NOTE.into();
         let tile = card(&snapshot, &snapshot.tickets[0]);
-        assert_eq!(tile.stage, Stage::Validation);
+        assert_eq!(tile.stage, Stage::Execution);
         assert!(!tile.failed);
         assert_eq!(tile.status(&snapshot), crate::tr!("Review-Snapshot wird erneut gesichert"));
+        snapshot.tickets[0].status = TicketState::Blocked;
+        assert_eq!(card(&snapshot, &snapshot.tickets[0]).stage, Stage::Execution);
+        snapshot.tickets[0].status = TicketState::Validating;
+        snapshot.tickets[0].routing_note.clear();
+        if let Some(CommandOutput::Agent { agent }) = &mut snapshot.commands[0].result {
+            agent.summary = PUBLICATION_PREPARED_PREFIX.into();
+        }
+        assert_eq!(card(&snapshot, &snapshot.tickets[0]).stage, Stage::Validation);
     }
 
     fn complete(s: &mut Snapshot) {

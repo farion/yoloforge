@@ -1014,8 +1014,8 @@ impl Store {
                 let mut owner = stream(tx, value.stream_id)?;
                 let merger = value.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE);
                 let approved_publication = value.agent_spec.as_ref().is_some_and(|spec| spec.role == APPROVED_PUBLICATION_ROLE);
-                let snapshot_retry = ok && value.agent_spec.as_ref().is_some_and(|s| s.defer_publication)
-                    && !value.requires_target_git();
+                let snapshot_retry = ok && implementer_needs_review_snapshot(&value)
+                    && !super::validation::legacy_dirty_checkout(&value);
                 let reviewed_merge = merger && super::merger::reviewed_source(tx, &value)?.is_some();
                 let publication_blocked = command_publication_blocked(&value)
                     || ((merger || approved_publication) && (!ok || !matches!(&value.result, Some(CommandOutput::Agent { agent })

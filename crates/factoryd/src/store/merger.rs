@@ -49,14 +49,21 @@ fn reviewed_delivery(tx: &Transaction<'_>) -> Result<()> {
         let mut ticket: Ticket = serde_json::from_str(&ticket)?;
         let latest: RunnerCommand = serde_json::from_str(&latest)?;
         let summary = match &latest.result { Some(CommandOutput::Agent { agent }) => agent.summary.as_str(), _ => "" };
-        if latest.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && spec.role.is_empty())
+        if is_implementer(&latest)
             && !latest.requires_target_git() && latest.state == CommandState::Succeeded && publication_was_blocked(summary)
             && tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs r WHERE r.ticket_id=?1 AND r.agent_id=?2)",
                 params![ticket.id.to_string(), latest.id.to_string()], |r| r.get::<_, bool>(0))?
         {
-            let note = SNAPSHOT_RETRY_NOTE;
-            if ticket.status != TicketState::InProgress || ticket.routing_note != note {
-                ticket.status = TicketState::InProgress;
+            let eligible = super::tasks::recoverable_publication(tx, latest.runner_id, latest.id, true)?.is_some();
+            let (state, note) = if eligible {
+                (TicketState::InProgress, SNAPSHOT_RETRY_NOTE)
+            } else if ticket.routing_note == SNAPSHOT_RETRY_NOTE {
+                (TicketState::Blocked, "Review-Snapshot kann nicht erneut gesichert werden; Arbeitsstand bleibt erhalten.")
+            } else {
+                continue;
+            };
+            if ticket.status != state || ticket.routing_note != note {
+                ticket.status = state;
                 ticket.routing_note = note.into();
                 super::scheduler::save_ticket(tx, &mut ticket)?;
             }

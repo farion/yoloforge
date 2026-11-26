@@ -463,6 +463,12 @@ async fn commands(
                 tokio::task::block_in_place(|| journal.save(&record))?;
             }
             if matches!(progress.phase, AgentPhase::Succeeded | AgentPhase::Failed) {
+                if progress.phase == AgentPhase::Succeeded && is_implementer(&record.command)
+                    && record.command.requires_target_git()
+                {
+                    progress.phase = AgentPhase::Failed;
+                    progress.summary = "Implementer darf den Zielbranch nicht ändern. Arbeitsstand bleibt erhalten.".into();
+                }
                 if progress.phase == AgentPhase::Succeeded
                     && record
                         .command
@@ -471,10 +477,13 @@ async fn commands(
                         .is_some_and(|s| !s.read_only && s.role != factory_protocol::directs::ROLE)
                 {
                     let planned_git = record.command.requires_target_git();
-                    let review_first = !planned_git && record.command.agent_spec.as_ref().is_some_and(|s| s.defer_publication);
+                    let review_first = implementer_needs_review_snapshot(&record.command)
+                        || !planned_git && record.command.agent_spec.as_ref().is_some_and(|s| s.defer_publication);
                     let publication = tokio::task::block_in_place(|| if review_first {
                         publication::prepare_for_review(journal, &record, args, &progress.summary)
                             .and_then(|path| path.map(Some).ok_or_else(|| anyhow::anyhow!("Missing review snapshot destination")))
+                    } else if is_implementer(&record.command) {
+                        Ok(None)
                     } else {
                         publication::publish_with_summary(journal, &record, args, &progress.summary)
                     });
@@ -485,7 +494,8 @@ async fn commands(
                         Ok(Some(_)) if managed => PublicationOutcome::Managed,
                         Ok(Some(_)) => PublicationOutcome::Local,
                         Ok(None) => PublicationOutcome::NotPublished,
-                        Err(_) => PublicationOutcome::Blocked,
+                         Err(_) if review_first => PublicationOutcome::NotPublished,
+                         Err(_) => PublicationOutcome::Blocked,
                     };
                     record.publication_notice = Some(PublicationNotice {
                         outcome,

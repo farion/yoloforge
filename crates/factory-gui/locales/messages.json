@@ -119,6 +119,8 @@
   "{key} abgeschlossen": ["{key} abgeschlossen", "{key} completed"],
   "Intent abgeschlossen": ["Intent abgeschlossen", "Intent completed"],
   "Übernahme blockiert": ["Übernahme blockiert", "Publication blocked"],
+  "Arbeitsstand erhalten · Git-Schritt nicht abgeschlossen": ["Arbeitsstand erhalten · Git-Schritt nicht abgeschlossen", "Work preserved · Git step incomplete"],
+  "Review-Snapshot gesichert": ["Review-Snapshot gesichert", "Review snapshot saved"],
   "Übernahme nicht bestätigt": ["Übernahme nicht bestätigt", "Publication not confirmed"],
   "In den Projektordner übernommen": ["In den Projektordner übernommen", "Published to the project checkout"],
   "Auf dem Factory-Basisbranch veröffentlicht": ["Auf dem Factory-Basisbranch veröffentlicht", "Published to the Factory base branch"],

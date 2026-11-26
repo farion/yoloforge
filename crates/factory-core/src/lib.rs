@@ -452,6 +452,21 @@ pub fn reviewed_merger(command: &RunnerCommand) -> bool {
     command.agent_spec.as_ref().is_some_and(|spec| spec.role == MERGER_ROLE
         && spec.prompt.lines().nth(2) == Some(REVIEWED_MERGER_POLICY))
 }
+
+pub fn is_implementer(command: &RunnerCommand) -> bool {
+    command.kind == CommandKind::RunAgent
+        && command.agent_spec.as_ref().is_some_and(|spec| matches!(spec.role.as_str(), "" | "implementer"))
+}
+
+pub fn implementer_needs_review_snapshot(command: &RunnerCommand) -> bool {
+    is_implementer(command) && !command.requires_target_git()
+        && command.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && (spec.defer_publication
+            || command.workspace_spec.as_ref().and_then(|w| w.setup.as_ref()).is_some_and(|setup|
+                setup.repository_path.is_empty() && (setup.repository_source == "factory:managed"
+                    || setup.repository_source.starts_with('/') || setup.repository_source.starts_with("\\\\")
+                    || (setup.repository_source.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                        && matches!(setup.repository_source.as_bytes().get(1..3), Some(b":\\" | b":/")))))))
+}
 pub const MERGER_RECOVERY_PROMPT_MARKER: &str = "factory_merge_recovery=workspace-preflight";
 
 pub fn is_merger_recovery(command: &RunnerCommand) -> bool {

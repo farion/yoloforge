@@ -1150,13 +1150,10 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         more.setOnClickListener(v->{page.removeView(more);load.accept(before);});
     }
     private void loadPage(String endpoint,String name,java.util.function.Consumer<JSONObject> ready){
-        loadPage(endpoint,name,false,ready);
-    }
-    private void loadPage(String endpoint,String name,boolean optional,java.util.function.Consumer<JSONObject> ready){
         int started=generation;
         loading(true);
         worker.execute(()->{
-            try{JSONObject result=optional?api().optionalObject(endpoint):api().request("GET",endpoint,null);ui(()->{if(generation==started){loading(false);ready.accept(result);}});}
+            try{JSONObject result=api().request("GET",endpoint,null);ui(()->{if(generation==started){loading(false);ready.accept(result);}});}
             catch(Exception failure){
                 android.util.Log.w("YoloForge","Factory data read failed: "+failure.getClass().getSimpleName());
                 ui(()->{if(generation==started){loading(false);toast(name+" konnten nicht geladen werden.");}});
@@ -1231,24 +1228,81 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
         session(latest,this::showSection);
     }
     private void session(JSONObject latest,Runnable back) {
-        screen("OpenCode");button("Zurück",back);
-        text(sessionTitle(latest));
+        screen("OpenCode");
         String id=latest.optString("id");
-        button("Vollständiges Archiv",()->archive(id,0,null));
-        loadPage("/v1/commands/"+id+"/excerpt","OpenCode-Nachrichten",true,excerpt->{
-            List<JSONObject> messages=records(excerpt==null?null:excerpt.optJSONArray("messages"));
-            if(messages.isEmpty())text("Noch keine OpenCode-Nachrichten verfügbar.");
-            if(excerpt!=null&&excerpt.optBoolean("older_omitted"))text("Ältere Nachrichten findest du im vollständigen Archiv.");
-            for(JSONObject message:messages){
-                sectionLabel(page,message.optString("kind"));
-                String body=message.optString("text");
-                text(body+(message.optBoolean("truncated")&&!body.endsWith("…")?"…":""));
-            }
+        LinearLayout header=(LinearLayout)surface.getChildAt(0);
+        ImageButton actions=iconButton(header,R.drawable.ic_dots_three,"OpenCode-Aktionen",null);
+        actions.setOnClickListener(v->{
+            PopupMenu menu=new PopupMenu(this,actions);
+            menu.getMenu().add("Aktualisieren").setOnMenuItemClickListener(item->{session(latest,back);return true;});
+            menu.getMenu().add("Archiv und Anhänge").setOnMenuItemClickListener(item->{archive(id,0,null,()->session(latest,back));return true;});
+            menu.show();
         });
+        button("Zurück",back);
+        TextView title=label(this,sessionTitle(latest),17,TEXT);truncate(title);page.addView(title);
+        LinearLayout transcript=new LinearLayout(this);transcript.setOrientation(LinearLayout.VERTICAL);
+        addControl(page,transcript,true);
+        readTranscript(id,0,null,transcript,new OpenCodeTranscript(transcript));
+    }
+    private void readTranscript(String id,long after,Long revision,LinearLayout transcript,OpenCodeTranscript renderer){
+        Button next=FactoryStyle.button(this,after==0?"Verlauf laden":"Weitere Nachrichten laden",false);
+        addControl(page,next,false);
+        next.setOnClickListener(v->{
+            next.setEnabled(false);
+            int started=generation;
+            worker.execute(()->{
+                try{
+                    Api client=api();
+                    String command="/v1/commands/"+id;
+                    JSONObject archive=null;
+                    try{archive=client.request("GET",command+"/archive?after="+after+(revision==null?"":"&through_revision="+revision),null);}
+                    catch(Api.HttpFailure failure){if(after!=0||failure.status!=404)throw failure;}
+                    List<JSONObject> messages=new ArrayList<>();
+                    JSONObject state=archive==null?null:archive.optJSONObject("status");
+                    long frozen=revision==null?(state==null?0:state.optLong("revision")):revision;
+                    long cursor=after;
+                    boolean hasMore=false;
+                    // Factory intentionally sends at most one raw message per archive page.
+                    // Collect a small batch so reading does not require one tap per message.
+                    for(int i=0;i<16&&archive!=null;i++){
+                        List<JSONObject> entries=records(archive.getJSONArray("entries"));
+                        hasMore=!entries.isEmpty();
+                        if(!hasMore)break;
+                        long advanced=archive.getLong("next_after");
+                        if(advanced<=cursor)throw new IllegalStateException("Archive cursor did not advance");
+                        cursor=advanced;
+                        for(JSONObject entry:entries){
+                            JSONObject message=entry.optJSONObject("message");
+                            if(message!=null){message.remove(ArchiveContent.KEY);messages.add(message);}
+                        }
+                        if(i<15)archive=client.request("GET",command+"/archive?after="+cursor+"&through_revision="+frozen,null);
+                    }
+                    JSONObject excerpt=after==0&&cursor==0?client.optionalObject(command+"/excerpt"):null;
+                    messages.addAll(records(excerpt==null?null:excerpt.optJSONArray("messages")));
+                    long nextCursor=cursor;
+                    boolean moreAvailable=hasMore;
+                    ui(()->{
+                        if(generation!=started)return;
+                        page.removeView(next);
+                        for(JSONObject message:messages)renderer.append(message);
+                        renderer.finish();
+                        if(after==0&&messages.isEmpty())emptyList(transcript,"Noch keine OpenCode-Nachrichten verfügbar.");
+                        if(moreAvailable)readTranscript(id,nextCursor,frozen,transcript,renderer);
+                    });
+                }catch(Exception failure){
+                    android.util.Log.w("YoloForge","OpenCode transcript read failed",failure);
+                    ui(()->{if(generation==started){next.setEnabled(true);toast("OpenCode-Verlauf konnte nicht geladen werden.");}});
+                }
+            });
+        });
+        if(after==0&&online)next.performClick();
     }
     private void archive(String id,long after,Long revision) {
+        archive(id,after,revision,this::showSection);
+    }
+    private void archive(String id,long after,Long revision,Runnable back) {
         screen("Archiv");archiveCommand=id;archiveAfter=after;archiveRevision=revision;
-        button("Zurueck",this::showSection);loading(true);int started=generation;
+        button("Zurück",back);loading(true);int started=generation;
         background(()->{
             JSONObject result=api().request("GET","/v1/commands/"+id+"/archive?after="+after+(revision==null?"":"&through_revision="+revision),null);
             JSONObject state=result.optJSONObject("status");long frozen=revision==null?(state==null?0:state.optLong("revision")):revision;
@@ -1274,9 +1328,9 @@ public final class MainActivity extends androidx.activity.ComponentActivity {
                         }catch(Exception e){text("Ungueltiger Dateiindex");}
                     }
                 }
-                if(entries.length()==0)text("Ende des Archivs");else button("Naechste Seite",()->archive(id,next,frozen));
-                if(after>0)button("Zum Anfang",()->archive(id,0,frozen));
-                button("Neuen Archivstand laden",()->archive(id,0,null));
+                if(entries.length()==0)text("Ende des Archivs");else button("Naechste Seite",()->archive(id,next,frozen,back));
+                if(after>0)button("Zum Anfang",()->archive(id,0,frozen,back));
+                button("Neuen Archivstand laden",()->archive(id,0,null,back));
             });
         });
     }

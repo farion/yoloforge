@@ -481,6 +481,7 @@ pub(crate) fn commit_tree(target: &Path, repository: &Path, args: &[&str]) -> Re
 }
 
 pub fn publish_with_summary(j: &Journal, r: &Record, args: &Args, summary: &str) -> Result<Option<PathBuf>> {
+    ensure!(!is_implementer(&r.command), "Implementer cannot publish to the target branch");
     publish_or_prepare(j, r, args, summary, false)
 }
 
@@ -559,7 +560,9 @@ fn publish_or_prepare(j: &Journal, r: &Record, args: &Args, summary: &str, prepa
     let reviewed = is_approved_publication(&r.command) || reviewed_merger(&r.command);
     let mut plan: Plan = if let Some(plan) = load(j, r.command.id)? {
         ensure!(
-            (plan.target == target || reviewed && fs::canonicalize(&plan.target).ok().as_ref() == Some(&target))
+            (plan.target == target
+                || reviewed && fs::canonicalize(&plan.target).ok().as_ref() == Some(&target)
+                || prepare_only && fs::canonicalize(&target).ok().as_ref() == Some(&plan.target))
                 && plan.repository == repository
                 && plan.branch == spec.base_branch,
             "Publication binding changed"
@@ -844,7 +847,7 @@ pub(crate) fn review_snapshot_candidate(journal: &Journal, position: usize) -> R
          WHERE json_extract(data,'$.reported')=1
            AND COALESCE(json_extract(data,'$.recovery_required'),0)=0
            AND COALESCE(json_extract(data,'$.command.agent_spec.read_only'),0)=0
-           AND COALESCE(json_extract(data,'$.command.agent_spec.role'),'')=''
+         AND COALESCE(json_extract(data,'$.command.agent_spec.role'),'') IN ('','implementer')
            AND json_extract(data,'$.result.agent.phase')='succeeded'
            AND (instr(json_extract(data,'$.result.agent.summary'),?1)=1
                 OR instr(json_extract(data,'$.result.agent.summary'),?2)=1
@@ -867,7 +870,8 @@ pub(crate) fn recover_review_snapshot(
 ) -> Result<factory_protocol::ReportRecoveredReviewSnapshot> {
     let record = journal.record(id)?.context("Missing implementation record")?;
     ensure!(record.reported && !record.recovery_required && !record.command.requires_target_git()
-        && record.command.agent_spec.as_ref().is_some_and(|s| !s.read_only && s.role.is_empty()),
+        && is_implementer(&record.command)
+        && record.command.agent_spec.as_ref().is_some_and(|s| !s.read_only),
         "Not a recoverable review snapshot");
     let Some(CommandOutput::Agent { agent }) = &record.result else {
         anyhow::bail!("Missing implementation result");
@@ -915,6 +919,7 @@ pub(crate) fn recover_prepared(
     let Some(spec) = record.command.workspace_spec.as_ref() else { return Ok(None); };
     let Some(setup) = spec.setup.as_ref() else { return Ok(None); };
     if !record.reported || record.recovery_required || record.command.requires_target_git()
+        || is_implementer(&record.command)
         || record.command.agent_spec.as_ref().is_some_and(|s| s.defer_publication)
         || !setup.repository_path.is_empty() || !Path::new(&setup.repository_source).is_absolute()
         || !matches!(&record.result, Some(CommandOutput::Agent { agent })
@@ -1073,6 +1078,21 @@ mod tests {
             work,
             target,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn implementer_without_defer_flag_cannot_publish_and_can_only_prepare_snapshot() {
+        let mut f = fixture().await;
+        f.record.command.agent_spec = Some(serde_json::from_value(serde_json::json!({
+            "prompt": "Implement change", "profile": ExecutionProfile::default()
+        })).unwrap());
+        let before = git(&f.target, &["rev-parse", "HEAD"]).unwrap();
+        assert!(implementer_needs_review_snapshot(&f.record.command));
+        assert!(publish_with_summary(&f.journal, &f.record, &f.args, "").is_err());
+        assert!(prepare_for_review(&f.journal, &f.record, &f.args, "").unwrap().is_some());
+        assert_eq!(git(&f.target, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert!(!f.target.join("result.txt").exists());
+        assert!(published_commit(&f.journal, f.record.command.id).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread")]

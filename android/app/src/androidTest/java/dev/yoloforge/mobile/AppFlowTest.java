@@ -260,7 +260,7 @@ public final class AppFlowTest {
             for(int i=0;i<snapshot.getJSONArray("questions").length();i++){JSONObject q=snapshot.getJSONArray("questions").getJSONObject(i);if(q.optJSONObject("answer")!=null && "Android UI proof".equals(q.getJSONObject("answer").optString("name")))answered=true;}
             for(int i=0;i<snapshot.getJSONArray("tickets").length();i++){JSONObject t=snapshot.getJSONArray("tickets").getJSONObject(i);if("Prompt from Android UI".equals(t.optString("prompt"))){created=true;assertFalse("Fixed session must survive saved draft",t.isNull("requested_session"));}}
             assertTrue("Question answer must reach real Factory API",answered);assertTrue("Prompt must reach real Factory API",created);assertNull(vault.get("pending"));
-            click("Navigation öffnen");click("Sessions");click("Android UI acceptance");click("Vollstaendiges Archiv");
+            click("Navigation öffnen");click("Sessions");click("Android UI acceptance");click("OpenCode-Aktionen");click("Archiv und Anhänge");
             waitView("Anhang speichern: proof.bin",false);click("Naechste Seite");waitView("Zum Anfang",false);click("Zum Anfang");waitView("Anhang speichern: proof.bin",false);
         } finally {context.stopService(new Intent(context,EventService.class));instrument.runOnMainSync(()->activity.finish());}
     }
