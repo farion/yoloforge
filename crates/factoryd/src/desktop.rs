@@ -62,7 +62,11 @@ pub(super) async fn return_intent_to_draft(
     State(app): State<App>, Path(id): Path<TicketId>,
     Json(body): Json<ReturnIntentToDraft>,
 ) -> Response {
-    db_call(body.request_id, move || app.store.return_intent_to_draft(id, body)).await
+    let supported: Vec<_> = app.registry.read().await.entries.iter().filter(|(_, entry)|
+        entry.input.capabilities.iter().any(|cap| cap == MERGER_DRAFT_RESET_CAPABILITY)
+            && entry.input.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY))
+        .map(|(id, _)| *id).collect();
+    db_call(body.request_id, move || app.store.return_intent_to_draft_with_mergers(id, body, &supported)).await
 }
 
 pub(super) async fn delete_failed_task(

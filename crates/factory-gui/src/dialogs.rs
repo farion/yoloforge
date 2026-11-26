@@ -286,6 +286,9 @@ impl Dialog {
         if matches!(self, Self::Form(form) if form.is_project_editor()) {
             content_size.x = content_size.x.min(520.0);
         }
+        if matches!(self, Self::Form(form) if form.intent_confirmation().is_some()) {
+            content_size.x = content_size.x.min(520.0);
+        }
         if matches!(self, Self::Read { path, .. } if is_project_usage(path)) {
             content_size.x = content_size.x.min(460.0);
         }
@@ -484,6 +487,23 @@ impl Dialog {
                      }
                      #[cfg(test)]
                      ui.ctx().data_mut(|data| data.insert_temp(modal_id.with("test-body-scroll"), (body.inner_rect, body.content_size)));
+                     return;
+                 }
+                 Self::Form(form) if form.intent_confirmation().is_some() => {
+                     let (action, color, test_id) = form.intent_confirmation().unwrap();
+                     form.restore_pending(app);
+                     if form.request.is_some_and(|id| app.responses.get(&id).is_some_and(Result::is_ok)) {
+                         close = true;
+                         return;
+                     }
+                     egui::ScrollArea::vertical().id_salt((modal_id, "body"))
+                         .max_height((body_height - design::SETTINGS_FOOTER_HEIGHT).max(0.0))
+                         .auto_shrink([false, true])
+                         .show(ui, |ui| { ui.label(&form.help); });
+                     ui.add_space(12.0);
+                     ui.separator();
+                     ui.add_space(12.0);
+                     close = form.show_intent_confirmation(ui, app, action, color, test_id);
                      return;
                  }
                  _ => {}
@@ -2664,8 +2684,8 @@ impl FormDialog {
         self.show_form(ui, app, height, saves_settings.then_some(bottom), false)
     }
 
-    fn show_form(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32, settings_bottom: Option<f32>, staged: bool) -> bool {
-        if self.request.is_none() && !staged {
+    fn restore_pending(&mut self, app: &App) {
+        if self.request.is_none() {
             if let Some(pending) = app.settings.pending.iter().find(|r| {
                 r.server == app.server
                     && r.path == self.path
@@ -2684,20 +2704,34 @@ impl FormDialog {
                 }
             }
         }
+    }
+
+    fn intent_confirmation(&self) -> Option<(&'static str, egui::Color32, &'static str)> {
+        if self.method == "PATCH" && self.path.starts_with("/v1/tickets/") {
+            if self.body["status"] == "cancelled" {
+                return Some((crate::tr!("Intent abbrechen"), RED, "test-intent-cancel-confirm"));
+            }
+            if self.body["status"] == "done" {
+                return Some((crate::tr!("Als umgesetzt bestätigen"), BLUE, "test-intent-complete-confirm"));
+            }
+        }
+        if !self.path.starts_with("/v1/tasks/") { return None; }
+        if self.method == "DELETE" {
+            Some((crate::tr!("Löschen"), RED, "test-task-delete-confirm"))
+        } else if self.method == "POST" && self.path.ends_with("/accept-solution") {
+            Some((crate::tr!("Lösung annehmen"), BLUE, "test-inbox-solution-confirm"))
+        } else if self.method == "POST" && self.path.ends_with("/return-to-draft") {
+            Some((crate::tr!("Session und Worktree verwerfen"), RED, "test-inbox-draft-confirm"))
+        } else { None }
+    }
+
+    fn show_form(&mut self, ui: &mut egui::Ui, app: &mut App, height: f32, settings_bottom: Option<f32>, staged: bool) -> bool {
+        if !staged { self.restore_pending(app); }
         if self.method == "POST" && self.path.starts_with("/v1/devices/") && self.path.ends_with("/revoke") {
             return self.show_device_revoke(ui, app);
         }
         if self.method == "DELETE" && self.body.get("confirm_name").is_some() {
             return self.show_project_delete(ui, app);
-        }
-        if self.method == "DELETE" && self.path.starts_with("/v1/tasks/") {
-            return self.show_intent_confirmation(ui, app, crate::tr!("Löschen"), RED, "test-task-delete-confirm");
-        }
-        if self.method == "POST" && self.path.starts_with("/v1/tasks/") && self.path.ends_with("/accept-solution") {
-            return self.show_intent_confirmation(ui, app, crate::tr!("Lösung annehmen"), BLUE, "test-inbox-solution-confirm");
-        }
-        if self.method == "POST" && self.path.starts_with("/v1/tasks/") && self.path.ends_with("/return-to-draft") {
-            return self.show_intent_confirmation(ui, app, crate::tr!("Session und Worktree verwerfen"), RED, "test-inbox-draft-confirm");
         }
         if self.path == "/v1/projects/setup" && self.request.is_none() {
             self.body["setup"]["repository_source"] = self.body["repository"].clone();
@@ -2984,11 +3018,11 @@ impl FormDialog {
             else { Some(DELETE_FAILED_TASK_CAPABILITY) };
         let incompatible = capability.is_some_and(|cap| app.snapshot.as_deref()
             .is_some_and(|s| !server_supports(s, cap)));
-        ui.label(&self.help);
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(12.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let row_height = ui.spacing().interact_size.y.max(
+            ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
+        );
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), row_height),
+            egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let confirm = design::server_compatibility_tooltip(
                 design::accent_button(ui, egui::Button::new(action),
                     !incompatible && app.online && self.request.is_none(), color.gamma_multiply(0.7)),
@@ -3045,6 +3079,9 @@ pub(crate) fn is_project_update(method: &str, path: &str) -> bool {
 }
 
 pub(crate) fn same_form_body(method: &str, path: &str, first: &Value, second: &Value) -> bool {
+    if method == "PATCH" && path.starts_with("/v1/tickets/") {
+        return first.get("status") == second.get("status") && first.get("expected_revision") == second.get("expected_revision");
+    }
     if method == "POST" && path.starts_with("/v1/tasks/")
         && (path.ends_with("/accept-solution") || path.ends_with("/return-to-draft")) {
         return first.get("previous_command") == second.get("previous_command")

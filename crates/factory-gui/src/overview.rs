@@ -191,6 +191,18 @@ struct Card<'a> {
 
 fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
     let command = task_command(s, ticket);
+    let success = task_bucket(s, ticket) == TaskBucket::Archive;
+    if success {
+        return Card {
+            ticket,
+            command,
+            stage: Stage::Result,
+            waiting: false,
+            failed: false,
+            active: false,
+            success: true,
+        };
+    }
     let waiting = command.is_some_and(|c| crate::model::command_waits_for_answer(s, c));
     let retry_wait = command.is_none() && task_status(s, ticket) == crate::tr!("Wartet auf Wiederholung");
     let failed = !retry_wait && (command.is_some_and(|c| {
@@ -206,10 +218,9 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
                 || ticket
                     .routing_note
                     .starts_with("Orchestrator: Lauf fehlgeschlagen"))));
-    let success = task_bucket(s, ticket) == TaskBucket::Archive;
     let stage = if ticket.draft {
         Stage::Routing
-    } else if !success && command.is_some_and(crate::model::is_merger) {
+    } else if command.is_some_and(crate::model::is_merger) {
         Stage::Merge
     } else if ticket.status == TicketState::Validating || crate::model::validation_blocked(ticket) {
         Stage::Validation
@@ -227,9 +238,8 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
         } else {
             Stage::Routing
         }
-    } else if success
-        || (matches!(ticket.status, TicketState::Review | TicketState::Done)
-            && !command.is_some_and(command_publication_unconfirmed))
+    } else if matches!(ticket.status, TicketState::Review | TicketState::Done)
+        && !command.is_some_and(command_publication_unconfirmed)
     {
         Stage::Result
     } else if let Some(c) = command {
@@ -250,7 +260,6 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
         && !ticket.draft
         && !waiting
         && !failed
-        && !success
         && command.is_some_and(|c| {
             c.state == CommandState::Accepted
                 && c.agent_progress
@@ -264,7 +273,7 @@ fn card<'a>(s: &'a Snapshot, ticket: &'a Ticket) -> Card<'a> {
         waiting,
         failed,
         active,
-        success,
+        success: false,
     }
 }
 
@@ -305,12 +314,12 @@ impl Card<'_> {
     }
 
     fn color(&self, s: &Snapshot) -> Color32 {
-        if self.waiting || self.command.and_then(|c| crate::model::merger_pending_status(s, c)).is_some() {
+        if self.success {
+            GREEN
+        } else if self.waiting || self.command.and_then(|c| crate::model::merger_pending_status(s, c)).is_some() {
             AMBER
         } else if self.failed {
             RED
-        } else if self.success {
-            GREEN
         } else if self.active {
             design::FLOW_TASK_ACCENT
         } else if self.ticket.draft {
@@ -1213,6 +1222,36 @@ mod tests {
         drop(lane);
         s.runners[0].capabilities.push(MERGER_CAPABILITY.into());
         assert_eq!(card(&s, &s.tickets[0]).status(&s), crate::tr!("Merger eingereiht"));
+    }
+
+    #[test]
+    fn manually_completed_intent_leaves_merger_lane_without_resolving_its_shared_stream() {
+        let app = crate::tests::fixture();
+        let mut s = (*app.snapshot.unwrap()).clone();
+        s.commands[0].agent_spec.as_mut().unwrap().role = MERGER_ROLE.into();
+        s.commands[0].state = CommandState::Failed;
+        s.tickets[0].status = TicketState::Blocked;
+        let mut other = s.tickets[0].clone();
+        other.id = TicketId::new();
+        let completed = s.tickets[0].id;
+        let still_blocked = other.id;
+        s.streams[0].ticket_ids.push(other.id);
+        s.tickets.push(other);
+        let flow = FlowState::default();
+        assert_eq!(lanes(&s, &flow, None)[3].cards.len(), 2);
+
+        s.tickets[0].status = TicketState::Done;
+        let visible = lanes(&s, &flow, None);
+        assert_eq!(visible[3].cards.len(), 1);
+        assert_eq!(visible[3].cards[0].ticket.id, still_blocked);
+        assert!(!visible.iter().flat_map(|lane| &lane.cards).any(|c| c.ticket.id == completed));
+        let result = card(&s, &s.tickets[0]);
+        assert_eq!(result.stage, Stage::Result);
+        assert!(result.success && !result.failed && !result.waiting && !result.active);
+        assert_eq!(result.color(&s), GREEN);
+        let archived = Default::default();
+        assert!(crate::model::session_archived_for_page(&s, &s.commands[0], Page::Merger, 0, &archived));
+        assert_eq!(s.commands[0].state, CommandState::Failed);
     }
 
     #[test]

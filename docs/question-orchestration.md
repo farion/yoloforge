@@ -106,8 +106,16 @@ Worktree, lehnt die Factory den Vorgang ab.
 Der zuständige verwaltete Runner prüft sein Journal und die Identität der
 ruhenden OpenCode-Session und des verknüpften Worktrees. Er entfernt nur
 diese Session und diesen Worktree. Erst nach Bestätigung beider Schritte
-wird der Intent wieder zum Entwurf. Prompt, Anhänge, Factory-Verlauf und
-bereits integrierte Ergebnisse bleiben erhalten. Der Vorgang kann nach einem
-Neustart fortgesetzt werden; bei fehlenden Nachweisen bleibt er offen.
-Laufende Sessions, Container-Sessions, Merger und Target-Git-Aufträge sind
-von diesem Weg ausgenommen.
+wird derselbe Intent wieder zum Entwurf. Prompt, Anhänge und bereits
+integrierte Ergebnisse bleiben erhalten. Alte Läufe erscheinen nicht mehr
+im Intent-Verlauf; das Sessionarchiv bleibt erhalten.
+
+Hat ein blockierter Intent bereits nachgelagerte Merger-Versuche, braucht der
+Runner Unterstützung für den erweiterten Reset. Er prüft alle betroffenen
+Sessions und verschiebt die verknüpften Worktrees unter dem Workspace-Root
+nach `discarded-<Reset-ID>`. Die Sicherung erhält auch unversionierte
+Dateien und ungelöste Konflikte. Weitere abgeschlossene Intents im selben
+Arbeitsbereich bleiben unverändert. Der Reset kann nach einem Neustart
+fortgesetzt werden; bei fehlenden Nachweisen bleibt er offen. Laufende
+Sessions, Container-Sessions und Target-Git-Aufträge bleiben ausgeschlossen;
+ein Merger ist kein eigenständiges Reset-Ziel.

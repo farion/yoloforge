@@ -24,6 +24,10 @@ fn load_ticket(tx: &Transaction<'_>, id: TicketId) -> Result<Ticket> {
 
 impl Store {
     pub fn return_intent_to_draft(&self, id: TicketId, body: ReturnIntentToDraft) -> Result<DraftReset> {
+        self.return_intent_to_draft_with_mergers(id, body, &[])
+    }
+
+    pub(crate) fn return_intent_to_draft_with_mergers(&self, id: TicketId, body: ReturnIntentToDraft, supported: &[RunnerId]) -> Result<DraftReset> {
         let result = self.mutate(body.request_id, &format!("task.return_to_draft/{id}"), &body, |tx| {
             let mut ticket = load_ticket(tx, id)?;
             if body.expected_revision != ticket.revision {
@@ -55,16 +59,15 @@ impl Store {
             {
                 return Err(StoreError::WorkConflict);
             }
-            if !tx.query_row("SELECT id=?1 FROM commands WHERE stream_id=?2 ORDER BY rowid DESC LIMIT 1",
-                params![command.id.to_string(), owner.id.to_string()], |row| row.get::<_, bool>(0))?
-                || !tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1
+            let merger_commands = later_mergers(tx, &command, supported)?;
+            if !tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1
                     AND json_extract(data,'$.final_scan_complete')=1)",
                     [command.id.to_string()], |row| row.get::<_, bool>(0))?
                 || tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",
                     [owner.id.to_string()], |row| row.get::<_, bool>(0))?
-                || tx.query_row("SELECT EXISTS(SELECT 1 FROM questions WHERE command_id=?1
-                    AND json_extract(data,'$.state') IN ('pending','rejected','answer_queued'))",
-                    [command.id.to_string()], |row| row.get::<_, bool>(0))?
+                 || tx.query_row("SELECT EXISTS(SELECT 1 FROM questions q JOIN commands c ON c.id=q.command_id WHERE c.stream_id=?1
+                     AND json_extract(q.data,'$.state') IN ('pending','rejected','answer_queued'))",
+                     [owner.id.to_string()], |row| row.get::<_, bool>(0))?
             {
                 return Err(StoreError::WorkConflict);
             }
@@ -92,7 +95,7 @@ impl Store {
             }
             let reset = DraftReset {
                 request_id: body.request_id, ticket_id: id, command_id: command.id, root_id: root,
-                stream_id: owner.id, ownership_epoch: owner.ownership_epoch,
+                stream_id: owner.id, ownership_epoch: owner.ownership_epoch, merger_commands,
             };
             tx.execute("INSERT INTO draft_resets(request_id,ticket_id,stream_id,root_id,runner_id,data) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![body.request_id.to_string(), id.to_string(), owner.id.to_string(), root.to_string(),
@@ -102,9 +105,13 @@ impl Store {
                 session_id: command.session_id(), reason: DISCARDED_SESSION_REASON.into(),
                 closed_unix_ms: super::super::unix_ms(),
             };
-            tx.execute("INSERT INTO session_closures(root_command_id,data) VALUES(?1,?2)
-                ON CONFLICT(root_command_id) DO UPDATE SET data=excluded.data",
-                params![root.to_string(), serde_json::to_string(&closure)?])?;
+            save_closure(tx, &closure)?;
+            for id in &reset.merger_commands {
+                save_closure(tx, &SessionClosure {
+                    root_command_id: *id, last_command_id: *id, session_id: agent_session_id(*id),
+                    ..closure.clone()
+                })?;
+            }
             ticket.status = TicketState::Blocked;
             ticket.routing_note = "Zurück zum Entwurf: Runner muss Session und Worktree noch verwerfen.".into();
             super::scheduler::save_ticket(tx, &mut ticket)?;
@@ -129,6 +136,10 @@ impl Store {
     }
 
     pub fn confirm_draft_reset(&self, runner: RunnerId, request: RequestId) -> Result<Ticket> {
+        self.confirm_draft_reset_with_mergers(runner, request, false)
+    }
+
+    pub(crate) fn confirm_draft_reset_with_mergers(&self, runner: RunnerId, request: RequestId, mergers: bool) -> Result<Ticket> {
         let mut db = self.0.lock().map_err(|_| StoreError::Internal)?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (raw, completed): (String, bool) = tx.query_row(
@@ -136,6 +147,7 @@ impl Store {
             params![request.to_string(), runner.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?.ok_or(StoreError::NotFound)?;
         let reset: DraftReset = serde_json::from_str(&raw)?;
+        if !mergers && !reset.merger_commands.is_empty() { return Err(StoreError::WorkConflict); }
         let mut ticket = load_ticket(&tx, reset.ticket_id)?;
         if !completed {
             let mut owner = super::work::stream(&tx, reset.stream_id)?;
@@ -159,6 +171,47 @@ impl Store {
         self.wake_scheduler();
         Ok(ticket)
     }
+}
+
+fn save_closure(tx: &Transaction<'_>, closure: &SessionClosure) -> Result<()> {
+    tx.execute("INSERT INTO session_closures(root_command_id,data) VALUES(?1,?2)
+        ON CONFLICT(root_command_id) DO UPDATE SET data=excluded.data",
+        params![closure.root_command_id.to_string(), serde_json::to_string(closure)?])?;
+    Ok(())
+}
+
+fn later_mergers(tx: &Transaction<'_>, original: &RunnerCommand, supported: &[RunnerId]) -> Result<Vec<CommandId>> {
+    let mut query = tx.prepare("SELECT data FROM commands WHERE stream_id=?1
+        AND rowid>(SELECT rowid FROM commands WHERE id=?2) ORDER BY rowid")?;
+    let mut rows = query.query(params![original.stream_id.to_string(), original.id.to_string()])?;
+    let mut sources = std::collections::BTreeSet::from([original.id]);
+    let mut mergers = Vec::new();
+    while let Some(row) = rows.next()? {
+        if !supported.contains(&original.runner_id) { return Err(StoreError::WorkConflict); }
+        let command: RunnerCommand = serde_json::from_str(&row.get::<_, String>(0)?)?;
+        if command.kind != CommandKind::RunAgent || !matches!(command.state, CommandState::Failed | CommandState::Succeeded)
+            || command.runner_id != original.runner_id || command.ownership_epoch != original.ownership_epoch
+        {
+            return Err(StoreError::WorkConflict);
+        }
+        let spec = command.agent_spec.as_ref().ok_or(StoreError::WorkConflict)?;
+        if spec.role == MERGER_ROLE && !spec.read_only && command.session_root() == command.id {
+            let source = spec.prompt.lines().next().and_then(|line| line.strip_prefix(MERGE_PARENT_PREFIX))
+                .and_then(|id| id.parse::<CommandId>().ok()).ok_or(StoreError::WorkConflict)?;
+            if !sources.contains(&source) { return Err(StoreError::WorkConflict); }
+            mergers.push(command.id);
+        } else if mergers.is_empty() && spec.role.is_empty() && !spec.read_only && !command.requires_target_git()
+            && command.session_root() == original.session_root()
+            && tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1
+                AND json_extract(data,'$.final_scan_complete')=1)", [command.id.to_string()], |r| r.get::<_, bool>(0))?
+        {
+            sources.insert(command.id);
+        } else {
+            return Err(StoreError::WorkConflict);
+        }
+    }
+    if mergers.is_empty() && sources.len() > 1 { return Err(StoreError::WorkConflict); }
+    Ok(mergers)
 }
 
 fn detach(tx: &Transaction<'_>, owner: &mut Workstream, ticket: TicketId) -> Result<()> {

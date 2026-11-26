@@ -844,6 +844,15 @@ fn final_archive(s: &Store, c: &RunnerCommand) {
 
 #[test]
 fn deleting_an_intent_with_an_open_question_hides_it_and_persists_the_stop_request() {
+    check_stop_with_open_question(false);
+}
+
+#[test]
+fn cancelling_an_intent_with_an_open_question_keeps_it_in_the_archive() {
+    check_stop_with_open_question(true);
+}
+
+fn check_stop_with_open_question(keep_intent: bool) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
     let s = Store::open(&db).unwrap();
@@ -871,12 +880,17 @@ fn deleting_an_intent_with_an_open_question_hides_it_and_persists_the_stop_reque
             "fields":[{"key":"answer","type":"string","required":true}]}),
     }] };
     let question = s.sync_questions(runner, run.id, snapshot()).unwrap().pop().unwrap();
-    let request = DeleteTask { request_id: RequestId::new() };
-    assert_eq!(s.delete_task(intent.id, request).unwrap().status, TicketState::Cancelled);
+    let request = RequestId::new();
+    let revision = s.task_payload(intent.id).unwrap().revision;
+    let stop = |s: &Store| if keep_intent {
+        s.update_ticket(intent.id, UpdateTicket { request_id: request, expected_revision: revision,
+            title: None, description: None, acceptance_criteria: None, priority: None, status: Some(TicketState::Cancelled) })
+    } else { s.delete_task(intent.id, DeleteTask { request_id: request }) };
+    assert_eq!(stop(&s).unwrap().status, TicketState::Cancelled);
     drop(s);
     let s = Store::open(&db).unwrap();
-    assert_eq!(s.delete_task(intent.id, request).unwrap().status, TicketState::Cancelled);
-    assert!(s.task_payload(intent.id).is_err());
+    assert_eq!(stop(&s).unwrap().status, TicketState::Cancelled);
+    assert_eq!(s.task_payload(intent.id).is_ok(), keep_intent);
     assert!(s.sync_questions(runner, run.id, snapshot()).unwrap().is_empty());
     assert!(s.answer_question(question.id, AnswerQuestion {
         request_id: RequestId::new(), legacy_revision: None, answer: serde_json::json!({"answer":"yes"}),

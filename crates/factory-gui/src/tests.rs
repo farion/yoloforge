@@ -95,6 +95,91 @@ fn legacy_publication_failure_stays_in_queue_and_completion_notice_is_corrected(
 }
 
 #[test]
+fn manually_completed_merger_moves_to_archive_without_changing_run_history() {
+    let mut app = fixture();
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let command = &mut snapshot.commands[0];
+    command.agent_spec.as_mut().unwrap().role = MERGER_ROLE.into();
+    command.state = CommandState::Failed;
+    let ticket = &mut snapshot.tickets[0];
+    ticket.status = TicketState::Blocked;
+    let project = ticket.project_id;
+    snapshot.intent_problems.push(IntentProblem {
+        ticket_id: ticket.id, command_id: command.id, reason: "Merge fehlgeschlagen".into(), solution: None,
+    });
+    assert_eq!(task_bucket(snapshot, &snapshot.tickets[0]), TaskBucket::Current);
+    assert_eq!(inbox_problems(snapshot, project).count(), 1);
+    snapshot.tickets[0].status = TicketState::Done;
+    assert_eq!(task_bucket(snapshot, &snapshot.tickets[0]), TaskBucket::Archive);
+    assert_eq!(task_display_status(snapshot, &snapshot.tickets[0]), crate::tr!("Abgeschlossen"));
+    assert_eq!(inbox_problems(snapshot, project).count(), 0);
+    assert_eq!(inbox_problems_for_tab(snapshot, project, true).count(), 1);
+    assert_eq!(snapshot.commands[0].state, CommandState::Failed);
+
+    snapshot.tickets[0].status = TicketState::Blocked;
+    let ticket = snapshot.tickets[0].id;
+    let revision = snapshot.tickets[0].revision;
+    app.navigate(Target::IntentProblem(project, ticket));
+    assert!(app.dialog.is_none(), "The intent dialog must not hide the Inbox actions");
+    let ctx = app.backend.context().clone();
+    let draw = |app: &mut App, events| {
+        let _ = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            events, ..Default::default()
+        }, |ctx| { app.draw_shell(ctx); app.draw_dialog(ctx); });
+    };
+    draw(&mut app, vec![]);
+    let action: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new(("test-inbox-complete", ticket)))).unwrap();
+    draw(&mut app, click_events(action.center()));
+    assert!(app.settings.pending.is_empty());
+    for _ in 0..3 { draw(&mut app, vec![]); }
+    let confirm: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-intent-complete-confirm"))).unwrap();
+    draw(&mut app, click_events(confirm.center()));
+    let [pending] = app.settings.pending.as_slice() else { panic!("Expected exactly one pending confirmation") };
+    assert_eq!(pending.path, format!("/v1/tickets/{ticket}"));
+    assert_eq!(pending.body["status"], "done");
+    assert_eq!(pending.body["expected_revision"], json!(revision));
+}
+
+#[test]
+fn inbox_offers_reset_after_merger_only_with_a_compatible_runner() {
+    let mut app = fixture();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let mut merger = s.commands[0].clone();
+    merger.id = CommandId::new();
+    merger.agent_spec.as_mut().unwrap().role = MERGER_ROLE.into();
+    merger.state = CommandState::Failed;
+    let work = &mut s.commands[0];
+    work.state = CommandState::Succeeded;
+    let mut result = work.agent_progress.clone().unwrap();
+    result.phase = AgentPhase::Succeeded;
+    result.summary = PUBLICATION_CONFLICT_PREFIX.into();
+    work.result = Some(CommandOutput::Agent { agent: result });
+    let ticket = &s.tickets[0];
+    let (project, ticket) = (ticket.project_id, ticket.id);
+    s.intent_problems.push(IntentProblem {
+        ticket_id: ticket, command_id: work.id, reason: "Übernahme blockiert".into(), solution: None,
+    });
+    s.commands.push(merger);
+    s.server_capabilities.extend([DRAFT_RESET_CAPABILITY.into(), MERGER_DRAFT_RESET_CAPABILITY.into()]);
+    s.runners[0].capabilities.push(DRAFT_RESET_CAPABILITY.into());
+    app.navigate(Target::IntentProblem(project, ticket));
+    let ctx = app.backend.context().clone();
+    let has_reset = |app: &mut App| {
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1360.0, 900.0))),
+            ..Default::default()
+        }, |ctx| app.draw_shell(ctx));
+        let mut labels = Vec::new();
+        for shape in &output.shapes { shape_text(&shape.shape, &mut labels); }
+        labels.iter().any(|label| label == crate::tr!("Zurück zum Entwurf"))
+    };
+    assert!(!has_reset(&mut app));
+    Arc::make_mut(app.snapshot.as_mut().unwrap()).runners[0].capabilities.push(MERGER_DRAFT_RESET_CAPABILITY.into());
+    assert!(has_reset(&mut app));
+}
+
+#[test]
 fn completion_notifications_use_the_ticket_key_instead_of_the_project_name() {
     use crate::i18n::{set_language, Language};
 
@@ -1552,7 +1637,66 @@ fn inbox_filter_is_to_the_right_of_search_and_switches_to_problems() {
     let _ = draw(&mut app, vec![]);
     let option = rect(egui::Id::new(("test-section-filter-option", "Inbox filtern", "Probleme")));
     let _ = draw(&mut app, click_events(option.center()));
-    assert!(app.show_inbox_problems);
+    assert_eq!(app.inbox_filter, InboxFilter::Problems);
+    let _ = draw(&mut app, vec![]);
+    let _ = draw(&mut app, click_events(filter.center()));
+    let _ = draw(&mut app, vec![]);
+    let all = rect(egui::Id::new(("test-section-filter-option", "Inbox filtern", "Alle")));
+    let pos = all.center();
+    for pressed in [true, false] {
+        let _ = draw(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+        }]);
+    }
+    assert_eq!(app.inbox_filter, InboxFilter::All);
+}
+
+#[test]
+fn return_to_draft_confirmation_stays_compact() {
+    let mut app = fixture();
+    let ctx = app.backend.context().clone();
+    app.dialog = Some(Dialog::form(
+        crate::tr!("Zurück zum Entwurf"),
+        crate::tr!("Session und Worktree werden endgültig verworfen. Prompt, Anhänge und bereits integrierte Ergebnisse bleiben erhalten. Noch nicht gestartete Folge-Intents werden neu zugeordnet."),
+        "POST", format!("/v1/tasks/{}/return-to-draft", TicketId::new()), json!({}),
+    ));
+    let mut output = None;
+    for _ in 0..4 {
+        output = Some(ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(875.0, 1044.0))),
+            ..Default::default()
+        }, |ctx| app.draw_dialog(ctx)));
+    }
+    let confirm: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-inbox-draft-confirm"))).unwrap();
+    let title = output.unwrap().shapes.into_iter().find_map(|s| match s.shape {
+        egui::Shape::Text(text) if text.galley.job.text == crate::tr!("Zurück zum Entwurf") => Some(text.pos),
+        _ => None,
+    }).unwrap();
+    assert!(confirm.bottom() - title.y < 235.0, "confirmation footer is too far from the title");
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
+fn accepted_draft_reset_moves_the_problem_to_archive_before_runner_confirmation() {
+    let mut app = fixture();
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let project = s.projects[0].id;
+    let ticket = s.tickets[0].id;
+    let command = &s.commands[0];
+    s.intent_problems.push(IntentProblem {
+        ticket_id: ticket, command_id: command.id, reason: "Unpublished changes".into(), solution: None,
+    });
+    assert_eq!(inbox_problems(s, project).count(), 1);
+    s.draft_resets.push(DraftReset {
+        request_id: RequestId::new(), ticket_id: ticket, command_id: command.id, root_id: command.session_root(),
+        stream_id: command.stream_id, ownership_epoch: command.ownership_epoch, merger_commands: vec![],
+    });
+    assert_eq!(inbox_problems(s, project).count(), 0);
+    assert_eq!(inbox_problems_for_tab(s, project, true).count(), 1);
+    s.draft_resets.clear();
+    s.tickets[0].draft = true;
+    s.tickets[0].execution_command = None;
+    assert_eq!(inbox_problems_for_tab(s, project, true).count(), 1);
 }
 
 #[test]
@@ -4211,7 +4355,7 @@ fn session_rows_use_the_latest_assigned_task_and_real_activity_across_continuati
 }
 
 #[test]
-fn session_rows_match_task_style_and_keep_actions_at_bottom_right_in_an_icon_menu() {
+fn session_rows_offer_direct_actions_at_bottom_right_without_a_technical_menu() {
     let mut app = fixture();
     app.settings.page = Page::Sessions;
     let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
@@ -4267,7 +4411,7 @@ fn session_rows_match_task_style_and_keep_actions_at_bottom_right_in_an_icon_men
         }
         let cell = rect("test-session-row");
         let open = rect("test-session-row-open");
-        let menu = rect("test-session-row-menu");
+        let questions = rect("test-session-row-questions");
         let active = rect("test-session-row-activity");
         assert!((cell.right() - open.right() - 16.0).abs() < 1.0);
         assert!(
@@ -4275,8 +4419,8 @@ fn session_rows_match_task_style_and_keep_actions_at_bottom_right_in_an_icon_men
             "{cell:?} {open:?}"
         );
         assert!((open.bottom() - active.bottom()).abs() < 1.0);
-        assert!(menu.right() < open.left());
-        assert!((menu.bottom() - open.bottom()).abs() < 1.0);
+        assert!(questions.right() < open.left());
+        assert!((questions.bottom() - open.bottom()).abs() < 1.0);
         assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::epaint::Shape::Rect(r) if r.rect==cell && r.corner_radius==egui::CornerRadius::same(2) && r.stroke==egui::Stroke::NONE)));
         assert!(output.shapes.iter().any(|shape|matches!(&shape.shape,egui::epaint::Shape::Text(t) if t.galley.job.text=="Titel aus OpenCode" && t.galley.job.sections.iter().all(|s|s.format.font_id.size==18.0))));
     }
@@ -4289,42 +4433,12 @@ fn session_rows_match_task_style_and_keep_actions_at_bottom_right_in_an_icon_men
         shape_text(&shape.shape, &mut text);
     }
     assert!(text.iter().any(|t| t == "In Bearbeitung"));
-    let pos = rect("test-session-row-menu").center();
-    let _ = draw(
-        &mut app,
-        egui::vec2(1360.0, 900.0),
-        vec![
-            egui::Event::PointerMoved(pos),
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ],
-    );
-    for _ in 0..3 {
-        let _ = draw(&mut app, egui::vec2(1360.0, 900.0), vec![]);
-    }
-    let output = draw(&mut app, egui::vec2(1360.0, 900.0), vec![]);
-    text.clear();
-    for shape in &output.shapes {
-        shape_text(&shape.shape, &mut text);
-    }
-    for expected in [
-        "Session schließen …",
-        "Compaction anfordern …",
-        "Checkpoint erstellen …",
-        "Metadaten und Ausführung",
-    ] {
-        assert!(text.iter().any(|t| t == expected), "{expected}");
-    }
+    let s = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    s.commands[0].state = CommandState::Succeeded;
+    s.commands[0].agent_progress.as_mut().unwrap().phase = AgentPhase::Succeeded;
+    let _ = draw(&mut app, egui::vec2(1360.0, 900.0), vec![]);
+    let _ = draw(&mut app, egui::vec2(1360.0, 900.0), click_events(rect("test-session-row-close").center()));
+    assert!(app.dialog.is_some(), "Closing a session requires confirmation");
     assert!(app.settings.pending.is_empty());
 }
 
@@ -5180,6 +5294,35 @@ fn project_menu_is_an_adjacent_icon_with_only_basic_actions_and_footer_version()
     let _ = draw(&mut app, click_events(rows[3].center()));
     assert!(matches!(&app.dialog, Some(Dialog::Read { title, path, .. })
         if title.starts_with("Verbrauch - ") && path == &format!("/v1/projects/{project}/usage")));
+    assert!(app.settings.pending.is_empty());
+}
+
+#[test]
+fn intent_delete_dialog_keeps_the_footer_close_to_the_text() {
+    let mut app = fixture();
+    let ctx = app.backend.context().clone();
+    let ticket = app.snapshot.as_ref().unwrap().tickets[0].id;
+    let mut dialog = Dialog::form(
+        crate::tr!("Intent löschen"),
+        &crate::tr!("Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", "Fehlgeschlagene Orchestrator-Läufe archivieren"),
+        "DELETE", format!("/v1/tasks/{ticket}/intent"),
+        json!(DeleteTask { request_id: RequestId::new() }),
+    );
+    let Dialog::Form(form) = &dialog else { unreachable!() };
+    let modal_id = egui::Id::new(("factory-form", form.id));
+    for size in [egui::vec2(889.0, 1047.0), egui::vec2(420.0, 330.0)] {
+        for _ in 0..4 {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            }, |ctx| { assert!(!dialog.show(ctx, &mut app)); });
+        }
+        let modal = ctx.memory(|m| m.area_rect(modal_id)).unwrap();
+        let button: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new("test-task-delete-confirm"))).unwrap();
+        assert!(modal.height() < if size.x > 500.0 { 300.0 } else { size.y - 16.0 }, "{modal:?} {button:?}");
+        assert!(modal.bottom() <= size.y && modal.contains_rect(button));
+        assert!(modal.bottom() - button.bottom() <= 36.0);
+    }
     assert!(app.settings.pending.is_empty());
 }
 

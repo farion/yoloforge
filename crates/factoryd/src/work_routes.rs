@@ -538,8 +538,10 @@ pub(super) async fn pending_draft_reset(
     if !guard.entries[&runner].input.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY) {
         return Json(Option::<DraftReset>::None).into_response();
     }
+    let mergers = guard.entries[&runner].input.capabilities.iter().any(|cap| cap == MERGER_DRAFT_RESET_CAPABILITY);
     let store = app.store.clone();
-    db_call(RequestId::new(), move || store.pending_draft_reset(runner)).await
+    db_call(RequestId::new(), move || Ok(store.pending_draft_reset(runner)?
+        .filter(|reset| mergers || reset.merger_commands.is_empty()))).await
 }
 
 pub(super) async fn confirm_draft_reset(
@@ -552,8 +554,9 @@ pub(super) async fn confirm_draft_reset(
     if !guard.entries[&runner].input.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY) {
         return error(StatusCode::CONFLICT, ErrorCode::WorkConflict, "Runner does not support draft reset");
     }
+    let mergers = guard.entries[&runner].input.capabilities.iter().any(|cap| cap == MERGER_DRAFT_RESET_CAPABILITY);
     let store = app.store.clone();
-    db_call(request, move || store.confirm_draft_reset(runner, request).map(|_| ())).await
+    db_call(request, move || store.confirm_draft_reset_with_mergers(runner, request, mergers).map(|_| ())).await
 }
 
 pub(super) async fn release_publication_recovery(

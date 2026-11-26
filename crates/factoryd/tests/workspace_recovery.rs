@@ -271,7 +271,7 @@ fn proposed_workspace_solution_waits_for_current_operator_approval() {
     assert!(s.accept_intent_solution(tid, AcceptIntentSolution {
         request_id: RequestId::new(), ..approval
     }).is_err());
-    assert!(s.desktop_snapshot().unwrap().intent_problems.is_empty());
+    assert_eq!(s.desktop_snapshot().unwrap().intent_problems[0].command_id, failed.id);
     let pending = s.pending(failed.runner_id).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].workspace_spec, failed.workspace_spec);
@@ -907,7 +907,7 @@ fn check_agent_recovery(needs_approval: bool) {
         s.accept_intent_solution(tid, AcceptIntentSolution {
             request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: worker.id,
         }).unwrap();
-        assert!(s.desktop_snapshot().unwrap().intent_problems.is_empty());
+        assert_eq!(s.desktop_snapshot().unwrap().intent_problems[0].command_id, worker.id);
     }
     let pending = s.pending(worker.runner_id).unwrap();
     assert_eq!(pending.len(), 1);
@@ -927,7 +927,7 @@ fn check_agent_recovery(needs_approval: bool) {
     assert_eq!(ticket.status, TicketState::Blocked);
     assert!(ticket.routing_note.contains("kein weiterer Versuch"));
     let problems = s.desktop_snapshot().unwrap().intent_problems;
-    assert_eq!(problems.len(), 1);
+    assert_eq!(problems.len(), 1 + usize::from(needs_approval));
     assert_eq!((problems[0].ticket_id, problems[0].command_id), (tid, continued.id));
     let notifications = s.notifications("test-operator", None).unwrap();
     assert_eq!(notifications.entries.iter().filter(|n| n.kind == INTENT_ATTENTION_EVENT).count(), 1 + usize::from(needs_approval));
@@ -935,7 +935,7 @@ fn check_agent_recovery(needs_approval: bool) {
     s.retry_task(tid, RetryTask {
         request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: continued.id,
     }).unwrap();
-    assert!(s.desktop_snapshot().unwrap().intent_problems.is_empty());
+    assert_eq!(s.desktop_snapshot().unwrap().intent_problems[0].command_id, continued.id);
 }
 
 #[test]

@@ -498,6 +498,30 @@ impl Store {
                 if ticket.revision != body.expected_revision {
                     return Err(StoreError::RevisionConflict(ticket.revision));
                 }
+                let cancelling = body.status == Some(TicketState::Cancelled) && ticket.status != TicketState::Cancelled;
+                if cancelling {
+                    tasks::require_no_publication_recovery(tx, ticket.project_id)?;
+                    draft_resets::require_not_resetting(tx, id)?;
+                    if ticket.status == TicketState::Done {
+                        return Err(StoreError::WorkConflict);
+                    }
+                    ticket.draft = false;
+                    ticket.routing_note = "Vom Benutzer abgebrochen".into();
+                    tasks::stop_deleted_intent(tx, &ticket)?;
+                }
+                if body.status == Some(TicketState::Done) && ticket.status == TicketState::Blocked {
+                    draft_resets::require_not_resetting(tx, id)?;
+                    tasks::require_no_publication_recovery(tx, ticket.project_id)?;
+                    if let Some(command) = ticket.execution_command {
+                        let busy: bool = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM commands active JOIN commands old ON old.stream_id=active.stream_id
+                              WHERE old.id=?1 AND active.state IN ('pending','accepted'))",
+                            [command.to_string()], |row| row.get(0),
+                        )?;
+                        if busy { return Err(StoreError::WorkConflict); }
+                    }
+                    ticket.routing_note = "Vom Benutzer als bereits umgesetzt bestätigt".into();
+                }
                 if matches!(body.status, Some(TicketState::Validating | TicketState::ReworkQueued))
                     || (matches!(ticket.status, TicketState::Validating | TicketState::ReworkQueued)
                         && body.status != Some(TicketState::Cancelled))

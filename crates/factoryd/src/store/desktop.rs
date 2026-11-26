@@ -38,14 +38,7 @@ pub(super) fn intent_problems(tx: &Transaction<'_>) -> Result<Vec<IntentProblem>
     let mut query = tx.prepare(
         "SELECT e.payload FROM events e JOIN tickets t ON t.id=e.aggregate_id
          JOIN active_projects p ON p.id=t.project_id
-         WHERE e.kind=?1 AND (
-           (json_extract(t.data,'$.execution_command')=json_extract(e.payload,'$.command_id')
-            AND json_extract(t.data,'$.status') IN ('blocked','in_progress'))
-           OR (json_extract(e.payload,'$.solution')='reassign_session'
-            AND json_extract(t.data,'$.execution_command') IS NULL
-            AND json_extract(t.data,'$.requested_session')=json_extract(e.payload,'$.command_id')
-            AND json_extract(t.data,'$.status') IN ('backlog','ready')))
-           AND COALESCE(json_extract(t.data,'$.draft'),0)=0
+         WHERE e.kind=?1
            AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
          ORDER BY e.sequence DESC",
     )?;

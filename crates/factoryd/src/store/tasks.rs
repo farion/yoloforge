@@ -21,7 +21,7 @@ pub(super) fn deletion_stop_requested(tx: &Connection, command: CommandId) -> Re
         [command.to_string()], |row| row.get(0))?)
 }
 
-fn stop_deleted_intent(tx: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
+pub(super) fn stop_deleted_intent(tx: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
     let rows = {
         let mut stmt = tx.prepare("SELECT c.data FROM commands c JOIN stream_tickets st ON st.stream_id=c.stream_id
             WHERE st.ticket_id=?1 AND c.state IN ('pending','accepted')

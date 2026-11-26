@@ -115,7 +115,7 @@ pub struct App {
     pub query: String,
     pub task_filter: usize,
     pub show_answered: bool,
-    pub show_inbox_problems: bool,
+    pub inbox_filter: InboxFilter,
     pub sessions_closed: bool,
     pub diagnostics_project: bool,
     pub responses: BTreeMap<u64, Result<Value, Failure>>,
@@ -136,7 +136,7 @@ struct ViewState {
     query: String,
     filter: usize,
     answered: bool,
-    inbox_problems: bool,
+    inbox_filter: InboxFilter,
     sessions_closed: bool,
     detail: Option<TicketId>,
 }
@@ -236,7 +236,7 @@ impl App {
             query: String::new(),
             task_filter: 0,
             show_answered: false,
-            show_inbox_problems: false,
+            inbox_filter: InboxFilter::All,
             sessions_closed: false,
             diagnostics_project: false,
             skill_settings: BTreeMap::new(),
@@ -431,7 +431,7 @@ impl App {
             Target::Questions(project, session) => {
                 self.set_project(Some(project));
                 self.set_page(Page::Questions);
-                self.show_inbox_problems = false;
+                self.inbox_filter = InboxFilter::Questions;
                 self.question_focus = Some(session.clone());
                 if let Some(s) = &self.snapshot {
                     let mut qs = question_groups_for_tab(s, project, false)
@@ -450,9 +450,11 @@ impl App {
             Target::IntentProblem(project, ticket) => {
                 self.set_project(Some(project));
                 self.set_page(Page::Questions);
-                self.show_inbox_problems = true;
+                self.inbox_filter = InboxFilter::Problems;
                 self.query.clear();
-                self.view_task(ticket);
+                self.show_answered = self.snapshot.as_ref().is_some_and(|s|
+                    !inbox_problems(s, project).any(|(_, t)| t.id == ticket)
+                    && inbox_problems_for_tab(s, project, true).any(|(_, t)| t.id == ticket));
             }
             Target::Session(project, root) => self.open_session(project, root),
             Target::RunDetails(id) => self.read(crate::tr!("Laufdetails …"), format!("/v1/commands/{id}")),
@@ -505,7 +507,7 @@ impl App {
                 query: self.query.clone(),
                 filter: self.task_filter,
                 answered: self.show_answered,
-                inbox_problems: self.show_inbox_problems,
+                inbox_filter: self.inbox_filter,
                 sessions_closed: self.sessions_closed,
                 detail: self.detail,
             },
@@ -520,7 +522,7 @@ impl App {
         self.query = state.query;
         self.task_filter = state.filter;
         self.show_answered = state.answered;
-        self.show_inbox_problems = state.inbox_problems;
+        self.inbox_filter = state.inbox_filter;
         self.sessions_closed = state.sessions_closed;
         self.detail = state.detail;
     }

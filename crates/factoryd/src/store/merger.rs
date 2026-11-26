@@ -45,19 +45,36 @@ fn find_existing_publication_problems(tx: &Transaction<'_>) -> Result<()> {
          WHERE json_extract(t.data,'$.status') IN ('in_progress','blocked')
            AND COALESCE(json_extract(t.data,'$.draft'),0)=0 AND COALESCE(json_extract(p.data,'$.paused'),0)=0
            AND c.state IN ('succeeded','failed')
-           AND c.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
+           AND (c.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
+                OR (instr(json_extract(c.data,'$.result.agent.summary'),?5)=1
+                    AND EXISTS(SELECT 1 FROM commands m WHERE m.stream_id=c.stream_id AND m.rowid>c.rowid
+                        AND m.rowid=(SELECT MAX(n.rowid) FROM commands n WHERE n.stream_id=c.stream_id)
+                        AND m.state IN ('succeeded','failed') AND json_extract(m.data,'$.agent_spec.role')=?1)))
            AND (json_extract(c.data,'$.agent_spec.role')=?1 OR instr(json_extract(c.data,'$.result.agent.summary'),?2)=1
-                OR instr(json_extract(c.data,'$.result.agent.summary'),?3)>0)
+                OR instr(json_extract(c.data,'$.result.agent.summary'),?3)>0
+                OR instr(json_extract(c.data,'$.result.agent.summary'),?5)=1)
            AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
            AND NOT EXISTS(SELECT 1 FROM events e WHERE e.kind=?4 AND e.aggregate_id=t.id
                 AND json_extract(e.payload,'$.command_id')=c.id)",
     )?;
     let rows = query.query_map(params![MERGER_ROLE, PUBLICATION_BLOCKED_PREFIX,
-        "Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:", INTENT_ATTENTION_EVENT],
+        "Ergebnis im Arbeitsbereich erhalten; automatische Uebernahme in den Projektordner blockiert:", INTENT_ATTENTION_EVENT,
+        PUBLICATION_CONFLICT_PREFIX],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (ticket, command) in rows {
-        if let Some(reason) = publication_attention_reason(tx, &serde_json::from_str::<RunnerCommand>(&command)?)? {
+        let command: RunnerCommand = serde_json::from_str(&command)?;
+        let superseded_conflict = matches!(&command.result, Some(CommandOutput::Agent { agent })
+            if agent.summary.starts_with(PUBLICATION_CONFLICT_PREFIX))
+            && tx.query_row("SELECT EXISTS(SELECT 1 FROM commands m JOIN commands c ON c.stream_id=m.stream_id
+                WHERE c.id=?1 AND m.rowid>c.rowid AND json_extract(m.data,'$.agent_spec.role')=?2)",
+                params![command.id.to_string(), MERGER_ROLE], |r| r.get::<_, bool>(0))?;
+        let reason = if superseded_conflict {
+            Some("Die Übernahme ist blockiert. Nicht integrierte Änderungen bleiben erhalten.")
+        } else {
+            publication_attention_reason(tx, &command)?
+        };
+        if let Some(reason) = reason {
             super::desktop::require_intent_attention(tx, &serde_json::from_str::<Ticket>(&ticket)?, reason)?;
         }
     }
@@ -489,7 +506,7 @@ mod tests {
         confirmation.base_branch = "main".into();
         assert_eq!(store.reconcile_publication(blocked.id, confirmation).unwrap().status, TicketState::Done);
         let snapshot = store.snapshot().unwrap();
-        assert!(snapshot.intent_problems.is_empty());
+        assert_eq!(snapshot.intent_problems[0].ticket_id, blocked.id);
         let reconciled = snapshot.commands.iter().find(|c| c.id == sources[0].1.id).unwrap();
         assert!(!command_publication_blocked(reconciled));
         assert!(!command_publication_unconfirmed(reconciled));
@@ -576,5 +593,68 @@ mod tests {
         );
         store.merger_tick().unwrap();
         assert!(store.pending(runner).unwrap().is_empty());
+        if !success {
+            let blocked = store.task_payload(sources[1].0).unwrap();
+            let done = store.update_ticket(blocked.id, UpdateTicket {
+                request_id: RequestId::new(), expected_revision: blocked.revision,
+                title: None, description: None, acceptance_criteria: None, priority: None,
+                status: Some(TicketState::Done),
+            }).unwrap();
+            assert_eq!(done.status, TicketState::Done);
+            assert_eq!(done.execution_command, Some(retry.id));
+            assert_eq!(store.snapshot().unwrap().commands.iter().find(|c| c.id == retry.id).unwrap().state,
+                CommandState::Failed);
+            store.merger_tick().unwrap();
+            assert!(store.pending(runner).unwrap().is_empty());
+
+            let source = &sources[1].1;
+            let mut earlier = store.create_ticket(CreateTicket {
+                request_id: RequestId::new(), project_id: project.id, title: "Earlier conflict".into(),
+                description: "Keep this prompt".into(), acceptance_criteria: String::new(), priority: 1,
+            }).unwrap();
+            let relink = |ticket: &mut Ticket, status| {
+                let mut db = store.0.lock().unwrap();
+                let tx = db.transaction().unwrap();
+                let mut stream = super::super::work::stream(&tx, source.stream_id).unwrap();
+                if !stream.ticket_ids.contains(&ticket.id) {
+                    stream.ticket_ids.push(ticket.id);
+                    tx.execute("INSERT INTO stream_tickets(stream_id,ticket_id) VALUES(?1,?2)",
+                        params![stream.id.to_string(), ticket.id.to_string()]).unwrap();
+                    super::super::work::save_stream(&tx, &mut stream, StreamState::Blocked).unwrap();
+                }
+                ticket.status = status;
+                ticket.execution_command = Some(source.id);
+                super::super::scheduler::save_ticket(&tx, ticket).unwrap();
+                tx.commit().unwrap();
+            };
+            relink(&mut earlier, TicketState::InProgress);
+            let request = ReturnIntentToDraft {
+                request_id: RequestId::new(), expected_revision: earlier.revision, previous_command: source.id,
+            };
+            assert!(store.return_intent_to_draft(earlier.id, request.clone()).is_err());
+            let mut other = done.clone();
+            relink(&mut other, TicketState::InProgress);
+            assert!(store.return_intent_to_draft_with_mergers(earlier.id, request.clone(), &[runner]).is_err(),
+                "Never retire a workspace with another open executed intent");
+            other.execution_command = Some(retry.id);
+            other.status = TicketState::Done;
+            {
+                let mut db = store.0.lock().unwrap();
+                let tx = db.transaction().unwrap();
+                super::super::scheduler::save_ticket(&tx, &mut other).unwrap();
+                tx.commit().unwrap();
+            }
+            store.merger_tick().unwrap();
+            assert!(store.snapshot().unwrap().intent_problems.iter().any(|p| p.ticket_id == earlier.id));
+            let reset = store.return_intent_to_draft_with_mergers(earlier.id, request, &[runner]).unwrap();
+            assert_eq!(reset.merger_commands, vec![merge.id, retry.id]);
+            assert!(!store.task_payload(earlier.id).unwrap().draft);
+            assert!(store.confirm_draft_reset(runner, reset.request_id).is_err());
+            let draft = store.confirm_draft_reset_with_mergers(runner, reset.request_id, true).unwrap();
+            assert!(draft.draft && draft.execution_command.is_none() && draft.requested_session.is_none());
+            assert_eq!(draft.description, earlier.description);
+            assert_eq!(store.task_payload(done.id).unwrap().execution_command, Some(retry.id));
+            assert!(store.task_history(earlier.id, None).unwrap().entries.iter().all(|entry| entry.command_id.is_none()));
+        }
     }
 }

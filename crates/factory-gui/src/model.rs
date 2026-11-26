@@ -3,6 +3,14 @@ use factory_protocol::{IntentProblem, IntentSolution, Snapshot, DISCARDED_SESSIO
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InboxFilter {
+    #[default]
+    All,
+    Questions,
+    Problems,
+}
+
 pub(crate) fn server_supports(snapshot: &Snapshot, capability: &str) -> bool {
     snapshot.protocol_version == factory_protocol::PROTOCOL_VERSION
         && snapshot.server_capabilities.iter().any(|cap| cap == capability)
@@ -264,6 +272,12 @@ pub fn task_status(s: &Snapshot, t: &Ticket) -> &'static str {
 
 /// Canonical user-facing Intent status shared by lists, Overview and sessions.
 pub fn task_display_status(s: &Snapshot, t: &Ticket) -> &'static str {
+    if manually_completed_merger(s, t) {
+        return crate::tr!("Abgeschlossen");
+    }
+    if t.status == TicketState::Cancelled {
+        return crate::tr!("Abgebrochen");
+    }
     let command = task_command(s, t);
     if let Some(status) = command.and_then(|c| merger_pending_status(s, c)) {
         return status;
@@ -423,6 +437,9 @@ pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
     if ticket.draft {
         return TaskBucket::Draft;
     }
+    if manually_completed_merger(snapshot, ticket) {
+        return TaskBucket::Archive;
+    }
     if matches!(ticket.status, TicketState::Blocked | TicketState::Validating | TicketState::ReworkQueued) {
         return TaskBucket::Current;
     }
@@ -460,6 +477,11 @@ pub fn task_bucket(snapshot: &Snapshot, ticket: &Ticket) -> TaskBucket {
     }
 }
 
+fn manually_completed_merger(s: &Snapshot, ticket: &Ticket) -> bool {
+    ticket.status == TicketState::Done && task_command(s, ticket).is_some_and(|c|
+        is_merger(c) && c.state == CommandState::Failed)
+}
+
 pub fn needs_answer(q: &Question) -> bool {
     matches!(q.state, QuestionState::Pending | QuestionState::Rejected)
 }
@@ -473,14 +495,19 @@ pub fn inbox_question(q: &Question) -> bool {
 }
 
 pub fn inbox_problems(s: &Snapshot, project: ProjectId) -> impl Iterator<Item = (&IntentProblem, &Ticket)> {
+    inbox_problems_for_tab(s, project, false)
+}
+
+pub fn inbox_problems_for_tab(s: &Snapshot, project: ProjectId, archived: bool) -> impl Iterator<Item = (&IntentProblem, &Ticket)> {
     s.intent_problems.iter().filter_map(move |problem| {
-        let ticket = s.tickets.iter().find(|t| t.id == problem.ticket_id && t.project_id == project
-            && !t.draft && (matches!(t.status, TicketState::Blocked | TicketState::InProgress)
-                && t.execution_command == Some(problem.command_id)
+        let ticket = s.tickets.iter().find(|t| t.id == problem.ticket_id && t.project_id == project)?;
+        let active = !ticket.draft && !s.draft_resets.iter().any(|r| r.ticket_id == ticket.id && r.command_id == problem.command_id)
+            && (matches!(ticket.status, TicketState::Blocked | TicketState::InProgress)
+                && ticket.execution_command == Some(problem.command_id)
                 || problem.solution == Some(IntentSolution::ReassignSession)
-                    && matches!(t.status, TicketState::Backlog | TicketState::Ready)
-                    && t.execution_command.is_none() && t.requested_session == Some(problem.command_id)))?;
-        Some((problem, ticket))
+                    && matches!(ticket.status, TicketState::Backlog | TicketState::Ready)
+                    && ticket.execution_command.is_none() && ticket.requested_session == Some(problem.command_id));
+        (active != archived).then_some((problem, ticket))
     })
 }
 

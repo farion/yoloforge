@@ -24,13 +24,16 @@ impl Store {
                   UNION SELECT json_extract(data,'$.command') FROM task_routing WHERE ticket_id=?1
                   UNION SELECT json_extract(payload,'$.command_id') FROM events WHERE aggregate_id=?1 AND kind='task.routing_run'
                   UNION SELECT json_extract(payload,'$.command_id') FROM events WHERE aggregate_id=?1 AND kind='intent.draft_reset_requested'
-             ), related(id) AS (
+              ), related(id) AS (
                 SELECT id FROM assigned_commands WHERE id IS NOT NULL
                 UNION SELECT id FROM questions WHERE command_id IN (SELECT id FROM assigned_commands)
                 UNION SELECT ?1
              )
              SELECT sequence, kind, created_unix_ms, payload FROM events
-              WHERE sequence<?2 AND (
+               WHERE sequence<?2
+                 AND sequence>=COALESCE((SELECT MAX(sequence) FROM events
+                    WHERE aggregate_id=?1 AND kind='intent.returned_to_draft'),0)
+                 AND (
                    aggregate_id IN (SELECT id FROM related)
                    OR (kind='supervisor.evaluation' AND json_extract(payload,'$.target_command_id') IN (SELECT id FROM assigned_commands))
               )

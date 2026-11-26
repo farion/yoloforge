@@ -265,6 +265,18 @@ pub(crate) fn has_plan(journal: &Journal, command: &RunnerCommand) -> Result<boo
         [key(command)], |row| row.get(0))?)
 }
 
+pub(crate) fn draft_reset_repository(journal: &Journal, command: &RunnerCommand, workspace: &Workspace, root: &Path) -> Result<PathBuf> {
+    let raw: String = journal.db.query_row("SELECT data FROM workspaces WHERE stream_id=?1",
+        [key(command)], |row| row.get(0)).context("No journaled worktree")?;
+    let plan: Plan = serde_json::from_str(&raw)?;
+    ensure!(plan.ready && (plan.path == root.join(path_key(command)) || plan.path == root.join(key(command)))
+        && git_path(&plan.path)? == git_path(Path::new(&workspace.path))?
+        && plan.spec.branch == workspace.branch && plan.path != plan.repository
+        && fs::canonicalize(&plan.repository)? == plan.repository
+        && common_dir(&plan.repository)? == plan.common_dir, "Draft reset worktree binding changed");
+    Ok(plan.repository)
+}
+
 /// Only an explicit draft reset reaches here. Bind the removal to the recorded
 /// linked worktree, never the user's checkout, a reused path or a symlink.
 pub(crate) fn discard(

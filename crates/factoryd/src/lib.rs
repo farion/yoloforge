@@ -643,7 +643,7 @@ async fn register(
     }
     if !valid_text(&body.name, 80)
         || !valid_text(&body.version, 80)
-        || body.capabilities.len() > 22
+        || body.capabilities.len() > 23
         || body.capabilities.iter().any(|c| !valid_text(c, 80))
     {
         return error(
@@ -877,7 +877,7 @@ async fn snapshot_response(app: App, compact: bool) -> Response {
         draft_resets: durable.draft_resets,
         intent_problems: durable.intent_problems,
         directs: durable.directs,
-        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into(), DELETE_TASK_CAPABILITY.into(), DRAFT_RESET_CAPABILITY.into()],
+        server_capabilities: vec![TARGET_GIT_CAPABILITY.into(), RUNNER_RESTART_CAPABILITY.into(), factory_protocol::directs::CAPABILITY.into(), DELETE_FAILED_TASK_CAPABILITY.into(), DELETE_INACTIVE_TASK_CAPABILITY.into(), DELETE_TASK_CAPABILITY.into(), DRAFT_RESET_CAPABILITY.into(), MERGER_DRAFT_RESET_CAPABILITY.into(), CANCEL_INTENT_CAPABILITY.into()],
         token_totals: durable.token_totals,
         session_activity_unix_ms: durable.session_activity_unix_ms,
         command_failed_unix_ms: durable.command_failed_unix_ms,

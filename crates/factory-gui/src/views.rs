@@ -820,6 +820,8 @@ impl App {
                                     vec![crate::tr!("Anzeigen")]
                                  };
                                   let retryable = retryable_task(&s, t);
+                                  let cancellable = !matches!(t.status, TicketState::Done | TicketState::Cancelled)
+                                      && server_supports(&s, CANCEL_INTENT_CAPABILITY);
                                   let full_delete = s.server_capabilities.iter().any(|cap| cap == DELETE_TASK_CAPABILITY);
                                   let inactive_delete = s.server_capabilities.iter().any(|cap| cap == DELETE_INACTIVE_TASK_CAPABILITY);
                                   let deletable = if full_delete {
@@ -850,7 +852,8 @@ impl App {
                                     })
                                     .sum::<f32>()
                                     + labels.len() as f32 * ui.spacing().item_spacing.x
-                                    + if show_delete { design::ICON_BUTTON_SIZE + ui.spacing().item_spacing.x } else { 0.0 };
+                                     + (usize::from(show_delete) + usize::from(cancellable)) as f32
+                                         * (design::ICON_BUTTON_SIZE + ui.spacing().item_spacing.x);
                                 let metadata_width = (ui.available_width() - reserved).max(100.0);
                                 let _date = ui
                                     .allocate_ui_with_layout(
@@ -950,9 +953,17 @@ impl App {
                                                 view.rect,
                                             )
                                         });
-                                         if view.clicked() {
-                                             self.view_task(t.id);
-                                         }
+                                          if view.clicked() {
+                                              self.view_task(t.id);
+                                          }
+                                          if cancellable && design::icon_button(ui, egui_phosphor::regular::STOP,
+                                              crate::tr!("Intent abbrechen"), self.online
+                                                  && !s.draft_resets.iter().any(|r| r.ticket_id == t.id)
+                                                  && !self.settings.pending.iter().any(|r| r.server == self.server
+                                                      && r.path == format!("/v1/tickets/{}", t.id))).clicked()
+                                          {
+                                              self.confirm_intent_state(t, TicketState::Cancelled);
+                                          }
                                          if show_delete {
                                              let retry_path = format!("/v1/tasks/{}/retry", t.id);
                                              let path = format!("/v1/tasks/{}", t.id);
@@ -1128,31 +1139,36 @@ impl App {
                 group.questions.retain(|q| !question_under_automation(q));
                 (!group.questions.is_empty()).then_some(group)
             }).partition(|group| group.questions.iter().any(inbox_question));
-        let problems: Vec<_> = inbox_problems(&s, project).collect();
         let mut selected = usize::from(self.show_answered);
-        let show_problems = self.show_inbox_problems;
-        let question_tabs = [(crate::tr!("Offen"), current.len()), (crate::tr!("Archiv"), archived.len())];
+        let filter = self.inbox_filter;
+        let tabs = [
+            (crate::tr!("Offen"), if filter == InboxFilter::Problems { 0 } else { current.len() }
+                + if filter == InboxFilter::Questions { 0 } else { inbox_problems(&s, project).count() }),
+            (crate::tr!("Archiv"), if filter == InboxFilter::Problems { 0 } else { archived.len() }
+                + if filter == InboxFilter::Questions { 0 } else { inbox_problems_for_tab(&s, project, true).count() }),
+        ];
         design::section_toolbar_extras(
             ui,
             "question",
             &mut self.query,
-            if show_problems { crate::tr!("Probleme durchsuchen …") } else { crate::tr!("Fragen durchsuchen …") },
-            if show_problems { &[] } else { &question_tabs },
+            match filter {
+                InboxFilter::All => crate::tr!("Inbox durchsuchen …"),
+                InboxFilter::Questions => crate::tr!("Fragen durchsuchen …"),
+                InboxFilter::Problems => crate::tr!("Probleme durchsuchen …"),
+            },
+            &tabs,
             &mut selected,
             |_| {},
             design::SECTION_FILTER_WIDTH,
             |ui| {
-                let _filter = design::section_filter(ui, crate::tr!("Inbox filtern"), &mut self.show_inbox_problems,
-                    &[(false, crate::tr!("Fragen")), (true, crate::tr!("Probleme"))]);
+                let _filter = design::section_filter(ui, crate::tr!("Inbox filtern"), &mut self.inbox_filter,
+                    &[(InboxFilter::All, crate::tr!("Alle")), (InboxFilter::Questions, crate::tr!("Fragen")),
+                        (InboxFilter::Problems, crate::tr!("Probleme"))]);
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-inbox-filter"), _filter.rect));
             },
         );
         self.show_answered = selected == 1;
-        if self.show_inbox_problems {
-            self.intent_problems(ui, &s, project, problems);
-            return;
-        }
         let needle = self.query.to_lowercase();
         let mut groups = if self.show_answered {
             archived
@@ -1177,7 +1193,21 @@ impl App {
                             .is_some_and(|c| session_title(&s, c).to_lowercase().contains(&needle))
                 })
         });
-        if groups.is_empty() {
+        let problems: Vec<_> = inbox_problems_for_tab(&s, project, self.show_answered).filter(|(problem, ticket)|
+            needle.is_empty() || [&ticket.key, &ticket.title, &problem.reason]
+                .into_iter().any(|text| text.to_lowercase().contains(&needle))).collect();
+        let show_problems = self.inbox_filter != InboxFilter::Questions;
+        if self.inbox_filter == InboxFilter::Problems {
+            groups.clear();
+        }
+        if groups.is_empty() && (!show_problems || problems.is_empty()) {
+            if self.inbox_filter == InboxFilter::Problems {
+                design::list_empty_state(ui, Page::Questions.icon(), if needle.is_empty() {
+                    if self.show_answered { crate::tr!("Keine archivierten Probleme") }
+                    else { crate::tr!("Keine offenen Probleme") }
+                } else { crate::tr!("Keine passenden Probleme") });
+                return;
+            }
             let message = if !needle.is_empty() {
                 crate::tr!("Keine passenden Fragen")
             } else if self.show_answered {
@@ -1189,8 +1219,11 @@ impl App {
             return;
         }
         egui::ScrollArea::vertical()
-            .id_salt(("questions", project, self.show_answered))
+            .id_salt(("inbox", project, self.inbox_filter as u8, self.show_answered))
             .show(ui, |ui| {
+                if show_problems {
+                    self.intent_problems(ui, &s, problems);
+                }
                 for group in groups {
                     let command = group.command;
                     let (total, answered) = question_group_progress(&group);
@@ -1239,23 +1272,12 @@ impl App {
                 }
             });
     }
-    fn intent_problems(&mut self, ui: &mut egui::Ui, s: &Snapshot, project: ProjectId,
+    fn intent_problems(&mut self, ui: &mut egui::Ui, s: &Snapshot,
         problems: Vec<(&IntentProblem, &Ticket)>,
     ) {
-        let needle = self.query.to_lowercase();
-        let problems: Vec<_> = problems.into_iter().filter(|(problem, ticket)|
-            needle.is_empty() || [&ticket.key, &ticket.title, &problem.reason]
-                .into_iter().any(|text| text.to_lowercase().contains(&needle))).collect();
-        if problems.is_empty() {
-            design::list_empty_state(ui, Page::Questions.icon(), if needle.is_empty() {
-                crate::tr!("Keine offenen Probleme")
-            } else { crate::tr!("Keine passenden Probleme") });
-            return;
-        }
         let inactive_delete = s.server_capabilities.iter().any(|cap| cap == DELETE_INACTIVE_TASK_CAPABILITY);
-        egui::ScrollArea::vertical().id_salt(("inbox-problems", project)).show(ui, |ui| {
             for (problem, ticket) in problems {
-                ui.push_id(ticket.id, |ui| {
+                ui.push_id((ticket.id, problem.command_id), |ui| {
                     design::task_row_frame().show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         design::ticket_title(ui, &ticket.key, &ticket.title,
@@ -1266,14 +1288,19 @@ impl App {
                         if resetting {
                             ui.colored_label(AMBER, crate::tr!("Wartet auf das Verwerfen von Session und Worktree"));
                         }
-                        let can_reset = s.server_capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY)
+                        let work = task_command(s, ticket);
+                        let after_merger = work.is_some_and(|c| s.commands.iter().skip_while(|other| other.id != c.id)
+                            .skip(1).any(|other| other.stream_id == c.stream_id && is_merger(other)));
+                        let can_reset = server_supports(s, DRAFT_RESET_CAPABILITY)
+                            && (!after_merger || server_supports(s, MERGER_DRAFT_RESET_CAPABILITY))
                             && task_command(s, ticket).is_some_and(|c|
                                 c.id == problem.command_id && c.kind == CommandKind::RunAgent && !c.requires_target_git()
                                 && c.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && spec.role.is_empty())
                                 && matches!(&c.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Failed
                                     || (agent.phase == AgentPhase::Succeeded && command_publication_blocked(c)))
                                 && s.runners.iter().any(|r| r.id == c.runner_id
-                                    && r.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY)));
+                                    && r.capabilities.iter().any(|cap| cap == DRAFT_RESET_CAPABILITY)
+                                    && (!after_merger || r.capabilities.iter().any(|cap| cap == MERGER_DRAFT_RESET_CAPABILITY))));
                         let suggestion = problem.solution.map(|solution| match solution {
                             IntentSolution::ContinueSession => crate::tr!("Vorschlag: In derselben Session fortsetzen"),
                             IntentSolution::RetryWorkspace => crate::tr!("Vorschlag: Worktree erneut vorbereiten"),
@@ -1286,10 +1313,34 @@ impl App {
                             let retry_path = format!("{path}/retry");
                             let accept_path = format!("{path}/accept-solution");
                             let reset_path = format!("{path}/return-to-draft");
+                            let state_path = format!("/v1/tickets/{}", ticket.id);
                             let busy = resetting || self.settings.pending.iter().any(|r| r.server == self.server
-                                && (r.path == delete_path || r.path == retry_path || r.path == accept_path || r.path == reset_path));
+                                && (r.path == delete_path || r.path == retry_path || r.path == accept_path
+                                    || r.path == reset_path || r.path == state_path));
                             if ui.button(crate::tr!("Anzeigen")).clicked() {
                                 self.view_task(ticket.id);
+                            }
+                            if self.show_answered {
+                                return;
+                            }
+                            if let Some(command) = task_command(s, ticket)
+                                .filter(|c| is_merger(c) && c.state == CommandState::Failed)
+                            {
+                                let stream_busy = s.commands.iter().any(|c| c.stream_id == command.stream_id
+                                    && matches!(c.state, CommandState::Pending | CommandState::Accepted));
+                                let confirm = ui.add_enabled(self.online && !busy && !stream_busy,
+                                    egui::Button::new(crate::tr!("Als umgesetzt bestätigen")));
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-inbox-complete", ticket.id)), confirm.rect));
+                                if confirm.clicked() {
+                                    self.confirm_intent_state(ticket, TicketState::Done);
+                                }
+                            }
+                            if server_supports(s, CANCEL_INTENT_CAPABILITY)
+                                && design::icon_button(ui, egui_phosphor::regular::STOP,
+                                    crate::tr!("Intent abbrechen"), self.online && !busy).clicked()
+                            {
+                                self.confirm_intent_state(ticket, TicketState::Cancelled);
                             }
                             if let Some(suggestion) = suggestion {
                                 let accept = ui.add_enabled(self.online && !busy, egui::Button::new(crate::tr!("Lösung annehmen")));
@@ -1307,7 +1358,11 @@ impl App {
                             }
                             if can_reset && ui.add_enabled(self.online && !busy, egui::Button::new(crate::tr!("Zurück zum Entwurf"))).clicked() {
                                 self.dialog = Some(Dialog::form(crate::tr!("Zurück zum Entwurf"),
-                                    crate::tr!("Session und Worktree werden endgültig verworfen. Prompt, Anhänge und bereits integrierte Ergebnisse bleiben erhalten. Noch nicht gestartete Folge-Intents werden neu zugeordnet."),
+                                    if after_merger {
+                                        crate::tr!("Der Runner sichert die Worktrees und verwirft die alten Sessions. Prompt, Anhänge und bereits integrierte Ergebnisse bleiben erhalten. Noch nicht gestartete Folge-Intents werden neu zugeordnet.")
+                                    } else {
+                                        crate::tr!("Session und Worktree werden endgültig verworfen. Prompt, Anhänge und bereits integrierte Ergebnisse bleiben erhalten. Noch nicht gestartete Folge-Intents werden neu zugeordnet.")
+                                    },
                                     "POST", reset_path, json!(ReturnIntentToDraft { request_id: RequestId::new(),
                                         expected_revision: ticket.revision, previous_command: problem.command_id })));
                             }
@@ -1325,7 +1380,17 @@ impl App {
                     });
                 });
             }
-        });
+    }
+
+    fn confirm_intent_state(&mut self, ticket: &Ticket, status: TicketState) {
+        let (title, help) = if status == TicketState::Cancelled {
+            (crate::tr!("Intent abbrechen"), crate::tr!("Der Intent wird abgebrochen und bleibt im Archiv. Ein laufender Auftrag wird zum Stopp aufgefordert."))
+        } else {
+            (crate::tr!("Als umgesetzt bestätigen"), crate::tr!("Bestätige nur, wenn der Intent bereits umgesetzt ist. Der fehlgeschlagene Merger bleibt im Verlauf."))
+        };
+        self.dialog = Some(Dialog::form(title, help, "PATCH", format!("/v1/tickets/{}", ticket.id),
+            json!(UpdateTicket { request_id: RequestId::new(), expected_revision: ticket.revision,
+                title: None, description: None, acceptance_criteria: None, priority: None, status: Some(status) })));
     }
     fn session_list(&mut self, ui: &mut egui::Ui, page: Page) {
         let controllers = page != Page::Sessions;
@@ -1416,7 +1481,7 @@ impl App {
                  |ui| {
                      if page == Page::ProjectActivity {
                          let _filter = design::section_filter(ui, crate::tr!("Nach Rolle filtern"), &mut filter,
-                             &[(page, crate::tr!("Alle Rollen")), (Page::Supervisor, "Supervisor"), (Page::Memorizer, "Memorizer")]);
+                             &[(page, crate::tr!("Alle")), (Page::Supervisor, "Supervisor"), (Page::Memorizer, "Memorizer")]);
                          #[cfg(test)]
                          ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("test-project-activity-filter"), _filter.rect));
                      }
@@ -1549,7 +1614,7 @@ impl App {
                                 });
                             });
                             ui.horizontal_top(|ui| {
-                                let metadata_width=(ui.available_width()-230.0).max(100.0);
+                                let metadata_width=(ui.available_width()-290.0).max(100.0);
                                 let metadata=ui.allocate_ui_with_layout(egui::vec2(metadata_width,0.0),egui::Layout::top_down(egui::Align::LEFT),|ui| {
                                     ui.spacing_mut().item_spacing.y=design::TASK_METADATA_LINE_GAP;
                                      if let Some(CommandOutput::WorkspaceError { workspace_error }) = &c.result {
@@ -1576,25 +1641,29 @@ impl App {
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-open",c.session_root())),open.rect));
                                     if open.clicked() {self.open_session(project,c.session_root());}
-                                    let menu=ui.scope(|ui| {
-                                        ui.spacing_mut().button_padding=egui::vec2(6.0,6.0);
-                                        ui.menu_button(RichText::new(egui_phosphor::regular::DOTS_THREE).size(20.0),|ui| {
-                                            ui.set_width(400.0);
-                                            if s.questions.iter().any(|q|q.session_id==c.session_id() && needs_answer(q)) && ui.button(crate::tr!("Zu den Fragen")).clicked() {
-                                                self.navigate(Target::Questions(project,c.session_id()));ui.close();
+                                    if s.questions.iter().any(|q| q.session_id == c.session_id() && needs_answer(q)) {
+                                        let questions = ui.add_enabled(self.online, egui::Button::new(crate::tr!("Zu den Fragen")));
+                                        #[cfg(test)]
+                                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-row-questions", c.session_root())), questions.rect));
+                                        if questions.clicked() {
+                                            self.navigate(Target::Questions(project, c.session_id()));
+                                        }
+                                    } else if page == Page::Sessions && c.state == CommandState::Succeeded
+                                        && !command_publication_blocked(c) && !session_closed(&s, c)
+                                        && s.commands.iter().rev().find(|other| other.stream_id == c.stream_id
+                                            && other.kind == CommandKind::RunAgent).is_some_and(|last| last.id == c.id)
+                                        && !s.commands.iter().any(|other| other.stream_id == c.stream_id
+                                            && matches!(other.state, CommandState::Pending | CommandState::Accepted))
+                                    {
+                                        if let Some(stream) = s.streams.iter().find(|w| w.id == c.stream_id) {
+                                            let close = ui.add_enabled(self.online, egui::Button::new(crate::tr!("Session schließen")));
+                                            #[cfg(test)]
+                                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-session-row-close", c.session_root())), close.rect));
+                                            if close.clicked() {
+                                                self.confirm_close_session(c, stream);
                                             }
-                                            self.command_menu(ui,&c);
-                                            ui.separator();
-                                            if ui.button(crate::tr!("Metadaten und Ausführung")).clicked() {
-                                                let value=json!({"command":c,"closure":s.session_closures.iter().find(|v|v.root_command_id==c.session_root()),"termination":s.runtime_terminations.iter().find(|v|v.command_id==c.id),"compaction":s.compactions.iter().rev().find(|v|v.command_id==c.id),"runner":s.runners.iter().find(|r|r.id==c.runner_id),"presence":self.instances.iter().find(|i|i.commands.contains(&c.id))});
-                                                self.inspect(crate::tr!("Session-Metadaten"),value);ui.close();
-                                            }
-                                        }).response
-                                    }).inner;
-                                    menu.widget_info(||egui::WidgetInfo::labeled(egui::WidgetType::Button,true,crate::tr!("Session verwalten")));
-                                    #[cfg(test)]
-                                    ui.ctx().data_mut(|d|d.insert_temp(egui::Id::new(("test-session-row-menu",c.session_root())),menu.rect));
-                                    menu.on_hover_text(crate::tr!("Session verwalten"));
+                                        }
+                                    }
                                 });
                             });
                         });
@@ -2310,6 +2379,10 @@ impl App {
         }
         rows.into_values().collect()
     }
+    fn confirm_close_session(&mut self, c: &RunnerCommand, w: &Workstream) {
+        self.dialog = Some(Dialog::form(crate::tr!("Session schließen"), crate::tr!("Eine geschlossene Session steht nicht mehr für neue Folgeaufgaben zur Verfügung. Vorher laufende Arbeit und Fragen prüfen."), "POST", format!("/v1/commands/{}/closure", c.id), json!(CloseSession { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
+    }
+
     pub(super) fn command_menu(&mut self, ui: &mut egui::Ui, c: &RunnerCommand) {
         let Some(s) = self.snapshot.clone() else {
             return;
@@ -2383,7 +2456,7 @@ impl App {
             }
         }
         if ui.button(crate::tr!("Session schließen …")).clicked() {
-            self.dialog = Some(Dialog::form(crate::tr!("Session schließen"), crate::tr!("Eine geschlossene Session steht nicht mehr für neue Folgeaufgaben zur Verfügung. Vorher laufende Arbeit und Fragen prüfen."), "POST", format!("/v1/commands/{}/closure", c.id), json!(CloseSession { request_id: RequestId::new(), expected_stream_revision: w.revision, reason: String::new() })));
+            self.confirm_close_session(c, w);
             ui.close();
         }
         if ui.button(crate::tr!("Compaction anfordern …")).clicked() {

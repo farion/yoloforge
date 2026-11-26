@@ -888,8 +888,17 @@ async fn run(mut args: Args) -> Result<()> {
             input.capabilities.push(AUTOMATIC_CHECKPOINT_CAPABILITY.into());
             input.capabilities.push(MERGER_RECOVERY_CAPABILITY.into());
             input.capabilities.push(INTENT_RECOVERY_CAPABILITY.into());
-            if args.managed_opencode.is_some() { input.capabilities.push(DRAFT_RESET_CAPABILITY.into()); }
+            if args.managed_opencode.is_some() {
+                input.capabilities.push(DRAFT_RESET_CAPABILITY.into());
+                input.capabilities.push(MERGER_DRAFT_RESET_CAPABILITY.into());
+            }
             let mut result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400)
+                && input.capabilities.iter().any(|capability| capability == MERGER_DRAFT_RESET_CAPABILITY)
+            {
+                input.capabilities.retain(|capability| capability != MERGER_DRAFT_RESET_CAPABILITY);
+                result = client.register_with_native_boot(&input, native_boot.as_ref()).await;
+            }
             if matches!(&result, Err(ClientError::Http { status, .. }) if status.as_u16() == 400)
                 && input.capabilities.iter().any(|capability| capability == DRAFT_RESET_CAPABILITY)
             {

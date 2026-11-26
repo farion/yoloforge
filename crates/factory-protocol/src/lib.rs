@@ -248,6 +248,7 @@ pub struct AcceptIntentSolution {
 }
 
 pub const DRAFT_RESET_CAPABILITY: &str = "intent-draft-reset-v1";
+pub const MERGER_DRAFT_RESET_CAPABILITY: &str = "intent-merger-draft-reset-v1";
 pub const DISCARDED_SESSION_REASON: &str = "intent returned to draft";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -266,6 +267,8 @@ pub struct DraftReset {
     pub root_id: CommandId,
     pub stream_id: StreamId,
     pub ownership_epoch: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merger_commands: Vec<CommandId>,
 }
 
 pub const INTENT_ATTENTION_EVENT: &str = "intent.attention_required";
@@ -340,6 +343,7 @@ pub struct RetryTask {
 }
 
 pub const DELETE_FAILED_TASK_CAPABILITY: &str = "delete-failed-intent-v1";
+pub const CANCEL_INTENT_CAPABILITY: &str = "cancel-intent-v1";
 pub const DELETE_INACTIVE_TASK_CAPABILITY: &str = "delete-inactive-intent-v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
