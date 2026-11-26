@@ -79,6 +79,15 @@ fn candidates(tx: &Transaction<'_>, project: ProjectId) -> Result<Vec<RunnerComm
     let rows = stmt.query_map([project.to_string()], |r| r.get::<_, String>(0))?;
     rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
 }
+
+fn cannot_continue(command: &RunnerCommand) -> bool {
+    command.agent_spec.as_ref().is_some_and(|spec|
+        matches!(spec.role.as_str(), MERGER_ROLE | factory_protocol::directs::ROLE))
+        || command_publication_blocked(command)
+        || (command.state == CommandState::Failed
+            && !matches!(&command.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted))
+}
+
 pub(super) fn route(
     tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket, seed: Option<&CheckpointImport>,
 ) -> Result<Route> {
@@ -122,7 +131,7 @@ pub(super) fn route(
     }
     let mut catalog = Vec::new();
     let mut offered = Vec::new();
-    for c in available.iter().take(16) {
+    for c in available.iter().filter(|c| !cannot_continue(c)).take(16) {
         if c.agent_spec
             .as_ref()
             .is_none_or(|a| a.profile != implementer_profile || !repo_skills.matches(a) || !local_mcps.matches(a))
@@ -226,6 +235,15 @@ pub(super) fn route(
             )?;
         }
         match &e.decision {
+            Some(Decision::Session { session_id, .. })
+                if e.candidates.contains(session_id) && available.iter()
+                    .find(|c| c.session_root() == *session_id).is_none_or(cannot_continue) =>
+            {
+                e.decision = Some(Decision::New { reason: "Die bisherige Session kann nicht fortgesetzt werden.".into() });
+                save(tx, t.id, e)?;
+                note(tx, t, "Orchestrator wechselt auf eine neue Session.")?;
+                return Ok(Route::New);
+            }
             Some(Decision::New { reason }) => {
                 note(tx, t, &format!("Orchestrator: neue Session. {reason}"))?;
                 return Ok(Route::New);
@@ -445,7 +463,7 @@ pub(super) fn continue_task(
         return Ok(None);
     };
     let mut owner = super::work::stream(tx, previous.stream_id)?;
-    if retired_session(tx, root, owner.id)? {
+    if retired_session(tx, root, owner.id)? || cannot_continue(previous) {
         unusable_session(tx, t, root)?;
         return Ok(None);
     }
@@ -533,7 +551,7 @@ pub(super) fn check_fixed_session(tx: &Transaction<'_>, ticket: &mut Ticket) -> 
     let Some(root) = ticket.requested_session else { return Ok(true); };
     let available = candidates(tx, ticket.project_id)?;
     if let Some(command) = available.iter().find(|c| c.session_root() == root) {
-        if !retired_session(tx, root, command.stream_id)? { return Ok(true); }
+        if !cannot_continue(command) && !retired_session(tx, root, command.stream_id)? { return Ok(true); }
     }
     unusable_session(tx, ticket, root)?;
     Ok(false)
