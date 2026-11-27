@@ -228,8 +228,11 @@ pub(super) fn recover_unusable_workspaces(tx: &Transaction<'_>, project: Project
             tx.execute_batch("RELEASE move_fallback")?;
             continue;
         }
-        if prepared_for_session || !tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs
-            WHERE stream_id=?1 AND ticket_id<>?2 AND agent_id=?3)",
+        if prepared_for_session || !tx.query_row("SELECT EXISTS(
+            SELECT 1 FROM scheduler_runs WHERE stream_id=?1 AND ticket_id<>?2 AND agent_id=?3
+            UNION ALL
+            SELECT 1 FROM validations v JOIN scheduler_runs r ON r.ticket_id=v.ticket_id
+                WHERE r.stream_id=?1 AND r.ticket_id<>?2 AND v.source_id=?3)",
             params![command.stream_id.to_string(),ticket.id.to_string(),previous.previous_command_id.to_string()],
             |r| r.get::<_, bool>(0))?
         {
