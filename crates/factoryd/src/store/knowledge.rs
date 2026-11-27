@@ -76,6 +76,14 @@ impl Store {
         tx: &Transaction<'_>,
         body: &CreateKnowledge,
     ) -> Result<KnowledgeNote> {
+        Self::create_knowledge_scoped(tx, body, false)
+    }
+
+    pub(super) fn create_knowledge_scoped(
+        tx: &Transaction<'_>,
+        body: &CreateKnowledge,
+        session_scope: bool,
+    ) -> Result<KnowledgeNote> {
         scope(tx, body.project_id, body.ticket_id)?;
         if let Some(value) = &body.branch {
             branch(value)?;
@@ -100,7 +108,12 @@ impl Store {
                 ));
             }
             if let Some(branch) = &body.branch {
-                let source_branch:String=tx.query_row("SELECT json_extract(s.data,'$.branch') FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1",[command.to_string()],|r|r.get(0))?;
+                let source_branch: String = if session_scope {
+                    let raw: String = tx.query_row("SELECT data FROM commands WHERE id=?1", [command.to_string()], |r| r.get(0))?;
+                    super::routing::session_knowledge_branch(tx, &serde_json::from_str(&raw)?)?
+                } else {
+                    tx.query_row("SELECT json_extract(s.data,'$.branch') FROM commands c JOIN streams s ON s.id=c.stream_id WHERE c.id=?1",[command.to_string()],|r|r.get(0))?
+                };
                 if *branch != source_branch {
                     return Err(StoreError::Invalid(
                         "Knowledge branch differs from source command workstream",

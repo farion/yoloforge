@@ -64,6 +64,10 @@ impl Store {
              params![owner.id.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX, DIRECT_MERGE_PREFIX], |r|r.get(0))?;
         let archived:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1 AND json_extract(data,'$.final_scan_complete')=1)",[id.to_string()],|r|r.get(0))?;
         if latest != id.to_string()
+            || (!command.agent_spec.as_ref().is_some_and(|spec| spec.read_only || !spec.role.is_empty())
+                && super::routing::candidates(tx, owner.project_id)?.iter()
+                    .find(|candidate| candidate.session_root() == command.session_root())
+                    .is_some_and(|candidate| candidate.id != id))
             || busy
             || super::validation::awaiting(tx, owner.id)?
             || !archived

@@ -128,13 +128,23 @@ pub(super) fn answer_clarification(
     super::questions::save(tx, value)?;
     Ok(true)
 }
-fn candidates(tx: &Transaction<'_>, project: ProjectId) -> Result<Vec<RunnerCommand>> {
+pub(super) fn candidates(tx: &Transaction<'_>, project: ProjectId) -> Result<Vec<RunnerCommand>> {
     let mut stmt=tx.prepare("SELECT c.data FROM commands c JOIN streams s ON s.id=c.stream_id WHERE s.project_id=?1 AND json_extract(c.data,'$.kind')='run_agent' AND COALESCE(json_extract(c.data,'$.agent_spec.read_only'),0)=0 AND c.rowid=(SELECT MAX(c2.rowid) FROM commands c2 WHERE c2.stream_id=c.stream_id AND json_extract(c2.data,'$.kind')='run_agent'
+        AND NOT (c2.state='failed' AND COALESCE(json_extract(c2.data,'$.result.agent.summary'),'')='Prepared workspace identity could not be verified'
+            AND EXISTS(SELECT 1 FROM commands prior WHERE prior.id=json_extract(c2.data,'$.agent_spec.continuation.previous_command_id') AND prior.stream_id=c2.stream_id))
         AND NOT ((COALESCE(json_extract(c2.data,'$.agent_spec.role'),'')=?2
             OR COALESCE(instr(json_extract(c2.data,'$.agent_spec.prompt'),?4),0)=1) AND c2.state='succeeded'
                  AND COALESCE(instr(json_extract(c2.data,'$.result.agent.summary'),?3),0)=1)) ORDER BY c.rowid DESC")?;
     let rows = stmt.query_map(params![project.to_string(), APPROVED_PUBLICATION_ROLE, PUBLICATION_CONFIRMED_PREFIX, DIRECT_MERGE_PREFIX], |r| r.get::<_, String>(0))?;
-    rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
+    let mut roots = std::collections::HashSet::new();
+    let mut commands = Vec::new();
+    for row in rows {
+        let command: RunnerCommand = serde_json::from_str(&row?)?;
+        if roots.insert(command.session_root()) {
+            commands.push(command);
+        }
+    }
+    Ok(commands)
 }
 
 fn cannot_continue(command: &RunnerCommand) -> bool {
@@ -145,11 +155,127 @@ fn cannot_continue(command: &RunnerCommand) -> bool {
             && !matches!(&command.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Interrupted))
 }
 
+pub(super) fn session_knowledge_branch(tx: &Transaction<'_>, command: &RunnerCommand) -> Result<String> {
+    let stream = if command.session_root() == command.id {
+        command.stream_id
+    } else {
+        let root: String = tx.query_row("SELECT stream_id FROM commands WHERE id=?1",
+            [command.session_root().to_string()], |r| r.get(0))?;
+        root.parse().map_err(|_| StoreError::Internal)?
+    };
+    Ok(super::work::stream(tx, stream)?.branch)
+}
+
+const FRESH_SESSION_EVENT: &str = "task.workspace_continuation_requeued";
+
+fn switched_to_fresh_session(tx: &Transaction<'_>, ticket: TicketId) -> Result<bool> {
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind=?1 AND aggregate_id=?2
+        AND sequence>COALESCE((SELECT MAX(sequence) FROM events WHERE aggregate_id=?2
+            AND kind='intent.returned_to_draft'),0))",
+        params![FRESH_SESSION_EVENT, ticket.to_string()], |r| r.get(0))?)
+}
+
+/// Recover only the runner's preflight failure, before it sent anything to OpenCode.
+pub(super) fn recover_unusable_workspaces(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
+    let mut stmt = tx.prepare("SELECT t.data,c.data FROM scheduler_runs r
+        JOIN tickets t ON t.id=r.ticket_id JOIN commands c ON c.id=r.agent_id
+        WHERE t.project_id=?1 AND c.state='failed'
+        AND json_extract(c.data,'$.result.agent.summary') IN
+            ('Prepared workspace identity could not be verified','Session cannot move to the prepared workspace')
+        AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
+        AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=r.stream_id AND d.completed=0)
+        AND NOT EXISTS(SELECT 1 FROM questions q WHERE q.command_id=c.id)")?;
+    let rows = stmt.query_map([project.to_string()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (ticket, command) in rows {
+        let mut ticket: Ticket = serde_json::from_str(&ticket)?;
+        let command: RunnerCommand = serde_json::from_str(&command)?;
+        let previous = command.agent_spec.as_ref().and_then(|spec| spec.continuation.as_ref());
+        if ticket.draft || !matches!(ticket.status, TicketState::InProgress | TicketState::Blocked)
+            || ticket.execution_command != Some(command.id) || command.kind != CommandKind::RunAgent
+            || command.requires_target_git()
+            || command.agent_spec.as_ref().is_none_or(|spec| spec.read_only || !spec.role.is_empty())
+            || !matches!(&command.result, Some(CommandOutput::Agent { agent }) if agent.phase == AgentPhase::Failed)
+            || switched_to_fresh_session(tx, ticket.id)?
+        {
+            continue;
+        }
+        let Some(previous) = previous else { continue };
+        let prepared_for_session = worktree_predecessor(tx, ticket.id, command.stream_id)?.is_some();
+        if matches!(&command.result, Some(CommandOutput::Agent { agent })
+            if agent.summary == "Session cannot move to the prepared workspace")
+            && prepared_for_session
+        {
+            // The new intent already owns a verified worktree. Only the
+            // native session is unusable, so keep the new worktree.
+            tx.execute_batch("SAVEPOINT move_fallback")?;
+            let replacement = super::tasks::retry_failed(tx, ticket.id, &RetryTask {
+                request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: command.id,
+            });
+            ticket = match replacement {
+                Ok(ticket) => ticket,
+                Err(StoreError::WorkConflict | StoreError::Invalid(_) | StoreError::RevisionConflict(_)) => {
+                    tx.execute_batch("ROLLBACK TO move_fallback; RELEASE move_fallback")?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            ticket.requested_session = None;
+            note(tx, &mut ticket, "Bisherige Session nicht verfügbar; Intent startet im vorbereiteten Arbeitsbereich mit einer neuen Session.")?;
+            event(tx, FRESH_SESSION_EVENT, ticket.id.to_string(), &serde_json::json!({
+                "previous_command": command.id, "previous_session": command.session_root()
+            }))?;
+            tx.execute_batch("RELEASE move_fallback")?;
+            continue;
+        }
+        if prepared_for_session || !tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduler_runs
+            WHERE stream_id=?1 AND ticket_id<>?2 AND agent_id=?3)",
+            params![command.stream_id.to_string(),ticket.id.to_string(),previous.previous_command_id.to_string()],
+            |r| r.get::<_, bool>(0))?
+        {
+            continue;
+        }
+        let mut owner = super::work::stream(tx, command.stream_id)?;
+        tx.execute("DELETE FROM scheduler_runs WHERE ticket_id=?1 AND agent_id=?2",
+            params![ticket.id.to_string(), command.id.to_string()])?;
+        tx.execute("DELETE FROM stream_tickets WHERE ticket_id=?1 AND stream_id=?2",
+            params![ticket.id.to_string(), owner.id.to_string()])?;
+        owner.ticket_ids.retain(|id| *id != ticket.id);
+        let state = owner.status;
+        super::work::save_stream(tx, &mut owner, state)?;
+        let root = command.session_root();
+        let reuse = candidates(tx, project)?.into_iter().find(|c| c.session_root() == root)
+            .filter(|c| !cannot_continue(c))
+            .map(|c| retired_session(tx, root, c.stream_id).map(|retired| !retired))
+            .transpose()?.unwrap_or(false);
+        ticket.execution_command = None;
+        ticket.requested_session = reuse.then_some(root);
+        ticket.status = TicketState::Ready;
+        let (kind, message) = if reuse {
+            ("task.workspace_continuation_reprepared", "Alter Arbeitsbereich nicht verfügbar; ein neuer Arbeitsbereich für dieselbe Session wird vorbereitet.")
+        } else {
+            (FRESH_SESSION_EVENT, "Bisheriger Arbeitsbereich nicht verfügbar; Intent wird in einer neuen Session gestartet.")
+        };
+        note(tx, &mut ticket, message)?;
+        event(tx, kind, ticket.id.to_string(), &serde_json::json!({
+            "previous_command": command.id, "previous_session": command.session_root()
+        }))?;
+    }
+    Ok(())
+}
+
+fn unavailable_for_automatic_routing(tx: &Transaction<'_>, command: &RunnerCommand) -> Result<bool> {
+    Ok(cannot_continue(command) || retired_session(tx, command.session_root(), command.stream_id)?)
+}
+
 pub(super) fn route(
     tx: &Transaction<'_>, p: &SchedulerPolicy, t: &mut Ticket, seed: Option<&CheckpointImport>,
 ) -> Result<Route> {
     if let Some(root) = t.requested_session {
         return Ok(Route::Session(root));
+    }
+    if switched_to_fresh_session(tx, t.id)? {
+        return Ok(Route::New);
     }
     // Legacy technical tickets retain their explicit scheduler workflow.
     if t.prompt.is_none() {
@@ -188,7 +314,10 @@ pub(super) fn route(
     }
     let mut catalog = Vec::new();
     let mut offered = Vec::new();
-    for c in available.iter().filter(|c| !cannot_continue(c)).take(16) {
+    for c in &available {
+        if unavailable_for_automatic_routing(tx, c)? {
+            continue;
+        }
         if c.agent_spec
             .as_ref()
             .is_none_or(|a| a.profile != implementer_profile || !repo_skills.matches(a) || !local_mcps.matches(a))
@@ -202,16 +331,14 @@ pub(super) fn route(
         if !super::mcp::runner_ready(tx, owner.runner_id, &local_mcps)? {
             continue;
         }
-        if super::sessions::closed(tx, c.session_root())?
-            || super::termination::load(tx, c.id)?.is_some()
-        {
+        if super::termination::load(tx, c.id)?.is_some() {
             continue;
         }
         let knowledge = Store::select_knowledge(
             tx,
             t.project_id,
             &owner.ticket_ids,
-            Some(&owner.branch),
+            Some(&session_knowledge_branch(tx, c)?),
             4096,
         )?;
         let knowledge = knowledge
@@ -235,6 +362,9 @@ pub(super) fn route(
             break;
         }
         offered.push(c.session_root());
+        if offered.len() == 16 {
+            break;
+        }
     }
     let evidence = (&t.prompt, &t.description, &t.images, &t.files, &implementer_profile);
     let serialized = match (orchestrator, repo_skills.repo.as_ref()) {
@@ -295,10 +425,12 @@ pub(super) fn route(
             )?;
         }
         match &e.decision {
-            Some(Decision::Session { session_id, .. })
-                if e.candidates.contains(session_id) && available.iter()
-                    .find(|c| c.session_root() == *session_id).is_none_or(cannot_continue) =>
-            {
+            Some(Decision::Session { session_id, .. }) if e.candidates.contains(session_id) && {
+                match available.iter().find(|c| c.session_root() == *session_id) {
+                    Some(c) => unavailable_for_automatic_routing(tx, c)?,
+                    None => true,
+                }
+            } => {
                 e.decision = Some(Decision::New { reason: "Die bisherige Session kann nicht fortgesetzt werden.".into() });
                 save(tx, t.id, e)?;
                 note(tx, t, "Orchestrator wechselt auf eine neue Session.")?;
@@ -556,8 +688,9 @@ pub(super) fn continue_task(
         unusable_session(tx, t, root)?;
         return Ok(None);
     };
-    let mut owner = super::work::stream(tx, previous.stream_id)?;
-    if retired_session(tx, root, owner.id)? || cannot_continue(previous) {
+    let owner = super::work::stream(tx, previous.stream_id)?;
+    if retired_session(tx, root, owner.id)? || cannot_continue(previous)
+        || (t.requested_session.is_none() && unavailable_for_automatic_routing(tx, previous)?) {
         unusable_session(tx, t, root)?;
         return Ok(None);
     }
@@ -572,53 +705,55 @@ pub(super) fn continue_task(
         )?;
         return Ok(None);
     }
-    let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))",[owner.id.to_string()],|r|r.get(0))?;
-    if busy {
+    let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM commands WHERE stream_id=?1 AND state IN ('pending','accepted'))
+        OR EXISTS(SELECT 1 FROM scheduler_runs r JOIN commands c ON c.id=r.prepare_id
+            JOIN events e ON e.kind='task.session_worktree' AND json_extract(e.payload,'$.stream_id')=r.stream_id
+            WHERE r.agent_id IS NULL AND c.state IN ('pending','accepted','succeeded')
+            AND json_extract(e.payload,'$.root')=?2)",
+        params![owner.id.to_string(), root.to_string()], |r| r.get(0))?;
+    if busy || super::validation::awaiting(tx, owner.id)?
+        || !tx.query_row("SELECT EXISTS(SELECT 1 FROM archive_status WHERE command_id=?1
+            AND json_extract(data,'$.final_scan_complete')=1)", [previous.id.to_string()], |r| r.get::<_, bool>(0))?
+    {
         return Ok(None);
     }
     tx.execute_batch("SAVEPOINT routed_continue")?;
-    // Enqueue before linking this ticket so historical attachments cannot accumulate.
-    let pins = super::models::ticket(tx, t.id)?;
-    let repo_skills = super::skills::for_ticket(tx, t.id, t.project_id)?;
     let local_mcps = super::mcp::for_ticket(tx, t.id, t.project_id)?;
     if !super::mcp::runner_ready(tx, owner.runner_id, &local_mcps)? {
         tx.execute_batch("RELEASE routed_continue")?;
         note(tx, t, "Wartet auf den Runner der gewählten Session mit passendem MCP-Profil")?;
         return Ok(None);
     }
-    match Store::enqueue_with_pins(
+    let stream = Store::create_stream_in(tx, &CreateStream {
+        request_id: RequestId::new(), project_id: t.project_id, runner_id: owner.runner_id,
+        goal: t.title.chars().take(60).collect(), ticket_ids: vec![t.id],
+    });
+    let prepared = stream.and_then(|stream| Store::enqueue_with_pins(
         tx,
-        owner.id,
+        stream.id,
         &EnqueueCommand {
             request_id: RequestId::new(),
-            expected_revision: owner.revision,
-            kind: CommandKind::RunAgent,
-            prompt: Some(prompt.into()),
+            expected_revision: stream.revision,
+            kind: CommandKind::PrepareWorkspace,
+            prompt: None,
         },
-        Some(previous.id),
-        "",
-        pins.as_ref().and_then(|m| m.implementer.as_ref()),
-        Some((&repo_skills, &local_mcps)),
         None,
-        t.session_prompt_request.is_some(),
-    ) {
-        Ok(mut c) => {
-            super::validation::defer_publication(tx, &mut c)?;
-            c.agent_spec.as_mut().ok_or(StoreError::Internal)?.images = t.images.clone();
-            c.agent_spec.as_mut().ok_or(StoreError::Internal)?.files = t.files.clone();
-            super::work::save_command(tx, &c, "pending")?;
-            owner = super::work::stream(tx, owner.id)?;
-            owner.ticket_ids.push(t.id);
-            tx.execute(
-                "INSERT INTO stream_tickets(stream_id,ticket_id) VALUES(?1,?2)",
-                params![owner.id.to_string(), t.id.to_string()],
-            )?;
-            super::work::save_stream(tx, &mut owner, StreamState::Queued)?;
-            let prepare:String=tx.query_row("SELECT id FROM commands WHERE stream_id=?1 AND state='succeeded' AND json_extract(data,'$.kind')='prepare_workspace' ORDER BY rowid DESC LIMIT 1",[owner.id.to_string()],|r|r.get(0))?;
-            tx.execute("INSERT INTO scheduler_runs(ticket_id,stream_id,prepare_id,prompt,agent_id) VALUES(?1,?2,?3,?4,?5)",params![t.id.to_string(),owner.id.to_string(),prepare,prompt,c.id.to_string()])?;
+        "",
+        None,
+        None,
+        None,
+        false,
+    ));
+    match prepared {
+        Ok(c) => {
+            tx.execute("INSERT INTO scheduler_runs(ticket_id,stream_id,prepare_id,prompt) VALUES(?1,?2,?3,?4)",
+                params![t.id.to_string(),c.stream_id.to_string(),c.id.to_string(),prompt])?;
+            event(tx, "task.session_worktree", t.id.to_string(), &serde_json::json!({
+                "stream_id": c.stream_id, "root": root, "previous": previous.id
+            }))?;
             t.execution_command = Some(c.id);
             t.status = TicketState::InProgress;
-            note(tx, t, "Prompt an ausgewaehlte Session uebergeben")?;
+            note(tx, t, "Neuer Arbeitsbereich für den Intent in der bestehenden Session wird vorbereitet.")?;
             tx.execute_batch("RELEASE routed_continue")?;
             Ok(Some(owner.runner_id))
         }
@@ -634,6 +769,13 @@ pub(super) fn continue_task(
         }
         Err(e) => Err(e),
     }
+}
+
+pub(super) fn worktree_predecessor(tx: &Transaction<'_>, ticket: TicketId, stream: StreamId) -> Result<Option<RunnerCommand>> {
+    let raw: Option<String> = tx.query_row("SELECT c.data FROM events e JOIN commands c ON c.id=json_extract(e.payload,'$.previous')
+        WHERE e.aggregate_id=?1 AND e.kind='task.session_worktree' AND json_extract(e.payload,'$.stream_id')=?2
+        ORDER BY e.sequence DESC LIMIT 1", params![ticket.to_string(), stream.to_string()], |r| r.get(0)).optional()?;
+    raw.map(|data| serde_json::from_str(&data).map_err(Into::into)).transpose()
 }
 
 fn retired_session(tx: &Transaction<'_>, root: CommandId, stream: StreamId) -> Result<bool> {

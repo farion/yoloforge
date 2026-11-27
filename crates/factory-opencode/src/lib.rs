@@ -539,6 +539,15 @@ impl OpenCodeClient {
         Ok(())
     }
 
+    pub async fn move_session(&self, id: &str, directory: &str) -> Result<bool> {
+        safe_id(id)?;
+        let response = self.request(Method::POST, &format!("/api/session/{id}/move"),
+            Some(serde_json::json!({"directory":directory,"delivery":"queue"}))).await?;
+        ensure!(response.is_none() || response == Some(serde_json::Value::Null),
+            "OpenCode did not accept the session move");
+        Ok(response.is_some())
+    }
+
     pub async fn local_mcp_statuses(&self, directory: &str) -> Result<std::collections::BTreeMap<String, String>> {
         let data = self.location_get("/api/mcp", directory).await?;
         data.as_array().context("MCP status list missing")?.iter().map(|entry| {

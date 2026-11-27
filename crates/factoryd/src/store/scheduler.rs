@@ -1419,6 +1419,7 @@ impl Store {
             if paused {
                 continue;
             }
+            super::routing::recover_unusable_workspaces(&tx, p.project_id)?;
             super::tasks::recover_stopped(&tx, p.project_id)?;
             super::validation::resume_legacy_snapshots(&tx, p.project_id)?;
             super::validation::resolve(&tx, p.project_id)?;
@@ -1512,6 +1513,7 @@ impl Store {
                 }
                 let latest = latest_command(&tx, sid)?;
                 let target_git = super::routing::assigned_git(&tx, tid)?;
+                let predecessor = super::routing::worktree_predecessor(&tx, tid, sid)?;
                 let baseline = if latest.kind == CommandKind::Checkpoint {
                     super::checkpoints::load(&tx, latest.id)?.is_some_and(|spec| spec.committed_only)
                 } else {
@@ -1533,7 +1535,7 @@ impl Store {
                 } else {
                     None
                 };
-                if automatic && baseline && (!source_ready || preferred_server.is_some()) {
+                if predecessor.is_none() && automatic && baseline && (!source_ready || preferred_server.is_some()) {
                     if latest.state == CommandState::Succeeded {
                         tx.execute_batch("SAVEPOINT checkpoint_handoff")?;
                         match reassign_checkpoint_to(&tx, owner, t, &latest, None, since, preferred_server) {
@@ -1546,7 +1548,7 @@ impl Store {
                     }
                     continue;
                 }
-                if automatic && !baseline && target_git.is_none() && source_ready
+                if predecessor.is_none() && automatic && !baseline && target_git.is_none() && source_ready
                     && latest.workspace_spec.as_ref().and_then(|spec| spec.setup.as_ref()).is_some()
                 {
                     tx.execute_batch("SAVEPOINT automatic_checkpoint")?;
@@ -1581,11 +1583,29 @@ impl Store {
                     pins.as_ref().and_then(|m| m.implementer.as_ref()),
                     Some((&repo_skills, &local_mcps)),
                     target_git,
-                    false,
+                    t.session_prompt_request.is_some(),
                 ) {
                     Ok(mut c) => {
-                        super::validation::defer_publication(&tx, &mut c)?;
                         let mut ticket = t.clone();
+                        if let Some(previous) = &predecessor {
+                            let spec = c.agent_spec.as_mut().ok_or(StoreError::Internal)?;
+                            if previous.runner_id == c.runner_id
+                                && c.ownership_epoch == owner.ownership_epoch
+                                && !super::sessions::closed(&tx, previous.session_root())?
+                                && super::termination::load(&tx, previous.id)?.is_none()
+                                && previous.agent_spec.as_ref().is_some_and(|old| old.profile == spec.profile
+                                    && repo_skills.can_continue(old) && local_mcps.matches(old))
+                            {
+                                spec.continuation = Some(SessionContinuation {
+                                    root_command_id: previous.session_root(), previous_command_id: previous.id,
+                                });
+                                super::work::save_command(&tx, &c, "pending")?;
+                            } else {
+                                ticket.requested_session = None;
+                                ticket.routing_note = "Bisherige Session nicht mehr kompatibel; Intent startet in einer neuen Session.".into();
+                            }
+                        }
+                        super::validation::defer_publication(&tx, &mut c)?;
                         ticket.execution_command = Some(c.id);
                         save_ticket(&tx, &mut ticket)?;
                         tx.execute(

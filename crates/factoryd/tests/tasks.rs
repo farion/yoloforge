@@ -463,7 +463,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
         assert_eq!(s.snapshot().unwrap().commands.len(), 6);
         if output.contains("calculator implementation") {
             let old = notes[0].clone();
-            s.save_task(SaveTask {
+            let correction = s.save_task(SaveTask {
                 request_id: RequestId::new(),
                 id: None,
                 expected_revision: Revision(0),
@@ -474,6 +474,7 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
             })
             .unwrap();
             s.scheduler_tick().unwrap();
+            prepare_followup(&s, runner, correction.id, work.stream_id);
             let follow = s
                 .pending(runner)
                 .unwrap()
@@ -532,6 +533,8 @@ fn completed_task_memory_is_once_only_provenanced_and_branch_scoped() {
                 .unwrap()
                 .prompt
                 .contains(&old.id.to_string()));
+            assert!(evaluation.agent_spec.as_ref().unwrap().prompt.contains(&follow.id.to_string()),
+                "Unexpected memorizer source: {}", evaluation.agent_spec.as_ref().unwrap().prompt);
             let racing = output.contains("Racing");
             if racing {
                 s.retire_knowledge(
@@ -828,6 +831,15 @@ fn prepare(s: &Store, c: &RunnerCommand) {
             },
         },
     );
+}
+fn prepare_followup(s: &Store, runner: RunnerId, ticket: TicketId, previous: StreamId) -> StreamId {
+    let id = s.task_payload(ticket).unwrap().execution_command.unwrap();
+    let prep = s.pending(runner).unwrap().into_iter().find(|cmd| cmd.id == id).unwrap();
+    assert_eq!(prep.kind, CommandKind::PrepareWorkspace);
+    assert_ne!(prep.stream_id, previous);
+    prepare(s, &prep);
+    s.scheduler_tick().unwrap();
+    prep.stream_id
 }
 fn agent_reply(s: &Store, c: &RunnerCommand, text: &str) {
     complete(s, c, CommandOutput::Agent { agent: AgentProgress {
@@ -1627,10 +1639,11 @@ fn archived_session_with_new_skill_grants_queues_and_sends_to_same_root() {
     assert_eq!(queued.requested_session, Some(original.id));
     assert!(store.session_closure(original.id).unwrap().is_none());
     store.scheduler_tick().unwrap();
-    store.scheduler_tick().unwrap();
+    let followup_stream = prepare_followup(&store, runner, queued.id, original.stream_id);
     let continued = store.pending(runner).unwrap().into_iter()
         .find(|c| c.id != original.id && c.session_root() == original.id).unwrap();
     assert_eq!(continued.session_id(), original.session_id());
+    assert_eq!(continued.stream_id, followup_stream);
     assert_eq!(continued.runner_id, original.runner_id);
     let spec = continued.agent_spec.unwrap();
     assert!(spec.prompt.starts_with("Follow up in this session"));
@@ -1774,6 +1787,7 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
     approve_review(&s, runner);
     finish_publication(&s, runner);
     s.scheduler_tick().unwrap();
+    let followup_stream = prepare_followup(&s, runner, follow.id, c.stream_id);
     let continued = s
         .pending(runner)
         .unwrap()
@@ -1781,7 +1795,7 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
         .find(|a| a.kind == CommandKind::RunAgent)
         .unwrap();
     assert_eq!(continued.session_root(), c.id);
-    assert_eq!(continued.stream_id, c.stream_id);
+    assert_eq!(continued.stream_id, followup_stream);
     assert_eq!(continued.runner_id, c.runner_id);
     assert_eq!(continued.agent_spec.as_ref().unwrap().files, direct.files);
     assert_eq!(continued.agent_spec.as_ref().unwrap().local_mcps, c.agent_spec.as_ref().unwrap().local_mcps);
@@ -1856,38 +1870,33 @@ async fn fixed_session_waits_then_continues_same_root_and_limit_survives_restart
     decide(
         &s,
         &routing,
-        &serde_json::json!({"action":"session","session_id":c.id,"reason":"Continue calculator"})
-            .to_string(),
+        &serde_json::json!({"action":"session","session_id":c.id,"reason":"Continue calculator"}).to_string(),
     );
     s.scheduler_tick().unwrap();
-    let reuse = s
-        .pending(runner)
-        .unwrap()
-        .into_iter()
-        .find(|c| c.agent_spec.as_ref().is_some_and(|a| !a.read_only))
-        .unwrap();
-    assert_eq!(reuse.session_root(), c.id);
-    assert_eq!(
-        reuse
-            .agent_spec
-            .as_ref()
-            .unwrap()
-            .continuation
-            .as_ref()
-            .unwrap()
-            .previous_command_id,
-        continued.id
-    );
-    assert_eq!(
-        s.snapshot()
-            .unwrap()
-            .tickets
-            .iter()
-            .find(|t| t.id == automatic.id)
-            .unwrap()
-            .execution_command,
-        Some(reuse.id)
-    );
+    let fallback = automatic;
+    let next_stream = prepare_followup(&s, runner, fallback.id, continued.stream_id);
+    let failed = s.pending(runner).unwrap().into_iter()
+        .find(|cmd| cmd.session_root() == c.id && cmd.stream_id == next_stream).unwrap();
+    assert_eq!(failed.agent_spec.as_ref().unwrap().continuation.as_ref().unwrap().previous_command_id, continued.id);
+    complete(&s, &failed, CommandOutput::Agent { agent: AgentProgress {
+        session_id: failed.session_id(), message_id: agent_message_id(failed.id),
+        phase: AgentPhase::Failed, summary: "Session cannot move to the prepared workspace".into(),
+    } });
+    s.scheduler_tick().unwrap();
+    let recovered = s.task_payload(fallback.id).unwrap();
+    assert_eq!(recovered.prompt, fallback.prompt);
+    assert_eq!(recovered.requested_session, None);
+    let replacement = s.pending(runner).unwrap().into_iter()
+        .find(|cmd| Some(cmd.id) == recovered.execution_command).unwrap();
+    assert_eq!(replacement.kind, CommandKind::RunAgent);
+    assert_eq!(replacement.stream_id, failed.stream_id);
+    assert_eq!(replacement.session_root(), replacement.id);
+    assert!(replacement.agent_spec.as_ref().unwrap().prompt.starts_with(fallback.prompt.as_deref().unwrap()));
+    assert_eq!(s.task_payload(first.id).unwrap().status, TicketState::Done);
+    for _ in 0..2 { s.scheduler_tick().unwrap(); }
+    assert_eq!(s.task_payload(fallback.id).unwrap().execution_command, Some(replacement.id));
+    assert!(s.task_history(fallback.id, None).unwrap().entries.iter()
+        .any(|entry| entry.command_id == Some(failed.id) && entry.level == TaskHistoryLevel::Error));
     let p = s.snapshot().unwrap().projects[0].clone();
     let limit = SetSessionLimit {
         request_id: RequestId::new(),

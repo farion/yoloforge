@@ -18,7 +18,9 @@ impl Store {
                 UNION SELECT agent_id FROM scheduler_runs WHERE ticket_id=?1 AND agent_id IS NOT NULL
                   UNION SELECT json_extract(data,'$.execution_command') FROM tickets WHERE id=?1
                   UNION SELECT json_extract(payload,'$.execution_command') FROM events WHERE aggregate_id=?1 AND kind='ticket.updated'
-                 UNION SELECT json_extract(payload,'$.previous_command') FROM events WHERE aggregate_id=?1 AND kind IN ('task.retried','task.session_recovered','task.merger_recovered')
+                  UNION SELECT json_extract(payload,'$.previous_command') FROM events WHERE aggregate_id=?1
+                    AND kind IN ('task.retried','task.session_recovered','task.merger_recovered',
+                        'task.workspace_continuation_requeued','task.workspace_continuation_reprepared')
                   UNION SELECT source_id FROM validations WHERE ticket_id=?1
                   UNION SELECT reviewer_id FROM validations WHERE ticket_id=?1
                   UNION SELECT json_extract(data,'$.command') FROM task_routing WHERE ticket_id=?1

@@ -407,8 +407,16 @@ async fn advance(
     let session_id = command.session_id();
     let (provider, model) = execution.model.as_ref().context("Selected model missing")?;
     let message_id = agent_message_id(command.id);
+    let unavailable = || progress(&command, AgentPhase::Failed, "Session cannot move to the prepared workspace");
+    let predecessor = if let Some(continuation) = spec.continuation.as_ref().filter(|_| !execution.prompt_attempted) {
+        Some(journal.record(continuation.previous_command_id)?.context("Continuation predecessor journal missing")?)
+    } else { None };
+    let moving = predecessor.as_ref().filter(|prior| prior.command.stream_id != command.stream_id);
     let session = client.session(&session_id).await?;
     let Some(session) = session else {
+        if moving.is_some() {
+            return Ok(unavailable());
+        }
         ensure!(
             spec.continuation.is_none(),
             "Continuation session missing; never recreate it"
@@ -442,11 +450,45 @@ async fn advance(
     ensure!(
         session["id"] == session_id
             && session["metadata"]["factory_command"] == command.session_root().to_string()
-            && session["location"]["directory"] == execution.workspace.path
             && session["model"]["providerID"] == *provider
             && session["model"]["id"] == *model,
         "Session identity changed"
     );
+    if let Some(previous) = moving {
+        let Some(prior) = previous.agent.as_ref() else { return Ok(unavailable()); };
+        if previous.command.runner_id != command.runner_id
+            || previous.command.session_root() != command.session_root()
+            || !previous.archive.finished
+            || !matches!(&previous.result, Some(CommandOutput::Agent { agent })
+                if matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Interrupted))
+            || prior.endpoint != execution.endpoint || prior.runtime.is_some() || execution.runtime.is_some()
+            || prior.workspace.path == execution.workspace.path
+        {
+            return Ok(unavailable());
+        }
+        if session["location"]["directory"] != execution.workspace.path {
+            if session["location"]["directory"] != prior.workspace.path {
+                return Ok(unavailable());
+            }
+            if client.active(&session_id).await? {
+                return Ok(progress(&command, AgentPhase::Starting, "Waiting for session to become idle before moving"));
+            }
+            for kind in ["inbox", "form", "permission"] {
+                if !client.session_items(&session_id, kind).await?.as_array()
+                    .context("Invalid session items")?.is_empty()
+                {
+                    return Ok(progress(&command, AgentPhase::Starting, "Waiting for pending session items before moving"));
+                }
+            }
+            let current = tokio::task::block_in_place(|| crate::publication::execution_workspace(journal, record, args, false))?;
+            ensure!(current == execution.workspace, "Workspace identity changed before session move");
+            if !client.move_session(&session_id, &execution.workspace.path).await? {
+                return Ok(unavailable());
+            }
+            return Ok(progress(&command, AgentPhase::Starting, "Waiting for OpenCode to confirm the new workspace"));
+        }
+    }
+    ensure!(session["location"]["directory"] == execution.workspace.path, "Session workspace identity changed");
     if !execution.prompt_attempted {
         let observed = session.get("permissions").filter(|value| !value.is_null());
         if (args.managed_opencode.is_some() || spec.repo_skills.is_some() || !skill_names.is_empty() || !mcp_names.is_empty())
@@ -522,10 +564,7 @@ async fn advance(
                 return Ok(progress(&command, AgentPhase::Starting, message));
             }
         }
-        if let Some(continuation) = &spec.continuation {
-            let previous = journal
-                .record(continuation.previous_command_id)?
-                .context("Continuation predecessor journal missing")?;
+        if let Some(previous) = &predecessor {
             let prior = previous
                 .agent
                 .as_ref()
@@ -535,17 +574,15 @@ async fn advance(
                 && !previous.command.requires_target_git()
                 && previous.command.agent_spec.as_ref().is_some_and(|spec| !spec.read_only && spec.role.is_empty());
             ensure!(
-                previous.command.stream_id == command.stream_id
-                    && previous.command.runner_id == command.runner_id
-                    && previous.command.ownership_epoch == command.ownership_epoch
+                previous.command.runner_id == command.runner_id
                     && previous.command.session_root() == command.session_root()
                     && previous.archive.finished
                     && (matches!(previous.result,Some(CommandOutput::Agent {ref agent}) if matches!(agent.phase, AgentPhase::Succeeded | AgentPhase::Interrupted))
                         || session_stopped_without_result(&previous.result)
                         || recovering_failure)
                     && prior.endpoint == execution.endpoint
-                    && prior.workspace == execution.workspace
-                    && prior.runtime == execution.runtime,
+                    && (moving.is_some() || (previous.command.ownership_epoch == command.ownership_epoch
+                        && prior.workspace == execution.workspace && prior.runtime == execution.runtime)),
                 "Continuation predecessor identity or completion differs"
             );
             ensure!(
@@ -865,10 +902,18 @@ mod tests {
         command: RunnerCommand,
         mode: Arc<AtomicUsize>,
         posts: Arc<AtomicUsize>,
+        moved_path: Arc<std::sync::Mutex<String>>,
     }
     async fn api(State(fake): State<Fake>, request: Request) -> axum::response::Response {
         if request.method() != axum::http::Method::GET {
             fake.posts.fetch_add(1, Ordering::SeqCst);
+            if request.uri().path().ends_with("/move") && fake.mode.load(Ordering::SeqCst) == 9 {
+                let bytes = axum::body::to_bytes(request.into_body(), 4096).await.unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body, json!({"directory":*fake.moved_path.lock().unwrap(),"delivery":"queue"}));
+                fake.mode.store(11, Ordering::SeqCst);
+                return axum::http::StatusCode::NO_CONTENT.into_response();
+            }
             return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
         let path = request.uri().path();
@@ -889,9 +934,10 @@ mod tests {
             if mode == 0 {
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
-            json!({"data":{"id":id,"title":"OpenCode: Implement archive capture","metadata":{"factory_command":fake.command.id},"location":{"directory":"/prepared"},
+            let directory = if mode == 10 { fake.moved_path.lock().unwrap().clone() } else { "/prepared".into() };
+            json!({"data":{"id":id,"title":"OpenCode: Implement archive capture","metadata":{"factory_command":fake.command.id},"location":{"directory":directory},
                 "model":{"providerID":spec.profile.provider_id,"id":spec.profile.model_id},"outcome":if matches!(mode,4|6|7|8) {"interrupted"} else {"succeeded"}}})
-        } else if path.ends_with("/inbox") && mode == 7 {
+        } else if path.ends_with("/inbox") && matches!(mode, 7 | 11) {
             json!({"data":[{"id":"msg_pending"}]})
         } else if path.ends_with(&format!("/message/{}", agent_message_id(fake.command.id))) {
             if matches!(mode, 1 | 8) {
@@ -902,7 +948,7 @@ mod tests {
             if request.uri().query() == Some("order=desc&limit=32") {
                 return Json(if mode==5 {json!({"invalid":true})} else {json!({"data":[{"id":"msg_excerpt","type":"assistant","content":[{"type":"text","text":"durable output"}]}],"cursor":{"next":null}})}).into_response();
             }
-            json!({"data":[{"type":"assistant","finish":"stop","time":{"completed":1},"content":[{"type":"text","text":"Finished and tested"}]}]})
+            json!({"data":[{"id":"msg_last","type":"assistant","finish":"stop","time":{"completed":1},"content":[{"type":"text","text":"Finished and tested"}]}]})
         } else {
             json!({"data":[]})
         };
@@ -961,12 +1007,14 @@ mod tests {
         };
         let mode = Arc::new(AtomicUsize::new(0));
         let posts = Arc::new(AtomicUsize::new(0));
+        let moved_path = Arc::new(std::sync::Mutex::new(String::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().fallback(api).with_state(Fake {
             command: command.clone(),
             mode: mode.clone(),
             posts: posts.clone(),
+            moved_path: moved_path.clone(),
         });
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let registration = dir.path().join("registration.json");
@@ -1004,7 +1052,7 @@ mod tests {
         drop(journal);
         let journal = Journal::open(&path, "http://localhost:7432", runner).unwrap();
         let mut record = journal.receive(command).unwrap();
-        let args = Args {
+        let mut args = Args {
             instance_id: None,
             control_file: None,
             open_session: None,
@@ -1123,6 +1171,52 @@ mod tests {
             PauseState::HeldBeforeExecution
         );
         assert_eq!(posts.load(Ordering::SeqCst), 1);
+        record.result = Some(CommandOutput::Agent { agent: result });
+        record.archive.finished = true;
+        journal.save(&record).unwrap();
+        let mut command = record.command.clone();
+        command.id = CommandId::new();
+        command.stream_id = StreamId::new();
+        let spec = command.workspace_spec.as_mut().unwrap();
+        spec.branch = format!("factory/{}", command.stream_id);
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| crate::workspace::git(&repo, args).unwrap();
+        git(&["init", "-b", "main"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial"]);
+        let mapping = dir.path().join("repos.json");
+        std::fs::write(&mapping, serde_json::to_vec(&std::collections::BTreeMap::from([(spec.project_id, repo)])).unwrap()).unwrap();
+        args.repositories = Some(mapping);
+        args.workspace_root = Some(dir.path().join("worktrees"));
+        command.agent_spec.as_mut().unwrap().continuation = Some(SessionContinuation {
+            root_command_id: record.command.id, previous_command_id: record.command.id,
+        });
+        let mut prep = command.clone();
+        prep.id = CommandId::new();
+        prep.kind = CommandKind::PrepareWorkspace;
+        prep.agent_spec = None;
+        let CommandOutput::Workspace { workspace } = crate::workspace::prepare(
+            &journal, &prep, args.repositories.as_deref(), args.workspace_root.as_deref().unwrap(),
+        ) else { panic!("Fresh worktree was not prepared") };
+        *moved_path.lock().unwrap() = workspace.path.clone();
+        let mut next = journal.receive(command).unwrap();
+        let mut execution = record.agent.clone().unwrap();
+        execution.workspace = workspace;
+        execution.model = Some(("openai".into(), "test".into()));
+        execution.prompt_attempted = false;
+        next.agent = Some(execution);
+        journal.save(&next).unwrap();
+        let client = OpenCodeClient::from_registration(args.opencode_registration.as_ref().unwrap()).unwrap();
+        mode.store(9, Ordering::SeqCst);
+        assert_eq!(advance(&client, &journal, &mut next, &args, None).await.unwrap().phase, AgentPhase::Starting);
+        assert!(!next.agent.as_ref().unwrap().prompt_attempted);
+        assert_eq!(advance(&client, &journal, &mut next, &args, None).await.unwrap().phase, AgentPhase::Starting);
+        assert_eq!(posts.load(Ordering::SeqCst), 2, "queued move must not be repeated");
+        mode.store(10, Ordering::SeqCst);
+        // The fake rejects the prompt; the durable attempt shows it was sent only after the move.
+        assert!(advance(&client, &journal, &mut next, &args, None).await.is_err());
+        assert!(next.agent.as_ref().unwrap().prompt_attempted);
+        assert_eq!(posts.load(Ordering::SeqCst), 3);
         server.abort();
     }
 }

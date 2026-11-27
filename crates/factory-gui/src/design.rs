@@ -179,7 +179,22 @@ impl ListEntryKind {
             Self::Memorizer => (BRAIN, "Memorizer"),
             Self::Supervisor => (EYE, "Supervisor"),
         };
-        let response = ui.label(RichText::new(icon).size(18.0).color(crate::app::MUTED));
+        let response = if matches!(self, Self::Intent) {
+            let color = crate::app::MUTED;
+            let galley = ui.painter().layout_no_wrap(icon.into(), egui::FontId::proportional(18.0), color);
+            let badge_height = ui.text_style_height(&egui::TextStyle::Body)
+                + badge_frame(Color32::TRANSPARENT).inner_margin.sum().y;
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(galley.size().x, galley.size().y.max(badge_height)),
+                egui::Sense::hover(),
+            );
+            // Phosphor's visible glyph sits above the font's line-box center.
+            let origin = egui::pos2(rect.left(), rect.center().y - galley.mesh_bounds.center().y);
+            ui.painter().galley(origin, galley, color);
+            response
+        } else {
+            ui.label(RichText::new(icon).size(18.0).color(crate::app::MUTED))
+        };
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), label));
         response.on_hover_text(label);
     }
@@ -193,26 +208,65 @@ pub fn ticket_title(
     font: egui::FontId,
     width: f32,
 ) -> egui::Response {
-    // This is a text row, not a row of controls. Let the pill set the row height
-    // so the title centers on it rather than on the taller button minimum.
+    ticket_text(ui, kind.into(), key, text, font, width, 1)
+}
+
+/// The task card shows a prompt preview, not the single-line list title.
+pub fn intent_preview(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let body = egui::TextStyle::Body;
+    let line_height = ui.text_style_height(&body) + 2.0;
+    let mut job = elided_text_job(
+        text.split_whitespace().collect::<Vec<_>>().join(" "),
+        body.resolve(ui.style()),
+        crate::app::MUTED,
+        ui.available_width().max(1.0),
+        3,
+    );
+    for section in &mut job.sections {
+        section.format.line_height = Some(line_height);
+    }
+    job.wrap.break_anywhere = false;
+    let galley = ui.painter().layout_job(job);
+    ui.add(egui::Label::new(galley))
+}
+
+fn ticket_text(
+    ui: &mut egui::Ui,
+    kind: Option<ListEntryKind>,
+    key: &str,
+    text: &str,
+    font: egui::FontId,
+    width: f32,
+    max_rows: usize,
+) -> egui::Response {
+    let width = width.min(ui.available_width());
     ui.allocate_ui_with_layout(
-        egui::vec2(width.min(ui.available_width()), 0.0),
-        egui::Layout::left_to_right(egui::Align::Center),
+        egui::vec2(width, 0.0),
+        egui::Layout::left_to_right(if max_rows == 1 { egui::Align::Center } else { egui::Align::Min }),
         |ui| {
-            if let Some(kind) = kind.into() {
+            if max_rows > 1 {
+                ui.set_min_width(width);
+            }
+            if let Some(kind) = kind {
                 kind.show(ui);
             }
-            if !key.is_empty() {
-                ticket_pill(ui, key);
-            }
+            let pill = (!key.is_empty()).then(|| ticket_pill(ui, key));
+            let line_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
             let galley = ui.painter().layout_job(elided_text_job(
                 text.to_owned(),
                 font,
                 ui.visuals().text_color(),
                 ui.available_width().max(1.0),
-                1,
+                max_rows,
             ));
-            ui.add(egui::Label::new(galley))
+            if let Some(pill) = pill.filter(|_| max_rows > 1) {
+                ui.vertical(|ui| {
+                    ui.add_space(((pill.rect.height() - line_height) / 2.0).max(0.0));
+                    ui.add(egui::Label::new(galley))
+                }).inner
+            } else {
+                ui.add(egui::Label::new(galley))
+            }
         },
     )
     .inner
@@ -754,7 +808,7 @@ pub fn attachment_tile(
     detail: &str,
     preview: impl FnOnce(&mut egui::Ui) -> egui::Response,
 ) -> bool {
-    attachment_tile_mode(ui, name, detail, true, preview)
+    attachment_tile_mode(ui, ATTACHMENT_SIZE, name, detail, true, preview)
 }
 
 pub fn attachment_preview_tile(
@@ -763,17 +817,28 @@ pub fn attachment_preview_tile(
     detail: &str,
     preview: impl FnOnce(&mut egui::Ui) -> egui::Response,
 ) {
-    attachment_tile_mode(ui, name, detail, false, preview);
+    attachment_tile_mode(ui, ATTACHMENT_SIZE, name, detail, false, preview);
+}
+
+pub fn compact_attachment_preview(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    name: &str,
+    detail: &str,
+    preview: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) {
+    attachment_tile_mode(ui, size, name, detail, false, preview);
 }
 
 fn attachment_tile_mode(
     ui: &mut egui::Ui,
+    size: egui::Vec2,
     name: &str,
     detail: &str,
     removable: bool,
     preview: impl FnOnce(&mut egui::Ui) -> egui::Response,
 ) -> bool {
-    let (rect, response) = ui.allocate_exact_size(ATTACHMENT_SIZE, egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter()
         .rect_filled(rect, 4, Color32::from_rgb(36, 40, 48));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(4.0)).layout(

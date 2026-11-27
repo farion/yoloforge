@@ -1776,7 +1776,7 @@ fn accepted_draft_reset_moves_the_problem_to_archive_before_runner_confirmation(
 }
 
 #[test]
-fn session_lists_show_neutral_observed_token_badges_but_intents_do_not() {
+fn session_and_intent_lists_show_neutral_observed_token_badges() {
     let mut app = fixture();
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
     let worker = snapshot.commands[0].clone();
@@ -1805,10 +1805,10 @@ fn session_lists_show_neutral_observed_token_badges_but_intents_do_not() {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(820.0, 560.0))),
             ..Default::default()
         }, |ctx| app.draw_shell(ctx));
-        assert_eq!(frame.shapes.iter().any(|shape| matches!(&shape.shape,
+        assert!(frame.shapes.iter().any(|shape| matches!(&shape.shape,
             egui::epaint::Shape::Text(text) if text.galley.job.text == label
                 && text.galley.job.sections[0].format.color == crate::app::MUTED)),
-            page != Page::Tasks, "Unexpected visibility of {label} on {page:?}");
+            "Missing {label} on {page:?}");
     }
     assert_eq!(crate::design::token_label(None), "— Tks");
 }
@@ -2023,17 +2023,19 @@ fn ticket_numbers_are_neutral_pills_searchable_and_never_change_the_prompt() {
     };
     let ticket_rect = pill_rect(egui::Color32::from_rgb(42, 47, 56));
     assert!(ticket_rect.contains(number.pos));
+    let icon_center = output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::epaint::Shape::Text(text) if text.galley.job.text == egui_phosphor::regular::TARGET
+            && (0.0..40.0).contains(&(ticket_rect.left() - text.pos.x))
+            && (text.pos.y - ticket_rect.top()).abs() < 24.0 =>
+            Some(text.pos.y + text.galley.mesh_bounds.center().y),
+        _ => None,
+    }).expect("Expected a visible Intent icon");
+    assert!((icon_center - ticket_rect.center().y).abs() <= 1.0, "{icon_center}, {ticket_rect:?}");
     let title=ctx.data_mut(|d|d.get_temp::<egui::Rect>(
-        egui::Id::new(("test-task-row-title",original.id)),
+        egui::Id::new(("test-task-row-heading",original.id)),
     )).unwrap();
     assert!(number.pos.x<title.left(),"Ticket pill must precede task text");
-    let summary = task_text(app.snapshot.as_ref().unwrap(), &original);
-    let title_center = output.shapes.iter().find_map(|shape| match &shape.shape {
-        egui::epaint::Shape::Text(text) if text.galley.job.text == summary => {
-            Some(text.pos.y + text.galley.size().y / 2.0)
-        }
-        _ => None,
-    }).expect("Expected a visible task title");
+    let title_center = title.center().y;
     assert!(
         (title_center - ticket_rect.center().y).abs() <= 1.0,
         "Title and reference must be vertically centered: {title_center}, {ticket_rect:?}"
@@ -3314,6 +3316,9 @@ fn deferred_attachments_cannot_be_edited_or_resubmitted_as_empty_files() {
 fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     let mut app = fixture();
     app.online = true;
+    let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
+    let execution = snapshot.tickets[0].execution_command.unwrap();
+    snapshot.token_totals.by_execution.insert(execution, 96_181);
     let ctx = app.backend.context().clone();
     let draw = |app: &mut App| {
         ctx.run(
@@ -3337,9 +3342,9 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     }
     assert!(text.iter().any(|s| s == "Aufgabe Grüße"));
     assert!(text.iter().any(|s| s == "OpenCode anzeigen"));
+    assert!(text.iter().any(|s| s == "96.181 Tks"));
     for removed in [
         "0 Anhänge",
-        "Tks",
         &timestamp(app.snapshot.as_ref().unwrap().tickets[0].created_unix_ms),
         "Details",
         "Zur Frage",
@@ -3363,8 +3368,12 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     let title = ctx
         .data_mut(|d| d.get_temp::<egui::Rect>(egui::Id::new(("test-task-row-title", id))))
         .unwrap();
-    assert!(action.left() >= title.right() && action.right() > 1300.0);
-    assert!(title.y_range().intersects(action.y_range()), "{title:?} {action:?}");
+    let view: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new(("test-task-row-view", id)))).unwrap();
+    assert!(title.bottom() < action.top() && view.right() < action.left(), "{title:?} {action:?}");
+    let pill: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new(("test-task-row-status", id)))).unwrap();
+    assert!(pill.bottom() < action.top() && action.right() < pill.right(), "{pill:?} {action:?}");
+    assert!(title.top() >= pill.bottom() + 8.0, "{title:?} {pill:?}");
+    assert!(action.top() >= title.bottom() + 8.0, "{title:?} {action:?}");
     assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::epaint::Shape::Rect(r) if r.rect==action && r.fill!=egui::Color32::TRANSPARENT)),"OpenCode action must be a real button, not a text link");
     let frame = crate::design::task_row_frame();
     assert_eq!(frame.stroke, egui::Stroke::NONE);
@@ -3377,6 +3386,7 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     ticket.execution_command = None;
     ticket.status = TicketState::Backlog;
     ticket.draft = true;
+    ticket.prompt = Some("Ein längerer Intent braucht genügend Platz für eine lesbare Vorschau. ".repeat(25));
     s.editable_tasks.clear();
     app.task_filter = TaskBucket::Draft.index();
     for _ in 0..3 {
@@ -3387,7 +3397,6 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
     for shape in &output.shapes {
         shape_text(&shape.shape, &mut text);
     }
-    assert!(!text.iter().any(|s| s == crate::tr!("Entwurf")));
     assert!(text.iter().any(|s| s == "Bearbeiten"));
     let (action, _) = ctx
         .data_mut(|d| {
@@ -3395,7 +3404,11 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
         })
         .unwrap();
     let title: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new(("test-task-row-title", id)))).unwrap();
-    assert!(action.left() >= title.right() && title.y_range().intersects(action.y_range()));
+    let pill: egui::Rect = ctx.data(|d| d.get_temp(egui::Id::new(("test-task-row-status", id)))).unwrap();
+    assert!(pill.bottom() < title.top() && title.bottom() < action.top());
+    assert!(title.height() > 45.0, "Preview should wrap: {title:?}");
+    assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Text(t)
+        if t.galley.job.text.starts_with("Ein längerer Intent") && t.galley.elided && t.galley.rows.len() == 3)));
     assert!(!text.iter().any(|s| s == "OpenCode anzeigen"));
     assert!(
         app.settings.pending.is_empty(),
@@ -3404,7 +3417,7 @@ fn task_list_is_flat_summary_only_with_draft_and_contextual_actions() {
 }
 
 #[test]
-fn failed_intent_trash_is_left_of_view_and_opens_confirmation_without_sending() {
+fn failed_intent_trash_is_right_of_view_and_opens_confirmation_without_sending() {
     check_intent_trash(CommandState::Failed);
 }
 
@@ -3454,7 +3467,7 @@ fn check_intent_trash(state: CommandState) {
     for _ in 0..3 { let _ = draw(&mut app, vec![]); }
     let rect = |which| ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new((which, id)))).unwrap();
     let trash = rect("test-task-row-delete");
-    assert!(trash.right() < rect("test-task-row-view").left());
+    assert!(trash.left() > rect("test-task-row-view").right());
     if state == CommandState::Failed {
         assert_server_compatibility_tooltip(&ctx, trash.center(), |events| draw(&mut app, events));
         let _ = draw(&mut app, click_events(trash.center()));
@@ -3752,10 +3765,10 @@ fn intent_result_stays_out_of_the_overview_and_is_short_in_the_intent_history() 
         text
     };
     app.query = "eindeutiges suchwort".into();
-    assert!(!draw(&mut app).iter().any(|text| text.contains("Ergebnis der Arbeit") || text == "Originalauftrag…"));
+    assert!(!draw(&mut app).iter().any(|text| text.contains("Ergebnis der Arbeit") || text == "Originalauftrag mit Details"));
     app.query = "mit details".into();
     let text = draw(&mut app);
-    assert!(text.iter().any(|text| text == "Originalauftrag…"));
+    assert!(text.iter().any(|text| text == "Originalauftrag mit Details"));
     assert!(!text.iter().any(|text| text.contains("Ergebnis der Arbeit")));
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
     let Some(CommandOutput::Agent { agent }) = &mut snapshot.commands[0].result else { unreachable!() };
@@ -3765,7 +3778,7 @@ fn intent_result_stays_out_of_the_overview_and_is_short_in_the_intent_history() 
     let questions = std::mem::take(&mut snapshot.questions);
     app.task_filter = TaskBucket::Archive.index();
     let text = draw(&mut app);
-    assert!(text.iter().any(|text| text == "Originalauftrag…"), "{text:?}");
+    assert!(text.iter().any(|text| text == "Originalauftrag mit Details"), "{text:?}");
     assert!(!text.iter().any(|text| text.contains(PUBLICATION_CONFIRMED_PREFIX) || text.contains("interne Details")));
     let snapshot = Arc::make_mut(app.snapshot.as_mut().unwrap());
     let Some(CommandOutput::Agent { agent }) = &mut snapshot.commands[0].result else { unreachable!() };

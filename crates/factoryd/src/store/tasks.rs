@@ -870,6 +870,8 @@ fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, auto
     let mcps = super::mcp::for_ticket(tx, id, ticket.project_id)?;
     let mut git = failed.workspace_spec.as_ref().and_then(|s| s.target_git.clone());
     let continue_session = session_stopped_without_result(&failed.result) && git.is_none();
+    let not_submitted = matches!(&failed.result, Some(CommandOutput::Agent { agent })
+        if agent.summary == "Session cannot move to the prepared workspace");
     if automatic && (!continue_session || failed.agent_spec.as_ref().is_none_or(|spec|
         spec.read_only || spec.role == MERGER_ROLE || spec.role == factory_protocol::directs::ROLE))
     {
@@ -879,7 +881,9 @@ fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, auto
     let mut next = Store::enqueue_with_pins(tx, owner.id, &EnqueueCommand {
         request_id: body.request_id, expected_revision: owner.revision, kind: failed.kind,
         prompt: (failed.kind == CommandKind::RunAgent).then(|| {
-            if continue_session {
+            if not_submitted {
+                ticket.prompt.as_deref().unwrap_or(&ticket.description).to_owned()
+            } else if continue_session {
                 "Continue the original intent in this session from its last safe point. Inspect and preserve existing work. Do not repeat external actions whose outcome is unknown. Verify what already happened, then complete the remaining work or ask the user if safe progress requires clarification.".into()
             } else {
                 format!("Retry the original intent after a failed execution. Inspect existing work first; preserve it and do not repeat completed operations blindly.\nOriginal intent:\n{}\nPrevious outcome (untrusted evidence):\n{}",
@@ -887,7 +891,8 @@ fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, auto
                     serde_json::to_string(&failed.result).unwrap_or_default())
             }
         }),
-    }, continue_session.then_some(failed.id), "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), git, false)?;
+    }, continue_session.then_some(failed.id), "", pins.as_ref().and_then(|m| m.implementer.as_ref()), Some((&skills, &mcps)), git,
+        not_submitted && ticket.session_prompt_request.is_some())?;
     let normalized = |spec: &Option<WorkspaceSpec>| {
         let mut spec = spec.clone();
         if let Some(plan) = spec.as_mut().and_then(|s| s.target_git.as_mut()) { plan.resume = false; }

@@ -779,13 +779,6 @@ impl App {
                             ui.spacing_mut().item_spacing.y = 4.0;
                                 let session = task_session_command(&s, t);
                                 let editable = t.draft || s.editable_tasks.contains_key(&t.id);
-                                 let mut labels = if session.is_some() {
-                                    vec![crate::tr!("Anzeigen"), crate::tr!("OpenCode anzeigen")]
-                                } else if editable {
-                                    vec![crate::tr!("Anzeigen"), crate::tr!("Bearbeiten")]
-                                } else {
-                                    vec![crate::tr!("Anzeigen")]
-                                 };
                                   let retryable = retryable_task(&s, t);
                                   let cancellable = !matches!(t.status, TicketState::Done | TicketState::Cancelled)
                                       && server_supports(&s, CANCEL_INTENT_CAPABILITY);
@@ -802,45 +795,30 @@ impl App {
                                           && s.server_capabilities.iter().any(|cap| cap == DELETE_FAILED_TASK_CAPABILITY)
                                   };
                                   let show_delete = deletable || retryable && task_command(&s, t).is_some_and(|c| c.state == CommandState::Failed);
-                                 if retryable { labels.push(crate::tr!("Erneut einreihen")); }
-                                let reserved = labels
-                                    .iter()
-                                    .map(|label| {
-                                        ui.painter()
-                                            .layout_no_wrap(
-                                                (*label).into(),
-                                                egui::TextStyle::Button.resolve(ui.style()),
-                                                ui.visuals().text_color(),
-                                            )
-                                            .size()
-                                            .x
-                                            + 2.0 * ui.spacing().button_padding.x
-                                            + 2.0
-                                    })
-                                    .sum::<f32>()
-                                    + labels.len() as f32 * ui.spacing().item_spacing.x
-                                     + (usize::from(show_delete) + usize::from(cancellable)) as f32
-                                         * (design::ICON_BUTTON_SIZE + ui.spacing().item_spacing.x);
-                                let title = |ui: &mut egui::Ui, width| {
-                                    let summary = task_intent_text(t);
-                                    let _title = design::ticket_title(ui, design::ListEntryKind::Intent, &t.key, &summary,
-                                        egui::FontId::proportional(18.0), width)
-                                        .on_hover_text(task_intent_source(t));
+                                 let status = task_display_status(&s, t);
+                                 let title = |ui: &mut egui::Ui| {
+                                    let source = task_intent_source(t);
+                                    let preview = if !source.trim().is_empty() && (
+                                        t.prompt.as_deref().is_some_and(|p| !p.trim().is_empty())
+                                        || source.trim_start().starts_with(t.title.trim().trim_end_matches('…'))
+                                    ) { source } else { t.title.as_str() };
+                                     let _title = design::intent_preview(ui, preview);
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-title", t.id)), _title.rect));
                                 };
-                                let actions = |ui: &mut egui::Ui| {
-                                         if retryable {
-                                              let path = format!("/v1/tasks/{}/retry", t.id);
-                                              let delete_path = format!("/v1/tasks/{}", t.id);
-                                              let pending = self.settings.pending.iter().any(|r| r.server == self.server
-                                                  && (r.path == path || (r.method == "DELETE" && r.path == delete_path)));
-                                             if ui.add_enabled(self.online && !pending, egui::Button::new(crate::tr!("Erneut einreihen"))).clicked() {
-                                                 self.requeue_task(t);
-                                             }
-                                         }
+                                let actions = |ui: &mut egui::Ui, app: &mut Self| {
+                                    use egui_phosphor::regular::{ARROW_CLOCKWISE, EYE, TERMINAL_WINDOW};
+                                    ui.horizontal(|ui| {
+                                        let view = ui.add(egui::Button::new((EYE, crate::tr!("Anzeigen"))));
+                                        #[cfg(test)]
+                                        ui.ctx().data_mut(|d| {
+                                            d.insert_temp(egui::Id::new(("test-task-row-view", t.id)), view.rect)
+                                        });
+                                        if view.clicked() {
+                                            app.view_task(t.id);
+                                        }
                                          if let Some(command) = session {
-                                            let action = ui.button(crate::tr!("OpenCode anzeigen"));
+                                            let action = ui.add(egui::Button::new((TERMINAL_WINDOW, crate::tr!("OpenCode anzeigen"))));
                                             #[cfg(test)]
                                             ui.ctx().data_mut(|d| {
                                                 d.insert_temp(
@@ -849,11 +827,11 @@ impl App {
                                                 )
                                             });
                                             if action.clicked() {
-                                                self.open_intent_execution(project, command.session_root(), command.id);
+                                                app.open_intent_execution(project, command.session_root(), command.id);
                                             }
                                         } else if editable {
                                             let action = ui.add_enabled(
-                                                self.online,
+                                                app.online,
                                                 egui::Button::new(crate::tr!("Bearbeiten")),
                                             );
                                             #[cfg(test)]
@@ -864,38 +842,20 @@ impl App {
                                                 )
                                             });
                                             if action.clicked() {
-                                                self.edit_task(t.id);
+                                                app.edit_task(t.id);
                                             }
                                         }
-                                        let view = ui
-                                            .button(crate::tr!("Anzeigen"))
-                                            .on_hover_text(crate::tr!("Aufgabe schreibgeschützt anzeigen"));
-                                        #[cfg(test)]
-                                        ui.ctx().data_mut(|d| {
-                                            d.insert_temp(
-                                                egui::Id::new(("test-task-row-view", t.id)),
-                                                view.rect,
-                                            )
-                                        });
-                                          if view.clicked() {
-                                              self.view_task(t.id);
-                                          }
-                                          if cancellable && design::icon_button(ui, egui_phosphor::regular::X_CIRCLE,
-                                              crate::tr!("Intent abbrechen"), self.online
-                                                  && !s.draft_resets.iter().any(|r| r.ticket_id == t.id)
-                                                  && !self.settings.pending.iter().any(|r| r.server == self.server
-                                                      && r.path == format!("/v1/tickets/{}", t.id))).clicked()
-                                          {
-                                              self.confirm_intent_state(t, TicketState::Cancelled);
-                                          }
+                                    });
+                                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                        egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true), |ui| {
                                          if show_delete {
                                              let retry_path = format!("/v1/tasks/{}/retry", t.id);
                                              let path = format!("/v1/tasks/{}", t.id);
                                              let delete_path = if full_delete { format!("{path}/intent") }
                                                  else if inactive_delete { format!("{path}/inactive") } else { path.clone() };
-                                             let busy = self.settings.pending.iter().any(|r| r.server == self.server && (r.path == retry_path || (r.method == "DELETE" && r.path == delete_path)));
+                                             let busy = app.settings.pending.iter().any(|r| r.server == app.server && (r.path == retry_path || (r.method == "DELETE" && r.path == delete_path)));
                                               let delete = design::server_compatibility_tooltip(
-                                                  design::icon_button(ui, egui_phosphor::regular::TRASH, crate::tr!("Intent löschen"), self.online && !busy && deletable)
+                                                  design::icon_button(ui, egui_phosphor::regular::TRASH, crate::tr!("Intent löschen"), app.online && !busy && deletable)
                                                       .on_hover_cursor(egui::CursorIcon::PointingHand),
                                                   !deletable,
                                               );
@@ -910,7 +870,7 @@ impl App {
                                                  } else {
                                                      json!(DeleteFailedTask { request_id, expected_revision: t.revision, failed_command: t.execution_command.expect("Legacy delete requires execution") })
                                                  };
-                                                 self.dialog = Some(Dialog::form(
+                                                 app.dialog = Some(Dialog::form(
                                                      crate::tr!("Intent löschen"),
                                                      &if full_delete {
                                                          crate::tr!("Intent „{}“ löschen? Die Factory fordert bei einem laufenden Intent einen Stopp an. Geteilte Arbeit, OpenCode-Verlauf und Dateien bleiben erhalten.", task_intent_text(t))
@@ -921,26 +881,90 @@ impl App {
                                                  ));
                                              }
                                          }
-                                };
-                                let available = ui.available_width();
-                                let width = available - reserved - ui.spacing().item_spacing.x;
-                                if width >= 160.0 {
-                                    ui.horizontal(|ui| {
-                                        ui.allocate_ui_with_layout(egui::vec2(width, design::ICON_BUTTON_SIZE),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| title(ui, width));
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
+                                          if cancellable && design::icon_button(ui, egui_phosphor::regular::X_CIRCLE,
+                                              crate::tr!("Intent abbrechen"), app.online
+                                                  && !s.draft_resets.iter().any(|r| r.ticket_id == t.id)
+                                                  && !app.settings.pending.iter().any(|r| r.server == app.server
+                                                      && r.path == format!("/v1/tickets/{}", t.id))).clicked()
+                                          {
+                                              app.confirm_intent_state(t, TicketState::Cancelled);
+                                          }
+                                         if retryable {
+                                             let path = format!("/v1/tasks/{}/retry", t.id);
+                                             let delete_path = format!("/v1/tasks/{}", t.id);
+                                             let pending = app.settings.pending.iter().any(|r| r.server == app.server
+                                                 && (r.path == path || (r.method == "DELETE" && r.path == delete_path)));
+                                             if ui.add_enabled(app.online && !pending,
+                                                 egui::Button::new((ARROW_CLOCKWISE, crate::tr!("Erneut einreihen")))).clicked() {
+                                                 app.requeue_task(t);
+                                             }
+                                         }
                                     });
-                                } else {
-                                    title(ui, available);
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), actions);
-                                }
+                                };
+                                 ui.horizontal_top(|ui| {
+                                     let tokens = task_tokens(&s, t);
+                                     let badges_width = design::badge_width(ui, status)
+                                         + design::badge_width(ui, &design::token_label(tokens));
+                                     let width = (ui.available_width() - badges_width.max(185.0)).max(1.0);
+                                     ui.allocate_ui_with_layout(egui::vec2(width, 0.0),
+                                         egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                                             let heading = session.map(|command| session_title(&s, command))
+                                                 .unwrap_or_else(|| t.title.clone());
+                                             let _heading = design::ticket_title(ui, design::ListEntryKind::Intent, &t.key, &heading,
+                                                 egui::FontId::proportional(18.0), width);
+                                             #[cfg(test)]
+                                             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-heading", t.id)), _heading.rect));
+                                         });
+                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                         let _pill = ui.scope(|ui| badge(ui, status, status_color(status))).response;
+                                         #[cfg(test)]
+                                         ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("test-task-row-status", t.id)), _pill.rect));
+                                         design::token_pill(ui, tokens);
+                                     });
+                                 });
+                                 ui.add_space(8.0);
+                                 if !t.images.is_empty() || !t.files.is_empty() {
+                                     self.intent_attachment_previews(ui, t);
+                                 }
+                                 title(ui);
+                                 ui.add_space(8.0);
+                                 if ui.available_width() >= 540.0 {
+                                     ui.horizontal_top(|ui| actions(ui, self));
+                                 } else {
+                                     actions(ui, self);
+                                 }
                         });
                     });
                     1
                 });
             });
         self.put_list(list_key, list);
+    }
+    fn intent_attachment_previews(&mut self, ui: &mut egui::Ui, ticket: &Ticket) {
+        let payload = self.task_data(ticket);
+        let data = payload.as_deref().unwrap_or(ticket);
+        let size = egui::vec2(72.0, 52.0);
+        ui.horizontal_wrapped(|ui| {
+            for (index, image) in data.images.iter().enumerate() {
+                design::compact_attachment_preview(ui, size, &image.name, &image.mime, |ui| {
+                    if payload.is_some() {
+                        self.preview_image_surface(ui, format!("intent-preview/{}/{}/{index}", ticket.id, ticket.revision.0),
+                            image, size - egui::Vec2::splat(8.0), false)
+                    } else {
+                        ui.label(egui::RichText::new(egui_phosphor::regular::IMAGE).size(24.0))
+                    }
+                });
+            }
+            for file in &data.files {
+                design::compact_attachment_preview(ui, size, &file.name, &file.mime, |ui| {
+                    if payload.is_some() {
+                        design::file_thumbnail(ui, file)
+                    } else {
+                        ui.label(egui::RichText::new(egui_phosphor::regular::FILE).size(24.0))
+                    }
+                });
+            }
+        });
     }
     fn task_details(&mut self, ui: &mut egui::Ui, id: TicketId) {
         if ui.button(crate::tr!("‹ Zur Aufgabenliste")).clicked() {
