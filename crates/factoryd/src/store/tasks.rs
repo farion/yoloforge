@@ -794,6 +794,18 @@ pub(super) fn recover_stopped(tx: &Transaction<'_>, project: ProjectId) -> Resul
 }
 
 pub(super) fn retry_failed(tx: &Transaction<'_>, id: TicketId, body: &RetryTask) -> Result<Ticket> {
+    let raw: String = tx.query_row("SELECT data FROM tickets WHERE id=?1",
+        [id.to_string()], |r| r.get(0)).optional()?.ok_or(StoreError::NotFound)?;
+    let ticket: Ticket = serde_json::from_str(&raw)?;
+    if ticket.revision == body.expected_revision && ticket.execution_command == Some(body.previous_command) {
+        super::routing::recover_unusable_workspaces(tx, ticket.project_id, Some(id))?;
+        let raw: String = tx.query_row("SELECT data FROM tickets WHERE id=?1",
+            [id.to_string()], |r| r.get(0))?;
+        let updated: Ticket = serde_json::from_str(&raw)?;
+        if updated.execution_command != ticket.execution_command {
+            return Ok(updated);
+        }
+    }
     retry_failed_inner(tx, id, body, false)
 }
 
@@ -833,7 +845,7 @@ pub(super) fn continue_failed_agent(tx: &Transaction<'_>, ticket: &mut Ticket, f
     }))
 }
 
-fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, automatic: bool) -> Result<Ticket> {
+pub(super) fn retry_failed_inner(tx: &Transaction<'_>, id: TicketId, body: &RetryTask, automatic: bool) -> Result<Ticket> {
     super::draft_resets::require_not_resetting(tx, id)?;
     let raw: Option<String> = tx.query_row("SELECT data FROM tickets WHERE id=?1", [id.to_string()], |r| r.get(0)).optional()?;
     let mut ticket: Ticket = serde_json::from_str(&raw.ok_or(StoreError::NotFound)?)?;

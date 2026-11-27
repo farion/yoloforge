@@ -1419,7 +1419,7 @@ impl Store {
             if paused {
                 continue;
             }
-            super::routing::recover_unusable_workspaces(&tx, p.project_id)?;
+            super::routing::recover_unusable_workspaces(&tx, p.project_id, None)?;
             super::tasks::recover_stopped(&tx, p.project_id)?;
             super::validation::resume_legacy_snapshots(&tx, p.project_id)?;
             super::validation::resolve(&tx, p.project_id)?;

@@ -176,21 +176,21 @@ fn switched_to_fresh_session(tx: &Transaction<'_>, ticket: TicketId) -> Result<b
 }
 
 /// Recover only the runner's preflight failure, before it sent anything to OpenCode.
-pub(super) fn recover_unusable_workspaces(tx: &Transaction<'_>, project: ProjectId) -> Result<()> {
+pub(super) fn recover_unusable_workspaces(tx: &Transaction<'_>, project: ProjectId, only: Option<TicketId>) -> Result<()> {
     let mut stmt = tx.prepare("SELECT t.data,c.data FROM scheduler_runs r
         JOIN tickets t ON t.id=r.ticket_id JOIN commands c ON c.id=r.agent_id
-        WHERE t.project_id=?1 AND c.state='failed'
+        WHERE t.project_id=?1 AND (?2 IS NULL OR t.id=?2) AND c.state='failed'
         AND json_extract(c.data,'$.result.agent.summary') IN
             ('Prepared workspace identity could not be verified','Session cannot move to the prepared workspace')
         AND NOT EXISTS(SELECT 1 FROM deleted_intents d WHERE d.ticket_id=t.id)
         AND NOT EXISTS(SELECT 1 FROM draft_resets d WHERE d.stream_id=r.stream_id AND d.completed=0)
         AND NOT EXISTS(SELECT 1 FROM questions q WHERE q.command_id=c.id)")?;
-    let rows = stmt.query_map([project.to_string()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+    let rows = stmt.query_map(params![project.to_string(), only.map(|id| id.to_string())], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     for (ticket, command) in rows {
         let mut ticket: Ticket = serde_json::from_str(&ticket)?;
         let command: RunnerCommand = serde_json::from_str(&command)?;
-        let previous = command.agent_spec.as_ref().and_then(|spec| spec.continuation.as_ref());
+        let mut continuation = command.agent_spec.as_ref().and_then(|spec| spec.continuation.clone());
         if ticket.draft || !matches!(ticket.status, TicketState::InProgress | TicketState::Blocked)
             || ticket.execution_command != Some(command.id) || command.kind != CommandKind::RunAgent
             || command.requires_target_git()
@@ -200,7 +200,23 @@ pub(super) fn recover_unusable_workspaces(tx: &Transaction<'_>, project: Project
         {
             continue;
         }
-        let Some(previous) = previous else { continue };
+        if continuation.is_none() {
+            // Older manual retries dropped the continuation but kept the same
+            // worktree. Recover only if the original attempt also failed preflight.
+            let raw: Option<String> = tx.query_row("SELECT c.data FROM events e
+                JOIN commands c ON c.id=json_extract(e.payload,'$.previous_command')
+                WHERE e.kind='task.retried' AND e.aggregate_id=?1 AND c.stream_id=?2
+                  AND c.state='failed'
+                  AND json_extract(c.data,'$.result.agent.summary')='Prepared workspace identity could not be verified'
+                  AND json_extract(c.data,'$.agent_spec.continuation.previous_command_id') IS NOT NULL
+                ORDER BY e.sequence DESC LIMIT 1",
+                params![ticket.id.to_string(), command.stream_id.to_string()], |r| r.get(0)).optional()?;
+            if let Some(raw) = raw {
+                let original: RunnerCommand = serde_json::from_str(&raw)?;
+                continuation = original.agent_spec.and_then(|spec| spec.continuation);
+            }
+        }
+        let Some(previous) = continuation else { continue };
         let prepared_for_session = worktree_predecessor(tx, ticket.id, command.stream_id)?.is_some();
         if matches!(&command.result, Some(CommandOutput::Agent { agent })
             if agent.summary == "Session cannot move to the prepared workspace")
@@ -209,9 +225,9 @@ pub(super) fn recover_unusable_workspaces(tx: &Transaction<'_>, project: Project
             // The new intent already owns a verified worktree. Only the
             // native session is unusable, so keep the new worktree.
             tx.execute_batch("SAVEPOINT move_fallback")?;
-            let replacement = super::tasks::retry_failed(tx, ticket.id, &RetryTask {
+            let replacement = super::tasks::retry_failed_inner(tx, ticket.id, &RetryTask {
                 request_id: RequestId::new(), expected_revision: ticket.revision, previous_command: command.id,
-            });
+            }, false);
             ticket = match replacement {
                 Ok(ticket) => ticket,
                 Err(StoreError::WorkConflict | StoreError::Invalid(_) | StoreError::RevisionConflict(_)) => {
@@ -246,7 +262,7 @@ pub(super) fn recover_unusable_workspaces(tx: &Transaction<'_>, project: Project
         owner.ticket_ids.retain(|id| *id != ticket.id);
         let state = owner.status;
         super::work::save_stream(tx, &mut owner, state)?;
-        let root = command.session_root();
+        let root = previous.root_command_id;
         let reuse = candidates(tx, project)?.into_iter().find(|c| c.session_root() == root)
             .filter(|c| !cannot_continue(c))
             .map(|c| retired_session(tx, root, c.stream_id).map(|retired| !retired))
